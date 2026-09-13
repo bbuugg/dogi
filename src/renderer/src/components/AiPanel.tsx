@@ -244,6 +244,24 @@ export function AiPanel() {
             ))}
           </SelectContent>
         </Select>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7 shrink-0 text-muted-foreground"
+          title="清空对话"
+          onClick={clearAiMessages}
+        >
+          <Eraser className="size-3.5" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7 shrink-0 text-muted-foreground"
+          title="AI 设置"
+          onClick={() => setSettingsOpen(true, 'models')}
+        >
+          <Settings2 className="size-3.5" />
+        </Button>
       </div>
 
       {/* 消息区 */}
@@ -328,24 +346,6 @@ export function AiPanel() {
                   })}
                 </SelectContent>
               </Select>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-7 shrink-0 text-muted-foreground"
-                title="清空对话"
-                onClick={clearAiMessages}
-              >
-                <Eraser className="size-3.5" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-7 shrink-0 text-muted-foreground"
-                title="AI 设置"
-                onClick={() => setSettingsOpen(true, 'models')}
-              >
-                <Settings2 className="size-3.5" />
-              </Button>
             </div>
             {aiStreaming ? (
               <Button

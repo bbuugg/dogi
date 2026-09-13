@@ -146,6 +146,10 @@
   padding: 8px;
 }
 
+.xterm-viewport {
+  background-color: unset !important;
+}
+
 .xterm-viewport::-webkit-scrollbar {
   width: 8px;
 }
