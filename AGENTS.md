@@ -1,0 +1,101 @@
+# OpsDesk 项目注意事项
+
+本文档记录本项目开发中实际踩过的坑与关键约束，按「触发信号 → 根因/约束 → 正确做法 → 验证方式」组织。改动相关模块前先读对应条目。
+
+## 环境与原生依赖
+
+### 1. node-pty 无法本地编译，使用 @lydell/node-pty
+
+- **触发信号**：`npm install node-pty` 或 `node-gyp rebuild` 报错（本机缺 MSVC / Windows Build Tools）。
+- **根因/约束**：node-pty 是需要本地编译的原生模块；@lydell/node-pty 提供预编译二进制（N-API，Node/Electron 通用），API 与 node-pty 兼容。
+- **正确做法**：依赖用 `@lydell/node-pty`，import 路径同（`src/main/services/sessions.ts`）。若机器装了 VS Build Tools 想换回官方包，仅需改 import 并重装。
+- **注意**：Windows ConPTY 下 `pty.spawn()` 返回的 `pid` 恒为 **0**，这不是错误，不要用 pid 判断进程是否存活，应以 `onExit` 事件为准。
+- **验证方式**：`ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron.exe -e "require('@lydell/node-pty').spawn('cmd.exe',[],{})"` 能收到输出即正常。
+
+### 2. npm 12 install-scripts 安全策略会静默跳过安装脚本
+
+- **触发信号**：安装后 `node_modules/electron/dist/electron.exe` 不存在、esbuild 运行报二进制缺失；npm 输出 `install-scripts blocked` 警告。
+- **根因/约束**：npm 12 默认阻止未批准的 postinstall/install 脚本，批准记录写在 `package.json` 的 `allowScripts` 字段。
+- **正确做法**：`npm install-scripts approve electron esbuild node-pty ssh2` 后执行 `npm rebuild`；新装原生依赖后检查产物是否存在。
+- **验证方式**：`ls node_modules/electron/dist/electron.exe`、`ls node_modules/@lydell/node-pty/build`。
+
+### 3. Electron 二进制下载需要镜像
+
+- **触发信号**：electron postinstall 报 `TypeError: fetch failed`。
+- **正确做法**：`ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/" node node_modules/electron/install.js`，或写入 `.npmrc`（`electron_mirror=...`）。
+
+### 4. Git Bash 下 Windows 命令参数会被转义成路径
+
+- **触发信号**：`taskkill /F /IM electron.exe` 报「无效参数/选项 - 'F:/'」。
+- **正确做法**：双斜杠 `taskkill //F //IM electron.exe`，或 `MSYS_NO_PATHCONV=1`。
+
+## 构建与 TypeScript
+
+### 5. 构建编排为自建三配置 Vite，不要引入 electron-vite
+
+- **约束**：用户明确不信任 electron-vite。
+- **正确做法**：main = `vite.main.mts`（ESM，`out/main/index.js`）；preload = `vite.preload.mts`（**CJS**，`out/preload/index.cjs`）；renderer = `vite.config.ts`（`root: 'src/renderer'`）。dev 编排在 `scripts/dev.mjs`（vite dev + 双 watch + 自动重启 electron）。
+- **原因**：沙箱 preload 只支持 CJS，因此输出必须是 `.cjs`；`package.json` 是 `type: module`，`.js` 会被当 ESM 导致 preload 加载失败。main 用 ESM（Electron 28+ 支持）。
+
+### 6. Vite 8 不再通过 exports 暴露 `bin/vite.js`
+
+- **触发信号**：`require.resolve('vite/bin/vite.js')` 抛 `ERR_PACKAGE_PATH_NOT_EXPORTED`。
+- **正确做法**：用 `fileURLToPath(new URL('../node_modules/vite/bin/vite.js', import.meta.url))` 直接拼路径（见 `scripts/dev.mjs`）。
+
+### 7. TypeScript 7 移除了 `baseUrl`
+
+- **触发信号**：`error TS5102: Option 'baseUrl' has been removed`。
+- **正确做法**：paths 直接写相对 tsconfig 的路径（`"./src/shared/*"`），三个 tsconfig 均已如此。
+
+### 8. shadcn CLI 依赖根 tsconfig 的 paths
+
+- **触发信号**：`npx shadcn add ...` 把组件生成到字面 `@/` 目录。
+- **根因**：CLI 读根 `tsconfig.json` 解析别名；根 tsconfig 没配 paths 时按字面路径建目录。
+- **正确做法**：根 tsconfig 已补 paths；新装组件后若再生成 `@/` 目录，把文件移到 `src/renderer/src/components/ui/` 即可。另外新版组件 `import { cn } from "cn"`（cn 包），与旧版 `@/lib/utils` 不同，两种都可用。
+
+## 依赖 API 版本差异（升级时必看）
+
+### 9. AI SDK v7 / @ai-sdk/openai v4
+
+- `createOpenAI()` 已无 `compatibility` 选项（v2/v3 有），OpenAI 兼容接口直接传 `baseURL` 即可。
+- **`provider(modelId)` 默认走 Responses API（/v1/responses），不是 chat/completions**：第三方兼容网关（Ollama/vLLM/one-api 等）普遍没实现该接口而报 404。需要 Chat Completions 时必须显式 `provider.chat(modelId)`；本项目通过 `AiModelConfig.apiStyle` 切换（见 `ai.ts` 的 `resolveModel`），`openai-compatible` kind 默认 `chat-completions`。
+- fullStream 事件字段：`text-delta` 是 `part.text`（v4 是 `textDelta`）、工具是 `input/output`（v4 是 `args/result`）。适配层见 `src/main/services/ai.ts` 的 `adaptPart`。
+- MCP 客户端已不在 `ai` 主包（v4 时代的 `experimental_createMCPClient` 已移除），用官方 `@modelcontextprotocol/sdk` 自行管理（见 `src/main/services/mcp.ts`），工具用 `dynamicTool + jsonSchema` 包装。
+- streamText 默认单步，自动工具循环需 `stopWhen: stepCountIs(N)`。
+
+### 10. xterm 6 默认 WebGL 渲染器
+
+- **触发信号**：DOM 里 `.xterm-rows` 的 textContent 始终为空，以为终端没输出。
+- **正确做法**：验证终端内容不要读 DOM，走主进程 `recentOutput`（IPC `terminal:recentOutput`）。
+
+## 架构约定与已修复的坑
+
+### 11. 新增会话类型必须同时接通数据转发（教训）
+
+- **事故**：`LocalSession` 的 `proc.onData` 只写了输出缓冲、漏了向 IPC 转发，终端黑屏；SshSession 因构造函数签名强制传 handlers 而幸免。
+- **正确做法**：所有 Session 实现的输出/退出必须经 `handlers.onData/onExit` → `sessionManager.emit('data'/'exit')` → `ipc.ts` broadcast → preload 订阅 → xterm，这条链缺一环就黑屏。新增传输类型（如 telnet、串口）时复制 SshSession 的 handlers 模式。
+- **验证方式**：创建会话后调 `window.api.terminal.recentOutput(sessionId)` 应有 shell 提示符。
+
+### 12. 主进程事件可能早于渲染端拿到 requestId（竞态）
+
+- **事故**：AI 无配置时错误事件在 `ipcMain.handle('ai:chat')` 返回 requestId **之前**同步 emit，渲染端因 `activeRequestId` 未设置而丢弃事件。
+- **正确做法**：主进程任何「立即产生事件」的路径都要延迟到 invoke 返回之后（`setTimeout(..., 0)`，见 `ai.ts` chat 的无配置分支）。
+
+### 13. zustand create 工厂内引用自身变量会 TDZ 崩溃
+
+- **触发信号**：在 `create()((set, get) => { ... useAppStore ... })` 工厂里读 store 变量 → `ReferenceError`，整棵 React 树卸载。
+- **正确做法**：需要在模块作用域暴露 store（如调试 `window.__store`）时，写在 `create(...)` 赋值语句**之后**。
+
+### 14. pty 输出早于渲染端订阅的丢失风险
+
+- **现状**：渲染端在 React mount 后才订阅 `terminal:data`，shell 启动横幅若早于订阅到达会丢失（实测 PowerShell 启动较慢未观察到，但 SSH 快速 banner 有此风险）。
+- **正确做法**（如需彻底修复）：渲染端挂载后先调 `terminal:recentOutput` 回放缓冲，再订阅实时事件。
+
+### 15. CSP 严格模式
+
+- renderer 的 CSP 为 `script-src 'self'`（`src/renderer/index.html`），**不允许内联 script**。需要启动前逻辑（如防主题闪烁）时，优先用主进程 `nativeTheme.themeSource`（在创建窗口前设置），不要往 index.html 加内联脚本。
+
+## 验证工具链
+
+- 无 GUI 截图环境时用 CDP 验证：启动加 `--remote-debugging-port=9333`，`curl http://127.0.0.1:9333/json/list` 取页面 WebSocket，`Runtime.evaluate` 驱动 UI。复杂表达式务必写成脚本文件执行（`node -e` 多层转义易错）。
+- 旧 Electron 实例会残留并占用调试端口，验证前先 `taskkill //F //IM electron.exe`，以 page id 变化确认是新实例。

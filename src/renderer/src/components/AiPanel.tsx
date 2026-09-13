@@ -1,0 +1,282 @@
+import { useEffect, useRef, useState } from 'react'
+import {
+  CircleStop,
+  Eraser,
+  Loader2,
+  Send,
+  Settings2,
+  Sparkles,
+  Wrench
+} from 'lucide-react'
+import type { AiMessagePart } from '@shared/types'
+import { useAppStore } from '@/stores/app-store'
+import { AiMarkdown } from '@/components/AiMarkdown'
+import { Button } from '@/components/ui/button'
+import { Textarea } from '@/components/ui/textarea'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from '@/components/ui/select'
+
+const TOOL_LABELS: Record<string, string> = {
+  run_in_terminal: '执行终端命令',
+  read_terminal_output: '读取终端输出',
+  list_terminal_sessions: '查看终端列表'
+}
+
+function ToolPartCard({ part }: { part: AiMessagePart }) {
+  const isCall = part.type === 'tool-call'
+  const input = isCall ? part.input : null
+  const output = part.type === 'tool-result' ? part.output : null
+  const toolName =
+    part.type === 'tool-call' || part.type === 'tool-result' ? part.toolName : ''
+  const label = TOOL_LABELS[toolName] ?? toolName
+  const inputText = input ? JSON.stringify(input, null, 1) : ''
+  const outputText =
+    typeof output === 'string'
+      ? output.slice(0, 1500)
+      : output
+        ? JSON.stringify(output).slice(0, 1500)
+        : ''
+
+  return (
+    <details className="my-1.5 rounded-md border border-border/70 bg-background/60 text-xs">
+      <summary className="flex cursor-pointer select-none items-center gap-1.5 px-2 py-1.5 text-muted-foreground hover:text-foreground">
+        {part.type === 'tool-result' && part.isError ? (
+          <span className="text-destructive">✕</span>
+        ) : (
+          <Wrench className="size-3 shrink-0" />
+        )}
+        <span className="font-medium">{label}</span>
+        {inputText && (
+          <span className="min-w-0 flex-1 truncate font-mono text-[10px]">
+            {inputText.replace(/\s+/g, ' ').slice(0, 80)}
+          </span>
+        )}
+      </summary>
+      <div className="border-t border-border/70 px-2 py-1.5">
+        {inputText && (
+          <pre className="mb-1 overflow-x-auto whitespace-pre-wrap font-mono text-[10px] text-muted-foreground">
+            {inputText}
+          </pre>
+        )}
+        {outputText && (
+          <pre
+            className={`max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[10px] ${
+              part.type === 'tool-result' && part.isError ? 'text-destructive' : ''
+            }`}
+          >
+            {outputText}
+          </pre>
+        )}
+      </div>
+    </details>
+  )
+}
+
+function MessageBubble({
+  role,
+  parts,
+  streaming
+}: {
+  role: 'user' | 'assistant'
+  parts: AiMessagePart[]
+  streaming?: boolean
+}) {
+  if (role === 'user') {
+    const text = parts
+      .filter((p) => p.type === 'text')
+      .map((p) => (p.type === 'text' ? p.text : ''))
+      .join('')
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[85%] whitespace-pre-wrap rounded-lg rounded-br-sm bg-primary px-3 py-2 text-[13px] text-primary-foreground">
+          {text}
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className="space-y-1">
+      {parts.map((part, i) =>
+        part.type === 'text' ? (
+          <div key={i} className="rounded-lg rounded-bl-sm bg-card px-3 py-2">
+            <AiMarkdown content={part.text} />
+            {streaming && i === parts.length - 1 && (
+              <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-primary align-middle" />
+            )}
+          </div>
+        ) : (
+          <ToolPartCard key={i} part={part} />
+        )
+      )}
+      {parts.length === 0 && streaming && (
+        <div className="flex items-center gap-2 rounded-lg bg-card px-3 py-2 text-xs text-muted-foreground">
+          <Loader2 className="size-3.5 animate-spin" /> 思考中...
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function AiPanel() {
+  const messages = useAppStore((s) => s.messages)
+  const aiStreaming = useAppStore((s) => s.aiStreaming)
+  const aiConfigs = useAppStore((s) => s.aiConfigs)
+  const aiSettings = useAppStore((s) => s.aiSettings)
+  const aiError = useAppStore((s) => s.aiError)
+  const sessions = useAppStore((s) => s.sessions)
+  const activeSessionId = useAppStore((s) => s.activeSessionId)
+  const activeSession = sessions.find((s) => s.id === activeSessionId)
+  const sendAiMessage = useAppStore((s) => s.sendAiMessage)
+  const abortAi = useAppStore((s) => s.abortAi)
+  const clearAiMessages = useAppStore((s) => s.clearAiMessages)
+  const setActiveAiConfig = useAppStore((s) => s.setActiveAiConfig)
+  const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
+
+  const [input, setInput] = useState('')
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [messages])
+
+  const hasConfig = Boolean(aiSettings.activeConfigId) && aiConfigs.length > 0
+
+  const handleSend = () => {
+    if (!input.trim() || aiStreaming) return
+    void sendAiMessage(input)
+    setInput('')
+  }
+
+  return (
+    <aside className="flex w-[380px] shrink-0 flex-col border-l border-border bg-sidebar">
+      {/* 头部 */}
+      <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-3">
+        <Sparkles className="size-4 text-primary" />
+        <span className="text-sm font-semibold">AI 助手</span>
+        <div className="flex-1" />
+        <Select
+          value={aiSettings.activeConfigId ?? ''}
+          onValueChange={(v) => void setActiveAiConfig(v)}
+        >
+          <SelectTrigger className="h-7 w-40 text-xs" title="切换模型">
+            <SelectValue placeholder="选择模型" />
+          </SelectTrigger>
+          <SelectContent>
+            {aiConfigs.map((c) => (
+              <SelectItem key={c.id} value={c.id} className="text-xs">
+                {c.name}（{c.model}）
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7"
+          title="清空对话"
+          onClick={clearAiMessages}
+        >
+          <Eraser className="size-3.5" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7"
+          title="AI 设置"
+          onClick={() => setSettingsOpen(true, 'models')}
+        >
+          <Settings2 className="size-3.5" />
+        </Button>
+      </div>
+
+      {/* 消息区 */}
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
+        <div className="space-y-3 p-3">
+          {messages.length === 0 && (
+            <div className="mt-16 flex flex-col items-center gap-3 text-center text-muted-foreground">
+              <Sparkles className="size-8 text-primary/40" />
+              <div className="text-sm">AI 可以帮你操作终端</div>
+              <div className="space-y-1 text-xs leading-5">
+                <p>试试：查看当前目录下占用空间最大的文件</p>
+                <p>试试：诊断 nginx 为什么启动失败</p>
+              </div>
+              {!hasConfig && (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  className="mt-2"
+                  onClick={() => setSettingsOpen(true, 'models')}
+                >
+                  先去配置模型
+                </Button>
+              )}
+            </div>
+          )}
+          {messages.map((msg, i) => (
+            <MessageBubble
+              key={msg.id}
+              role={msg.role}
+              parts={msg.parts}
+              streaming={aiStreaming && i === messages.length - 1 && msg.role === 'assistant'}
+            />
+          ))}
+          {aiError && <p className="text-xs text-destructive">{aiError}</p>}
+        </div>
+      </div>
+
+      {/* 输入区 */}
+      <div className="shrink-0 border-t border-border p-3">
+        <div className="mb-1.5 text-[10px] text-muted-foreground">
+          {activeSession
+            ? `AI 将操作当前终端：${activeSession.title}`
+            : '提示：打开一个终端会话后，AI 才能执行命令'}
+          {aiSettings.autoApprove ? '' : ' ·（AI 自动执行已关闭）'}
+        </div>
+        <div className="relative">
+          <Textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault()
+                handleSend()
+              }
+            }}
+            placeholder={
+              hasConfig ? '描述你想做的事…（Enter 发送，Shift+Enter 换行）' : '请先在设置中配置模型'
+            }
+            className="min-h-20 resize-none pr-12 text-[13px]"
+            rows={3}
+          />
+          {aiStreaming ? (
+            <Button
+              size="icon"
+              variant="destructive"
+              className="absolute bottom-2 right-2 size-8"
+              title="停止"
+              onClick={() => void abortAi()}
+            >
+              <CircleStop className="size-4" />
+            </Button>
+          ) : (
+            <Button
+              size="icon"
+              className="absolute bottom-2 right-2 size-8"
+              disabled={!input.trim() || !hasConfig}
+              title="发送"
+              onClick={handleSend}
+            >
+              <Send className="size-4" />
+            </Button>
+          )}
+        </div>
+      </div>
+    </aside>
+  )
+}
