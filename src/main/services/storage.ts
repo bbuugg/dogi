@@ -89,8 +89,15 @@ class StorageService {
     }))
   }
 
+  /** 按 id 取配置（主进程内部使用：密钥字段已解密，禁止直接发给渲染端） */
   getSshProfile(id: string): SshProfile | undefined {
-    return this.store.get('sshProfiles').find((p) => p.id === id)
+    const profile = this.store.get('sshProfiles').find((p) => p.id === id)
+    if (!profile) return undefined
+    return {
+      ...profile,
+      password: this.decrypt(profile.password),
+      passphrase: this.decrypt(profile.passphrase)
+    }
   }
 
   /** 保存 SSH 配置（upsert）；password/privateKey/passphrase 为 undefined 时保留旧值 */
