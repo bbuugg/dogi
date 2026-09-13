@@ -104,24 +104,52 @@
   * {
     @apply border-border outline-ring/50;
   }
+
   body {
     @apply bg-background text-foreground;
     font-family:
       'Segoe UI', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
     overflow: hidden;
   }
+
   button {
     @apply cursor-pointer;
   }
+}
+
+/* 全局滚动条美化 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.2) transparent;
+}
+
+::-webkit-scrollbar {
+  width: .5rem;
+  height: .5rem;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 3px;
+
+  &:hover {
+    background: rgba(0, 0, 0, 0.3);
+  }
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 /* xterm 终端容器 */
 .xterm {
   padding: 8px;
 }
+
 .xterm-viewport::-webkit-scrollbar {
   width: 8px;
 }
+
 .xterm-viewport::-webkit-scrollbar-thumb {
   background: color-mix(in oklab, var(--foreground) 15%, transparent);
   border-radius: 4px;

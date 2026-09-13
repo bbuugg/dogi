@@ -10,6 +10,7 @@ import type {
   Preferences,
   SessionInfo,
   SshProfile,
+  TerminalThemeName,
   ThemeMode
 } from '@shared/types'
 
@@ -52,7 +53,7 @@ interface UiState {
   settingsOpen: boolean
   /** 编辑中的 SSH 配置（null=新建，undefined=关闭） */
   sshDialog: { open: boolean; editing?: SshProfile | null }
-  settingsTab: 'models' | 'mcp' | 'prefs'
+  settingsTab: 'models' | 'mcp' | 'terminal' | 'prefs'
 }
 
 interface AppStore {
@@ -96,6 +97,7 @@ interface AppStore {
   setAiPermissionMode: (mode: AiPermissionMode) => Promise<void>
   resolveAiConfirm: (approved: boolean) => Promise<void>
   setTheme: (mode: ThemeMode) => Promise<void>
+  setTerminalTheme: (name: TerminalThemeName) => Promise<void>
   sendAiMessage: (text: string, targetSessionId?: string | null) => Promise<void>
   abortAi: () => Promise<void>
   clearAiMessages: () => void
@@ -143,7 +145,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     profiles: [],
 
-    preferences: { theme: 'system' },
+    preferences: { theme: 'system', terminalTheme: 'auto' },
 
     aiConfigs: [],
     aiSettings: { permissionMode: 'full' },
@@ -246,6 +248,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     setTheme: async (mode) => {
       const preferences = await window.api.prefs.save({ theme: mode })
+      set({ preferences })
+    },
+
+    setTerminalTheme: async (name) => {
+      // 立即生效，终端监听 preferences 变化时热更新配色
+      set((s) => ({ preferences: { ...s.preferences, terminalTheme: name } }))
+      const preferences = await window.api.prefs.save({ terminalTheme: name })
       set({ preferences })
     },
 

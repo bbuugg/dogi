@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -6,39 +6,7 @@ import '@xterm/xterm/css/xterm.css'
 import type { SessionInfo } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import { useIsDarkTheme } from '@/lib/theme'
-import type { ITheme } from '@xterm/xterm'
-
-const DARK_TERMINAL_THEME: ITheme = {
-  background: '#0f1117',
-  foreground: '#e6e6e6',
-  cursor: '#4daafc',
-  cursorAccent: '#0f1117',
-  selectionBackground: 'rgba(77, 170, 252, 0.3)',
-  black: '#1d1f21',
-  red: '#cc6666',
-  green: '#b5bd68',
-  yellow: '#f0c674',
-  blue: '#81a2be',
-  magenta: '#c9c9c9',
-  cyan: '#8abeb7',
-  white: '#c5c8c6'
-}
-
-const LIGHT_TERMINAL_THEME: ITheme = {
-  background: '#ffffff',
-  foreground: '#24292f',
-  cursor: '#0969da',
-  cursorAccent: '#ffffff',
-  selectionBackground: 'rgba(9, 105, 218, 0.25)',
-  black: '#24292f',
-  red: '#cf222e',
-  green: '#116329',
-  yellow: '#9a6700',
-  blue: '#0969da',
-  magenta: '#8250df',
-  cyan: '#1b7c83',
-  white: '#6e7781'
-}
+import { resolveTerminalTheme } from '@/lib/terminal-themes'
 
 interface TerminalViewProps {
   session: SessionInfo
@@ -50,6 +18,14 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const isDark = useIsDarkTheme()
+  const terminalThemeName = useAppStore((s) => s.preferences.terminalTheme)
+  const theme = useMemo(() => resolveTerminalTheme(terminalThemeName, isDark), [
+    terminalThemeName,
+    isDark
+  ])
+  // 始终读取最新主题（创建 effect 只跑一次，避免闭包读到旧值）
+  const themeRef = useRef(theme)
+  themeRef.current = theme
 
   useEffect(() => {
     const container = containerRef.current
@@ -63,7 +39,7 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
       cursorBlink: true,
       scrollback: 10000,
       allowProposedApi: true,
-      theme: isDark ? DARK_TERMINAL_THEME : LIGHT_TERMINAL_THEME
+      theme: themeRef.current
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
@@ -105,12 +81,10 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id])
 
-  // 主题切换时热更新终端配色
+  // 主题/配色切换时热更新终端
   useEffect(() => {
-    if (termRef.current) {
-      termRef.current.options.theme = isDark ? DARK_TERMINAL_THEME : LIGHT_TERMINAL_THEME
-    }
-  }, [isDark])
+    if (termRef.current) termRef.current.options.theme = theme
+  }, [theme])
 
   // 激活时重新适配尺寸并聚焦
   useEffect(() => {

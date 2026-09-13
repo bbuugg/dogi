@@ -35,19 +35,19 @@ const PERMISSION_MODES: Array<{
   icon: typeof ShieldCheck
   hint: string
 }> = [
-  {
-    value: 'full',
-    label: '完全访问',
-    icon: Terminal,
-    hint: 'AI 可直接执行终端命令，无需逐条确认'
-  },
-  {
-    value: 'confirm',
-    label: '确认模式',
-    icon: ShieldCheck,
-    hint: 'AI 执行每条终端命令前都需要你确认，可随时取消'
-  }
-]
+    {
+      value: 'full',
+      label: '完全访问',
+      icon: Terminal,
+      hint: 'AI 可直接执行终端命令，无需逐条确认'
+    },
+    {
+      value: 'confirm',
+      label: '确认模式',
+      icon: ShieldCheck,
+      hint: 'AI 执行每条终端命令前都需要你确认，可随时取消'
+    }
+  ]
 
 function ToolPartCard({ part }: { part: AiMessagePart }) {
   const isCall = part.type === 'tool-call'
@@ -87,9 +87,8 @@ function ToolPartCard({ part }: { part: AiMessagePart }) {
         )}
         {outputText && (
           <pre
-            className={`max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[10px] ${
-              part.type === 'tool-result' && part.isError ? 'text-destructive' : ''
-            }`}
+            className={`max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[10px] ${part.type === 'tool-result' && part.isError ? 'text-destructive' : ''
+              }`}
           >
             {outputText}
           </pre>
@@ -234,7 +233,7 @@ export function AiPanel() {
           value={aiSettings.activeConfigId ?? ''}
           onValueChange={(v) => void setActiveAiConfig(v)}
         >
-          <SelectTrigger className="h-7 w-40 text-xs" title="切换模型">
+          <SelectTrigger className="h-7 min-w-0 flex-1 text-xs" title="切换模型">
             <SelectValue placeholder="选择模型" />
           </SelectTrigger>
           <SelectContent>
@@ -245,24 +244,6 @@ export function AiPanel() {
             ))}
           </SelectContent>
         </Select>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-7"
-          title="清空对话"
-          onClick={clearAiMessages}
-        >
-          <Eraser className="size-3.5" />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-7"
-          title="AI 设置"
-          onClick={() => setSettingsOpen(true, 'models')}
-        >
-          <Settings2 className="size-3.5" />
-        </Button>
       </div>
 
       {/* 消息区 */}
@@ -303,50 +284,9 @@ export function AiPanel() {
       {/* 命令确认（确认模式） */}
       <CommandConfirmCard />
 
-      {/* 输入区 */}
+      {/* 输入区：圆角卡片，操作按钮集中在卡片底部（对齐 ChatInput 结构） */}
       <div className="shrink-0 border-t border-border p-3">
-        <div className="mb-1.5 flex items-center gap-2">
-          <Select
-            value={permissionMode}
-            onValueChange={(v) => void setAiPermissionMode(v as AiPermissionMode)}
-          >
-            <SelectTrigger
-              className="h-7 w-28 shrink-0 gap-1 px-2 text-xs"
-              title="AI 终端执行权限（可实时切换）"
-            >
-              <span className="flex min-w-0 items-center gap-1.5">
-                <ModeIcon className="size-3 shrink-0" />
-                <SelectValue />
-              </span>
-            </SelectTrigger>
-            <SelectContent>
-              {PERMISSION_MODES.map((m) => {
-                const Icon = m.icon
-                return (
-                  <SelectItem key={m.value} value={m.value} className="text-xs">
-                    <span className="flex items-center gap-1.5">
-                      <Icon className="size-3" />
-                      {m.label}
-                    </span>
-                  </SelectItem>
-                )
-              })}
-            </SelectContent>
-          </Select>
-          <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground">
-            {modeMeta.hint}
-          </span>
-        </div>
-        {activeSession ? (
-          <div className="mb-1.5 truncate text-[10px] text-muted-foreground">
-            AI 将操作当前终端：{activeSession.title}
-          </div>
-        ) : (
-          <div className="mb-1.5 text-[10px] text-muted-foreground">
-            提示：打开一个终端会话后，AI 才能执行命令
-          </div>
-        )}
-        <div className="relative">
+        <div className="rounded-lg border border-border bg-card transition-colors focus-within:border-primary">
           <Textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -359,30 +299,83 @@ export function AiPanel() {
             placeholder={
               hasConfig ? '描述你想做的事…（Enter 发送，Shift+Enter 换行）' : '请先在设置中配置模型'
             }
-            className="min-h-20 resize-none pr-12 text-[13px]"
-            rows={3}
+            rows={2}
+            className="min-h-14 max-h-40 resize-none overflow-y-auto border-0 bg-transparent px-2.5 pt-2.5 text-[13px] shadow-none outline-none focus-visible:border-0 focus-visible:ring-0 dark:bg-transparent"
           />
-          {aiStreaming ? (
-            <Button
-              size="icon"
-              variant="destructive"
-              className="absolute bottom-2 right-2 size-8"
-              title="停止"
-              onClick={() => void abortAi()}
-            >
-              <CircleStop className="size-4" />
-            </Button>
-          ) : (
-            <Button
-              size="icon"
-              className="absolute bottom-2 right-2 size-8"
-              disabled={!input.trim() || !hasConfig}
-              title="发送"
-              onClick={handleSend}
-            >
-              <Send className="size-4" />
-            </Button>
-          )}
+          <div className="flex items-center justify-between gap-2 px-2 pb-2">
+            <div className="flex min-w-0 items-center gap-1">
+              <Select
+                value={permissionMode}
+                onValueChange={(v) => void setAiPermissionMode(v as AiPermissionMode)}
+              >
+                <SelectTrigger
+                  className="h-7 w-28 shrink-0 gap-1 px-2 text-xs"
+                  title="AI 终端执行权限（可实时切换）"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {PERMISSION_MODES.map((m) => {
+                    const Icon = m.icon
+                    return (
+                      <SelectItem key={m.value} value={m.value} className="text-xs">
+                        <span className="flex items-center gap-1.5">
+                          <Icon className="size-3" />
+                          {m.label}
+                        </span>
+                      </SelectItem>
+                    )
+                  })}
+                </SelectContent>
+              </Select>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 shrink-0 text-muted-foreground"
+                title="清空对话"
+                onClick={clearAiMessages}
+              >
+                <Eraser className="size-3.5" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 shrink-0 text-muted-foreground"
+                title="AI 设置"
+                onClick={() => setSettingsOpen(true, 'models')}
+              >
+                <Settings2 className="size-3.5" />
+              </Button>
+            </div>
+            {aiStreaming ? (
+              <Button
+                size="icon"
+                variant="destructive"
+                className="size-8 shrink-0 rounded-full"
+                title="停止"
+                onClick={() => void abortAi()}
+              >
+                <CircleStop className="size-4" />
+              </Button>
+            ) : (
+              <Button
+                size="icon"
+                className="size-8 shrink-0 rounded-full"
+                disabled={!input.trim() || !hasConfig}
+                title="发送"
+                onClick={handleSend}
+              >
+                <Send className="size-4" />
+              </Button>
+            )}
+          </div>
+        </div>
+        <div className="mt-1.5 truncate text-[10px] text-muted-foreground">
+          {activeSession
+            ? `AI 将操作当前终端：${activeSession.title}`
+            : '提示：打开一个终端会话后，AI 才能执行命令'}
+          {' · '}
+          {modeMeta.hint}
         </div>
       </div>
     </aside>

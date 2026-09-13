@@ -2,8 +2,23 @@
 
 export type ThemeMode = 'system' | 'light' | 'dark'
 
+/**
+ * 终端配色方案：
+ * - auto：跟随应用明暗主题
+ * - 其余为固定配色，不随应用主题变化
+ */
+export type TerminalThemeName =
+  | 'auto'
+  | 'dark'
+  | 'light'
+  | 'solarized-dark'
+  | 'dracula'
+  | 'nord'
+
 export interface Preferences {
   theme: ThemeMode
+  /** 终端配色方案，缺省 auto（跟随应用主题） */
+  terminalTheme: TerminalThemeName
 }
 
 export type SessionType = 'local' | 'ssh'

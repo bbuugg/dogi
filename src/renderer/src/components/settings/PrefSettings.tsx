@@ -30,7 +30,7 @@ export function PrefSettings() {
       <div className="rounded-md border border-border px-3 py-3">
         <Label>主题</Label>
         <p className="mt-1 mb-2.5 text-[11px] leading-4 text-muted-foreground">
-          「跟随系统」随 Windows 深浅色自动切换，终端配色同步变化。
+          「跟随系统」随 Windows 深浅色自动切换。终端配色请在左侧「终端」中单独设置。
         </p>
         <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label="主题模式">
           {THEME_OPTIONS.map(({ value, label, icon: Icon }) => {
