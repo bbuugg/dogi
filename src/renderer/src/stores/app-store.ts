@@ -1,8 +1,10 @@
 import { create } from 'zustand'
 import type {
   AiChatMessage,
+  AiConfirmRequest,
   AiMessagePart,
   AiModelConfig,
+  AiPermissionMode,
   AiSettings,
   AiStreamEvent,
   Preferences,
@@ -72,6 +74,8 @@ interface AppStore {
   aiStreaming: boolean
   activeRequestId: string | null
   aiError: string | null
+  /** 确认模式下等待用户处理的命令执行请求 */
+  pendingConfirm: AiConfirmRequest | null
 
   // ---------- UI ----------
   ui: UiState
@@ -89,6 +93,8 @@ interface AppStore {
   refreshAiConfigs: () => Promise<void>
   setActiveAiConfig: (id: string) => Promise<void>
   saveAiSettings: (patch: Partial<AiSettings>) => Promise<void>
+  setAiPermissionMode: (mode: AiPermissionMode) => Promise<void>
+  resolveAiConfirm: (approved: boolean) => Promise<void>
   setTheme: (mode: ThemeMode) => Promise<void>
   sendAiMessage: (text: string, targetSessionId?: string | null) => Promise<void>
   abortAi: () => Promise<void>
@@ -124,6 +130,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
     window.api.ai.onChatEvent(({ requestId, event }) => {
       get().handleAiEvent(requestId, event)
     })
+    window.api.ai.onConfirmRequest((req) => {
+      // 同一时刻只可能有一个待确认命令
+      set({ pendingConfirm: req })
+    })
   }
 
   return {
@@ -136,11 +146,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
     preferences: { theme: 'system' },
 
     aiConfigs: [],
-    aiSettings: { autoApprove: true },
+    aiSettings: { permissionMode: 'full' },
     messages: [],
     aiStreaming: false,
     activeRequestId: null,
     aiError: null,
+    pendingConfirm: null,
 
     ui: {
       aiPanelOpen: true,
@@ -219,6 +230,20 @@ export const useAppStore = create<AppStore>()((set, get) => {
       set({ aiSettings: settings })
     },
 
+    setAiPermissionMode: async (mode) => {
+      // 实时生效：主进程在每次执行命令时才读取该配置
+      set((s) => ({ aiSettings: { ...s.aiSettings, permissionMode: mode } }))
+      const settings = await window.api.ai.saveSettings({ permissionMode: mode })
+      set({ aiSettings: settings })
+    },
+
+    resolveAiConfirm: async (approved) => {
+      const pending = get().pendingConfirm
+      if (!pending) return
+      set({ pendingConfirm: null })
+      await window.api.ai.resolveConfirm(pending.id, approved)
+    },
+
     setTheme: async (mode) => {
       const preferences = await window.api.prefs.save({ theme: mode })
       set({ preferences })
@@ -269,18 +294,21 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     abortAi: async () => {
       const requestId = get().activeRequestId
+      set({ pendingConfirm: null })
       if (requestId) {
         await window.api.ai.abort(requestId)
         set({ aiStreaming: false, activeRequestId: null })
       }
     },
 
-    clearAiMessages: () => set({ messages: [] }),
+    clearAiMessages: () => set({ messages: [], pendingConfirm: null }),
 
     handleAiEvent: (requestId, event) => {
       if (requestId !== get().activeRequestId) return
       if (event.type === 'finish') {
         set({ aiStreaming: false, activeRequestId: null })
+        // 兜底：对话已结束但仍有挂起确认时按取消处理，避免主进程工具悬挂
+        if (get().pendingConfirm) void get().resolveAiConfirm(false)
         return
       }
       set((s) => {

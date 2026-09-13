@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import type {
   AiChatMessage,
+  AiConfirmRequest,
   AiModelConfig,
   AiSettings,
   AiStreamEvent,
@@ -66,7 +67,12 @@ const api = {
     abort: (requestId: string): Promise<void> =>
       ipcRenderer.invoke('ai:abort', requestId),
     onChatEvent: (cb: (payload: { requestId: string; event: AiStreamEvent }) => void) =>
-      subscribe('ai:chat-event', cb)
+      subscribe('ai:chat-event', cb),
+    /** 确认模式下收到命令执行确认请求 */
+    onConfirmRequest: (cb: (req: AiConfirmRequest) => void) => subscribe('ai:confirm', cb),
+    /** 回复确认请求：approved=true 执行，false 取消 */
+    resolveConfirm: (id: string, approved: boolean): Promise<void> =>
+      ipcRenderer.invoke('ai:confirm:resolve', { id, approved })
   },
   mcp: {
     list: (): Promise<McpServerConfig[]> => ipcRenderer.invoke('mcp:list'),

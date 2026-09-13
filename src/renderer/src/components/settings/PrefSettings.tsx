@@ -3,7 +3,6 @@ import type { ThemeMode } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
-import { Switch } from '@/components/ui/switch'
 import { useEffect, useState } from 'react'
 import { cn } from 'cn'
 
@@ -55,20 +54,6 @@ export function PrefSettings() {
             )
           })}
         </div>
-      </div>
-
-      <div className="flex items-start justify-between gap-4 rounded-md border border-border px-3 py-3">
-        <div>
-          <Label htmlFor="auto-approve">AI 自动执行终端命令</Label>
-          <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-            关闭后 AI 无法执行命令，只能读取终端输出。建议在敏感环境关闭。
-          </p>
-        </div>
-        <Switch
-          id="auto-approve"
-          checked={aiSettings.autoApprove}
-          onCheckedChange={(v) => void saveAiSettings({ autoApprove: v })}
-        />
       </div>
 
       <div className="grid gap-1.5">

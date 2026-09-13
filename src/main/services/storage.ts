@@ -2,6 +2,7 @@ import Store from 'electron-store'
 import { safeStorage } from 'electron'
 import type {
   AiModelConfig,
+  AiPermissionMode,
   AiSettings,
   McpServerConfig,
   Preferences,
@@ -17,7 +18,7 @@ interface StoreSchema {
   windowBounds?: { x?: number; y?: number; width: number; height: number }
 }
 
-const DEFAULT_AI_SETTINGS: AiSettings = { autoApprove: true }
+const DEFAULT_AI_SETTINGS: AiSettings = { permissionMode: 'full' }
 const DEFAULT_PREFERENCES: Preferences = { theme: 'system' }
 
 /** 密钥类字段加密前缀（safeStorage 密文 base64） */
@@ -178,7 +179,14 @@ class StorageService {
 
   // ---------- AI 设置 ----------
   getAiSettings(): AiSettings {
-    return { ...DEFAULT_AI_SETTINGS, ...this.store.get('aiSettings') }
+    // 兼容旧版 autoApprove 布尔配置：关闭自动执行 -> 确认模式
+    const stored = (this.store.get('aiSettings') ?? {}) as Partial<AiSettings> & {
+      autoApprove?: boolean
+    }
+    const { autoApprove, ...rest } = stored
+    const permissionMode: AiPermissionMode =
+      rest.permissionMode ?? (autoApprove === false ? 'confirm' : 'full')
+    return { ...DEFAULT_AI_SETTINGS, ...rest, permissionMode }
   }
 
   saveAiSettings(settings: Partial<AiSettings>): AiSettings {

@@ -5,10 +5,12 @@ import {
   Loader2,
   Send,
   Settings2,
+  ShieldCheck,
   Sparkles,
+  Terminal,
   Wrench
 } from 'lucide-react'
-import type { AiMessagePart } from '@shared/types'
+import type { AiMessagePart, AiPermissionMode } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import { AiMarkdown } from '@/components/AiMarkdown'
 import { Button } from '@/components/ui/button'
@@ -26,6 +28,26 @@ const TOOL_LABELS: Record<string, string> = {
   read_terminal_output: '读取终端输出',
   list_terminal_sessions: '查看终端列表'
 }
+
+const PERMISSION_MODES: Array<{
+  value: AiPermissionMode
+  label: string
+  icon: typeof ShieldCheck
+  hint: string
+}> = [
+  {
+    value: 'full',
+    label: '完全访问',
+    icon: Terminal,
+    hint: 'AI 可直接执行终端命令，无需逐条确认'
+  },
+  {
+    value: 'confirm',
+    label: '确认模式',
+    icon: ShieldCheck,
+    hint: 'AI 执行每条终端命令前都需要你确认，可随时取消'
+  }
+]
 
 function ToolPartCard({ part }: { part: AiMessagePart }) {
   const isCall = part.type === 'tool-call'
@@ -122,6 +144,48 @@ function MessageBubble({
   )
 }
 
+/** 确认模式下的命令执行确认卡片 */
+function CommandConfirmCard() {
+  const pendingConfirm = useAppStore((s) => s.pendingConfirm)
+  const resolveAiConfirm = useAppStore((s) => s.resolveAiConfirm)
+  const sessions = useAppStore((s) => s.sessions)
+
+  if (!pendingConfirm) return null
+  const target = sessions.find((s) => s.id === pendingConfirm.sessionId)
+
+  return (
+    <div className="mx-3 mb-2 rounded-md border border-amber-500/60 bg-amber-500/10 p-2.5">
+      <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-400">
+        <ShieldCheck className="size-3.5 shrink-0" />
+        允许 AI 执行这条命令？
+      </div>
+      <pre className="mb-1.5 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-background/70 px-2 py-1.5 font-mono text-[11px] leading-4">
+        {pendingConfirm.command}
+      </pre>
+      <div className="mb-2 truncate text-[10px] text-muted-foreground">
+        目标会话：{target?.title ?? pendingConfirm.sessionId ?? '最近活跃会话'}
+      </div>
+      <div className="flex gap-2">
+        <Button
+          size="sm"
+          className="h-7 flex-1 text-xs"
+          onClick={() => void resolveAiConfirm(true)}
+        >
+          执行
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7 flex-1 text-xs"
+          onClick={() => void resolveAiConfirm(false)}
+        >
+          取消
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 export function AiPanel() {
   const messages = useAppStore((s) => s.messages)
   const aiStreaming = useAppStore((s) => s.aiStreaming)
@@ -135,6 +199,7 @@ export function AiPanel() {
   const abortAi = useAppStore((s) => s.abortAi)
   const clearAiMessages = useAppStore((s) => s.clearAiMessages)
   const setActiveAiConfig = useAppStore((s) => s.setActiveAiConfig)
+  const setAiPermissionMode = useAppStore((s) => s.setAiPermissionMode)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
 
   const [input, setInput] = useState('')
@@ -143,9 +208,14 @@ export function AiPanel() {
   useEffect(() => {
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [messages])
+  }, [messages, aiStreaming])
 
   const hasConfig = Boolean(aiSettings.activeConfigId) && aiConfigs.length > 0
+  const permissionMode: AiPermissionMode =
+    aiSettings.permissionMode === 'confirm' ? 'confirm' : 'full'
+  const modeMeta =
+    PERMISSION_MODES.find((m) => m.value === permissionMode) ?? PERMISSION_MODES[0]
+  const ModeIcon = modeMeta.icon
 
   const handleSend = () => {
     if (!input.trim() || aiStreaming) return
@@ -230,14 +300,52 @@ export function AiPanel() {
         </div>
       </div>
 
+      {/* 命令确认（确认模式） */}
+      <CommandConfirmCard />
+
       {/* 输入区 */}
       <div className="shrink-0 border-t border-border p-3">
-        <div className="mb-1.5 text-[10px] text-muted-foreground">
-          {activeSession
-            ? `AI 将操作当前终端：${activeSession.title}`
-            : '提示：打开一个终端会话后，AI 才能执行命令'}
-          {aiSettings.autoApprove ? '' : ' ·（AI 自动执行已关闭）'}
+        <div className="mb-1.5 flex items-center gap-2">
+          <Select
+            value={permissionMode}
+            onValueChange={(v) => void setAiPermissionMode(v as AiPermissionMode)}
+          >
+            <SelectTrigger
+              className="h-7 w-28 shrink-0 gap-1 px-2 text-xs"
+              title="AI 终端执行权限（可实时切换）"
+            >
+              <span className="flex min-w-0 items-center gap-1.5">
+                <ModeIcon className="size-3 shrink-0" />
+                <SelectValue />
+              </span>
+            </SelectTrigger>
+            <SelectContent>
+              {PERMISSION_MODES.map((m) => {
+                const Icon = m.icon
+                return (
+                  <SelectItem key={m.value} value={m.value} className="text-xs">
+                    <span className="flex items-center gap-1.5">
+                      <Icon className="size-3" />
+                      {m.label}
+                    </span>
+                  </SelectItem>
+                )
+              })}
+            </SelectContent>
+          </Select>
+          <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground">
+            {modeMeta.hint}
+          </span>
         </div>
+        {activeSession ? (
+          <div className="mb-1.5 truncate text-[10px] text-muted-foreground">
+            AI 将操作当前终端：{activeSession.title}
+          </div>
+        ) : (
+          <div className="mb-1.5 text-[10px] text-muted-foreground">
+            提示：打开一个终端会话后，AI 才能执行命令
+          </div>
+        )}
         <div className="relative">
           <Textarea
             value={input}

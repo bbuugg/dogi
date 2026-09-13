@@ -74,6 +74,14 @@ export function registerIpc(win: () => BrowserWindow | null): void {
     broadcast(win, 'ai:chat-event', { requestId, event })
   )
 
+  // ---------- AI 命令执行确认（确认模式） ----------
+  aiService.setConfirmRequester((req) => broadcast(win, 'ai:confirm', req))
+  ipcMain.handle(
+    'ai:confirm:resolve',
+    (_e, payload: { id: string; approved: boolean }) =>
+      aiService.resolveConfirm(payload.id, payload.approved)
+  )
+
   // ---------- MCP ----------
   ipcMain.handle('mcp:list', () => mcpManager.listStatus())
   ipcMain.handle('mcp:save', (_e, server: McpServerConfig) => {

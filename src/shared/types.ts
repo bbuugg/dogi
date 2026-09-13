@@ -84,11 +84,33 @@ export interface McpServerConfig {
   enabled: boolean
 }
 
+/**
+ * AI 执行终端命令的权限模式（可在对话输入框处实时切换）：
+ * - full：完全访问，AI 可直接执行终端命令
+ * - confirm：确认模式，AI 每次执行终端命令前都需要用户确认，用户可取消
+ */
+export type AiPermissionMode = 'full' | 'confirm'
+
 export interface AiSettings {
   activeConfigId?: string
-  /** AI 是否可自动执行终端命令；关闭时工具调用会被拒绝 */
-  autoApprove: boolean
+  /** AI 执行终端命令的权限模式；在对话输入框处实时切换 */
+  permissionMode: AiPermissionMode
   systemPrompt?: string
+}
+
+/** 主进程向渲染进程发起的命令执行确认请求 */
+export interface AiConfirmRequest {
+  /** 确认请求 id，回复时原样带回 */
+  id: string
+  /** 所属 AI 对话请求 id */
+  requestId: string
+  toolCallId: string
+  toolName: string
+  /** 待执行的命令 */
+  command: string
+  /** 目标终端会话 */
+  sessionId?: string
+  sessionTitle?: string
 }
 
 /** AI 聊天消息（简化版 UIMessage，主进程与渲染进程一致） */
