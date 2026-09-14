@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -59,6 +59,9 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
   const suggestionsRef = useRef<string[]>([])
   const activeIndexRef = useRef(0)
   const [suggestions, setSuggestions] = useState<{ items: string[]; index: number } | null>(null)
+  // 命令预测下拉框定位（相对终端容器）
+  const dropdownRef = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
 
   const clearSuggestions = useCallback(() => {
     suggestionsRef.current = []
@@ -77,6 +80,39 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
     inputBufferRef.current = full
     clearSuggestions()
   }, [session.id, clearSuggestions])
+
+  // 预测下拉框定位：优先显示在光标下方，空间不足则显示在光标上方
+  const positionDropdown = useCallback(() => {
+    const term = termRef.current
+    const container = containerRef.current
+    const box = dropdownRef.current
+    if (!term || !container || !box) return
+    const buf = term.buffer.active
+    const dims: any = (term as any)._core?._renderService?.dimensions
+    const cellW = dims?.actualCellWidth ?? container.clientWidth / term.cols
+    const cellH = dims?.actualCellHeight ?? container.clientHeight / term.rows
+    const x = buf.cursorX * cellW
+    const y = buf.cursorY * cellH
+    const contW = container.clientWidth
+    const contH = container.clientHeight
+    const boxW = box.offsetWidth
+    const boxH = box.offsetHeight
+    const gap = 16
+    const left = Math.min(Math.max(x, 0), Math.max(0, contW - boxW))
+    const belowTop = y + cellH + gap
+    let top = belowTop
+    if (belowTop + boxH > contH) {
+      const aboveTop = y - gap - boxH
+      top = aboveTop >= 0 ? aboveTop : belowTop
+    }
+    top = Math.min(Math.max(top, 0), Math.max(0, contH - boxH))
+    setPos({ top, left })
+  }, [])
+
+  // 建议变化时（键入 / 切换）重新定位
+  useLayoutEffect(() => {
+    if (suggestions) positionDropdown()
+  }, [suggestions, positionDropdown])
   // 始终读取最新主题（创建 effect 只跑一次，避免闭包读到旧值）
   const themeRef = useRef(theme)
   themeRef.current = theme
@@ -336,6 +372,7 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
         return
       }
       void window.api.terminal.resize(session.id, term.cols, term.rows)
+      positionDropdown()
     })
     resizeObserver.observe(container)
 
@@ -391,7 +428,10 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
         </div>
       )}
       {suggestions && (
-        <div className="absolute bottom-2 left-2 z-10 max-h-56 w-80 overflow-y-auto rounded-md border border-border bg-popover/95 p-1 text-xs shadow-lg backdrop-blur">
+        <div
+          ref={dropdownRef}
+          style={pos ? { top: pos.top, left: pos.left } : undefined}
+          className="absolute z-10 max-h-56 w-80 overflow-y-auto rounded-md border border-border bg-popover/95 p-1 text-xs shadow-lg backdrop-blur">
           <div className="px-2 py-1 text-[10px] text-muted-foreground">
             命令预测 · Tab/→ 接受 · ↑/↓ 切换 · Esc 关闭
           </div>
