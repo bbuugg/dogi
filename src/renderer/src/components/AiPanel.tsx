@@ -326,7 +326,7 @@ export function AiPanel() {
                 onValueChange={(v) => void setAiPermissionMode(v as AiPermissionMode)}
               >
                 <SelectTrigger
-                  className="h-7 w-28 shrink-0 gap-1 px-2 text-xs"
+                  className="w-28 shrink-0 gap-1 px-2 text-xs"
                   title="AI 终端执行权限（可实时切换）"
                 >
                   <SelectValue />
