@@ -57,7 +57,7 @@ export function TerminalTabs() {
 
   return (
     <div className="flex h-9 shrink-0 items-end gap-1 border-b border-border bg-background px-2">
-      <div className="flex flex-1 items-end gap-1 overflow-x-auto">
+      <div className="flex flex-1 items-end gap-1 overflow-x-auto no-scrollbar">
         {sessions.map((session) => (
           <TabItem key={session.id} session={session} />
         ))}

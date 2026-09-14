@@ -26,6 +26,19 @@
   }
 }
 
+@utility no-scrollbar {
+  /* Firefox */
+  scrollbar-width: none !important;
+
+  /* IE and Edge */
+  -ms-overflow-style: none !important;
+
+  /* Chrome, Safari and Opera */
+  &::-webkit-scrollbar {
+    display: none !important;
+  }
+}
+
 /* 全局滚动条美化 */
 * {
   scrollbar-width: thin;
