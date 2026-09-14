@@ -12,6 +12,8 @@ export function TerminalSettings() {
   const setTerminalTheme = useAppStore((s) => s.setTerminalTheme)
   const copyOnSelect = useAppStore((s) => s.preferences.copyOnSelect)
   const setCopyOnSelect = useAppStore((s) => s.setCopyOnSelect)
+  const commandPrediction = useAppStore((s) => s.preferences.commandPrediction)
+  const setCommandPrediction = useAppStore((s) => s.setCommandPrediction)
   const isDark = useIsDarkTheme()
 
   return (
@@ -75,6 +77,20 @@ export function TerminalSettings() {
           id="copy-on-select"
           checked={copyOnSelect}
           onCheckedChange={(v) => void setCopyOnSelect(v)}
+        />
+      </div>
+
+      <div className="flex items-start justify-between gap-4 rounded-md border border-border px-3 py-3">
+        <div>
+          <Label htmlFor="command-prediction">命令预测补全</Label>
+          <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+            根据命令历史与常见命令，在输入时给出补全建议，按 Tab 或 → 接受，↑/↓ 切换。
+          </p>
+        </div>
+        <Switch
+          id="command-prediction"
+          checked={commandPrediction}
+          onCheckedChange={(v) => void setCommandPrediction(v)}
         />
       </div>
     </div>

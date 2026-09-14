@@ -22,7 +22,8 @@ const DEFAULT_AI_SETTINGS: AiSettings = { permissionMode: 'full' }
 const DEFAULT_PREFERENCES: Preferences = {
   theme: 'system',
   terminalTheme: 'auto',
-  copyOnSelect: true
+  copyOnSelect: true,
+  commandPrediction: true
 }
 
 /** 密钥类字段加密前缀（safeStorage 密文 base64） */

@@ -100,6 +100,7 @@ interface AppStore {
   setTheme: (mode: ThemeMode) => Promise<void>
   setTerminalTheme: (name: TerminalThemeName) => Promise<void>
   setCopyOnSelect: (enabled: boolean) => Promise<void>
+  setCommandPrediction: (enabled: boolean) => Promise<void>
   sendAiMessage: (text: string, targetSessionId?: string | null) => Promise<void>
   abortAi: () => Promise<void>
   clearAiMessages: () => void
@@ -149,7 +150,7 @@ let shortcutWired = false
 
     profiles: [],
 
-    preferences: { theme: 'system', terminalTheme: 'auto', copyOnSelect: true },
+    preferences: { theme: 'system', terminalTheme: 'auto', copyOnSelect: true, commandPrediction: true },
 
     aiConfigs: [],
     aiSettings: { permissionMode: 'full' },
@@ -275,6 +276,12 @@ let shortcutWired = false
     setCopyOnSelect: async (enabled) => {
       set((s) => ({ preferences: { ...s.preferences, copyOnSelect: enabled } }))
       const preferences = await window.api.prefs.save({ copyOnSelect: enabled })
+      set({ preferences })
+    },
+
+    setCommandPrediction: async (enabled) => {
+      set((s) => ({ preferences: { ...s.preferences, commandPrediction: enabled } }))
+      const preferences = await window.api.prefs.save({ commandPrediction: enabled })
       set({ preferences })
     },
 

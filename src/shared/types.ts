@@ -21,6 +21,8 @@ export interface Preferences {
   terminalTheme: TerminalThemeName
   /** 选中终端文本时自动复制到剪贴板，缺省开启 */
   copyOnSelect: boolean
+  /** 命令预测（历史 / 常见命令补全下拉），缺省开启 */
+  commandPrediction: boolean
 }
 
 export type SessionType = 'local' | 'ssh'
