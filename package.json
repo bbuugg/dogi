@@ -90,6 +90,9 @@
       "out/**/*",
       "package.json"
     ],
+    "extraResources": [
+      "resources/app-icon.png"
+    ],
     "npmRebuild": false,
     "asarUnpack": [
       "**/*.node",

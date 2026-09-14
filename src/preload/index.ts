@@ -93,9 +93,20 @@ const api = {
       ipcRenderer.invoke('prefs:save', patch)
   },
   app: {
+    /** 当前平台（同步常量，用于标题栏等 UI 的系统适配） */
+    platform: process.platform,
     info: (): Promise<AppInfo> => ipcRenderer.invoke('app:info'),
     /** 订阅主进程触发的全局快捷键动作 */
     onShortcut: (cb: (action: AppShortcutAction) => void) => subscribe('app:shortcut', cb)
+  },
+  window: {
+    minimize: (): Promise<void> => ipcRenderer.invoke('window:minimize'),
+    toggleMaximize: (): Promise<void> => ipcRenderer.invoke('window:toggleMaximize'),
+    close: (): Promise<void> => ipcRenderer.invoke('window:close'),
+    isMaximized: (): Promise<boolean> => ipcRenderer.invoke('window:isMaximized'),
+    /** 订阅最大化状态变化（自定义标题栏切换最大化/还原图标） */
+    onMaximizedChange: (cb: (maximized: boolean) => void) =>
+      subscribe('window:maximized', cb)
   },
   zmodem: {
     /** 打开文件选择框，返回选中文件的字节（用于 rz 上传） */

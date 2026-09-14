@@ -1,7 +1,7 @@
 import { TerminalSquare } from 'lucide-react'
 import { useAppStore } from '@/stores/app-store'
+import { TitleBar } from '@/components/TitleBar'
 import { Sidebar } from '@/components/Sidebar'
-import { TerminalTabs } from '@/components/TerminalTabs'
 import { TerminalView } from '@/components/TerminalView'
 import { MonitorPanel } from '@/components/MonitorPanel'
 import { AiPanel } from '@/components/AiPanel'
@@ -35,31 +35,33 @@ export default function App() {
   const monitorOpen = useAppStore((s) => s.ui.monitorOpen)
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
-      <Sidebar />
+    <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
+      <TitleBar />
+      <div className="flex min-h-0 flex-1">
+        <Sidebar />
 
-      <main className="flex min-w-0 flex-1 flex-col">
-        <TerminalTabs />
-        {monitorOpen && activeSessionId && (
-          <MonitorPanel sessionId={activeSessionId} />
-        )}
-        <div className="min-h-0 flex-1">
-          {sessions.length === 0 ? (
-            <EmptyState />
-          ) : (
-            sessions.map((session) => (
-              <div
-                key={session.id}
-                className={session.id === activeSessionId ? 'h-full' : 'hidden'}
-              >
-                <TerminalView session={session} isActive={session.id === activeSessionId} />
-              </div>
-            ))
+        <main className="flex min-w-0 flex-1 flex-col">
+          {monitorOpen && activeSessionId && (
+            <MonitorPanel sessionId={activeSessionId} />
           )}
-        </div>
-      </main>
+          <div className="min-h-0 flex-1">
+            {sessions.length === 0 ? (
+              <EmptyState />
+            ) : (
+              sessions.map((session) => (
+                <div
+                  key={session.id}
+                  className={session.id === activeSessionId ? 'h-full' : 'hidden'}
+                >
+                  <TerminalView session={session} isActive={session.id === activeSessionId} />
+                </div>
+              ))
+            )}
+          </div>
+        </main>
 
-      {aiPanelOpen && <AiPanel />}
+        {aiPanelOpen && <AiPanel />}
+      </div>
 
       <SshProfileDialog />
       <SettingsDialog />

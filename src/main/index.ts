@@ -31,6 +31,11 @@ function installMenu(): void {
 
 function createWindow(): void {
   const bounds = storage.getWindowBounds()
+  const isMac = process.platform === 'darwin'
+  // 窗口/任务栏图标：开发时取项目 resources 目录；打包后由 extraResources 带入安装目录 resources
+  const iconPath = app.isPackaged
+    ? join(process.resourcesPath, 'app-icon.png')
+    : join(import.meta.dirname, '../../resources/app-icon.png')
   mainWindow = new BrowserWindow({
     width: bounds?.width ?? 1280,
     height: bounds?.height ?? 800,
@@ -39,6 +44,11 @@ function createWindow(): void {
     minWidth: 960,
     minHeight: 600,
     show: false,
+    icon: iconPath,
+    // 自定义标题栏：隐藏系统标题栏但保留窗口阴影/圆角/动画；
+    // macOS 用 hiddenInset 保留交通灯，并让交通灯与自定义标题栏（h-9）垂直对齐
+    titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
+    trafficLightPosition: isMac ? { x: 12, y: 12 } : undefined,
     // 创建窗口前 themeSource 已就位，按解析后的主题设置底色避免闪白
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#0f1117' : '#ffffff',
     autoHideMenuBar: true,
@@ -49,6 +59,15 @@ function createWindow(): void {
       spellcheck: false
     }
   })
+
+  // 最大化状态变化广播给渲染端，用于切换最大化/还原图标
+  const sendMaximized = (v: boolean): void => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('window:maximized', v)
+    }
+  }
+  mainWindow.on('maximize', () => sendMaximized(true))
+  mainWindow.on('unmaximize', () => sendMaximized(false))
 
   // 终端缩放改用字号（见 TerminalView）；整页缩放强制复位到 100%。
   // Chromium 会按 origin 记住 zoom level，并在导航完成后重新应用，

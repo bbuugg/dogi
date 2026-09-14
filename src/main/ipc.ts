@@ -186,6 +186,17 @@ export function registerIpc(win: () => BrowserWindow | null): void {
     return prefs
   })
 
+  // ---------- 窗口控制（自定义标题栏） ----------
+  ipcMain.handle('window:minimize', () => win()?.minimize())
+  ipcMain.handle('window:toggleMaximize', () => {
+    const window = win()
+    if (!window) return
+    if (window.isMaximized()) window.unmaximize()
+    else window.maximize()
+  })
+  ipcMain.handle('window:close', () => win()?.close())
+  ipcMain.handle('window:isMaximized', () => win()?.isMaximized() ?? false)
+
   // ---------- 应用信息 ----------
   ipcMain.handle('app:info', () => ({
     version: app.getVersion(),

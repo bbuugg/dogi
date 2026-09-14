@@ -20,7 +20,7 @@ function TabItem({ session }: { session: SessionInfo }) {
   return (
     <div
       onClick={() => setActiveSession(session.id)}
-      className={`group flex h-9 max-w-52 shrink-0 cursor-pointer items-center gap-2 rounded-t-md border border-b-0 px-3 text-xs transition-colors ${
+      className={`app-no-drag group flex h-9 max-w-52 shrink-0 cursor-pointer items-center gap-2 rounded-t-md border border-b-0 px-3 text-xs transition-colors ${
         active
           ? 'border-border bg-card text-foreground'
           : 'border-transparent bg-transparent text-muted-foreground hover:text-foreground'
@@ -56,8 +56,8 @@ export function TerminalTabs() {
   const effectiveShellId = localShell || 'default'
 
   return (
-    <div className="flex h-9 shrink-0 items-end gap-1 border-b border-border bg-background px-2">
-      <div className="flex flex-1 items-end gap-1 overflow-x-auto no-scrollbar">
+    <div className="app-drag flex h-full min-w-0 flex-1 items-end gap-1 px-2">
+      <div className="no-scrollbar flex flex-1 items-end gap-1 overflow-x-auto">
         {sessions.map((session) => (
           <TabItem key={session.id} session={session} />
         ))}
@@ -65,50 +65,52 @@ export function TerminalTabs() {
           <span className="pb-1.5 text-xs text-muted-foreground">暂无终端会话</span>
         )}
       </div>
-      <Button
-        variant="ghost"
-        size="icon"
-        className={cn('mb-0.5 size-7', monitorOpen && 'bg-secondary text-foreground')}
-        title="服务器监控（CPU/内存/流量等）"
-        onClick={toggleMonitor}
-      >
-        <Activity className="size-4" />
-      </Button>
-      <div className="mb-0.5 flex items-center">
+      <div className="app-no-drag mb-0.5 flex items-center gap-1">
         <Button
           variant="ghost"
           size="icon"
-          className="size-7 rounded-r-none pr-1"
-          title="新建本地终端（默认 shell）"
-          onClick={() => void createLocalSession()}
+          className={cn('size-7', monitorOpen && 'bg-secondary text-foreground')}
+          title="服务器监控（CPU/内存/流量等）"
+          onClick={toggleMonitor}
         >
-          <Plus className="size-4" />
+          <Activity className="size-4" />
         </Button>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-4 rounded-l-none border-l border-border/60 px-0"
-              title="选择 shell 新建终端"
-            >
-              <ChevronDown className="size-3" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="min-w-40">
-            {shells?.shells.map((shell) => (
-              <DropdownMenuItem
-                key={shell.id}
-                onClick={() => void createLocalSession(shell.id)}
+        <div className="flex items-center">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7 rounded-r-none pr-1"
+            title="新建本地终端（默认 shell）"
+            onClick={() => void createLocalSession()}
+          >
+            <Plus className="size-4" />
+          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-4 rounded-l-none border-l border-border/60 px-0"
+                title="选择 shell 新建终端"
               >
-                <span className="flex-1">{shell.name}</span>
-                {shell.id === effectiveShellId && (
-                  <span className="text-[10px] text-muted-foreground">默认</span>
-                )}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
+                <ChevronDown className="size-3" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="min-w-40">
+              {shells?.shells.map((shell) => (
+                <DropdownMenuItem
+                  key={shell.id}
+                  onClick={() => void createLocalSession(shell.id)}
+                >
+                  <span className="flex-1">{shell.name}</span>
+                  {shell.id === effectiveShellId && (
+                    <span className="text-[10px] text-muted-foreground">默认</span>
+                  )}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
     </div>
   )

@@ -3,6 +3,7 @@ import { useAppStore } from '@/stores/app-store'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
+import appIcon from '@/assets/app-icon.png'
 import { useEffect, useState } from 'react'
 import type { AppInfo } from '@shared/types'
 
@@ -31,9 +32,7 @@ export function Sidebar() {
   return (
     <aside className="flex w-60 shrink-0 flex-col border-r border-border bg-sidebar">
       <div className="flex items-center gap-2 px-4 py-3">
-        <div className="flex size-7 items-center justify-center rounded-md bg-sidebar-primary text-sidebar-primary-foreground">
-          <TerminalGlyph />
-        </div>
+        <img src={appIcon} alt="OpsDesk" className="size-7" draggable={false} />
         <div className="flex-1">
           <div className="text-sm font-semibold">OpsDesk</div>
           <div className="text-[10px] text-muted-foreground">AI 运维终端</div>
@@ -154,20 +153,3 @@ export function Sidebar() {
   )
 }
 
-function TerminalGlyph() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <polyline points="4 17 10 11 4 5" />
-      <line x1="12" y1="19" x2="20" y2="19" />
-    </svg>
-  )
-}

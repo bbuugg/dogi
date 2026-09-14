@@ -39,6 +39,15 @@
   }
 }
 
+/* 自定义标题栏：拖拽区域（窗口控制按钮等交互元素需用 app-no-drag 排除） */
+@utility app-drag {
+  -webkit-app-region: drag;
+}
+
+@utility app-no-drag {
+  -webkit-app-region: no-drag;
+}
+
 /* 全局滚动条美化 */
 * {
   scrollbar-width: thin;
