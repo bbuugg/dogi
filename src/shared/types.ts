@@ -19,6 +19,8 @@ export interface Preferences {
   theme: ThemeMode
   /** 终端配色方案，缺省 auto（跟随应用主题） */
   terminalTheme: TerminalThemeName
+  /** 选中终端文本时自动复制到剪贴板，缺省开启 */
+  copyOnSelect: boolean
 }
 
 export type SessionType = 'local' | 'ssh'

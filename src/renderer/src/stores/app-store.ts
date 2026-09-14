@@ -98,6 +98,7 @@ interface AppStore {
   resolveAiConfirm: (approved: boolean) => Promise<void>
   setTheme: (mode: ThemeMode) => Promise<void>
   setTerminalTheme: (name: TerminalThemeName) => Promise<void>
+  setCopyOnSelect: (enabled: boolean) => Promise<void>
   sendAiMessage: (text: string, targetSessionId?: string | null) => Promise<void>
   abortAi: () => Promise<void>
   clearAiMessages: () => void
@@ -145,7 +146,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     profiles: [],
 
-    preferences: { theme: 'system', terminalTheme: 'auto' },
+    preferences: { theme: 'system', terminalTheme: 'auto', copyOnSelect: true },
 
     aiConfigs: [],
     aiSettings: { permissionMode: 'full' },
@@ -255,6 +256,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
       // 立即生效，终端监听 preferences 变化时热更新配色
       set((s) => ({ preferences: { ...s.preferences, terminalTheme: name } }))
       const preferences = await window.api.prefs.save({ terminalTheme: name })
+      set({ preferences })
+    },
+
+    setCopyOnSelect: async (enabled) => {
+      set((s) => ({ preferences: { ...s.preferences, copyOnSelect: enabled } }))
+      const preferences = await window.api.prefs.save({ copyOnSelect: enabled })
       set({ preferences })
     },
 

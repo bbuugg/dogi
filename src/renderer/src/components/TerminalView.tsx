@@ -19,6 +19,10 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
   const fitRef = useRef<FitAddon | null>(null)
   const isDark = useIsDarkTheme()
   const terminalThemeName = useAppStore((s) => s.preferences.terminalTheme)
+  const copyOnSelect = useAppStore((s) => s.preferences.copyOnSelect)
+  // 创建 effect 只跑一次，用 ref 读取最新偏好，避免闭包读到旧值
+  const copyOnSelectRef = useRef(copyOnSelect)
+  copyOnSelectRef.current = copyOnSelect
   const theme = useMemo(() => resolveTerminalTheme(terminalThemeName, isDark), [
     terminalThemeName,
     isDark
@@ -52,6 +56,13 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
     }
     void window.api.terminal.resize(session.id, term.cols, term.rows)
     term.onData((data) => void window.api.terminal.write(session.id, data))
+    // 选中文本即复制到剪贴板（可在终端设置中开关）
+    term.onSelectionChange(() => {
+      if (!copyOnSelectRef.current) return
+      const sel = term.getSelection()
+      if (!sel) return
+      navigator.clipboard?.writeText(sel).catch(() => {})
+    })
     termRef.current = term
     fitRef.current = fit
 

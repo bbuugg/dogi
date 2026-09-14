@@ -3,11 +3,15 @@ import type { TerminalThemeName } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import { useIsDarkTheme } from '@/lib/theme'
 import { TERMINAL_THEMES, resolveTerminalTheme } from '@/lib/terminal-themes'
+import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
 import { cn } from 'cn'
 
 export function TerminalSettings() {
   const terminalTheme = useAppStore((s) => s.preferences.terminalTheme)
   const setTerminalTheme = useAppStore((s) => s.setTerminalTheme)
+  const copyOnSelect = useAppStore((s) => s.preferences.copyOnSelect)
+  const setCopyOnSelect = useAppStore((s) => s.setCopyOnSelect)
   const isDark = useIsDarkTheme()
 
   return (
@@ -58,6 +62,20 @@ export function TerminalSettings() {
             )
           })}
         </div>
+      </div>
+
+      <div className="flex items-start justify-between gap-4 rounded-md border border-border px-3 py-3">
+        <div>
+          <Label htmlFor="copy-on-select">选中文本即复制</Label>
+          <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+            在终端里选中文本后自动复制到剪贴板，无需手动 Ctrl+C。
+          </p>
+        </div>
+        <Switch
+          id="copy-on-select"
+          checked={copyOnSelect}
+          onCheckedChange={(v) => void setCopyOnSelect(v)}
+        />
       </div>
     </div>
   )
