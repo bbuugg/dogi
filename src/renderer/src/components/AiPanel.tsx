@@ -222,9 +222,9 @@ export function AiPanel() {
   }
 
   return (
-    <aside className="flex w-[380px] shrink-0 flex-col border-l border-border bg-sidebar">
+    <aside className="flex w-[350px] shrink-0 flex-col bg-sidebar">
       {/* 头部 */}
-      <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-3">
+      <div className="flex h-12 shrink-0 items-center gap-2 px-3">
         <Sparkles className="size-4 text-primary" />
         <span className="text-sm font-semibold">AI 助手</span>
         <div className="flex-1" />

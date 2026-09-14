@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Copy, Minus, Square, X } from 'lucide-react'
+import { Copy, Minus, Settings, Sparkles, Square, X } from 'lucide-react'
 import { cn } from 'cn'
+import { useAppStore } from '@/stores/app-store'
+import { Button } from '@/components/ui/button'
 import { TerminalTabs } from '@/components/TerminalTabs'
 import appIcon from '@/assets/app-icon.png'
 
@@ -15,6 +17,9 @@ export function TitleBar() {
   const platform = window.api.app.platform
   const isMac = platform === 'darwin'
   const [maximized, setMaximized] = useState(false)
+  const aiPanelOpen = useAppStore((s) => s.ui.aiPanelOpen)
+  const setAiPanelOpen = useAppStore((s) => s.setAiPanelOpen)
+  const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
 
   useEffect(() => {
     void window.api.window.isMaximized().then(setMaximized)
@@ -34,6 +39,27 @@ export function TitleBar() {
 
       <div className="flex min-w-0 flex-1 items-end">
         <TerminalTabs />
+      </div>
+
+      <div className="app-no-drag flex items-center gap-0.5 pr-1">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-8"
+          title={aiPanelOpen ? '隐藏 AI 助手' : '显示 AI 助手'}
+          onClick={() => setAiPanelOpen(!aiPanelOpen)}
+        >
+          <Sparkles className={cn('size-4', aiPanelOpen && 'text-primary')} />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-8"
+          title="设置"
+          onClick={() => setSettingsOpen(true)}
+        >
+          <Settings className="size-4" />
+        </Button>
       </div>
 
       {!isMac && (

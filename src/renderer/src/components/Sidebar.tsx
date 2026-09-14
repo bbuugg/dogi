@@ -1,21 +1,17 @@
-import { Monitor, Pencil, Plus, Server, Settings, Sparkles, Trash2 } from 'lucide-react'
-import { useAppStore } from '@/stores/app-store'
-import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
-import appIcon from '@/assets/app-icon.png'
-import { useEffect, useState } from 'react'
+import { useAppStore } from '@/stores/app-store'
 import type { AppInfo } from '@shared/types'
+import { Monitor, Pencil, Plus, Server, Trash2 } from 'lucide-react'
+import { useEffect, useState } from 'react'
 
 export function Sidebar() {
   const profiles = useAppStore((s) => s.profiles)
   const sessions = useAppStore((s) => s.sessions)
-  const aiPanelOpen = useAppStore((s) => s.ui.aiPanelOpen)
   const createLocalSession = useAppStore((s) => s.createLocalSession)
   const connectSsh = useAppStore((s) => s.connectSsh)
   const setSshDialog = useAppStore((s) => s.setSshDialog)
-  const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
-  const setAiPanelOpen = useAppStore((s) => s.setAiPanelOpen)
   const refreshProfiles = useAppStore((s) => s.refreshProfiles)
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null)
 
@@ -30,34 +26,7 @@ export function Sidebar() {
   }
 
   return (
-    <aside className="flex w-60 shrink-0 flex-col border-r border-border bg-sidebar">
-      <div className="flex items-center gap-2 px-4 py-3">
-        <img src={appIcon} alt="OpsDesk" className="size-7" draggable={false} />
-        <div className="flex-1">
-          <div className="text-sm font-semibold">OpsDesk</div>
-          <div className="text-[10px] text-muted-foreground">AI 运维终端</div>
-        </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-7"
-          title={aiPanelOpen ? '隐藏 AI 助手' : '显示 AI 助手'}
-          onClick={() => setAiPanelOpen(!aiPanelOpen)}
-        >
-          <Sparkles className={`size-4 ${aiPanelOpen ? 'text-primary' : ''}`} />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-7"
-          title="设置"
-          onClick={() => setSettingsOpen(true)}
-        >
-          <Settings className="size-4" />
-        </Button>
-      </div>
-      <Separator />
-
+    <aside className="flex w-60 shrink-0 flex-col bg-sidebar">
       <div className="flex-1 overflow-y-auto p-2">
         {/* 本地终端 */}
         <div className="mb-1 flex items-center justify-between px-2 py-1">
