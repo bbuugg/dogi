@@ -8,6 +8,7 @@ import type {
   AiSettings,
   AiStreamEvent,
   Preferences,
+  ServerMetrics,
   SessionInfo,
   SshProfile,
   TerminalThemeName,
@@ -55,6 +56,8 @@ interface UiState {
   /** 编辑中的 SSH 配置（null=新建，undefined=关闭） */
   sshDialog: { open: boolean; editing?: SshProfile | null }
   settingsTab: 'ai' | 'terminal' | 'prefs'
+  /** 是否展开服务器监控面板 */
+  monitorOpen: boolean
 }
 
 interface AppStore {
@@ -81,6 +84,13 @@ interface AppStore {
 
   // ---------- UI ----------
   ui: UiState
+
+  // ---------- 服务器监控 ----------
+  /** 各会话最新指标，key 为 sessionId */
+  monitors: Record<string, ServerMetrics>
+
+  toggleMonitor: () => void
+  setMonitorData: (sessionId: string, metrics: ServerMetrics) => void
 
   bootstrap: () => Promise<void>
   createLocalSession: () => Promise<void>
@@ -141,6 +151,9 @@ let shortcutWired = false
       // 同一时刻只可能有一个待确认命令
       set({ pendingConfirm: req })
     })
+    window.api.monitor.onData(({ sessionId, metrics }) => {
+      set((s) => ({ monitors: { ...s.monitors, [sessionId]: metrics } }))
+    })
   }
 
   return {
@@ -164,8 +177,11 @@ let shortcutWired = false
       aiPanelOpen: true,
       settingsOpen: false,
       sshDialog: { open: false, editing: null },
-      settingsTab: 'ai'
+      settingsTab: 'ai',
+      monitorOpen: false
     },
+
+    monitors: {},
 
     bootstrap: async () => {
       const [profiles, configs, settings, preferences] = await Promise.all([
@@ -232,6 +248,12 @@ let shortcutWired = false
       })),
     setSshDialog: (open, editing = null) =>
       set((s) => ({ ui: { ...s.ui, sshDialog: { open, editing } } })),
+
+    toggleMonitor: () =>
+      set((s) => ({ ui: { ...s.ui, monitorOpen: !s.ui.monitorOpen } })),
+
+    setMonitorData: (sessionId, metrics) =>
+      set((s) => ({ monitors: { ...s.monitors, [sessionId]: metrics } })),
 
     refreshAiConfigs: async () => {
       set({ aiConfigs: await window.api.ai.listConfigs() })

@@ -184,3 +184,39 @@ export interface AppInfo {
   node: string
   platform: string
 }
+
+/** 单块磁盘/分区的使用情况 */
+export interface DiskUsage {
+  mount: string
+  used: number
+  total: number
+  /** 使用率（0-100 整数） */
+  percent: number
+}
+
+/**
+ * 服务器监控指标（由主进程通过 SSH exec 周期性采集并解析 /proc、df 得到）。
+ * 流量为每秒速率（字节/秒），首次采样时 CPU 使用率暂为 null。
+ */
+export interface ServerMetrics {
+  /** CPU 使用率百分比（0-100），首次采样为 null */
+  cpuPercent: number | null
+  /** 逻辑核心数 */
+  cores: number
+  memTotal: number
+  memUsed: number
+  /** 内存使用率百分比（0-100） */
+  memPercent: number
+  load1: number
+  load5: number
+  load15: number
+  /** 网络接收速率（字节/秒，汇总非回环网卡） */
+  netRxRate: number
+  /** 网络发送速率（字节/秒） */
+  netTxRate: number
+  disk: DiskUsage[]
+  /** 系统运行时长（秒） */
+  uptime: number
+  /** 采集时间戳 */
+  timestamp: number
+}

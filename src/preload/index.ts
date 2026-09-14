@@ -12,6 +12,7 @@ import type {
   McpToolInfo,
   Preferences,
   SessionInfo,
+  ServerMetrics,
   SshProfile
 } from '@shared/types'
 
@@ -100,6 +101,15 @@ const api = {
     /** 弹出保存对话框并把字节写入磁盘（用于 sz 下载），返回保存路径 */
     saveFile: (name: string, data: Uint8Array): Promise<string | null> =>
       ipcRenderer.invoke('zmodem:saveFile', name, data)
+  },
+  monitor: {
+    /** 开始对指定会话进行服务器指标采集 */
+    start: (sessionId: string): Promise<void> => ipcRenderer.invoke('monitor:start', sessionId),
+    /** 停止采集 */
+    stop: (sessionId: string): Promise<void> => ipcRenderer.invoke('monitor:stop', sessionId),
+    /** 订阅监控数据推送 */
+    onData: (cb: (payload: { sessionId: string; metrics: ServerMetrics }) => void) =>
+      subscribe('monitor:data', cb)
   }
 }
 

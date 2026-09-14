@@ -3,6 +3,7 @@ import { useAppStore } from '@/stores/app-store'
 import { Sidebar } from '@/components/Sidebar'
 import { TerminalTabs } from '@/components/TerminalTabs'
 import { TerminalView } from '@/components/TerminalView'
+import { MonitorPanel } from '@/components/MonitorPanel'
 import { AiPanel } from '@/components/AiPanel'
 import { SshProfileDialog } from '@/components/SshProfileDialog'
 import { SettingsDialog } from '@/components/SettingsDialog'
@@ -31,6 +32,7 @@ export default function App() {
   const sessions = useAppStore((s) => s.sessions)
   const activeSessionId = useAppStore((s) => s.activeSessionId)
   const aiPanelOpen = useAppStore((s) => s.ui.aiPanelOpen)
+  const monitorOpen = useAppStore((s) => s.ui.monitorOpen)
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
@@ -38,6 +40,9 @@ export default function App() {
 
       <main className="flex min-w-0 flex-1 flex-col">
         <TerminalTabs />
+        {monitorOpen && activeSessionId && (
+          <MonitorPanel sessionId={activeSessionId} />
+        )}
         <div className="min-h-0 flex-1">
           {sessions.length === 0 ? (
             <EmptyState />

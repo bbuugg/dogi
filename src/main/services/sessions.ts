@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import { exec as cpExec } from 'node:child_process'
 import * as os from 'node:os'
 import * as pty from '@lydell/node-pty'
 import { Client, type ClientChannel, type ConnectConfig } from 'ssh2'
@@ -20,6 +21,8 @@ interface InternalSession {
   kill(): void
   /** 读取最近输出（AI 工具用） */
   recentOutput(maxChars: number): string
+  /** 在远端/本地执行一次性命令并返回完整输出（监控采集用） */
+  exec(command: string): Promise<string>
 }
 
 function pickLocalShell(): string {
@@ -107,6 +110,15 @@ class LocalSession implements InternalSession {
 
   recentOutput(maxChars: number): string {
     return this.output.slice(-maxChars)
+  }
+
+  exec(command: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      cpExec(command, { encoding: 'utf8', maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+        if (err) reject(err)
+        else resolve(stdout + stderr)
+      })
+    })
   }
 }
 
@@ -233,6 +245,29 @@ class SshSession implements InternalSession {
 
   recentOutput(maxChars: number): string {
     return this.output.slice(-maxChars)
+  }
+
+  exec(command: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      if (this.killed || !this.conn) {
+        reject(new Error('SSH 连接已关闭'))
+        return
+      }
+      this.conn.exec(command, (err, stream: ClientChannel) => {
+        if (err || !stream) {
+          reject(err ?? new Error('exec 通道建立失败'))
+          return
+        }
+        let out = ''
+        stream.on('data', (data: Buffer | string) => {
+          out += Buffer.isBuffer(data) ? data.toString('utf8') : data
+        })
+        stream.stderr?.on('data', (data: Buffer | string) => {
+          out += Buffer.isBuffer(data) ? data.toString('utf8') : data
+        })
+        stream.on('close', () => resolve(out))
+      })
+    })
   }
 }
 

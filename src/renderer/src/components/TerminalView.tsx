@@ -149,6 +149,7 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
     // 上传（远端执行了 rz）：弹出文件选择，逐文件发送
     const handleUpload = async (zsession: any) => {
       try {
+        term.blur()
         const files = await window.api.zmodem.pickFiles()
         if (!files.length) {
           try {
@@ -173,6 +174,7 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
         console.error('zmodem upload failed', e)
       } finally {
         endSession()
+        term.focus()
       }
     }
     // zmodem.js Sentry：扫描所有入站字节，识别 rz/sz 的 ZMODEM 会话

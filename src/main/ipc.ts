@@ -1,6 +1,7 @@
 import { ipcMain, nativeTheme, dialog, type BrowserWindow } from 'electron'
 import { promises as fs } from 'node:fs'
 import { sessionManager } from './services/sessions'
+import { monitorService } from './services/monitor'
 import { storage } from './services/storage'
 import { aiService } from './services/ai'
 import { mcpManager } from './services/mcp'
@@ -11,6 +12,7 @@ import type {
   AiStreamEvent,
   McpServerConfig,
   Preferences,
+  ServerMetrics,
   SshProfile
 } from '@shared/types'
 
@@ -32,6 +34,19 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   sessionManager.on('closed', (payload: { sessionId: string }) =>
     broadcast(win, 'terminal:closed', payload)
   )
+  // 会话关闭时停止其监控，避免泄漏
+  sessionManager.on('closed', ({ sessionId }: { sessionId: string }) =>
+    monitorService.stop(sessionId)
+  )
+
+  // ---------- 服务器监控（SSH 连接后查看 CPU/内存/流量等） ----------
+  monitorService.on(
+    'data',
+    (payload: { sessionId: string; metrics: ServerMetrics }) =>
+      broadcast(win, 'monitor:data', payload)
+  )
+  ipcMain.handle('monitor:start', (_e, sessionId: string) => monitorService.start(sessionId))
+  ipcMain.handle('monitor:stop', (_e, sessionId: string) => monitorService.stop(sessionId))
 
   // ---------- 终端控制 ----------
   ipcMain.handle('terminal:list', () => sessionManager.list())
@@ -60,9 +75,20 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   ipcMain.handle('zmodem:pickFiles', async () => {
     const window = win()
     if (!window || window.isDestroyed()) return []
-    const { canceled, filePaths } = await dialog.showOpenDialog(window, {
-      properties: ['openFile', 'multiSelections']
-    })
+    // Windows 上模态文件框可能被主窗口遮住（electron#32857），临时置顶并聚焦，
+    // 确保选择框显示在最前、鼠标可正常交互
+    if (window.isMinimized()) window.restore()
+    window.setAlwaysOnTop(true)
+    window.focus()
+    let result: Electron.OpenDialogReturnValue
+    try {
+      result = await dialog.showOpenDialog(window, {
+        properties: ['openFile', 'multiSelections']
+      })
+    } finally {
+      window.setAlwaysOnTop(false)
+    }
+    const { canceled, filePaths } = result
     if (canceled || !filePaths.length) return []
     const files: { name: string; size: number; data: Buffer }[] = []
     for (const p of filePaths) {
@@ -76,7 +102,16 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   ipcMain.handle('zmodem:saveFile', async (_e, name: string, data: Uint8Array) => {
     const window = win()
     if (!window || window.isDestroyed()) return null
-    const { canceled, filePath } = await dialog.showSaveDialog(window, { defaultPath: name })
+    if (window.isMinimized()) window.restore()
+    window.setAlwaysOnTop(true)
+    window.focus()
+    let result: Electron.SaveDialogReturnValue
+    try {
+      result = await dialog.showSaveDialog(window, { defaultPath: name })
+    } finally {
+      window.setAlwaysOnTop(false)
+    }
+    const { canceled, filePath } = result
     if (canceled || !filePath) return null
     await fs.writeFile(filePath, Buffer.from(data))
     return filePath

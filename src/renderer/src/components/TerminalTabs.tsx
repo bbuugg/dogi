@@ -1,7 +1,8 @@
-import { Plus, TerminalSquare, X } from 'lucide-react'
+import { Activity, Plus, TerminalSquare, X } from 'lucide-react'
 import type { SessionInfo } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import { Button } from '@/components/ui/button'
+import { cn } from 'cn'
 
 function TabItem({ session }: { session: SessionInfo }) {
   const activeSessionId = useAppStore((s) => s.activeSessionId)
@@ -41,6 +42,8 @@ function TabItem({ session }: { session: SessionInfo }) {
 export function TerminalTabs() {
   const sessions = useAppStore((s) => s.sessions)
   const createLocalSession = useAppStore((s) => s.createLocalSession)
+  const monitorOpen = useAppStore((s) => s.ui.monitorOpen)
+  const toggleMonitor = useAppStore((s) => s.toggleMonitor)
 
   return (
     <div className="flex h-9 shrink-0 items-end gap-1 border-b border-border bg-background px-2">
@@ -52,6 +55,15 @@ export function TerminalTabs() {
           <span className="pb-1.5 text-xs text-muted-foreground">暂无终端会话</span>
         )}
       </div>
+      <Button
+        variant="ghost"
+        size="icon"
+        className={cn('mb-0.5 size-7', monitorOpen && 'bg-secondary text-foreground')}
+        title="服务器监控（CPU/内存/流量等）"
+        onClick={toggleMonitor}
+      >
+        <Activity className="size-4" />
+      </Button>
       <Button
         variant="ghost"
         size="icon"
