@@ -13,6 +13,7 @@ import type {
   TerminalThemeName,
   ThemeMode
 } from '@shared/types'
+import type { AppShortcutAction } from '@shared/types'
 
 /** AI 回复生成中的占位 assistant 消息尾部追加 part */
 function appendAssistantPart(
@@ -108,6 +109,8 @@ interface AppStore {
 let listenersBound = false
 
 export const useAppStore = create<AppStore>()((set, get) => {
+/** 全局快捷键监听器仅注册一次，避免 HMR / 重复 bootstrap 叠加 */
+let shortcutWired = false
   if (!listenersBound && typeof window !== 'undefined' && window.api) {
     listenersBound = true
     // 会话输出退出等事件 -> 更新状态（数据本身由 TerminalView 自行订阅）
@@ -171,6 +174,16 @@ export const useAppStore = create<AppStore>()((set, get) => {
         window.api.prefs.get()
       ])
       set({ profiles, aiConfigs: configs, aiSettings: settings, preferences })
+
+      // 全局快捷键：主进程触发后在此分发到具体 UI 动作
+      if (!shortcutWired) {
+        shortcutWired = true
+        window.api.app.onShortcut((action: AppShortcutAction) => {
+          const s = get()
+          if (action === 'open-settings') s.setSettingsOpen(true)
+          else if (action === 'new-session') void s.createLocalSession()
+        })
+      }
     },
 
     createLocalSession: async () => {

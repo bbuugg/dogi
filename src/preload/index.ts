@@ -7,6 +7,7 @@ import type {
   AiSettings,
   AiStreamEvent,
   AppInfo,
+  AppShortcutAction,
   McpServerConfig,
   McpToolInfo,
   Preferences,
@@ -88,7 +89,9 @@ const api = {
       ipcRenderer.invoke('prefs:save', patch)
   },
   app: {
-    info: (): Promise<AppInfo> => ipcRenderer.invoke('app:info')
+    info: (): Promise<AppInfo> => ipcRenderer.invoke('app:info'),
+    /** 订阅主进程触发的全局快捷键动作 */
+    onShortcut: (cb: (action: AppShortcutAction) => void) => subscribe('app:shortcut', cb)
   }
 }
 

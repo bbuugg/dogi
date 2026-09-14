@@ -58,6 +58,9 @@ export interface SshProfile {
   updatedAt: number
 }
 
+/** 全局快捷键触发的应用动作 */
+export type AppShortcutAction = 'open-settings' | 'new-session'
+
 export type AiProviderKind =
   | 'openai'
   | 'anthropic'

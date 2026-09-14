@@ -30,7 +30,8 @@ const DEFAULT_SYSTEM_PROMPT = [
   '执行命令前先简要说明要做什么；优先使用安全、无破坏性的命令。',
   '涉及删除文件、重启服务、修改配置等危险操作时，先简要说明影响再执行。',
   '使用 run_in_terminal 执行命令后，终端原始输出即为事实依据；失败时结合输出排查原因再尝试。',
-  '注意根据会话标题判断操作系统（PowerShell 与 bash 语法不同）。'
+  '注意根据会话标题判断操作系统（PowerShell 与 bash 语法不同）。',
+  '部分命令会启动交互式 / 前台程序（如 htop、top、vim、nano、less、man、watch、python、node 等），它们占据终端且不返回 shell 提示符。执行这类命令后，不要继续向该会话输入新命令，应先用 send_keys 工具发送退出指令（多数程序用 "q"，卡死用 "C-c"，个别用 "exit" / "C-d"），并用 read_terminal_output 确认已回到 shell 提示符后再继续。'
 ].join('\n')
 
 const TOOL_OUTPUT_LIMIT = 8000
@@ -108,6 +109,41 @@ function currentPermissionMode(): AiPermissionMode {
   return storage.getAiSettings().permissionMode === 'confirm' ? 'confirm' : 'full'
 }
 
+/**
+ * 命中即视为「交互式/前台程序」的命令（不会返回 shell 提示符）。
+ * 例如 htop、top、vim、less、man、watch、python、node 等：
+ * 这类命令会占据终端，若把后续命令直接写进去会被程序吞掉导致异常。
+ */
+const INTERACTIVE_PROGRAM_RE =
+  /(?:^|[\s;|&])(htop|top|btop|atop|iotop|iftop|nethogs|vim?|nvim|nano|emacs|less|more|most|man|tmux|screen|watch|tail\s+-f|python3?|ipython|node|irb|pry|byebug|bc|ftp|sftp|telnet|nc\b|mysql|psql|sqlite3|redis-cli|mongosh|mongo|lua|ghci|ranger|nnn|mc\b|lf\b|lynx|w3m|elinks|links|ncdu|glances|vifm|newsboat|mutt|alpine)\b/i
+
+/** 粗略判断终端是否停在 shell 提示符（用于识别前台程序是否已退出） */
+const SHELL_PROMPT_RE = /(PS\s+[A-Za-z]:[\\/].*>)|([$#%]\s*$)/
+/** ansi 转义 + 回车清理，取最后一非空行 */
+function tailCleaned(output: string): string {
+  const cleaned = output.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\r/g, '')
+  const lines = cleaned.split('\n').filter((l) => l.trim().length > 0)
+  return lines.length ? lines[lines.length - 1].trimEnd() : ''
+}
+function hasShellPrompt(output: string): boolean {
+  return SHELL_PROMPT_RE.test(tailCleaned(output))
+}
+
+/** 把 send_keys 的语义化按键翻译成终端控制字节 */
+function translateKeys(keys: string): string {
+  return keys
+    .replace(/C-([a-zA-Z])/g, (_m, c: string) =>
+      String.fromCharCode(c.toUpperCase().charCodeAt(0) & 0x1f)
+    )
+    .replace(/Escape/gi, '\x1b')
+    .replace(/Enter|Return/gi, '\r')
+    .replace(/\r?\n/g, '\r')
+}
+
+function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(-max)}\n…（输出已截断）` : text
+}
+
 /** 终端操作工具：AI 通过这些工具查看与驱动真实终端 */
 function buildTerminalTools(requestId: string): ToolSet {
   const listSessions = tool({
@@ -158,8 +194,47 @@ function buildTerminalTools(requestId: string): ToolSet {
       }
 
       sessionManager.write(id, command.endsWith('\n') ? command : `${command}\r`)
-      await new Promise((resolve) => setTimeout(resolve, Math.min(waitMs ?? 3000, 15000)))
-      return sessionManager.recentOutput(id, TOOL_OUTPUT_LIMIT) ?? ''
+      const waited = Math.min(waitMs ?? 3000, 15000)
+      await new Promise((resolve) => setTimeout(resolve, waited))
+      const raw = sessionManager.recentOutput(id, TOOL_OUTPUT_LIMIT) ?? ''
+
+      // 交互式 / 前台程序（htop、vim、less、watch、python 等）不会返回 shell 提示符，
+      // 若把后续命令直接写进去会被程序吞掉导致异常。主动提示 AI 先退出。
+      if (INTERACTIVE_PROGRAM_RE.test(command) && !hasShellPrompt(raw)) {
+        return [
+          `命令「${command.trim()}」已启动一个交互式 / 前台程序（htop、top、vim、less、watch、python 等），它当前占据终端、尚未返回 shell 提示符。`,
+          '请勿继续向该会话输入新命令（会被该程序吞掉，造成异常）。如需继续，请先用 send_keys 工具发送退出指令：',
+          "  · 多数程序按 'q' 即可退出；",
+          "  · 卡死或无法退出时发送 Ctrl-C（send_keys 传入 'C-c'）；",
+          "  · 个别程序用 'exit' / 'quit' / Ctrl-D（'C-d'）。",
+          "发送退出键后，可用 read_terminal_output 确认已回到 shell 提示符，再执行后续命令。",
+          '',
+          '（附：当前终端最近输出，供判断程序是否已退出）',
+          truncate(raw, 2000)
+        ].join('\n')
+      }
+      return raw
+    }
+  })
+
+  const sendKeys = tool({
+    description:
+      '向终端发送按键或控制序列（不会自动回车）。主要用于退出交互式 / 前台程序：如发送 "q" 退出 htop/less/man，发送 "C-c" 发送 Ctrl-C，发送 "C-d" 发送 Ctrl-D，发送 "Escape" 退出某些程序。普通命令执行前一般不需要此工具。',
+    inputSchema: z.object({
+      keys: z
+        .string()
+        .describe(
+          "要发送的按键序列。普通字符直接写，如 'q'、'exit'；控制键写法 'C-c'、'C-d'、'C-z'、'Escape'；换行 / 回车用 'Enter' 或 '\\n'。"
+        ),
+      sessionId: z.string().optional().describe('目标会话 ID，缺省为最近活跃会话')
+    }),
+    execute: async ({ keys, sessionId }) => {
+      const id = sessionId ?? sessionManager.getActiveId()
+      if (!id) throw new Error('当前没有打开的终端会话')
+      if (!sessionManager.get(id)) throw new Error(`会话不存在: ${id}`)
+      sessionManager.write(id, translateKeys(keys))
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      return sessionManager.recentOutput(id, 2000) ?? ''
     }
   })
 
@@ -179,7 +254,8 @@ function buildTerminalTools(requestId: string): ToolSet {
   return {
     list_terminal_sessions: listSessions,
     run_in_terminal: runInTerminal,
-    read_terminal_output: readOutput
+    read_terminal_output: readOutput,
+    send_keys: sendKeys
   }
 }
 

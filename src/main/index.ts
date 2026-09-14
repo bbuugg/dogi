@@ -1,6 +1,7 @@
 import { join } from 'node:path'
 import { app, BrowserWindow, nativeTheme, shell } from 'electron'
 import { registerIpc } from './ipc'
+import { registerShortcuts } from './shortcuts'
 import { storage } from './services/storage'
 
 let mainWindow: BrowserWindow | null = null
@@ -59,6 +60,7 @@ app.whenReady().then(() => {
   nativeTheme.themeSource = storage.getPreferences().theme
   registerIpc(() => mainWindow)
   createWindow()
+  registerShortcuts(() => mainWindow)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
