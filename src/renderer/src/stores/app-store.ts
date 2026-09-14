@@ -176,7 +176,7 @@ let shortcutWired = false
     pendingConfirm: null,
 
     ui: {
-      aiPanelOpen: true,
+      aiPanelOpen: false,
       settingsOpen: false,
       sshDialog: { open: false, editing: null },
       settingsTab: 'ai',

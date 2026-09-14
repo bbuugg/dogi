@@ -388,6 +388,7 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
         if (!actionRef.current) {
           actionRef.current = true
           if (data === '\r') {
+            term.write('\r\n\x1b[36m● 正在重连…\x1b[0m\r\n')
             void useAppStore.getState().reconnectSession(session.id)
           } else if (data === '\x04') {
             void useAppStore.getState().closeSession(session.id)
@@ -485,38 +486,76 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
     })
   }, [isActive, session.id])
 
+  // AI 面板 / 监控面板显隐会改变终端可用宽度，主动重新适配，避免关闭面板后终端仍停留在旧（较窄）宽度
+  const aiPanelOpen = useAppStore((s) => s.ui.aiPanelOpen)
+  const monitorOpen = useAppStore((s) => s.ui.monitorOpen)
+  useEffect(() => {
+    if (!isActive) return
+    const raf = requestAnimationFrame(() => {
+      const fit = fitRef.current
+      const term = termRef.current
+      if (!fit || !term) return
+      try {
+        fit.fit()
+      } catch {
+        return
+      }
+      void window.api.terminal.resize(session.id, term.cols, term.rows)
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [aiPanelOpen, monitorOpen, isActive, session.id])
+
+  // 初始化时布局/字体测量可能尚未稳定，首次 fit 会因 cell 尺寸为 0 而被跳过（终端停在默认列数，右侧留白）；
+  // 待布局与字体就绪后再补适配，保证一打开就铺满，无需手动切换面板触发。
+  useEffect(() => {
+    if (!isActive) return
+    let alive = true
+    const refit = () => {
+      if (!alive) return
+      const fit = fitRef.current
+      const term = termRef.current
+      if (!fit || !term) return
+      try {
+        fit.fit()
+      } catch {
+        return
+      }
+      void window.api.terminal.resize(session.id, term.cols, term.rows)
+    }
+    const timers = [0, 80, 250, 600, 1200, 2000].map((ms) => window.setTimeout(refit, ms))
+    if (typeof document !== 'undefined' && document.fonts?.ready) {
+      void document.fonts.ready.then(refit)
+    }
+    return () => {
+      alive = false
+      timers.forEach((t) => window.clearTimeout(t))
+    }
+  }, [isActive, session.id])
+
   const exited = useAppStore((s) => s.exitedSessions.has(session.id))
   // 镜像最新“已结束”状态，供 onData 回调（创建时只绑定一次）读取
   const exitedRef = useRef(exited)
   exitedRef.current = exited
   // 重连/关闭动作只触发一次，避免连按产生多个会话
   const actionRef = useRef(false)
-  // 会话结束后自动聚焦，使回车重连 / Ctrl+D 关闭立即生效
+  // 会话结束后：把提示直接写进终端（对齐 Web 端子做法，不再弹浮层），并聚焦以接收回车重连 / Ctrl+D 关闭
+  const exitNoticeRef = useRef(false)
   useEffect(() => {
-    if (exited) termRef.current?.focus()
-  }, [exited])
+    if (!exited) {
+      exitNoticeRef.current = false
+      return
+    }
+    const term = termRef.current
+    term?.focus()
+    if (!term || exitNoticeRef.current) return
+    exitNoticeRef.current = true
+    term.write(`\r\n\x1b[33m● 会话已结束（${session.title}）\x1b[0m\r\n`)
+    term.write('\x1b[90m  按 Enter 重连 · 按 Ctrl+D 关闭标签\x1b[0m\r\n')
+  }, [exited, session.title])
 
   return (
-    <div className="relative h-full w-full">
+    <div className="relative h-full w-full" style={{ backgroundColor: theme.background }}>
       <div ref={containerRef} className="h-full w-full" />
-      {exited && (
-        <div
-          className="absolute inset-0 flex items-center justify-center bg-black/60"
-          onClick={() => termRef.current?.focus()}
-        >
-          <div className="rounded-md border border-border bg-card px-4 py-3 text-center text-sm shadow">
-            <div className="font-medium text-foreground">会话已结束（{session.title}）</div>
-            <div className="mt-1 text-xs text-muted-foreground">
-              按{' '}
-              <kbd className="rounded border border-border bg-secondary px-1 py-0.5">Enter</kbd> 重连
-              {' · '}
-              按{' '}
-              <kbd className="rounded border border-border bg-secondary px-1 py-0.5">Ctrl+D</kbd>{' '}
-              关闭标签
-            </div>
-          </div>
-        </div>
-      )}
       {zmodem && (
         <div className="absolute left-1/2 top-3 z-10 w-72 -translate-x-1/2 rounded-md border border-border bg-card px-3 py-2 text-xs text-foreground shadow">
           <div className="mb-1 flex items-center justify-between gap-2">
