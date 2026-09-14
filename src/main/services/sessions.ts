@@ -15,7 +15,7 @@ const TERM_TYPE = 'xterm-256color'
 
 interface InternalSession {
   info: SessionInfo
-  write(data: string): void
+  write(data: string | Uint8Array): void
   resize(cols: number, rows: number): void
   kill(): void
   /** 读取最近输出（AI 工具用） */
@@ -47,7 +47,7 @@ class LocalSession implements InternalSession {
     id: string,
     cols: number,
     rows: number,
-    handlers: { onData: (data: string) => void; onExit: (code: number) => void }
+    handlers: { onData: (data: Buffer) => void; onExit: (code: number) => void }
   ) {
     const shell = pickLocalShell()
     this.proc = pty.spawn(shell, [], {
@@ -55,6 +55,8 @@ class LocalSession implements InternalSession {
       cols,
       rows,
       cwd: os.homedir(),
+      // 传 null 让 onData 返回原始 Buffer，保留 ZMODEM 等二进制协议的字节保真
+      encoding: null,
       env: { ...stripUndefined(process.env), TERM: TERM_TYPE, COLORTERM: 'truecolor' }
     })
     this.info = {
@@ -66,8 +68,9 @@ class LocalSession implements InternalSession {
       exited: false
     }
     this.proc.onData((data) => {
-      this.appendOutput(data)
-      handlers.onData(data)
+      const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as string)
+      this.appendOutput(buf.toString('utf8'))
+      handlers.onData(buf)
     })
     this.proc.onExit(({ exitCode }) => {
       this.info.exited = true
@@ -82,8 +85,8 @@ class LocalSession implements InternalSession {
     }
   }
 
-  write(data: string): void {
-    this.proc.write(data)
+  write(data: string | Uint8Array): void {
+    this.proc.write(typeof data === 'string' ? data : Buffer.from(data))
   }
 
   resize(cols: number, rows: number): void {
@@ -114,7 +117,7 @@ class SshSession implements InternalSession {
   private stream: ClientChannel | null = null
   private output = ''
   private killed = false
-  private onData: (data: string) => void
+  private onData: (data: Buffer) => void
   private onExit: (exitCode: number) => void
 
   constructor(
@@ -122,7 +125,7 @@ class SshSession implements InternalSession {
     profile: SshProfile,
     cols: number,
     rows: number,
-    handlers: { onData: (data: string) => void; onExit: (code: number) => void }
+    handlers: { onData: (data: Buffer) => void; onExit: (code: number) => void }
   ) {
     this.info = {
       id,
@@ -140,7 +143,7 @@ class SshSession implements InternalSession {
   private fail(message: string): void {
     const line = `\r\n\x1b[31m[SSH 连接失败] ${message}\x1b[0m\r\n`
     this.appendOutput(line)
-    this.onData(line)
+    this.onData(Buffer.from(line))
     this.info.exited = true
     this.onExit(1)
   }
@@ -173,18 +176,18 @@ class SshSession implements InternalSession {
             }
             this.stream = stream
             stream.on('data', (data: Buffer | string) => {
-              const text = data.toString()
-              this.appendOutput(text)
-              this.onData(text)
+              const buf = Buffer.isBuffer(data) ? data : Buffer.from(data)
+              this.appendOutput(buf.toString('utf8'))
+              this.onData(buf)
             })
             stream.on('close', () => {
               this.info.exited = true
               this.onExit(0)
             })
             stream.stderr?.on('data', (data: Buffer | string) => {
-              const text = data.toString()
-              this.appendOutput(text)
-              this.onData(text)
+              const buf = Buffer.isBuffer(data) ? data : Buffer.from(data)
+              this.appendOutput(buf.toString('utf8'))
+              this.onData(buf)
             })
           }
         )
@@ -202,8 +205,8 @@ class SshSession implements InternalSession {
     }
   }
 
-  write(data: string): void {
-    if (this.stream) this.stream.write(data)
+  write(data: string | Uint8Array): void {
+    if (this.stream) this.stream.write(typeof data === 'string' ? data : Buffer.from(data))
   }
 
   resize(cols: number, rows: number): void {
@@ -284,7 +287,7 @@ class SessionManager extends EventEmitter {
     this.emit('created', { ...session.info })
   }
 
-  private handleData(id: string, data: string): void {
+  private handleData(id: string, data: Buffer | string): void {
     this.emit('data', { sessionId: id, data })
   }
 
@@ -292,7 +295,7 @@ class SessionManager extends EventEmitter {
     this.emit('exit', { sessionId: id, exitCode })
   }
 
-  write(id: string, data: string): boolean {
+  write(id: string, data: string | Uint8Array): boolean {
     const session = this.sessions.get(id)
     if (!session) return false
     this.lastActiveId = id

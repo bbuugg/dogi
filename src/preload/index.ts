@@ -33,7 +33,7 @@ const api = {
       ipcRenderer.invoke('terminal:createLocal', cols, rows),
     createSsh: (profileId: string, cols?: number, rows?: number): Promise<SessionInfo> =>
       ipcRenderer.invoke('terminal:createSsh', profileId, cols, rows),
-    write: (sessionId: string, data: string): Promise<boolean> =>
+    write: (sessionId: string, data: string | Uint8Array): Promise<boolean> =>
       ipcRenderer.invoke('terminal:write', sessionId, data),
     resize: (sessionId: string, cols: number, rows: number): Promise<void> =>
       ipcRenderer.invoke('terminal:resize', sessionId, cols, rows),
@@ -41,7 +41,7 @@ const api = {
       ipcRenderer.invoke('terminal:kill', sessionId),
     recentOutput: (sessionId: string, maxChars?: number): Promise<string | null> =>
       ipcRenderer.invoke('terminal:recentOutput', sessionId, maxChars),
-    onData: (cb: (payload: { sessionId: string; data: string }) => void) =>
+    onData: (cb: (payload: { sessionId: string; data: Uint8Array }) => void) =>
       subscribe('terminal:data', cb),
     onExit: (cb: (payload: { sessionId: string; exitCode: number }) => void) =>
       subscribe('terminal:exit', cb),
@@ -92,6 +92,14 @@ const api = {
     info: (): Promise<AppInfo> => ipcRenderer.invoke('app:info'),
     /** 订阅主进程触发的全局快捷键动作 */
     onShortcut: (cb: (action: AppShortcutAction) => void) => subscribe('app:shortcut', cb)
+  },
+  zmodem: {
+    /** 打开文件选择框，返回选中文件的字节（用于 rz 上传） */
+    pickFiles: (): Promise<{ name: string; size: number; data: Uint8Array }[]> =>
+      ipcRenderer.invoke('zmodem:pickFiles'),
+    /** 弹出保存对话框并把字节写入磁盘（用于 sz 下载），返回保存路径 */
+    saveFile: (name: string, data: Uint8Array): Promise<string | null> =>
+      ipcRenderer.invoke('zmodem:saveFile', name, data)
   }
 }
 

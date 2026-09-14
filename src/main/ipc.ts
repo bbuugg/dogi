@@ -1,4 +1,5 @@
-import { ipcMain, nativeTheme, type BrowserWindow } from 'electron'
+import { ipcMain, nativeTheme, dialog, type BrowserWindow } from 'electron'
+import { promises as fs } from 'node:fs'
 import { sessionManager } from './services/sessions'
 import { storage } from './services/storage'
 import { aiService } from './services/ai'
@@ -53,6 +54,33 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   ipcMain.handle('terminal:recentOutput', (_e, sessionId: string, maxChars?: number) =>
     sessionManager.recentOutput(sessionId, maxChars)
   )
+
+  // ---------- ZMODEM 文件传输（rz/sz） ----------
+  // 打开系统文件选择框，读取选中文件并返回字节，供渲染端作为上传内容
+  ipcMain.handle('zmodem:pickFiles', async () => {
+    const window = win()
+    if (!window || window.isDestroyed()) return []
+    const { canceled, filePaths } = await dialog.showOpenDialog(window, {
+      properties: ['openFile', 'multiSelections']
+    })
+    if (canceled || !filePaths.length) return []
+    const files: { name: string; size: number; data: Buffer }[] = []
+    for (const p of filePaths) {
+      const buf = await fs.readFile(p)
+      const name = p.split(/[\\/]/).pop() || 'file'
+      files.push({ name, size: buf.length, data: buf })
+    }
+    return files
+  })
+  // 弹出保存对话框并把字节写入磁盘，返回最终路径
+  ipcMain.handle('zmodem:saveFile', async (_e, name: string, data: Uint8Array) => {
+    const window = win()
+    if (!window || window.isDestroyed()) return null
+    const { canceled, filePath } = await dialog.showSaveDialog(window, { defaultPath: name })
+    if (canceled || !filePath) return null
+    await fs.writeFile(filePath, Buffer.from(data))
+    return filePath
+  })
 
   // ---------- SSH 配置 CRUD ----------
   ipcMain.handle('ssh:list', () => storage.listSshProfiles())

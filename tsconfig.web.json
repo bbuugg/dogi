@@ -23,5 +23,5 @@
       "@shared/*": ["./src/shared/*"]
     }
   },
-  "include": ["src/renderer/src/**/*", "src/renderer/index.html", "src/shared/**/*", "src/preload/global.d.ts"]
+  "include": ["src/renderer/src/**/*", "src/renderer/index.html", "src/shared/**/*", "src/preload/global.d.ts", "src/types/**/*"]
 }
