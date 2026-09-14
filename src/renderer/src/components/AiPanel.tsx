@@ -257,7 +257,7 @@ export function AiPanel() {
           size="icon"
           className="size-7 shrink-0 text-muted-foreground"
           title="AI 设置"
-          onClick={() => setSettingsOpen(true, 'models')}
+          onClick={() => setSettingsOpen(true, 'ai')}
         >
           <Settings2 className="size-3.5" />
         </Button>
@@ -279,7 +279,7 @@ export function AiPanel() {
                   size="sm"
                   variant="secondary"
                   className="mt-2"
-                  onClick={() => setSettingsOpen(true, 'models')}
+                  onClick={() => setSettingsOpen(true, 'ai')}
                 >
                   先去配置模型
                 </Button>
@@ -302,7 +302,7 @@ export function AiPanel() {
       <CommandConfirmCard />
 
       {/* 输入区：圆角卡片，操作按钮集中在卡片底部（对齐 ChatInput 结构） */}
-      <div className="shrink-0 border-t border-border p-3">
+      <div className="shrink-0 p-3">
         <div className="rounded-lg border border-border bg-card transition-colors focus-within:border-primary">
           <Textarea
             value={input}

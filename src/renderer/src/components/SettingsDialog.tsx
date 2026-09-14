@@ -1,4 +1,4 @@
-import { Bot, Plug, SlidersHorizontal, TerminalSquare } from 'lucide-react'
+import { Bot, SlidersHorizontal, TerminalSquare } from 'lucide-react'
 import { useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'
 import {
@@ -8,12 +8,11 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
-import { ModelSettings } from '@/components/settings/ModelSettings'
-import { McpSettings } from '@/components/settings/McpSettings'
+import { AiConfigSettings } from '@/components/settings/AiConfigSettings'
 import { TerminalSettings } from '@/components/settings/TerminalSettings'
 import { PrefSettings } from '@/components/settings/PrefSettings'
 
-type SettingsTab = 'models' | 'mcp' | 'terminal' | 'prefs'
+type SettingsTab = 'ai' | 'terminal' | 'prefs'
 
 const MENU: Array<{
   value: SettingsTab
@@ -21,10 +20,9 @@ const MENU: Array<{
   desc: string
   icon: typeof Bot
 }> = [
-  { value: 'models', label: '模型配置', desc: 'AI 模型与接口', icon: Bot },
-  { value: 'mcp', label: 'MCP 服务', desc: '外部工具接入', icon: Plug },
+  { value: 'ai', label: 'AI 配置', desc: '模型、MCP 服务与提示词', icon: Bot },
   { value: 'terminal', label: '终端', desc: '配色与外观', icon: TerminalSquare },
-  { value: 'prefs', label: '偏好', desc: '应用主题与 AI 行为', icon: SlidersHorizontal }
+  { value: 'prefs', label: '偏好', desc: '应用主题', icon: SlidersHorizontal }
 ]
 
 export function SettingsDialog() {
@@ -40,7 +38,7 @@ export function SettingsDialog() {
         <DialogHeader className="shrink-0 border-b border-border px-5 py-4">
           <DialogTitle>设置</DialogTitle>
           <DialogDescription className="text-xs">
-            模型、MCP、终端与偏好设置
+            AI 配置、终端与偏好设置
           </DialogDescription>
         </DialogHeader>
 
@@ -75,8 +73,7 @@ export function SettingsDialog() {
 
           {/* 右侧内容 */}
           <div className="min-w-0 flex-1 overflow-y-auto p-5">
-            {settingsTab === 'models' && <ModelSettings />}
-            {settingsTab === 'mcp' && <McpSettings />}
+            {settingsTab === 'ai' && <AiConfigSettings />}
             {settingsTab === 'terminal' && <TerminalSettings />}
             {settingsTab === 'prefs' && <PrefSettings />}
           </div>

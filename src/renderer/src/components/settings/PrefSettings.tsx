@@ -2,8 +2,6 @@ import { Monitor, Moon, Sun } from 'lucide-react'
 import type { ThemeMode } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import { Label } from '@/components/ui/label'
-import { Textarea } from '@/components/ui/textarea'
-import { useEffect, useState } from 'react'
 import { cn } from 'cn'
 
 const THEME_OPTIONS: Array<{ value: ThemeMode; label: string; icon: typeof Sun }> = [
@@ -15,15 +13,6 @@ const THEME_OPTIONS: Array<{ value: ThemeMode; label: string; icon: typeof Sun }
 export function PrefSettings() {
   const preferences = useAppStore((s) => s.preferences)
   const setTheme = useAppStore((s) => s.setTheme)
-  const aiSettings = useAppStore((s) => s.aiSettings)
-  const saveAiSettings = useAppStore((s) => s.saveAiSettings)
-  const [systemPrompt, setSystemPrompt] = useState(aiSettings.systemPrompt ?? '')
-
-  useEffect(() => {
-    setSystemPrompt(aiSettings.systemPrompt ?? '')
-    // 仅在打开设置时同步一次
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
 
   return (
     <div className="space-y-4">
@@ -54,19 +43,6 @@ export function PrefSettings() {
             )
           })}
         </div>
-      </div>
-
-      <div className="grid gap-1.5">
-        <Label htmlFor="system-prompt">自定义系统提示词（留空使用默认）</Label>
-        <Textarea
-          id="system-prompt"
-          rows={7}
-          className="text-xs"
-          placeholder="默认：运维助手角色设定，包含安全操作约束等。"
-          value={systemPrompt}
-          onChange={(e) => setSystemPrompt(e.target.value)}
-          onBlur={() => void saveAiSettings({ systemPrompt: systemPrompt.trim() || undefined })}
-        />
       </div>
     </div>
   )

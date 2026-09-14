@@ -54,7 +54,7 @@ interface UiState {
   settingsOpen: boolean
   /** 编辑中的 SSH 配置（null=新建，undefined=关闭） */
   sshDialog: { open: boolean; editing?: SshProfile | null }
-  settingsTab: 'models' | 'mcp' | 'terminal' | 'prefs'
+  settingsTab: 'ai' | 'terminal' | 'prefs'
 }
 
 interface AppStore {
@@ -164,7 +164,7 @@ let shortcutWired = false
       aiPanelOpen: true,
       settingsOpen: false,
       sshDialog: { open: false, editing: null },
-      settingsTab: 'models'
+      settingsTab: 'ai'
     },
 
     bootstrap: async () => {
