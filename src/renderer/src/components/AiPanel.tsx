@@ -214,7 +214,6 @@ export function AiPanel() {
     aiSettings.permissionMode === 'confirm' ? 'confirm' : 'full'
   const modeMeta =
     PERMISSION_MODES.find((m) => m.value === permissionMode) ?? PERMISSION_MODES[0]
-  const ModeIcon = modeMeta.icon
 
   const handleSend = () => {
     if (!input.trim() || aiStreaming) return

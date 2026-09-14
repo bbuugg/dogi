@@ -7,6 +7,12 @@ import type { SessionInfo, SessionType, SshProfile } from '@shared/types'
 /** 每个会话保留的输出缓冲上限，供 AI 读取 */
 const MAX_OUTPUT_BUFFER = 256 * 1024
 
+/**
+ * 统一终端类型：必须是 256 色终端，否则远程 ncurses 程序（htop/btop/lazygit 等）
+ * 会按 8 色甚至无色渲染，表现为黑白。
+ */
+const TERM_TYPE = 'xterm-256color'
+
 interface InternalSession {
   info: SessionInfo
   write(data: string): void
@@ -45,11 +51,11 @@ class LocalSession implements InternalSession {
   ) {
     const shell = pickLocalShell()
     this.proc = pty.spawn(shell, [], {
-      name: 'xterm-256color',
+      name: TERM_TYPE,
       cols,
       rows,
       cwd: os.homedir(),
-      env: stripUndefined(process.env)
+      env: { ...stripUndefined(process.env), TERM: TERM_TYPE, COLORTERM: 'truecolor' }
     })
     this.info = {
       id,
@@ -158,27 +164,30 @@ class SshSession implements InternalSession {
     this.conn
       .on('ready', () => {
         if (this.killed) return
-        this.conn.shell({ cols: Math.max(2, cols), rows: Math.max(2, rows) }, (err, stream) => {
-          if (err || !stream) {
-            this.fail(err?.message || '无法打开 shell')
-            return
+        this.conn.shell(
+          { term: TERM_TYPE, cols: Math.max(2, cols), rows: Math.max(2, rows) },
+          (err, stream) => {
+            if (err || !stream) {
+              this.fail(err?.message || '无法打开 shell')
+              return
+            }
+            this.stream = stream
+            stream.on('data', (data: Buffer | string) => {
+              const text = data.toString()
+              this.appendOutput(text)
+              this.onData(text)
+            })
+            stream.on('close', () => {
+              this.info.exited = true
+              this.onExit(0)
+            })
+            stream.stderr?.on('data', (data: Buffer | string) => {
+              const text = data.toString()
+              this.appendOutput(text)
+              this.onData(text)
+            })
           }
-          this.stream = stream
-          stream.on('data', (data: Buffer | string) => {
-            const text = data.toString()
-            this.appendOutput(text)
-            this.onData(text)
-          })
-          stream.on('close', () => {
-            this.info.exited = true
-            this.onExit(0)
-          })
-          stream.stderr?.on('data', (data: Buffer | string) => {
-            const text = data.toString()
-            this.appendOutput(text)
-            this.onData(text)
-          })
-        })
+        )
       })
       .on('error', (err: Error) => {
         if (!this.stream) this.fail(err.message)

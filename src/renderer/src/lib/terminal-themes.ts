@@ -10,6 +10,12 @@ export interface TerminalThemePreset {
   theme?: ITheme
 }
 
+/**
+ * 每个配色必须提供完整的 16 色（8 基础 + 8 亮色）：
+ * 只给 8 色时 xterm 会用内置默认值补亮色，htop / btop / vim 等 TUI 大量使用
+ * 亮色（90-97、100-107），会与当前配色不搭，观感接近黑白。
+ */
+
 const DARK: ITheme = {
   background: '#0f1117',
   foreground: '#e6e6e6',
@@ -23,7 +29,15 @@ const DARK: ITheme = {
   blue: '#81a2be',
   magenta: '#c9c9c9',
   cyan: '#8abeb7',
-  white: '#c5c8c6'
+  white: '#c5c8c6',
+  brightBlack: '#7a8288',
+  brightRed: '#e88388',
+  brightGreen: '#ccd484',
+  brightYellow: '#f8dc90',
+  brightBlue: '#9dc0dd',
+  brightMagenta: '#e6e6e6',
+  brightCyan: '#a9e2db',
+  brightWhite: '#ffffff'
 }
 
 const LIGHT: ITheme = {
@@ -39,7 +53,15 @@ const LIGHT: ITheme = {
   blue: '#0969da',
   magenta: '#8250df',
   cyan: '#1b7c83',
-  white: '#6e7781'
+  white: '#6e7781',
+  brightBlack: '#57606a',
+  brightRed: '#e5534b',
+  brightGreen: '#1a7f37',
+  brightYellow: '#bf8700',
+  brightBlue: '#218bff',
+  brightMagenta: '#a371f7',
+  brightCyan: '#3192aa',
+  brightWhite: '#8c959f'
 }
 
 const SOLARIZED_DARK: ITheme = {
@@ -55,7 +77,15 @@ const SOLARIZED_DARK: ITheme = {
   blue: '#268bd2',
   magenta: '#d33682',
   cyan: '#2aa198',
-  white: '#eee8d5'
+  white: '#eee8d5',
+  brightBlack: '#002b36',
+  brightRed: '#cb4b16',
+  brightGreen: '#586e75',
+  brightYellow: '#657b83',
+  brightBlue: '#839496',
+  brightMagenta: '#6c71c4',
+  brightCyan: '#93a1a1',
+  brightWhite: '#fdf6e3'
 }
 
 const DRACULA: ITheme = {
@@ -71,7 +101,15 @@ const DRACULA: ITheme = {
   blue: '#bd93f9',
   magenta: '#ff79c6',
   cyan: '#8be9fd',
-  white: '#f8f8f2'
+  white: '#f8f8f2',
+  brightBlack: '#6272a4',
+  brightRed: '#ff6e6e',
+  brightGreen: '#69ff94',
+  brightYellow: '#ffffa5',
+  brightBlue: '#d6acff',
+  brightMagenta: '#ff92df',
+  brightCyan: '#a4ffff',
+  brightWhite: '#ffffff'
 }
 
 const NORD: ITheme = {
@@ -87,13 +125,35 @@ const NORD: ITheme = {
   blue: '#81a1c1',
   magenta: '#b48ead',
   cyan: '#88c0d0',
-  white: '#e5e9f0'
+  white: '#e5e9f0',
+  brightBlack: '#4c566a',
+  brightRed: '#bf616a',
+  brightGreen: '#a3be8c',
+  brightYellow: '#ebcb8b',
+  brightBlue: '#81a1c1',
+  brightMagenta: '#b48ead',
+  brightCyan: '#8fbcbb',
+  brightWhite: '#eceff4'
 }
 
 export const TERMINAL_THEMES: TerminalThemePreset[] = [
-  { id: 'auto', label: '跟随应用主题', swatch: ['#0f1117', '#cc6666', '#b5bd68', '#81a2be', '#ffffff'] },
-  { id: 'dark', label: '深色', swatch: [DARK.background!, '#cc6666', '#b5bd68', '#81a2be', '#c5c8c6'], theme: DARK },
-  { id: 'light', label: '浅色', swatch: [LIGHT.background!, '#cf222e', '#116329', '#0969da', '#6e7781'], theme: LIGHT },
+  {
+    id: 'auto',
+    label: '跟随应用主题',
+    swatch: ['#0f1117', '#cc6666', '#b5bd68', '#81a2be', '#ffffff']
+  },
+  {
+    id: 'dark',
+    label: '深色',
+    swatch: [DARK.background!, '#cc6666', '#b5bd68', '#81a2be', '#c5c8c6'],
+    theme: DARK
+  },
+  {
+    id: 'light',
+    label: '浅色',
+    swatch: [LIGHT.background!, '#cf222e', '#116329', '#0969da', '#6e7781'],
+    theme: LIGHT
+  },
   {
     id: 'solarized-dark',
     label: 'Solarized Dark',
