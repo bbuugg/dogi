@@ -50,6 +50,14 @@ function createWindow(): void {
     }
   })
 
+  // 终端缩放改用字号（见 TerminalView）；整页缩放强制复位到 100%。
+  // Chromium 会按 origin 记住 zoom level，并在导航完成后重新应用，
+  // 因此除创建时设置外，还要在页面加载完成后复位一次，避免历史缩放残留。
+  mainWindow.webContents.setZoomFactor(1)
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.setZoomFactor(1)
+  })
+
   mainWindow.on('ready-to-show', () => mainWindow?.show())
 
   // 外部链接交给系统浏览器
