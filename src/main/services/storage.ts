@@ -23,7 +23,8 @@ const DEFAULT_PREFERENCES: Preferences = {
   theme: 'system',
   terminalTheme: 'auto',
   copyOnSelect: true,
-  commandPrediction: true
+  commandPrediction: true,
+  terminalFontSize: 13
 }
 
 /** 密钥类字段加密前缀（safeStorage 密文 base64） */

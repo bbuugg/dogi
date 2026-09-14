@@ -136,6 +136,9 @@ class SshSession implements InternalSession {
   private ready = false
   private output = ''
   private killed = false
+  /** 目标 PTY 尺寸：SSH 握手完成前收到的 resize 需缓存，待 shell 流建立后补应用 */
+  private desiredCols: number
+  private desiredRows: number
   private onData: (data: Buffer) => void
   private onExit: (exitCode: number) => void
 
@@ -154,9 +157,11 @@ class SshSession implements InternalSession {
       createdAt: Date.now(),
       exited: false
     }
+    this.desiredCols = Math.max(2, cols)
+    this.desiredRows = Math.max(2, rows)
     this.onData = handlers.onData
     this.onExit = handlers.onExit
-    this.connect(profile, cols, rows)
+    this.connect(profile)
   }
 
   private fail(message: string): void {
@@ -168,7 +173,7 @@ class SshSession implements InternalSession {
     this.onExit(1)
   }
 
-  private connect(profile: SshProfile, cols: number, rows: number): void {
+  private connect(profile: SshProfile): void {
     const config: ConnectConfig = {
       host: profile.host,
       port: profile.port || 22,
@@ -189,13 +194,16 @@ class SshSession implements InternalSession {
         if (this.killed) return
         this.ready = true
         this.conn.shell(
-          { term: TERM_TYPE, cols: Math.max(2, cols), rows: Math.max(2, rows) },
+          // 用最新目标尺寸打开 shell（握手期间可能已收到渲染端下发的 resize）
+          { term: TERM_TYPE, cols: this.desiredCols, rows: this.desiredRows },
           (err, stream) => {
             if (err || !stream) {
               this.fail(err?.message || '无法打开 shell')
               return
             }
             this.stream = stream
+            // 握手期间收到的 resize 在此补应用，避免远端 PTY 停在创建时的初始尺寸
+            this.applySize()
             stream.on('data', (data: Buffer | string) => {
               const buf = Buffer.isBuffer(data) ? data : Buffer.from(data)
               this.appendOutput(buf.toString('utf8'))
@@ -233,8 +241,16 @@ class SshSession implements InternalSession {
   }
 
   resize(cols: number, rows: number): void {
+    this.desiredCols = Math.max(2, cols)
+    this.desiredRows = Math.max(2, rows)
+    this.applySize()
+  }
+
+  /** 应用最新目标尺寸；shell 流尚未建立时先缓存，待建立后补应用 */
+  private applySize(): void {
+    if (!this.stream) return
     try {
-      this.stream?.setWindow(Math.max(2, rows), Math.max(2, cols), 0, 0)
+      this.stream.setWindow(this.desiredRows, this.desiredCols, 0, 0)
     } catch {
       // 忽略
     }

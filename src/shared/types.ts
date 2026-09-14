@@ -23,6 +23,8 @@ export interface Preferences {
   copyOnSelect: boolean
   /** 命令预测（历史 / 常见命令补全下拉），缺省开启 */
   commandPrediction: boolean
+  /** 终端字号（Ctrl+滚轮 / Ctrl +/- 缩放），缺省 13 */
+  terminalFontSize: number
 }
 
 export type SessionType = 'local' | 'ssh'

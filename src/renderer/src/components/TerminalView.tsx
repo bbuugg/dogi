@@ -152,6 +152,17 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
       // 隐藏容器首次 fit 可能失败
     }
     void window.api.terminal.resize(session.id, term.cols, term.rows)
+    // 首次 fit 时 cell 尺寸可能尚未测量完成（会被 FitAddon 静默跳过，终端停在默认列数，
+    // 导致 tmux 等按 80 列绘制、状态条不铺满）。订阅 CharSizeService 的尺寸变化，
+    // 测量一就绪就重新适配，并把新尺寸同步给 PTY。
+    const charSizeDisp = (term as any)._core?._charSizeService?.onCharSizeChange?.(() => {
+      try {
+        fit.fit()
+      } catch {
+        return
+      }
+      void window.api.terminal.resize(session.id, term.cols, term.rows)
+    })
     // ZMODEM 传输结束时的清理（终止会话引用、收起提示）
     const endSession = () => {
       zsessionRef.current = null
@@ -454,6 +465,7 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
 
     return () => {
       resizeObserver.disconnect()
+      charSizeDisp?.dispose?.()
       unsubscribeData()
       zsessionRef.current = null
       term.dispose()
