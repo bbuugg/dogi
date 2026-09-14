@@ -33,6 +33,17 @@ interface TerminalViewProps {
   isActive: boolean
 }
 
+/** ZMODEM 传输（rz/sz）的实时状态，用于展示进度条 */
+interface ZmodemState {
+  direction: 'upload' | 'download'
+  /** 当前文件名 */
+  name: string
+  /** 提示文案（含状态/路径） */
+  text: string
+  /** 进度百分比 0-100 */
+  progress: number
+}
+
 export function TerminalView({ session, isActive }: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
@@ -49,7 +60,7 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
   ])
   // ZMODEM 传输会话（rz/sz）与状态提示
   const zsessionRef = useRef<any>(null)
-  const [zmodem, setZmodem] = useState<{ active: boolean; text: string } | null>(null)
+  const [zmodem, setZmodem] = useState<ZmodemState | null>(null)
   // 命令预测（历史 / 常见命令补全）相关状态
   const commandPrediction = useAppStore((s) => s.preferences.commandPrediction)
   const commandPredictionRef = useRef(commandPrediction)
@@ -146,7 +157,7 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
       zsessionRef.current = null
       setZmodem(null)
     }
-    // 上传（远端执行了 rz）：弹出文件选择，逐文件发送
+    // 上传（远端执行了 rz）：弹出文件选择，逐文件发送，并实时上报进度
     const handleUpload = async (zsession: any) => {
       try {
         term.blur()
@@ -160,12 +171,27 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
           endSession()
           return
         }
+        const CHUNK = 8192
         for (const f of files) {
-          const xfer = await zsession.send_offer({ name: f.name, size: f.size, mtime: new Date() })
+          setZmodem({ direction: 'upload', name: f.name, text: `上传中：${f.name}`, progress: 0 })
+          const xfer = await zsession.send_offer({
+            name: f.name,
+            size: f.size,
+            mtime: new Date()
+          })
           if (!xfer) continue
-          const CHUNK = 8192
-          for (let off = 0; off < f.data.byteLength; off += CHUNK) {
-            xfer.send(f.data.subarray(off, Math.min(off + CHUNK, f.data.byteLength)))
+          const total = f.data.byteLength
+          let sent = 0
+          let last = 0
+          for (let off = 0; off < total; off += CHUNK) {
+            const chunk = f.data.subarray(off, Math.min(off + CHUNK, total))
+            xfer.send(chunk)
+            sent += chunk.length
+            const now = performance.now()
+            if (sent === total || now - last > 120) {
+              last = now
+              setZmodem((p) => (p ? { ...p, progress: (sent / total) * 100 } : p))
+            }
           }
           await xfer.end(new Uint8Array(0))
         }
@@ -199,27 +225,62 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
         }
         zsessionRef.current = zsession
         setZmodem({
-          active: true,
-          text: zsession.type === 'send' ? 'ZMODEM 上传中：请选择要发送的文件' : 'ZMODEM 下载中…'
+          direction: zsession.type === 'send' ? 'upload' : 'download',
+          name: '',
+          text:
+            zsession.type === 'send'
+              ? 'ZMODEM 上传：请选择要发送的文件'
+              : 'ZMODEM 下载中…',
+          progress: 0
         })
         if (zsession.type === 'send') {
           void handleUpload(zsession)
         } else {
-          zsession.on('offer', (offer: any) => {
-            const name = offer.get_details().name || 'file'
-            offer
-              .accept()
-              .then((spool: Uint8Array[]) => {
-                const total = spool.reduce((a: number, p: Uint8Array) => a + p.byteLength, 0)
-                const merged = new Uint8Array(total)
-                let off = 0
-                for (const p of spool) {
-                  merged.set(p, off)
-                  off += p.byteLength
-                }
-                return window.api.zmodem.saveFile(name, merged)
-              })
-              .catch((e: unknown) => console.error('zmodem receive failed', e))
+          zsession.on('offer', async (offer: any) => {
+            const details = (offer.get_details && offer.get_details()) || {}
+            const rawName: string = details.name || 'file'
+            const size: number = typeof details.size === 'number' ? details.size : 0
+            // 仅用于对话框默认名：去掉目录分隔符与控制字符，避免被当作路径
+            const safeName =
+              rawName.replace(/[\\/]/g, '_').replace(/[ -]/g, '').trim() || 'file'
+            setZmodem({ direction: 'download', name: rawName, text: `下载中：${rawName}`, progress: 0 })
+            // 先选保存位置，再开始下载
+            const filePath = await window.api.zmodem.askSavePath(safeName)
+            if (!filePath) {
+              try {
+                offer.skip()
+              } catch {
+                // 忽略
+              }
+              return
+            }
+            let downloaded = 0
+            let last = 0
+            offer.on('input', (payload: Uint8Array) => {
+              downloaded += payload.byteLength
+              if (!size) return
+              const now = performance.now()
+              if (downloaded >= size || now - last > 120) {
+                last = now
+                setZmodem((p) =>
+                  p ? { ...p, progress: Math.min(100, (downloaded / size) * 100) } : p
+                )
+              }
+            })
+            try {
+              const spool = (await offer.accept()) as Uint8Array[]
+              const total = spool.reduce((a: number, p: Uint8Array) => a + p.byteLength, 0)
+              const merged = new Uint8Array(total)
+              let off = 0
+              for (const p of spool) {
+                merged.set(p, off)
+                off += p.byteLength
+              }
+              await window.api.zmodem.saveFileTo(filePath, merged)
+              setZmodem((p) => (p ? { ...p, progress: 100, text: `已保存：${filePath}` } : p))
+            } catch (e) {
+              console.error('zmodem receive failed', e)
+            }
           })
           zsession.on('session_end', () => endSession())
           zsession.start()
@@ -322,6 +383,18 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
     }
 
     term.onData((data) => {
+      // 会话已结束：拦截回车重连 / Ctrl+D 关闭标签，其余按键吞掉（对齐 Web 终端重连逻辑）
+      if (exitedRef.current) {
+        if (!actionRef.current) {
+          actionRef.current = true
+          if (data === '\r') {
+            void useAppStore.getState().reconnectSession(session.id)
+          } else if (data === '\x04') {
+            void useAppStore.getState().closeSession(session.id)
+          }
+        }
+        return
+      }
       // ZMODEM 传输期间禁用手动输入，避免破坏协议
       if (zsessionRef.current) return
       // 预测下拉开启时拦截导航 / 接受键（不转发给 PTY，避免与 shell 行编辑冲突）
@@ -413,20 +486,57 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
   }, [isActive, session.id])
 
   const exited = useAppStore((s) => s.exitedSessions.has(session.id))
+  // 镜像最新“已结束”状态，供 onData 回调（创建时只绑定一次）读取
+  const exitedRef = useRef(exited)
+  exitedRef.current = exited
+  // 重连/关闭动作只触发一次，避免连按产生多个会话
+  const actionRef = useRef(false)
+  // 会话结束后自动聚焦，使回车重连 / Ctrl+D 关闭立即生效
+  useEffect(() => {
+    if (exited) termRef.current?.focus()
+  }, [exited])
 
   return (
     <div className="relative h-full w-full">
       <div ref={containerRef} className="h-full w-full" />
       {exited && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/60">
-          <span className="rounded-md border border-border bg-card px-4 py-2 text-sm text-muted-foreground">
-            会话已结束（{session.title}）
-          </span>
+        <div
+          className="absolute inset-0 flex items-center justify-center bg-black/60"
+          onClick={() => termRef.current?.focus()}
+        >
+          <div className="rounded-md border border-border bg-card px-4 py-3 text-center text-sm shadow">
+            <div className="font-medium text-foreground">会话已结束（{session.title}）</div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              按{' '}
+              <kbd className="rounded border border-border bg-secondary px-1 py-0.5">Enter</kbd> 重连
+              {' · '}
+              按{' '}
+              <kbd className="rounded border border-border bg-secondary px-1 py-0.5">Ctrl+D</kbd>{' '}
+              关闭标签
+            </div>
+          </div>
         </div>
       )}
       {zmodem && (
-        <div className="absolute left-1/2 top-3 z-10 -translate-x-1/2 rounded-md border border-border bg-card px-3 py-1.5 text-xs text-foreground shadow">
-          {zmodem.text}
+        <div className="absolute left-1/2 top-3 z-10 w-72 -translate-x-1/2 rounded-md border border-border bg-card px-3 py-2 text-xs text-foreground shadow">
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <span className="truncate font-medium">
+              {zmodem.direction === 'upload' ? '↑ 上传' : '↓ 下载'}：{zmodem.name || '…'}
+            </span>
+            <span className="shrink-0 tabular-nums text-muted-foreground">
+              {Math.round(zmodem.progress)}%
+            </span>
+          </div>
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary">
+            <div
+              className={cn(
+                'h-full rounded-full transition-[width] duration-150',
+                zmodem.direction === 'upload' ? 'bg-emerald-500' : 'bg-sky-500'
+              )}
+              style={{ width: `${zmodem.progress}%` }}
+            />
+          </div>
+          <div className="mt-1 truncate text-[10px] text-muted-foreground">{zmodem.text}</div>
         </div>
       )}
       {suggestions && (

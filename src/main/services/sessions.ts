@@ -23,6 +23,8 @@ interface InternalSession {
   recentOutput(maxChars: number): string
   /** 在远端/本地执行一次性命令并返回完整输出（监控采集用） */
   exec(command: string): Promise<string>
+  /** 连接是否已就绪（本地 shell 已启动 / SSH 握手已完成），监控采集前应判读 */
+  isReady(): boolean
 }
 
 function pickLocalShell(): string {
@@ -120,6 +122,10 @@ class LocalSession implements InternalSession {
       })
     })
   }
+
+  isReady(): boolean {
+    return !this.info.exited
+  }
 }
 
 /** SSH 远程会话 */
@@ -127,6 +133,7 @@ class SshSession implements InternalSession {
   info: SessionInfo
   private conn = new Client()
   private stream: ClientChannel | null = null
+  private ready = false
   private output = ''
   private killed = false
   private onData: (data: Buffer) => void
@@ -156,6 +163,7 @@ class SshSession implements InternalSession {
     const line = `\r\n\x1b[31m[SSH 连接失败] ${message}\x1b[0m\r\n`
     this.appendOutput(line)
     this.onData(Buffer.from(line))
+    this.ready = false
     this.info.exited = true
     this.onExit(1)
   }
@@ -179,6 +187,7 @@ class SshSession implements InternalSession {
     this.conn
       .on('ready', () => {
         if (this.killed) return
+        this.ready = true
         this.conn.shell(
           { term: TERM_TYPE, cols: Math.max(2, cols), rows: Math.max(2, rows) },
           (err, stream) => {
@@ -193,6 +202,7 @@ class SshSession implements InternalSession {
               this.onData(buf)
             })
             stream.on('close', () => {
+              this.ready = false
               this.info.exited = true
               this.onExit(0)
             })
@@ -205,6 +215,7 @@ class SshSession implements InternalSession {
         )
       })
       .on('error', (err: Error) => {
+        this.ready = false
         if (!this.stream) this.fail(err.message)
       })
       .connect(config)
@@ -231,6 +242,7 @@ class SshSession implements InternalSession {
 
   kill(): void {
     this.killed = true
+    this.ready = false
     try {
       this.stream?.close()
     } catch {
@@ -247,10 +259,14 @@ class SshSession implements InternalSession {
     return this.output.slice(-maxChars)
   }
 
+  isReady(): boolean {
+    return this.ready && !this.killed
+  }
+
   exec(command: string): Promise<string> {
     return new Promise((resolve, reject) => {
-      if (this.killed || !this.conn) {
-        reject(new Error('SSH 连接已关闭'))
+      if (this.killed || !this.ready) {
+        reject(new Error('SSH 连接未就绪'))
         return
       }
       this.conn.exec(command, (err, stream: ClientChannel) => {

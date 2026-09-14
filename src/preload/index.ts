@@ -98,9 +98,12 @@ const api = {
     /** 打开文件选择框，返回选中文件的字节（用于 rz 上传） */
     pickFiles: (): Promise<{ name: string; size: number; data: Uint8Array }[]> =>
       ipcRenderer.invoke('zmodem:pickFiles'),
-    /** 弹出保存对话框并把字节写入磁盘（用于 sz 下载），返回保存路径 */
-    saveFile: (name: string, data: Uint8Array): Promise<string | null> =>
-      ipcRenderer.invoke('zmodem:saveFile', name, data)
+    /** 弹出保存对话框，返回用户选定的完整路径（先选位置再下载）；取消返回 null */
+    askSavePath: (defaultName: string): Promise<string | null> =>
+      ipcRenderer.invoke('zmodem:askSavePath', defaultName),
+    /** 将字节写入指定路径并保存，返回实际保存路径（失败返回 null） */
+    saveFileTo: (filePath: string, data: Uint8Array): Promise<string | null> =>
+      ipcRenderer.invoke('zmodem:saveFileTo', filePath, data)
   },
   monitor: {
     /** 开始对指定会话进行服务器指标采集 */

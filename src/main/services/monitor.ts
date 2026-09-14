@@ -62,6 +62,8 @@ class SessionMonitor extends EventEmitter {
       this.stop()
       return
     }
+    // 连接尚未就绪（SSH 握手中 / 本地 shell 未启动），跳过本轮，下个周期再试
+    if (!session.isReady()) return
     let raw = ''
     try {
       raw = await session.exec(COLLECT_CMD)

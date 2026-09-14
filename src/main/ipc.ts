@@ -98,8 +98,8 @@ export function registerIpc(win: () => BrowserWindow | null): void {
     }
     return files
   })
-  // 弹出保存对话框并把字节写入磁盘，返回最终路径
-  ipcMain.handle('zmodem:saveFile', async (_e, name: string, data: Uint8Array) => {
+  // 弹出保存对话框，返回用户选定的完整路径（先选位置再下载）；取消返回 null
+  ipcMain.handle('zmodem:askSavePath', async (_e, defaultName: string) => {
     const window = win()
     if (!window || window.isDestroyed()) return null
     if (window.isMinimized()) window.restore()
@@ -107,14 +107,23 @@ export function registerIpc(win: () => BrowserWindow | null): void {
     window.focus()
     let result: Electron.SaveDialogReturnValue
     try {
-      result = await dialog.showSaveDialog(window, { defaultPath: name })
+      result = await dialog.showSaveDialog(window, { defaultPath: defaultName })
     } finally {
       window.setAlwaysOnTop(false)
     }
     const { canceled, filePath } = result
     if (canceled || !filePath) return null
-    await fs.writeFile(filePath, Buffer.from(data))
     return filePath
+  })
+  // 将字节写入指定路径并保存，返回实际保存路径（失败返回 null）
+  ipcMain.handle('zmodem:saveFileTo', async (_e, filePath: string, data: Uint8Array) => {
+    try {
+      await fs.writeFile(filePath, Buffer.from(data))
+      return filePath
+    } catch (e) {
+      console.error('zmodem save failed', e)
+      return null
+    }
   })
 
   // ---------- SSH 配置 CRUD ----------

@@ -96,6 +96,8 @@ interface AppStore {
   createLocalSession: () => Promise<void>
   connectSsh: (profile: SshProfile) => Promise<void>
   closeSession: (id: string) => Promise<void>
+  /** 会话结束后重连：按原类型/SSH 配置新建一个会话并替换旧的 */
+  reconnectSession: (id: string) => Promise<void>
   setActiveSession: (id: string) => void
   refreshProfiles: () => Promise<void>
 
@@ -229,6 +231,28 @@ let shortcutWired = false
             ? (s.sessions.filter((x) => x.id !== id).slice(-1)[0]?.id ?? null)
             : s.activeSessionId
       }))
+    },
+
+    reconnectSession: async (id) => {
+      const old = get().sessions.find((x) => x.id === id)
+      if (!old) return
+      // 按原会话类型创建新会话：SSH 沿用原 profileId，本地则新建本地 Shell
+      const info: SessionInfo =
+        old.type === 'ssh' && old.profileId
+          ? await window.api.terminal.createSsh(old.profileId, 80, 24)
+          : await window.api.terminal.createLocal(80, 24)
+      // 关闭已退出的旧会话
+      await window.api.terminal.kill(id)
+      set((s) => {
+        const sessions = s.sessions.filter((x) => x.id !== id)
+        const exited = new Set(s.exitedSessions)
+        exited.delete(id)
+        return {
+          sessions: [...sessions, info],
+          activeSessionId: info.id,
+          exitedSessions: exited
+        }
+      })
     },
 
     setActiveSession: (id) => set({ activeSessionId: id }),
