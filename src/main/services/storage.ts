@@ -24,7 +24,8 @@ const DEFAULT_PREFERENCES: Preferences = {
   terminalTheme: 'auto',
   copyOnSelect: true,
   commandPrediction: true,
-  terminalFontSize: 13
+  terminalFontSize: 13,
+  localShell: 'default'
 }
 
 /** 密钥类字段加密前缀（safeStorage 密文 base64） */

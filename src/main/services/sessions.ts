@@ -4,6 +4,7 @@ import * as os from 'node:os'
 import * as pty from '@lydell/node-pty'
 import { Client, type ClientChannel, type ConnectConfig } from 'ssh2'
 import type { SessionInfo, SessionType, SshProfile } from '@shared/types'
+import { resolveLocalShell } from './shells'
 
 /** 每个会话保留的输出缓冲上限，供 AI 读取 */
 const MAX_OUTPUT_BUFFER = 256 * 1024
@@ -27,12 +28,6 @@ interface InternalSession {
   isReady(): boolean
 }
 
-function pickLocalShell(): string {
-  if (process.platform === 'win32') {
-    return process.env.PWSH_PATH || 'powershell.exe'
-  }
-  return process.env.SHELL || '/bin/bash'
-}
 
 function stripUndefined(env: NodeJS.ProcessEnv): Record<string, string> {
   const result: Record<string, string> = {}
@@ -52,10 +47,11 @@ class LocalSession implements InternalSession {
     id: string,
     cols: number,
     rows: number,
-    handlers: { onData: (data: Buffer) => void; onExit: (code: number) => void }
+    handlers: { onData: (data: Buffer) => void; onExit: (exitCode: number) => void },
+    shellId?: string
   ) {
-    const shell = pickLocalShell()
-    this.proc = pty.spawn(shell, [], {
+    const shell = resolveLocalShell(shellId)
+    this.proc = pty.spawn(shell.command, shell.args ?? [], {
       name: TERM_TYPE,
       cols,
       rows,
@@ -67,7 +63,7 @@ class LocalSession implements InternalSession {
     this.info = {
       id,
       type: 'local',
-      title: `${shell}`,
+      title: shell.title,
       pid: this.proc.pid,
       createdAt: Date.now(),
       exited: false
@@ -328,12 +324,18 @@ class SessionManager extends EventEmitter {
     return this.lastActiveId
   }
 
-  createLocal(cols = 80, rows = 24): SessionInfo {
+  createLocal(cols = 80, rows = 24, shellId?: string): SessionInfo {
     const id = crypto.randomUUID()
-    const session = new LocalSession(id, cols, rows, {
-      onData: (data) => this.handleData(id, data),
-      onExit: (code) => this.handleExit(id, code)
-    })
+    const session = new LocalSession(
+      id,
+      cols,
+      rows,
+      {
+        onData: (data) => this.handleData(id, data),
+        onExit: (code) => this.handleExit(id, code)
+      },
+      shellId
+    )
     this.attach(id, session)
     return { ...session.info }
   }

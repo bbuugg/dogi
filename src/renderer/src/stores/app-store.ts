@@ -10,6 +10,7 @@ import type {
   Preferences,
   ServerMetrics,
   SessionInfo,
+  ShellDetectResult,
   SshProfile,
   TerminalThemeName,
   ThemeMode
@@ -75,6 +76,8 @@ interface AppStore {
 
   // ---------- 偏好 ----------
   preferences: Preferences
+  /** 本地可用 shell 检测结果（null = 尚未加载） */
+  shells: ShellDetectResult | null
 
   // ---------- AI ----------
   aiConfigs: AiModelConfig[]
@@ -97,7 +100,8 @@ interface AppStore {
   setMonitorData: (sessionId: string, metrics: ServerMetrics) => void
 
   bootstrap: () => Promise<void>
-  createLocalSession: () => Promise<void>
+  /** 创建本地终端：不传 shellId 时使用偏好设置的默认本地终端 */
+  createLocalSession: (shellId?: string) => Promise<void>
   connectSsh: (profile: SshProfile) => Promise<void>
   closeSession: (id: string) => Promise<void>
   /** 会话结束后重连：按原类型/SSH 配置新建一个会话并替换旧的 */
@@ -117,6 +121,8 @@ interface AppStore {
   setTerminalTheme: (name: TerminalThemeName) => Promise<void>
   setCopyOnSelect: (enabled: boolean) => Promise<void>
   setCommandPrediction: (enabled: boolean) => Promise<void>
+  /** 设置本地终端默认 shell（持久化到偏好设置） */
+  setLocalShell: (shellId: string) => Promise<void>
   setTerminalFontSize: (size: number) => Promise<void>
   sendAiMessage: (text: string, targetSessionId?: string | null) => Promise<void>
   abortAi: () => Promise<void>
@@ -170,7 +176,9 @@ let shortcutWired = false
 
     profiles: [],
 
-    preferences: { theme: 'system', terminalTheme: 'auto', copyOnSelect: true, commandPrediction: true, terminalFontSize: 13 },
+    preferences: { theme: 'system', terminalTheme: 'auto', copyOnSelect: true, commandPrediction: true, terminalFontSize: 13, localShell: 'default' },
+
+    shells: null,
 
     aiConfigs: [],
     aiSettings: { permissionMode: 'full' },
@@ -191,13 +199,14 @@ let shortcutWired = false
     monitors: {},
 
     bootstrap: async () => {
-      const [profiles, configs, settings, preferences] = await Promise.all([
+      const [profiles, configs, settings, preferences, shells] = await Promise.all([
         window.api.ssh.list(),
         window.api.ai.listConfigs(),
         window.api.ai.getSettings(),
-        window.api.prefs.get()
+        window.api.prefs.get(),
+        window.api.terminal.listShells()
       ])
-      set({ profiles, aiConfigs: configs, aiSettings: settings, preferences })
+      set({ profiles, aiConfigs: configs, aiSettings: settings, preferences, shells })
 
       // 全局快捷键：主进程触发后在此分发到具体 UI 动作
       if (!shortcutWired) {
@@ -210,8 +219,8 @@ let shortcutWired = false
       }
     },
 
-    createLocalSession: async () => {
-      const info = await window.api.terminal.createLocal(80, 24)
+    createLocalSession: async (shellId) => {
+      const info = await window.api.terminal.createLocal(80, 24, shellId)
       set((s) => ({
         sessions: [...s.sessions, info],
         activeSessionId: info.id
@@ -333,6 +342,12 @@ let shortcutWired = false
     setCommandPrediction: async (enabled) => {
       set((s) => ({ preferences: { ...s.preferences, commandPrediction: enabled } }))
       const preferences = await window.api.prefs.save({ commandPrediction: enabled })
+      set({ preferences })
+    },
+
+    setLocalShell: async (shellId) => {
+      set((s) => ({ preferences: { ...s.preferences, localShell: shellId } }))
+      const preferences = await window.api.prefs.save({ localShell: shellId })
       set({ preferences })
     },
 

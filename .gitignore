@@ -2,3 +2,4 @@
 out
 .vscode
 release
+.merkle-snapshot.json

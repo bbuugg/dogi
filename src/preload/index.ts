@@ -11,8 +11,9 @@ import type {
   McpServerConfig,
   McpToolInfo,
   Preferences,
-  SessionInfo,
   ServerMetrics,
+  SessionInfo,
+  ShellDetectResult,
   SshProfile
 } from '@shared/types'
 
@@ -30,8 +31,10 @@ function subscribe<T extends unknown[]>(
 const api = {
   terminal: {
     list: (): Promise<SessionInfo[]> => ipcRenderer.invoke('terminal:list'),
-    createLocal: (cols?: number, rows?: number): Promise<SessionInfo> =>
-      ipcRenderer.invoke('terminal:createLocal', cols, rows),
+    /** 检测本地可用 shell（含平台默认 id） */
+    listShells: (): Promise<ShellDetectResult> => ipcRenderer.invoke('terminal:listShells'),
+    createLocal: (cols?: number, rows?: number, shellId?: string): Promise<SessionInfo> =>
+      ipcRenderer.invoke('terminal:createLocal', cols, rows, shellId),
     createSsh: (profileId: string, cols?: number, rows?: number): Promise<SessionInfo> =>
       ipcRenderer.invoke('terminal:createSsh', profileId, cols, rows),
     write: (sessionId: string, data: string | Uint8Array): Promise<boolean> =>

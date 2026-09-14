@@ -25,6 +25,30 @@ export interface Preferences {
   commandPrediction: boolean
   /** 终端字号（Ctrl+滚轮 / Ctrl +/- 缩放），缺省 13 */
   terminalFontSize: number
+  /**
+   * 本地终端默认使用的 shell（ShellProfile.id），
+   * 缺省 'default' 表示跟随平台默认（Windows: PowerShell；Unix: $SHELL）
+   */
+  localShell: string
+}
+
+/** 检测到的本地可用 shell */
+export interface ShellProfile {
+  /** 唯一标识，如 powershell / pwsh / cmd / gitbash / wsl / bash / zsh / fish */
+  id: string
+  /** 展示名，如 PowerShell / CMD / Git Bash */
+  name: string
+  /** 可执行文件（绝对路径或 PATH 可解析名） */
+  command: string
+  /** 启动参数（如 Git Bash 的 --login -i） */
+  args?: string[]
+}
+
+/** 本地 shell 检测结果 */
+export interface ShellDetectResult {
+  shells: ShellProfile[]
+  /** 平台默认 shell 的 id（Preferences.localShell === 'default' 时使用） */
+  defaultId: string
 }
 
 export type SessionType = 'local' | 'ssh'

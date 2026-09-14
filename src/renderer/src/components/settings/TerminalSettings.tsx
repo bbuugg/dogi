@@ -5,6 +5,13 @@ import { useIsDarkTheme } from '@/lib/theme'
 import { TERMINAL_THEMES, resolveTerminalTheme } from '@/lib/terminal-themes'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from '@/components/ui/select'
 import { cn } from 'cn'
 
 export function TerminalSettings() {
@@ -14,10 +21,39 @@ export function TerminalSettings() {
   const setCopyOnSelect = useAppStore((s) => s.setCopyOnSelect)
   const commandPrediction = useAppStore((s) => s.preferences.commandPrediction)
   const setCommandPrediction = useAppStore((s) => s.setCommandPrediction)
+  const localShell = useAppStore((s) => s.preferences.localShell)
+  const setLocalShell = useAppStore((s) => s.setLocalShell)
+  const shells = useAppStore((s) => s.shells)
   const isDark = useIsDarkTheme()
+
+  const defaultShellName =
+    shells?.shells.find((s) => s.id === shells.defaultId)?.name ?? '系统默认'
 
   return (
     <div className="space-y-4">
+      <div className="rounded-md border border-border px-3 py-3">
+        <div className="text-sm font-medium">默认本地终端</div>
+        <p className="mt-1 mb-3 text-[11px] leading-4 text-muted-foreground">
+          新建本地终端时默认使用的 shell，可选项来自本机检测结果。点击标签栏「+」旁的下拉箭头也可临时使用其他 shell 新建。
+        </p>
+        <Select
+          value={localShell || 'default'}
+          onValueChange={(v) => void setLocalShell(v)}
+        >
+          <SelectTrigger className="w-56" aria-label="默认本地终端">
+            <SelectValue placeholder="选择 shell" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="default">系统默认（{defaultShellName}）</SelectItem>
+            {shells?.shells.map((shell) => (
+              <SelectItem key={shell.id} value={shell.id}>
+                {shell.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
       <div className="rounded-md border border-border px-3 py-3">
         <div className="text-sm font-medium">终端配色</div>
         <p className="mt-1 mb-3 text-[11px] leading-4 text-muted-foreground">

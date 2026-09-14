@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs'
 import { sessionManager } from './services/sessions'
 import { monitorService } from './services/monitor'
 import { storage } from './services/storage'
+import { detectShells } from './services/shells'
 import { aiService } from './services/ai'
 import { mcpManager } from './services/mcp'
 import { app } from 'electron'
@@ -50,9 +51,14 @@ export function registerIpc(win: () => BrowserWindow | null): void {
 
   // ---------- 终端控制 ----------
   ipcMain.handle('terminal:list', () => sessionManager.list())
+  ipcMain.handle('terminal:listShells', () => detectShells())
   ipcMain.handle(
     'terminal:createLocal',
-    (_e, cols?: number, rows?: number) => sessionManager.createLocal(cols, rows)
+    (_e, cols?: number, rows?: number, shellId?: string) => {
+      // 未显式指定 shell 时使用偏好设置中的默认本地终端（'default' = 平台默认）
+      const id = shellId || storage.getPreferences().localShell
+      return sessionManager.createLocal(cols, rows, id)
+    }
   )
   ipcMain.handle('terminal:createSsh', (_e, profileId: string, cols?: number, rows?: number) => {
     const profile = storage.getSshProfile(profileId)

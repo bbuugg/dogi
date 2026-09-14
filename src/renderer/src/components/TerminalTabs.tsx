@@ -1,7 +1,13 @@
-import { Activity, Plus, TerminalSquare, X } from 'lucide-react'
+import { Activity, ChevronDown, Plus, TerminalSquare, X } from 'lucide-react'
 import type { SessionInfo } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger
+} from '@/components/ui/dropdown-menu'
 import { cn } from 'cn'
 
 function TabItem({ session }: { session: SessionInfo }) {
@@ -44,6 +50,10 @@ export function TerminalTabs() {
   const createLocalSession = useAppStore((s) => s.createLocalSession)
   const monitorOpen = useAppStore((s) => s.ui.monitorOpen)
   const toggleMonitor = useAppStore((s) => s.toggleMonitor)
+  const shells = useAppStore((s) => s.shells)
+  const localShell = useAppStore((s) => s.preferences.localShell)
+
+  const effectiveShellId = localShell || 'default'
 
   return (
     <div className="flex h-9 shrink-0 items-end gap-1 border-b border-border bg-background px-2">
@@ -64,15 +74,42 @@ export function TerminalTabs() {
       >
         <Activity className="size-4" />
       </Button>
-      <Button
-        variant="ghost"
-        size="icon"
-        className="mb-0.5 size-7"
-        title="新建本地终端"
-        onClick={() => void createLocalSession()}
-      >
-        <Plus className="size-4" />
-      </Button>
+      <div className="mb-0.5 flex items-center">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7 rounded-r-none pr-1"
+          title="新建本地终端（默认 shell）"
+          onClick={() => void createLocalSession()}
+        >
+          <Plus className="size-4" />
+        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-4 rounded-l-none border-l border-border/60 px-0"
+              title="选择 shell 新建终端"
+            >
+              <ChevronDown className="size-3" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-40">
+            {shells?.shells.map((shell) => (
+              <DropdownMenuItem
+                key={shell.id}
+                onClick={() => void createLocalSession(shell.id)}
+              >
+                <span className="flex-1">{shell.name}</span>
+                {shell.id === effectiveShellId && (
+                  <span className="text-[10px] text-muted-foreground">默认</span>
+                )}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
     </div>
   )
 }
