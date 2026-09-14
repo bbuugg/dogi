@@ -9,6 +9,7 @@ import type { SessionInfo } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import { useIsDarkTheme } from '@/lib/theme'
 import { resolveTerminalTheme } from '@/lib/terminal-themes'
+import { TERMINAL_FONT_SIZE_DEFAULT, TERMINAL_FONT_SIZE_STEP } from '@/lib/terminal-font'
 
 /** 常见命令词表：即使没有任何历史也能给出首词补全建议 */
 const COMMON_COMMANDS = [
@@ -27,6 +28,15 @@ const COMMON_COMMANDS = [
   'tar', 'zip', 'unzip', 'gzip', 'xz', 'rzsz', 'sz', 'rz',
   'history', 'alias', 'type', 'man', 'help', 'exit', 'logout', 'reboot', 'shutdown'
 ]
+
+/** 调整终端字号（Ctrl+滚轮 / Ctrl +/-）；'reset' 恢复默认 */
+function adjustTerminalFontSize(delta: number | 'reset'): void {
+  const store = useAppStore.getState()
+  const current = store.preferences.terminalFontSize || TERMINAL_FONT_SIZE_DEFAULT
+  const next =
+    delta === 'reset' ? TERMINAL_FONT_SIZE_DEFAULT : current + delta * TERMINAL_FONT_SIZE_STEP
+  void store.setTerminalFontSize(next)
+}
 
 interface TerminalViewProps {
   session: SessionInfo
@@ -51,9 +61,12 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
   const isDark = useIsDarkTheme()
   const terminalThemeName = useAppStore((s) => s.preferences.terminalTheme)
   const copyOnSelect = useAppStore((s) => s.preferences.copyOnSelect)
+  const terminalFontSize = useAppStore((s) => s.preferences.terminalFontSize)
   // 创建 effect 只跑一次，用 ref 读取最新偏好，避免闭包读到旧值
   const copyOnSelectRef = useRef(copyOnSelect)
   copyOnSelectRef.current = copyOnSelect
+  const fontSizeRef = useRef(terminalFontSize)
+  fontSizeRef.current = terminalFontSize
   const theme = useMemo(() => resolveTerminalTheme(terminalThemeName, isDark), [
     terminalThemeName,
     isDark
@@ -135,7 +148,7 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
     const term = new Terminal({
       fontFamily:
         '"Cascadia Mono", "JetBrains Mono", Consolas, "Courier New", monospace',
-      fontSize: 13,
+      fontSize: fontSizeRef.current ?? TERMINAL_FONT_SIZE_DEFAULT,
       lineHeight: 1.2,
       cursorBlink: true,
       scrollback: 10000,
@@ -162,6 +175,25 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
         return
       }
       void window.api.terminal.resize(session.id, term.cols, term.rows)
+    })
+    // Ctrl + 鼠标滚轮：缩放终端文字（返回 false 阻止 xterm 内置滚动）
+    term.attachCustomWheelEventHandler((e) => {
+      if (!e.ctrlKey) return true
+      e.preventDefault()
+      adjustTerminalFontSize(e.deltaY < 0 ? 1 : -1)
+      return false
+    })
+    // Ctrl + + / - / 0：放大 / 缩小 / 复位（返回 false 阻止按键发往 PTY）
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== 'keydown' || !e.ctrlKey || e.altKey) return true
+      const isPlus = e.key === '=' || e.key === '+'
+      const isMinus = e.key === '-' || e.key === '_'
+      if (!isPlus && !isMinus && e.key !== '0') return true
+      e.preventDefault()
+      if (isPlus) adjustTerminalFontSize(1)
+      else if (isMinus) adjustTerminalFontSize(-1)
+      else adjustTerminalFontSize('reset')
+      return false
     })
     // ZMODEM 传输结束时的清理（终止会话引用、收起提示）
     const endSession = () => {
@@ -480,6 +512,23 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
   useEffect(() => {
     if (termRef.current) termRef.current.options.theme = theme
   }, [theme])
+
+  // 字号变化（Ctrl+滚轮 / Ctrl +/-）：热更新并重新适配，同时把新尺寸同步给 PTY
+  useEffect(() => {
+    const term = termRef.current
+    const fit = fitRef.current
+    if (!term || !fit) return
+    if (term.options.fontSize === terminalFontSize) return
+    term.options.fontSize = terminalFontSize
+    requestAnimationFrame(() => {
+      try {
+        fit.fit()
+      } catch {
+        return
+      }
+      void window.api.terminal.resize(session.id, term.cols, term.rows)
+    })
+  }, [terminalFontSize, session.id])
 
   // 激活时重新适配尺寸并聚焦
   useEffect(() => {

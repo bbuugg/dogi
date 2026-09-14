@@ -20,9 +20,9 @@ const MENU: Array<{
   desc: string
   icon: typeof Bot
 }> = [
-  { value: 'ai', label: 'AI 配置', desc: '模型、MCP 服务与提示词', icon: Bot },
+  { value: 'prefs', label: '偏好', desc: '应用主题', icon: SlidersHorizontal },
   { value: 'terminal', label: '终端', desc: '配色与外观', icon: TerminalSquare },
-  { value: 'prefs', label: '偏好', desc: '应用主题', icon: SlidersHorizontal }
+  { value: 'ai', label: 'AI 配置', desc: '模型、MCP 服务与提示词', icon: Bot },
 ]
 
 export function SettingsDialog() {

@@ -15,6 +15,10 @@ import type {
   ThemeMode
 } from '@shared/types'
 import type { AppShortcutAction } from '@shared/types'
+import { clampTerminalFontSize } from '@/lib/terminal-font'
+
+/** 终端字号持久化写入的防抖句柄（Ctrl+滚轮会触发连续调整） */
+let fontSizeSaveTimer: number | undefined
 
 /** AI 回复生成中的占位 assistant 消息尾部追加 part */
 function appendAssistantPart(
@@ -113,6 +117,7 @@ interface AppStore {
   setTerminalTheme: (name: TerminalThemeName) => Promise<void>
   setCopyOnSelect: (enabled: boolean) => Promise<void>
   setCommandPrediction: (enabled: boolean) => Promise<void>
+  setTerminalFontSize: (size: number) => Promise<void>
   sendAiMessage: (text: string, targetSessionId?: string | null) => Promise<void>
   abortAi: () => Promise<void>
   clearAiMessages: () => void
@@ -165,7 +170,7 @@ let shortcutWired = false
 
     profiles: [],
 
-    preferences: { theme: 'system', terminalTheme: 'auto', copyOnSelect: true, commandPrediction: true },
+    preferences: { theme: 'system', terminalTheme: 'auto', copyOnSelect: true, commandPrediction: true, terminalFontSize: 13 },
 
     aiConfigs: [],
     aiSettings: { permissionMode: 'full' },
@@ -329,6 +334,18 @@ let shortcutWired = false
       set((s) => ({ preferences: { ...s.preferences, commandPrediction: enabled } }))
       const preferences = await window.api.prefs.save({ commandPrediction: enabled })
       set({ preferences })
+    },
+
+    setTerminalFontSize: async (size) => {
+      const terminalFontSize = clampTerminalFontSize(size)
+      // 先本地生效（缩放需即时反馈）；持久化做防抖，避免滚轮连续调整时频繁写盘
+      set((s) => ({ preferences: { ...s.preferences, terminalFontSize } }))
+      if (fontSizeSaveTimer) window.clearTimeout(fontSizeSaveTimer)
+      fontSizeSaveTimer = window.setTimeout(() => {
+        void window.api.prefs
+          .save({ terminalFontSize: get().preferences.terminalFontSize })
+          .then((preferences) => set({ preferences }))
+      }, 300)
     },
 
     sendAiMessage: async (text, targetSessionId) => {

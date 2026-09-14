@@ -1,10 +1,33 @@
 import { join } from 'node:path'
-import { app, BrowserWindow, nativeTheme, shell } from 'electron'
+import { app, BrowserWindow, Menu, nativeTheme, shell } from 'electron'
 import { registerIpc } from './ipc'
 import { registerShortcuts } from './shortcuts'
 import { storage } from './services/storage'
 
 let mainWindow: BrowserWindow | null = null
+
+/**
+ * 自定义菜单：保留编辑 / 重载 / DevTools / 全屏，但**去掉 zoom 角色**。
+ * 默认菜单的 Ctrl+加/减/0 会缩放整个页面，并抢在渲染端之前触发；
+ * 去掉后才能把这些组合键交给终端自己处理（Ctrl+滚轮 / Ctrl +/- 缩放终端字号）。
+ */
+function installMenu(): void {
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      { role: 'editMenu' },
+      {
+        label: 'View',
+        submenu: [
+          { role: 'reload' },
+          { role: 'forceReload' },
+          { role: 'toggleDevTools' },
+          { type: 'separator' },
+          { role: 'togglefullscreen' }
+        ]
+      }
+    ])
+  )
+}
 
 function createWindow(): void {
   const bounds = storage.getWindowBounds()
@@ -58,6 +81,7 @@ function saveBounds(): void {
 app.whenReady().then(() => {
   // 在创建窗口前应用主题偏好，renderer 的 prefers-color-scheme 随之生效
   nativeTheme.themeSource = storage.getPreferences().theme
+  installMenu()
   registerIpc(() => mainWindow)
   createWindow()
   registerShortcuts(() => mainWindow)
