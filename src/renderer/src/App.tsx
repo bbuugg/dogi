@@ -9,6 +9,7 @@ import { SettingsDialog } from '@/components/SettingsDialog'
 import { PaneLayout } from '@/components/PaneLayout'
 import { ScriptPalette } from '@/components/ScriptPalette'
 import { ScriptsPage } from '@/components/ScriptsPage'
+import { ResizeHandle } from '@/components/ResizeHandle'
 import { Button } from '@/components/ui/button'
 
 function EmptyState() {
@@ -36,12 +37,22 @@ export default function App() {
   const aiPanelOpen = useAppStore((s) => s.ui.aiPanelOpen)
   const monitorOpen = useAppStore((s) => s.ui.monitorOpen)
   const view = useAppStore((s) => s.ui.view)
+  const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth)
+  const aiPanelWidth = useAppStore((s) => s.ui.aiPanelWidth)
+  const setSidebarWidth = useAppStore((s) => s.setSidebarWidth)
+  const setAiPanelWidth = useAppStore((s) => s.setAiPanelWidth)
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
       <TitleBar />
       <div className="flex min-h-0 flex-1">
         <Sidebar />
+        <ResizeHandle
+          width={sidebarWidth}
+          min={180}
+          max={480}
+          onResize={setSidebarWidth}
+        />
 
         <main className="relative flex min-w-0 flex-1 flex-col">
           {monitorOpen && activeSessionId && view === 'terminal' && (
@@ -54,7 +65,18 @@ export default function App() {
           {view === 'scripts' && <ScriptsPage />}
         </main>
 
-        {aiPanelOpen && <AiPanel />}
+        {aiPanelOpen && (
+          <>
+            <ResizeHandle
+              width={aiPanelWidth}
+              min={280}
+              max={720}
+              onResize={setAiPanelWidth}
+              invert
+            />
+            <AiPanel />
+          </>
+        )}
       </div>
 
       <SshProfileDialog />

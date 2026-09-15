@@ -200,6 +200,7 @@ export function AiPanel() {
   const setActiveAiConfig = useAppStore((s) => s.setActiveAiConfig)
   const setAiPermissionMode = useAppStore((s) => s.setAiPermissionMode)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
+  const aiPanelWidth = useAppStore((s) => s.ui.aiPanelWidth)
 
   const [input, setInput] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -222,7 +223,7 @@ export function AiPanel() {
   }
 
   return (
-    <aside className="flex w-[350px] shrink-0 flex-col bg-sidebar">
+    <aside className="flex shrink-0 flex-col bg-sidebar" style={{ width: aiPanelWidth }}>
       {/* 头部 */}
       <div className="flex h-12 shrink-0 items-center gap-2 px-3">
         <Sparkles className="size-4 text-primary" />

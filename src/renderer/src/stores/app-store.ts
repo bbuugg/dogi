@@ -125,6 +125,10 @@ interface UiState {
   scriptPaletteOpen: boolean
   /** 主区域视图：终端 / 脚本管理页 */
   view: 'terminal' | 'scripts'
+  /** 侧边栏宽度（px） */
+  sidebarWidth: number
+  /** AI 助手面板宽度（px） */
+  aiPanelWidth: number
 }
 
 /** 编辑器组：承载多个会话（标签页），并指向当前激活的会话 */
@@ -201,6 +205,8 @@ interface AppStore {
   setSettingsOpen: (open: boolean, tab?: UiState['settingsTab']) => void
   setScriptPaletteOpen: (open: boolean) => void
   setView: (view: 'terminal' | 'scripts') => void
+  setSidebarWidth: (width: number) => void
+  setAiPanelWidth: (width: number) => void
   refreshScripts: () => Promise<void>
   setSshDialog: (open: boolean, editing?: SshProfile | null) => void
   refreshAiConfigs: () => Promise<void>
@@ -285,7 +291,9 @@ let shortcutWired = false
       settingsTab: 'prefs',
       monitorOpen: false,
       scriptPaletteOpen: false,
-      view: 'terminal'
+      view: 'terminal',
+      sidebarWidth: 240,
+      aiPanelWidth: 350
     },
 
     monitors: {},
@@ -558,6 +566,12 @@ let shortcutWired = false
 
     setView: (view) =>
       set((s) => ({ ui: { ...s.ui, view } })),
+
+    setSidebarWidth: (width) =>
+      set((s) => ({ ui: { ...s.ui, sidebarWidth: width } })),
+
+    setAiPanelWidth: (width) =>
+      set((s) => ({ ui: { ...s.ui, aiPanelWidth: width } })),
 
     refreshScripts: async () => {
       set({ scripts: await window.api.scripts.list() })

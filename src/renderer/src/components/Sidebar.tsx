@@ -21,6 +21,7 @@ export function Sidebar() {
   const setScriptPaletteOpen = useAppStore((s) => s.setScriptPaletteOpen)
   const setView = useAppStore((s) => s.setView)
   const view = useAppStore((s) => s.ui.view)
+  const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth)
   const refreshProfiles = useAppStore((s) => s.refreshProfiles)
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null)
 
@@ -35,7 +36,10 @@ export function Sidebar() {
   }
 
   return (
-    <aside className="select-none flex w-60 shrink-0 flex-col bg-sidebar">
+    <aside
+      className="select-none flex shrink-0 flex-col bg-sidebar"
+      style={{ width: sidebarWidth }}
+    >
       <div className="flex-1 overflow-y-auto p-2">
         {/* 本地终端 */}
         <div className="mb-1 flex items-center justify-between px-2 py-1">
