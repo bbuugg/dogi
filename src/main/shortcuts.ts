@@ -9,7 +9,7 @@ import type { AppShortcutAction } from '@shared/types'
 const SHORTCUTS: Record<string, AppShortcutAction> = {
   'Ctrl+Alt+S': 'open-settings',
   'Ctrl+Alt+T': 'new-session',
-  'CmdOrCtrl+Shift+P': 'open-script-palette'
+  'CmdOrCtrl+Shift+P': 'open-command-palette'
 }
 
 export function registerShortcuts(win: () => BrowserWindow | null): void {

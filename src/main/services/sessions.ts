@@ -197,7 +197,6 @@ class SshSession implements InternalSession {
     conn
       .on('ready', () => {
         if (this.killed) return
-        this.ready = true
         conn.shell(
           // 用最新目标尺寸打开 shell（握手期间可能已收到渲染端下发的 resize）
           { term: TERM_TYPE, cols: this.desiredCols, rows: this.desiredRows },
@@ -208,6 +207,8 @@ class SshSession implements InternalSession {
               return
             }
             this.stream = stream
+            // shell 流建立后才算就绪：此时写入的输入不会被丢弃（isReady 也用于脚本投递）
+            this.ready = true
             // 握手期间收到的 resize 在此补应用，避免远端 PTY 停在创建时的初始尺寸
             this.applySize()
             stream.on('data', (data: Buffer | string) => {
@@ -393,6 +394,24 @@ class SessionManager extends EventEmitter {
     this.lastActiveId = id
     session.write(data)
     return true
+  }
+
+  /**
+   * 等待会话就绪后写入内容（SSH 握手 + shell 建立需要时间，未就绪时写入会被丢弃）。
+   * 返回是否写入成功；会话不存在/已退出/等待超时返回 false。
+   */
+  async writeWhenReady(id: string, data: string, timeoutMs = 20000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const session = this.sessions.get(id)
+      if (!session || session.info.exited) return false
+      if (session.isReady()) {
+        this.write(id, data)
+        return true
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    return false
   }
 
   resize(id: string, cols: number, rows: number): void {

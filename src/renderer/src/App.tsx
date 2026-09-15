@@ -7,7 +7,8 @@ import { AiPanel } from '@/components/AiPanel'
 import { SshProfileDialog } from '@/components/SshProfileDialog'
 import { SettingsDialog } from '@/components/SettingsDialog'
 import { PaneLayout } from '@/components/PaneLayout'
-import { ScriptPalette } from '@/components/ScriptPalette'
+import { CommandPalette } from '@/components/CommandPalette'
+import { RunScriptDialog } from '@/components/RunScriptDialog'
 import { ScriptsPage } from '@/components/ScriptsPage'
 import { ResizeHandle } from '@/components/ResizeHandle'
 import { Button } from '@/components/ui/button'
@@ -79,7 +80,8 @@ export default function App() {
 
       <SshProfileDialog />
       <SettingsDialog />
-      <ScriptPalette />
+      <CommandPalette />
+      <RunScriptDialog />
     </div>
   )
 }

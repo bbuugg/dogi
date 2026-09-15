@@ -98,6 +98,10 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   ipcMain.handle('terminal:recentOutput', (_e, sessionId: string, maxChars?: number) =>
     sessionManager.recentOutput(sessionId, maxChars)
   )
+  // 等待会话就绪后写入内容（如：连上主机后自动执行保存的脚本），未就绪则丢弃
+  ipcMain.handle('terminal:runScript', (_e, sessionId: string, data: string) =>
+    sessionManager.writeWhenReady(sessionId, data)
+  )
 
   // ---------- ZMODEM 文件传输（rz/sz） ----------
   // 打开系统文件选择框，读取选中文件并返回字节，供渲染端作为上传内容

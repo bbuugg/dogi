@@ -46,6 +46,12 @@ const api = {
       ipcRenderer.invoke('terminal:kill', sessionId),
     recentOutput: (sessionId: string, maxChars?: number): Promise<string | null> =>
       ipcRenderer.invoke('terminal:recentOutput', sessionId, maxChars),
+    /**
+     * 等待会话就绪后写入内容（用于「连接主机后自动执行脚本」）；
+     * 返回是否写入成功（会话不存在/已退出/超时返回 false）
+     */
+    runScript: (sessionId: string, data: string): Promise<boolean> =>
+      ipcRenderer.invoke('terminal:runScript', sessionId, data),
     onData: (cb: (payload: { sessionId: string; data: Uint8Array }) => void) =>
       subscribe('terminal:data', cb),
     onExit: (cb: (payload: { sessionId: string; exitCode: number }) => void) =>

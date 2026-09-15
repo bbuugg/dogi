@@ -94,9 +94,9 @@ export interface SshProfile {
 }
 
 /** 全局快捷键触发的应用动作 */
-export type AppShortcutAction = 'open-settings' | 'new-session' | 'open-script-palette'
+export type AppShortcutAction = 'open-settings' | 'new-session' | 'open-command-palette'
 
-/** 用户保存的脚本：在命令面板（Ctrl+Shift+P）中选择后写入并自动执行 */
+/** 用户保存的脚本：在命令面板（Ctrl+Shift+P）的「运行脚本」中选择后写入并自动执行 */
 export interface ScriptEntry {
   id: string
   /** 展示名称，同时用于搜索 */

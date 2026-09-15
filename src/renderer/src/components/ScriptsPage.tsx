@@ -12,7 +12,7 @@ export function ScriptsPage() {
   const scripts = useAppStore((s) => s.scripts)
   const refreshScripts = useAppStore((s) => s.refreshScripts)
   const setView = useAppStore((s) => s.setView)
-  const setScriptPaletteOpen = useAppStore((s) => s.setScriptPaletteOpen)
+  const setRunScriptDialog = useAppStore((s) => s.setRunScriptDialog)
 
   // null = 列表视图；非 null = 编辑/新增表单（持有待保存内容）
   const [editing, setEditing] = useState<ScriptEntry | null>(null)
@@ -74,8 +74,8 @@ export function ScriptsPage() {
           <Button
             variant="secondary"
             size="sm"
-            onClick={() => setScriptPaletteOpen(true)}
-            title="在当前终端运行脚本（Ctrl+Shift+P）"
+            onClick={() => setRunScriptDialog(true)}
+            title="选择主机并运行脚本"
           >
             <Play className="size-4" /> 运行脚本
           </Button>
@@ -91,7 +91,8 @@ export function ScriptsPage() {
             <div className="mx-auto mt-16 max-w-md rounded-md border border-dashed border-border px-3 py-10 text-center text-sm text-muted-foreground">
               还没有脚本。
               <br />
-              把常用命令保存下来，之后在终端按 Ctrl+Shift+P 即可快速执行。
+              把常用命令保存下来，之后选择主机执行；也可在终端按 Ctrl+Shift+P
+              打开命令面板，选择「运行脚本」。
               <div className="mt-4">
                 <Button size="sm" onClick={startAdd}>
                   <Plus className="size-4" /> 新增脚本
@@ -114,6 +115,14 @@ export function ScriptsPage() {
                       {s.content.split('\n')[0] || ''}
                     </div>
                   </div>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    title="选择主机运行"
+                    onClick={() => setRunScriptDialog(true, s.id)}
+                  >
+                    <Play className="size-4" />
+                  </Button>
                   <Button
                     variant="ghost"
                     size="icon-sm"

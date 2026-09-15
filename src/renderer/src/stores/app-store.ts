@@ -18,6 +18,7 @@ import type {
 } from '@shared/types'
 import type { AppShortcutAction } from '@shared/types'
 import { clampTerminalFontSize } from '@/lib/terminal-font'
+import { scriptToTerminalInput } from '@/lib/script'
 import {
   firstGroupId,
   genPaneId,
@@ -131,9 +132,11 @@ interface UiState {
   settingsOpen: boolean
   /** 编辑中的 SSH 配置（null=新建，undefined=关闭） */
   sshDialog: { open: boolean; editing?: SshProfile | null }
+  /** 运行脚本对话框：scriptId 为预设脚本（可空，在对话框内选择） */
+  runScriptDialog: { open: boolean; scriptId?: string }
   settingsTab: 'ai' | 'terminal' | 'prefs'
-  /** 是否打开脚本命令面板（Ctrl+Shift+P） */
-  scriptPaletteOpen: boolean
+  /** 是否打开命令面板（Ctrl+Shift+P：脚本、终端、主机、设置等命令入口） */
+  commandPaletteOpen: boolean
   /** 主区域视图：终端 / 脚本管理页 */
   view: 'terminal' | 'scripts'
   /** 侧边栏宽度（px） */
@@ -192,7 +195,10 @@ interface AppStore {
   bootstrap: () => Promise<void>
   /** 创建本地终端：不传 shellId 时使用偏好设置的默认本地终端 */
   createLocalSession: (shellId?: string) => Promise<void>
-  connectSsh: (profile: SshProfile) => Promise<void>
+  /** 连接 SSH 主机，返回新会话信息（供后续在该会话上执行脚本等） */
+  connectSsh: (profile: SshProfile) => Promise<SessionInfo>
+  /** 连接指定主机并在其上执行脚本：连接就绪后把脚本写入该会话，返回是否执行成功 */
+  runScriptOnHost: (profile: SshProfile, script: ScriptEntry) => Promise<boolean>
   closeSession: (id: string) => Promise<void>
   /** 会话结束后重连：按原类型/SSH 配置新建一个会话并替换旧的 */
   reconnectSession: (id: string) => Promise<void>
@@ -211,12 +217,14 @@ interface AppStore {
 
   setAiPanelOpen: (open: boolean) => void
   setSettingsOpen: (open: boolean, tab?: UiState['settingsTab']) => void
-  setScriptPaletteOpen: (open: boolean) => void
+  setCommandPaletteOpen: (open: boolean) => void
   setView: (view: 'terminal' | 'scripts') => void
   setSidebarWidth: (width: number) => void
   setAiPanelWidth: (width: number) => void
   refreshScripts: () => Promise<void>
   setSshDialog: (open: boolean, editing?: SshProfile | null) => void
+  /** 打开/关闭「运行脚本」对话框（可预设要运行的脚本） */
+  setRunScriptDialog: (open: boolean, scriptId?: string) => void
   refreshAiConfigs: () => Promise<void>
   setActiveAiConfig: (id: string) => Promise<void>
   saveAiSettings: (patch: Partial<AiSettings>) => Promise<void>
@@ -298,8 +306,9 @@ let shortcutWired = false
       aiPanelOpen: false,
       settingsOpen: false,
       sshDialog: { open: false, editing: null },
+      runScriptDialog: { open: false },
       settingsTab: 'prefs',
-      scriptPaletteOpen: false,
+      commandPaletteOpen: false,
       view: 'terminal',
       sidebarWidth: 240,
       aiPanelWidth: 350
@@ -325,7 +334,7 @@ let shortcutWired = false
           const s = get()
           if (action === 'open-settings') s.setSettingsOpen(true)
           else if (action === 'new-session') void s.createLocalSession()
-          else if (action === 'open-script-palette') s.setScriptPaletteOpen(true)
+          else if (action === 'open-command-palette') s.setCommandPaletteOpen(true)
         })
       }
     },
@@ -382,6 +391,14 @@ let shortcutWired = false
         }
         return { sessions: [...s.sessions, info], groups, activeGroupId, activeSessionId: info.id }
       })
+      return info
+    },
+
+    runScriptOnHost: async (profile, script) => {
+      const info = await get().connectSsh(profile)
+      // 切到终端视图，便于观察脚本执行过程
+      get().setView('terminal')
+      return window.api.terminal.runScript(info.id, scriptToTerminalInput(script.content))
     },
 
     closeSession: async (id) => {
@@ -573,8 +590,11 @@ let shortcutWired = false
     setSshDialog: (open, editing = null) =>
       set((s) => ({ ui: { ...s.ui, sshDialog: { open, editing } } })),
 
-    setScriptPaletteOpen: (open) =>
-      set((s) => ({ ui: { ...s.ui, scriptPaletteOpen: open } })),
+    setRunScriptDialog: (open, scriptId) =>
+      set((s) => ({ ui: { ...s.ui, runScriptDialog: { open, scriptId } } })),
+
+    setCommandPaletteOpen: (open) =>
+      set((s) => ({ ui: { ...s.ui, commandPaletteOpen: open } })),
 
     setView: (view) =>
       set((s) => ({ ui: { ...s.ui, view } })),
