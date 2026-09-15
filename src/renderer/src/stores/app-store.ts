@@ -121,6 +121,8 @@ interface AppStore {
   setTerminalTheme: (name: TerminalThemeName) => Promise<void>
   setCopyOnSelect: (enabled: boolean) => Promise<void>
   setCommandPrediction: (enabled: boolean) => Promise<void>
+  /** 关闭窗口时是否最小化到系统托盘（持久化到偏好设置） */
+  setMinimizeToTray: (enabled: boolean) => Promise<void>
   /** 设置本地终端默认 shell（持久化到偏好设置） */
   setLocalShell: (shellId: string) => Promise<void>
   setTerminalFontSize: (size: number) => Promise<void>
@@ -176,7 +178,7 @@ let shortcutWired = false
 
     profiles: [],
 
-    preferences: { theme: 'system', terminalTheme: 'auto', copyOnSelect: true, commandPrediction: true, terminalFontSize: 13, localShell: 'default' },
+    preferences: { theme: 'system', terminalTheme: 'auto', copyOnSelect: true, commandPrediction: true, terminalFontSize: 13, localShell: 'default', minimizeToTray: true },
 
     shells: null,
 
@@ -342,6 +344,12 @@ let shortcutWired = false
     setCommandPrediction: async (enabled) => {
       set((s) => ({ preferences: { ...s.preferences, commandPrediction: enabled } }))
       const preferences = await window.api.prefs.save({ commandPrediction: enabled })
+      set({ preferences })
+    },
+
+    setMinimizeToTray: async (enabled) => {
+      set((s) => ({ preferences: { ...s.preferences, minimizeToTray: enabled } }))
+      const preferences = await window.api.prefs.save({ minimizeToTray: enabled })
       set({ preferences })
     },
 

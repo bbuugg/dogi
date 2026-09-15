@@ -1,10 +1,13 @@
 import { join } from 'node:path'
-import { app, BrowserWindow, Menu, nativeTheme, shell } from 'electron'
-import { registerIpc } from './ipc'
+import { app, BrowserWindow, Menu, nativeTheme, Tray } from 'electron'
+import { registerIpc, openExternalSafe } from './ipc'
 import { registerShortcuts } from './shortcuts'
 import { storage } from './services/storage'
 
 let mainWindow: BrowserWindow | null = null
+let tray: Tray | null = null
+/** 真正退出程序的标志位：仅当用户从托盘「退出」触发，关闭窗口时置位 */
+let isQuiting = false
 
 /**
  * 自定义菜单：保留编辑 / 重载 / DevTools / 全屏，但**去掉 zoom 角色**。
@@ -27,6 +30,40 @@ function installMenu(): void {
       }
     ])
   )
+}
+
+/**
+ * 显示并聚焦主窗口（从托盘图标恢复时调用）。
+ */
+function showMainWindow(): void {
+  if (!mainWindow) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+}
+
+/**
+ * 创建系统托盘图标与右键菜单。点击图标在「显示/隐藏」间切换；
+ * 右键菜单提供「显示主窗口」与「退出」。退出会真正关闭程序。
+ */
+function createTray(): void {
+  // 托盘图标：开发时取项目 resources 目录；打包后由 extraResources 带入安装目录 resources
+  const iconPath = app.isPackaged
+    ? join(process.resourcesPath, 'app-icon.png')
+    : join(import.meta.dirname, '../../resources/app-icon.png')
+  tray = new Tray(iconPath)
+  tray.setToolTip('OpsDesk')
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: '显示主窗口', click: () => showMainWindow() },
+      { type: 'separator' },
+      { label: '退出', click: () => app.quit() }
+    ])
+  )
+  tray.on('click', () => {
+    if (mainWindow?.isVisible()) mainWindow.hide()
+    else showMainWindow()
+  })
 }
 
 function createWindow(): void {
@@ -88,14 +125,22 @@ function createWindow(): void {
     }
   })
 
-  // 外部链接交给系统浏览器
+  // 外部链接交给系统浏览器（仅放行常见协议，避免未知协议触发系统弹窗）
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url)
+    openExternalSafe(url)
     return { action: 'deny' }
   })
 
   mainWindow.on('resize', saveBounds)
   mainWindow.on('move', saveBounds)
+  // 关闭时：未真正退出且开启了「最小化到托盘」则隐藏而非销毁，
+  // 程序继续在托盘运行；从托盘「退出」会置 isQuiting 让窗口真正关闭。
+  mainWindow.on('close', (e) => {
+    if (!isQuiting && storage.getPreferences().minimizeToTray) {
+      e.preventDefault()
+      mainWindow?.hide()
+    }
+  })
   mainWindow.on('closed', () => {
     mainWindow = null
   })
@@ -121,10 +166,24 @@ app.whenReady().then(() => {
   registerIpc(() => mainWindow)
   createWindow()
   registerShortcuts(() => mainWindow)
+  createTray()
 
   app.on('activate', () => {
+    // 窗口已存在（仅隐藏到托盘）时恢复显示；否则重新创建
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    else showMainWindow()
   })
+})
+
+// 真正退出前置位标志，确保关闭事件不再被拦截（否则会再次最小化到托盘）
+app.on('before-quit', () => {
+  isQuiting = true
+})
+
+// 退出时销毁托盘图标，避免残留在系统托盘区
+app.on('will-quit', () => {
+  tray?.destroy()
+  tray = null
 })
 
 app.on('window-all-closed', () => {

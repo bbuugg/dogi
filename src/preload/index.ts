@@ -97,7 +97,9 @@ const api = {
     platform: process.platform,
     info: (): Promise<AppInfo> => ipcRenderer.invoke('app:info'),
     /** 订阅主进程触发的全局快捷键动作 */
-    onShortcut: (cb: (action: AppShortcutAction) => void) => subscribe('app:shortcut', cb)
+    onShortcut: (cb: (action: AppShortcutAction) => void) => subscribe('app:shortcut', cb),
+    /** 用系统默认程序打开外部链接（主进程会按安全协议过滤，避免弹窗） */
+    openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url)
   },
   window: {
     minimize: (): Promise<void> => ipcRenderer.invoke('window:minimize'),

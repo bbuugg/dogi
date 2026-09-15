@@ -2,6 +2,7 @@ import { Monitor, Moon, Sun } from 'lucide-react'
 import type { ThemeMode } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
 import { cn } from 'cn'
 
 const THEME_OPTIONS: Array<{ value: ThemeMode; label: string; icon: typeof Sun }> = [
@@ -13,9 +14,25 @@ const THEME_OPTIONS: Array<{ value: ThemeMode; label: string; icon: typeof Sun }
 export function PrefSettings() {
   const preferences = useAppStore((s) => s.preferences)
   const setTheme = useAppStore((s) => s.setTheme)
+  const minimizeToTray = useAppStore((s) => s.preferences.minimizeToTray)
+  const setMinimizeToTray = useAppStore((s) => s.setMinimizeToTray)
 
   return (
     <div className="space-y-4">
+      <div className="flex items-start justify-between gap-4 rounded-md border border-border px-3 py-3">
+        <div>
+          <Label htmlFor="minimize-to-tray">关闭时最小化到系统托盘</Label>
+          <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+            关闭主窗口时隐藏到系统托盘继续运行，从托盘图标右键菜单中选择「退出」才真正关闭程序。
+          </p>
+        </div>
+        <Switch
+          id="minimize-to-tray"
+          checked={minimizeToTray}
+          onCheckedChange={(v) => void setMinimizeToTray(v)}
+        />
+      </div>
+
       <div className="rounded-md border border-border px-3 py-3">
         <Label>主题</Label>
         <p className="mt-1 mb-2.5 text-[11px] leading-4 text-muted-foreground">

@@ -1,4 +1,4 @@
-import { ipcMain, nativeTheme, dialog, type BrowserWindow } from 'electron'
+import { ipcMain, nativeTheme, dialog, shell, type BrowserWindow } from 'electron'
 import { promises as fs } from 'node:fs'
 import { sessionManager } from './services/sessions'
 import { monitorService } from './services/monitor'
@@ -21,6 +21,19 @@ function broadcast(win: () => BrowserWindow | null, channel: string, payload: un
   const window = win()
   if (!window || window.isDestroyed()) return
   window.webContents.send(channel, payload)
+}
+
+/**
+ * 安全地用系统默认程序打开外部链接。仅放行常见协议（http(s)/mailto/file），
+ * 其余协议（ssh://、telnet://、vscode:// 等）系统往往没有注册的处理程序，
+ * 直接 shell.openExternal 会弹出"需要新应用才能打开此链接"的对话框。
+ */
+export function openExternalSafe(url: string): void {
+  if (/^(https?:\/\/|mailto:|file:\/\/)/i.test(url)) {
+    void shell.openExternal(url)
+  } else {
+    console.warn('[openExternal] 忽略未支持协议的链接:', url)
+  }
 }
 
 export function registerIpc(win: () => BrowserWindow | null): void {
@@ -204,4 +217,6 @@ export function registerIpc(win: () => BrowserWindow | null): void {
     node: process.versions.node ?? '',
     platform: process.platform
   }))
+  // 终端中点击链接时使用：按安全协议过滤后由系统默认程序打开
+  ipcMain.handle('app:openExternal', (_e, url: string) => openExternalSafe(url))
 }

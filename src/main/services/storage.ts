@@ -25,7 +25,8 @@ const DEFAULT_PREFERENCES: Preferences = {
   copyOnSelect: true,
   commandPrediction: true,
   terminalFontSize: 13,
-  localShell: 'default'
+  localShell: 'default',
+  minimizeToTray: true
 }
 
 /** 密钥类字段加密前缀（safeStorage 密文 base64） */

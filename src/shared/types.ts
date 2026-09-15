@@ -30,6 +30,11 @@ export interface Preferences {
    * 缺省 'default' 表示跟随平台默认（Windows: PowerShell；Unix: $SHELL）
    */
   localShell: string
+  /**
+   * 关闭主窗口时最小化到系统托盘而不是退出，缺省开启。
+   * 关闭程序需在托盘图标的右键菜单中选择「退出」。
+   */
+  minimizeToTray: boolean
 }
 
 /** 检测到的本地可用 shell */

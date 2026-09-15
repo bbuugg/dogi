@@ -157,7 +157,15 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
-    term.loadAddon(new WebLinksAddon())
+    // 自定义点击处理：仅当按住 Ctrl（mac 为 Cmd）点击时才打开链接，
+    // 普通点击不触发，避免误触；打开时交给主进程按安全协议过滤（http(s)/mailto/file），
+    // 避免未知协议（ssh://、vscode:// 等）触发系统"需要新应用"的弹窗
+    term.loadAddon(
+      new WebLinksAddon((event: MouseEvent, link: string) => {
+        if (!event.ctrlKey && !event.metaKey) return
+        void window.api.app.openExternal(link)
+      })
+    )
     term.open(container)
     try {
       fit.fit()
