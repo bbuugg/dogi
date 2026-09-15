@@ -65,8 +65,14 @@ export function ScriptsPage() {
   return (
     <div className="flex h-full flex-col bg-background">
       <div className="flex items-center gap-3 border-b border-border px-5 py-3">
-        <Button variant="ghost" size="sm" onClick={() => setView('terminal')}>
-          <ArrowLeft className="size-4" /> 返回终端
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          title="返回终端"
+          aria-label="返回终端"
+          onClick={() => setView('terminal')}
+        >
+          <ArrowLeft className="size-4" />
         </Button>
         <h1 className="text-sm font-semibold">脚本管理</h1>
         <span className="text-xs text-muted-foreground">共 {scripts.length} 个脚本</span>
@@ -85,7 +91,8 @@ export function ScriptsPage() {
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-5">
+      {/* 脚本内容属于「内容」，保持可选中复制 */}
+      <div className="min-h-0 flex-1 overflow-y-auto p-5 select-text">
         {editing === null ? (
           scripts.length === 0 ? (
             <div className="mx-auto mt-16 max-w-md rounded-md border border-dashed border-border px-3 py-10 text-center text-sm text-muted-foreground">
@@ -100,45 +107,52 @@ export function ScriptsPage() {
               </div>
             </div>
           ) : (
-            <div className="mx-auto max-w-3xl space-y-1">
+            // 每行 3 个脚本卡片
+            <div className="mx-auto grid max-w-6xl grid-cols-3 gap-2">
               {scripts.map((s) => (
                 <div
                   key={s.id}
-                  className="group flex items-center gap-3 rounded-md border border-border/60 px-3 py-2.5 hover:bg-secondary"
+                  className="group flex min-w-0 flex-col gap-1 rounded-md border border-border/60 px-3 py-2.5 hover:bg-secondary"
                 >
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium">{s.name}</div>
-                    {s.description && (
-                      <div className="truncate text-xs text-muted-foreground">{s.description}</div>
-                    )}
-                    <div className="truncate font-mono text-[11px] text-muted-foreground/80">
-                      {s.content.split('\n')[0] || ''}
+                  <div className="flex items-start gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium">{s.name}</div>
+                      {s.description && (
+                        <div className="truncate text-xs text-muted-foreground">
+                          {s.description}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex shrink-0 items-center gap-0.5">
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        title="选择主机运行"
+                        onClick={() => setRunScriptDialog(true, s.id)}
+                      >
+                        <Play className="size-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        title="编辑"
+                        onClick={() => startEdit(s)}
+                      >
+                        <Pencil className="size-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        title="删除"
+                        onClick={() => void remove(s.id)}
+                      >
+                        <Trash2 className="size-4 text-destructive" />
+                      </Button>
                     </div>
                   </div>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    title="选择主机运行"
-                    onClick={() => setRunScriptDialog(true, s.id)}
-                  >
-                    <Play className="size-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    title="编辑"
-                    onClick={() => startEdit(s)}
-                  >
-                    <Pencil className="size-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    title="删除"
-                    onClick={() => void remove(s.id)}
-                  >
-                    <Trash2 className="size-4 text-destructive" />
-                  </Button>
+                  <div className="truncate font-mono text-[11px] text-muted-foreground/80">
+                    {s.content.split('\n')[0] || ''}
+                  </div>
                 </div>
               ))}
             </div>

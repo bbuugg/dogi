@@ -146,7 +146,7 @@ export function RunScriptDialog() {
           {script && (
             <div className="grid gap-1.5">
               <Label>将执行</Label>
-              <pre className="max-h-32 overflow-auto rounded-md border border-border/60 bg-secondary/40 p-2 font-mono text-[11px] whitespace-pre-wrap text-muted-foreground">
+              <pre className="max-h-32 overflow-auto rounded-md border border-border/60 bg-secondary/40 p-2 font-mono text-[11px] whitespace-pre-wrap text-muted-foreground select-text">
                 {script.content}
               </pre>
             </div>

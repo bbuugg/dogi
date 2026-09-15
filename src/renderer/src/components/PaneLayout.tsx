@@ -192,7 +192,7 @@ function GroupView({ groupId }: { groupId: string }) {
       {/* 标签页条 */}
       <div
         className={cn(
-          'select-none flex h-8 shrink-0 items-stretch border-b',
+          'flex h-8 shrink-0 items-stretch border-b',
           active ? 'border-border' : 'border-border/60'
         )}
       >

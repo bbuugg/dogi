@@ -1,9 +1,7 @@
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Separator } from '@/components/ui/separator'
 import { useAppStore } from '@/stores/app-store'
-import type { AppInfo } from '@shared/types'
-import { Command as CommandIcon, Monitor, Pencil, Plus, Server, Trash2 } from 'lucide-react'
+import { Pencil, Plus, Server, Trash2 } from 'lucide-react'
 import { ChevronDown } from 'lucide-react'
 import {
   DropdownMenu,
@@ -11,21 +9,14 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
-import { useEffect, useState } from 'react'
 
 export function Sidebar() {
   const profiles = useAppStore((s) => s.profiles)
   const sessions = useAppStore((s) => s.sessions)
   const connectSsh = useAppStore((s) => s.connectSsh)
   const setSshDialog = useAppStore((s) => s.setSshDialog)
-  const setCommandPaletteOpen = useAppStore((s) => s.setCommandPaletteOpen)
   const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth)
   const refreshProfiles = useAppStore((s) => s.refreshProfiles)
-  const [appInfo, setAppInfo] = useState<AppInfo | null>(null)
-
-  useEffect(() => {
-    void window.api.app.info().then(setAppInfo)
-  }, [])
 
   const handleDeleteProfile = async (id: string, name: string) => {
     if (!window.confirm(`确定删除 SSH 配置「${name}」吗？`)) return
@@ -35,7 +26,7 @@ export function Sidebar() {
 
   return (
     <aside
-      className="select-none flex shrink-0 flex-col bg-sidebar"
+      className="flex shrink-0 flex-col bg-sidebar"
       style={{ width: sidebarWidth }}
     >
       <div className="flex-1 overflow-y-auto p-2">
@@ -74,8 +65,13 @@ export function Sidebar() {
               <div
                 key={profile.id}
                 className="group flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-sidebar-accent"
-                onClick={() => void connectSsh(profile)}
-                title={`连接 ${profile.username}@${profile.host}`}
+                // 双击才连接，避免单击误触
+                onDoubleClick={(e) => {
+                  // 行内按钮（编辑 / 删除）上的双击不触发连接
+                  if ((e.target as HTMLElement).closest('button')) return
+                  void connectSsh(profile)
+                }}
+                title={`双击连接 ${profile.username}@${profile.host}`}
               >
                 <Server className="size-4 shrink-0 text-muted-foreground" />
                 <div className="min-w-0 flex-1">
@@ -116,24 +112,6 @@ export function Sidebar() {
           })}
         </div>
 
-        {/* 全部功能入口（脚本管理、主机、设置等都在命令面板里） */}
-        <div className="mt-3">
-          <Button
-            variant="secondary"
-            size="sm"
-            className="mb-1 w-full justify-start gap-2"
-            title="脚本、主机、设置等全部功能的统一入口"
-            onClick={() => setCommandPaletteOpen(true)}
-          >
-            <CommandIcon className="size-4" /> 命令面板 (Ctrl+Shift+P)
-          </Button>
-        </div>
-      </div>
-
-      <Separator />
-      <div className="flex items-center gap-1.5 px-4 py-2 text-[10px] text-muted-foreground">
-        <Monitor className="size-3" />
-        Electron {appInfo?.electron ?? '-'} · v{appInfo?.version ?? '-'}
       </div>
     </aside>
   )

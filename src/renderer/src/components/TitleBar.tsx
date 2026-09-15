@@ -30,7 +30,7 @@ export function TitleBar() {
       {isMac ? (
         <div className="w-[76px] shrink-0" />
       ) : (
-        <div className="flex w-36 shrink-0 items-center gap-2 pl-3 select-none">
+        <div className="flex w-36 shrink-0 items-center gap-2 pl-3">
           <img src={appIcon} alt="OpsDesk" className="size-5" draggable={false} />
           <span className="text-xs font-semibold">OpsDesk</span>
         </div>

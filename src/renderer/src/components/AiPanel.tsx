@@ -66,7 +66,7 @@ function ToolPartCard({ part }: { part: AiMessagePart }) {
 
   return (
     <details className="my-1.5 rounded-md text-xs">
-      <summary className="flex cursor-pointer select-none items-center gap-1.5 px-2 py-1.5 text-muted-foreground hover:text-foreground">
+      <summary className="flex cursor-pointer items-center gap-1.5 px-2 py-1.5 text-muted-foreground hover:text-foreground">
         {part.type === 'tool-result' && part.isError ? (
           <span className="text-destructive">✕</span>
         ) : (
@@ -153,7 +153,7 @@ function CommandConfirmCard() {
   const target = sessions.find((s) => s.id === pendingConfirm.sessionId)
 
   return (
-    <div className="mx-3 mb-2 rounded-md border border-amber-500/60 bg-amber-500/10 p-2.5">
+    <div className="mx-3 mb-2 rounded-md border border-amber-500/60 bg-amber-500/10 p-2.5 select-text">
       <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-400">
         <ShieldCheck className="size-3.5 shrink-0" />
         允许 AI 执行这条命令？
@@ -264,8 +264,8 @@ export function AiPanel() {
         </Button>
       </div>
 
-      {/* 消息区 */}
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
+      {/* 消息区：AI 回复属于「内容」，保持可选中复制 */}
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto select-text">
         <div className="space-y-3 p-3">
           {messages.length === 0 && (
             <div className="mt-16 flex flex-col items-center gap-3 text-center text-muted-foreground">

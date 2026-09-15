@@ -365,6 +365,8 @@ let shortcutWired = false
         }
         return { sessions: [...s.sessions, info], groups, activeGroupId, activeSessionId: info.id }
       })
+      // 切回终端视图，避免在脚本管理页等其它页面新建后看不到终端
+      get().setView('terminal')
     },
 
     connectSsh: async (profile) => {
@@ -391,13 +393,14 @@ let shortcutWired = false
         }
         return { sessions: [...s.sessions, info], groups, activeGroupId, activeSessionId: info.id }
       })
+      // 连接后切回终端视图（连接可能是在脚本管理页等其它页面发起的）
+      get().setView('terminal')
       return info
     },
 
     runScriptOnHost: async (profile, script) => {
+      // connectSsh 内部已把视图切回终端
       const info = await get().connectSsh(profile)
-      // 切到终端视图，便于观察脚本执行过程
-      get().setView('terminal')
       return window.api.terminal.runScript(info.id, scriptToTerminalInput(script.content))
     },
 

@@ -23,6 +23,21 @@
   }
   html {
     @apply font-sans;
+
+    /* 桌面应用：界面默认不可选中，避免像网页一样拖出蓝色选区 / 双击选中按钮文字。
+       需要复制的内容用 select-text 显式开放（见下），这样规则集中在两处而不是散落在各组件里。
+       注意：Radix 的 dialog / menu / popover 都 portal 到 body，所以规则必须挂在 html/body 上，
+       挂在 App 根节点上的 class 覆盖不到它们。 */
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  /* 可编辑控件必须保持可选中，否则无法用鼠标选择 / 替换已输入内容 */
+  input,
+  textarea,
+  [contenteditable='true'] {
+    user-select: text;
+    -webkit-user-select: text;
   }
 }
 

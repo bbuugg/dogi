@@ -10,6 +10,7 @@ import { PaneLayout } from '@/components/PaneLayout'
 import { CommandPalette } from '@/components/CommandPalette'
 import { RunScriptDialog } from '@/components/RunScriptDialog'
 import { ScriptsPage } from '@/components/ScriptsPage'
+import { StatusBar } from '@/components/StatusBar'
 import { ResizeHandle } from '@/components/ResizeHandle'
 import { Button } from '@/components/ui/button'
 
@@ -17,7 +18,7 @@ function EmptyState() {
   const createLocalSession = useAppStore((s) => s.createLocalSession)
   const setSshDialog = useAppStore((s) => s.setSshDialog)
   return (
-    <div className="select-none flex h-full flex-col items-center justify-center gap-4 text-muted-foreground">
+    <div className="flex h-full flex-col items-center justify-center gap-4 text-muted-foreground">
       <TerminalSquare className="size-12 opacity-30" />
       <div className="text-sm">从左侧新建本地终端或连接 SSH</div>
       <div className="flex gap-2">
@@ -77,6 +78,9 @@ export default function App() {
           </>
         )}
       </div>
+
+      {/* 底部功能条（类 VS Code 状态栏），整宽 */}
+      <StatusBar />
 
       <SshProfileDialog />
       <SettingsDialog />
