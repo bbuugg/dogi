@@ -99,3 +99,11 @@
 
 - 无 GUI 截图环境时用 CDP 验证：启动加 `--remote-debugging-port=9333`，`curl http://127.0.0.1:9333/json/list` 取页面 WebSocket，`Runtime.evaluate` 驱动 UI。复杂表达式务必写成脚本文件执行（`node -e` 多层转义易错）。
 - 旧 Electron 实例会残留并占用调试端口，验证前先 `taskkill //F //IM electron.exe`，以 page id 变化确认是新实例。
+
+### 16. did-finish-load 里 setZoomFactor 会让隐藏窗口永不显示
+
+- **触发信号**：构建（`electron .` 加载 out/renderer）后进程在任务管理器里活着，但窗口不出现；dev（`VITE_DEV_SERVER_URL`）一切正常。
+- **根因/约束**：窗口是 `show: false` + `ready-to-show` 才 `show()`。`file://` 页面 + 隐藏窗口下，`did-finish-load` 里调 `webContents.setZoomFactor()` 触发的重布局会让首帧永远不产出 → `ready-to-show` 永不触发 → 窗口永不显示。dev 走 `loadURL(http)`，渲染端有 HMR 等后续活动会补触发首帧，所以 dev 掩盖了问题。
+- **正确做法**：zoom 复位只放在 ① 窗口创建后（loadFile 之前，无害）；② `ready-to-show` 里 `show()` 之后；③ `did-finish-load` 里仅当 `mainWindow.isVisible()` 时执行（reload 场景）。见 `src/main/index.ts` createWindow。
+- **验证方式**：`npm run build` 后 `electron .` 应出现窗口；也可用 Win32 `EnumWindows + IsWindowVisible` 脚本断言主窗口 `visible=True`。
+- **排查技巧**：这种"进程在、无窗口"的问题，主进程 stderr 往往完全干净（err.log 空）。给 main 加 `console.error` 诊断事件时序（did-finish-load / ready-to-show / 强制 show）是最快定位手段。

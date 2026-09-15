@@ -72,12 +72,21 @@ function createWindow(): void {
   // 终端缩放改用字号（见 TerminalView）；整页缩放强制复位到 100%。
   // Chromium 会按 origin 记住 zoom level，并在导航完成后重新应用，
   // 因此除创建时设置外，还要在页面加载完成后复位一次，避免历史缩放残留。
+  // ⚠️ 不能在 did-finish-load（窗口尚未显示、show:false）时调 setZoomFactor：
+  //    file:// 页面 + 隐藏窗口下，zoom 变更触发的重布局会让首帧永远不产出，
+  //    ready-to-show 不触发 → 窗口永不显示（进程在、无页面）。dev 正常是因为
+  //    loadURL(http) 下渲染端有 HMR 等后续活动会补触发首帧。
+  //    故复位挪到 ready-to-show（此时首帧已产出）以及窗口可见时的 did-finish-load（reload 场景）。
   mainWindow.webContents.setZoomFactor(1)
-  mainWindow.webContents.on('did-finish-load', () => {
+  mainWindow.on('ready-to-show', () => {
+    mainWindow?.show()
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.setZoomFactor(1)
   })
-
-  mainWindow.on('ready-to-show', () => mainWindow?.show())
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+      mainWindow.webContents.setZoomFactor(1)
+    }
+  })
 
   // 外部链接交给系统浏览器
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
