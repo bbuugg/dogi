@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Copy, Minus, Settings, Sparkles, Square, X } from 'lucide-react'
+import { Copy, Minus, Sparkles, Square, X } from 'lucide-react'
 import { cn } from 'cn'
 import { useAppStore } from '@/stores/app-store'
 import { Button } from '@/components/ui/button'
@@ -18,7 +18,6 @@ export function TitleBar() {
   const [maximized, setMaximized] = useState(false)
   const aiPanelOpen = useAppStore((s) => s.ui.aiPanelOpen)
   const setAiPanelOpen = useAppStore((s) => s.setAiPanelOpen)
-  const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
 
   useEffect(() => {
     void window.api.window.isMaximized().then(setMaximized)
@@ -47,15 +46,6 @@ export function TitleBar() {
           onClick={() => setAiPanelOpen(!aiPanelOpen)}
         >
           <Sparkles className={cn('size-4', aiPanelOpen && 'text-primary')} />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-8"
-          title="设置"
-          onClick={() => setSettingsOpen(true)}
-        >
-          <Settings className="size-4" />
         </Button>
       </div>
 
