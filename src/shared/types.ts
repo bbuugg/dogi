@@ -3,6 +3,20 @@
 export type ThemeMode = 'system' | 'light' | 'dark'
 
 /**
+ * 界面配色方案（强调色）：只影响按钮、选中态、焦点框等强调色，
+ * 中性色（背景/边框/文字）仍由明暗主题（ThemeMode）决定。
+ */
+export type ColorThemeName =
+  | 'neutral'
+  | 'blue'
+  | 'cyan'
+  | 'green'
+  | 'violet'
+  | 'rose'
+  | 'orange'
+  | 'amber'
+
+/**
  * 终端配色方案：
  * - auto：跟随应用明暗主题
  * - 其余为固定配色，不随应用主题变化
@@ -17,6 +31,8 @@ export type TerminalThemeName =
 
 export interface Preferences {
   theme: ThemeMode
+  /** 界面配色方案（强调色），缺省 neutral */
+  colorTheme: ColorThemeName
   /** 终端配色方案，缺省 auto（跟随应用主题） */
   terminalTheme: TerminalThemeName
   /** 选中终端文本时自动复制到剪贴板，缺省开启 */

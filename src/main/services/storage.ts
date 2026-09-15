@@ -23,6 +23,7 @@ interface StoreSchema {
 const DEFAULT_AI_SETTINGS: AiSettings = { permissionMode: 'full' }
 const DEFAULT_PREFERENCES: Preferences = {
   theme: 'system',
+  colorTheme: 'neutral',
   terminalTheme: 'auto',
   copyOnSelect: true,
   commandPrediction: true,

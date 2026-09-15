@@ -7,6 +7,7 @@ import type {
   AiPermissionMode,
   AiSettings,
   AiStreamEvent,
+  ColorThemeName,
   Preferences,
   ServerMetrics,
   SessionInfo,
@@ -19,6 +20,7 @@ import type {
 import type { AppShortcutAction } from '@shared/types'
 import { clampTerminalFontSize } from '@/lib/terminal-font'
 import { scriptToTerminalInput } from '@/lib/script'
+import { applyColorTheme } from '@/lib/theme'
 import {
   firstGroupId,
   genPaneId,
@@ -231,6 +233,8 @@ interface AppStore {
   setAiPermissionMode: (mode: AiPermissionMode) => Promise<void>
   resolveAiConfirm: (approved: boolean) => Promise<void>
   setTheme: (mode: ThemeMode) => Promise<void>
+  /** 设置界面配色方案（强调色，立即生效并持久化） */
+  setColorTheme: (name: ColorThemeName) => Promise<void>
   setTerminalTheme: (name: TerminalThemeName) => Promise<void>
   setCopyOnSelect: (enabled: boolean) => Promise<void>
   setCommandPrediction: (enabled: boolean) => Promise<void>
@@ -290,7 +294,7 @@ let shortcutWired = false
 
     scripts: [],
 
-    preferences: { theme: 'system', terminalTheme: 'auto', copyOnSelect: true, commandPrediction: true, terminalFontSize: 13, localShell: 'default', minimizeToTray: true, monitorInterval: 2000 },
+    preferences: { theme: 'system', colorTheme: 'neutral', terminalTheme: 'auto', copyOnSelect: true, commandPrediction: true, terminalFontSize: 13, localShell: 'default', minimizeToTray: true, monitorInterval: 2000 },
 
     shells: null,
 
@@ -326,6 +330,8 @@ let shortcutWired = false
         window.api.scripts.list()
       ])
       set({ profiles, aiConfigs: configs, aiSettings: settings, preferences, shells, scripts })
+      // 配色在偏好加载后立即应用（之前用默认中性配色）
+      applyColorTheme(preferences.colorTheme)
 
       // 全局快捷键：主进程触发后在此分发到具体 UI 动作
       if (!shortcutWired) {
@@ -642,6 +648,14 @@ let shortcutWired = false
 
     setTheme: async (mode) => {
       const preferences = await window.api.prefs.save({ theme: mode })
+      set({ preferences })
+    },
+
+    setColorTheme: async (name) => {
+      // 立即生效（改 html 的 data-color-theme），再持久化
+      applyColorTheme(name)
+      set((s) => ({ preferences: { ...s.preferences, colorTheme: name } }))
+      const preferences = await window.api.prefs.save({ colorTheme: name })
       set({ preferences })
     },
 

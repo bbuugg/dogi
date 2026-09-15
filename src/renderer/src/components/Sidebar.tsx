@@ -1,4 +1,5 @@
-import { Badge } from '@/components/ui/badge'
+import { useState } from 'react'
+import type { SshProfile } from '@shared/types'
 import { Button } from '@/components/ui/button'
 import { useAppStore } from '@/stores/app-store'
 import { Pencil, Plus, Server, Trash2 } from 'lucide-react'
@@ -9,18 +10,38 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger
+} from '@/components/ui/context-menu'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle
+} from '@/components/ui/alert-dialog'
 
 export function Sidebar() {
   const profiles = useAppStore((s) => s.profiles)
-  const sessions = useAppStore((s) => s.sessions)
   const connectSsh = useAppStore((s) => s.connectSsh)
   const setSshDialog = useAppStore((s) => s.setSshDialog)
   const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth)
   const refreshProfiles = useAppStore((s) => s.refreshProfiles)
+  /** 待确认删除的 SSH 配置（非 null 时弹出确认框） */
+  const [pendingDelete, setPendingDelete] = useState<SshProfile | null>(null)
 
-  const handleDeleteProfile = async (id: string, name: string) => {
-    if (!window.confirm(`确定删除 SSH 配置「${name}」吗？`)) return
-    await window.api.ssh.remove(id)
+  const confirmDelete = async () => {
+    const target = pendingDelete
+    if (!target) return
+    setPendingDelete(null)
+    await window.api.ssh.remove(target.id)
     await refreshProfiles()
   }
 
@@ -58,61 +79,67 @@ export function Sidebar() {
             </div>
           )}
           {profiles.map((profile) => {
-            const connectedCount = sessions.filter(
-              (s) => s.profileId === profile.id
-            ).length
             return (
-              <div
-                key={profile.id}
-                className="group flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-sidebar-accent"
-                // 双击才连接，避免单击误触
-                onDoubleClick={(e) => {
-                  // 行内按钮（编辑 / 删除）上的双击不触发连接
-                  if ((e.target as HTMLElement).closest('button')) return
-                  void connectSsh(profile)
-                }}
-                title={`双击连接 ${profile.username}@${profile.host}`}
-              >
-                <Server className="size-4 shrink-0 text-muted-foreground" />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-xs font-medium">{profile.name}</div>
-                  <div className="truncate text-[10px] text-muted-foreground">
-                    {profile.username}@{profile.host}:{profile.port}
+              // 右键菜单：编辑 / 删除（行内不再放按钮）
+              <ContextMenu key={profile.id}>
+                <ContextMenuTrigger asChild>
+                  <div
+                    className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-sidebar-accent"
+                    // 双击才连接，避免单击误触
+                    onDoubleClick={() => void connectSsh(profile)}
+                    title={`双击连接 ${profile.username}@${profile.host}`}
+                  >
+                    <Server className="size-4 shrink-0 text-muted-foreground" />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-xs font-medium">{profile.name}</div>
+                      <div className="truncate text-[10px] text-muted-foreground">
+                        {profile.username}@{profile.host}:{profile.port}
+                      </div>
+                    </div>
                   </div>
-                </div>
-                {connectedCount > 0 && (
-                  <Badge variant="secondary" className="h-4 px-1 text-[9px]">
-                    {connectedCount}
-                  </Badge>
-                )}
-                <div className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
-                  <button
-                    className="rounded p-1 text-muted-foreground hover:bg-background hover:text-foreground"
-                    title="编辑"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      setSshDialog(true, profile)
-                    }}
-                  >
-                    <Pencil className="size-3" />
-                  </button>
-                  <button
-                    className="rounded p-1 text-muted-foreground hover:bg-background hover:text-destructive"
-                    title="删除"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      void handleDeleteProfile(profile.id, profile.name)
-                    }}
-                  >
-                    <Trash2 className="size-3" />
-                  </button>
-                </div>
-              </div>
+                </ContextMenuTrigger>
+                <ContextMenuContent className="w-36">
+                  <ContextMenuItem onClick={() => void connectSsh(profile)}>
+                    <Server className="size-3.5" /> 连接
+                  </ContextMenuItem>
+                  <ContextMenuItem onClick={() => setSshDialog(true, profile)}>
+                    <Pencil className="size-3.5" /> 编辑
+                  </ContextMenuItem>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem variant="destructive" onClick={() => setPendingDelete(profile)}>
+                    <Trash2 className="size-3.5" /> 删除
+                  </ContextMenuItem>
+                </ContextMenuContent>
+              </ContextMenu>
             )
           })}
         </div>
 
       </div>
+
+      {/* 删除确认（AlertDialog） */}
+      <AlertDialog
+        open={pendingDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingDelete(null)
+        }}
+      >
+        <AlertDialogContent size="sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除 SSH 连接？</AlertDialogTitle>
+            <AlertDialogDescription>
+              「{pendingDelete?.name}」（{pendingDelete?.username}@{pendingDelete?.host}:
+              {pendingDelete?.port}）将从列表中移除，该操作不可撤销。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" onClick={() => void confirmDelete()}>
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </aside>
   )
 }

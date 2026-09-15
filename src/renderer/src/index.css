@@ -330,3 +330,93 @@
   --sidebar-ring:
       oklch(0.556 0 0);
 }
+
+/* ------------------------------------------------------------------
+ * 界面配色（强调色）：由 html 的 data-color-theme 属性切换（见 lib/theme.ts）。
+ * 只覆盖强调色相关变量，中性色（背景/边框/文字）仍由 :root 与 .dark 决定；
+ * 不设置该属性时即为默认的中性配色。新增配色需同时更新 lib/color-themes.ts。
+ * ------------------------------------------------------------------ */
+:root[data-color-theme='blue'] {
+  --primary: oklch(0.52 0.19 258);
+  --primary-foreground: oklch(0.985 0.01 258);
+  --ring: oklch(0.63 0.16 258);
+}
+
+.dark[data-color-theme='blue'] {
+  --primary: oklch(0.74 0.13 258);
+  --primary-foreground: oklch(0.2 0.04 258);
+  --ring: oklch(0.58 0.12 258);
+}
+
+:root[data-color-theme='cyan'] {
+  --primary: oklch(0.55 0.11 195);
+  --primary-foreground: oklch(0.985 0.01 195);
+  --ring: oklch(0.66 0.1 195);
+}
+
+.dark[data-color-theme='cyan'] {
+  --primary: oklch(0.78 0.09 195);
+  --primary-foreground: oklch(0.21 0.03 195);
+  --ring: oklch(0.6 0.08 195);
+}
+
+:root[data-color-theme='green'] {
+  --primary: oklch(0.53 0.13 152);
+  --primary-foreground: oklch(0.985 0.01 152);
+  --ring: oklch(0.64 0.11 152);
+}
+
+.dark[data-color-theme='green'] {
+  --primary: oklch(0.76 0.11 152);
+  --primary-foreground: oklch(0.2 0.03 152);
+  --ring: oklch(0.58 0.09 152);
+}
+
+:root[data-color-theme='violet'] {
+  --primary: oklch(0.51 0.2 293);
+  --primary-foreground: oklch(0.985 0.01 293);
+  --ring: oklch(0.62 0.17 293);
+}
+
+.dark[data-color-theme='violet'] {
+  --primary: oklch(0.74 0.14 293);
+  --primary-foreground: oklch(0.21 0.04 293);
+  --ring: oklch(0.58 0.12 293);
+}
+
+:root[data-color-theme='rose'] {
+  --primary: oklch(0.55 0.2 12);
+  --primary-foreground: oklch(0.985 0.01 12);
+  --ring: oklch(0.65 0.17 12);
+}
+
+.dark[data-color-theme='rose'] {
+  --primary: oklch(0.76 0.14 12);
+  --primary-foreground: oklch(0.21 0.04 12);
+  --ring: oklch(0.6 0.12 12);
+}
+
+:root[data-color-theme='orange'] {
+  --primary: oklch(0.6 0.16 48);
+  --primary-foreground: oklch(0.985 0.01 48);
+  --ring: oklch(0.7 0.13 48);
+}
+
+.dark[data-color-theme='orange'] {
+  --primary: oklch(0.79 0.13 55);
+  --primary-foreground: oklch(0.23 0.04 48);
+  --ring: oklch(0.62 0.11 48);
+}
+
+:root[data-color-theme='amber'] {
+  --primary: oklch(0.64 0.14 85);
+  /* 偏黄的强调色用深色文字才够对比 */
+  --primary-foreground: oklch(0.22 0.03 85);
+  --ring: oklch(0.72 0.12 85);
+}
+
+.dark[data-color-theme='amber'] {
+  --primary: oklch(0.8 0.12 85);
+  --primary-foreground: oklch(0.24 0.03 85);
+  --ring: oklch(0.64 0.1 85);
+}

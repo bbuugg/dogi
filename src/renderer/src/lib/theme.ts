@@ -1,6 +1,17 @@
 import { useEffect, useState } from 'react'
+import type { ColorThemeName } from '@shared/types'
 
 const DARK_QUERY = '(prefers-color-scheme: dark)'
+
+/**
+ * 应用界面配色：写 html 的 data-color-theme 属性，CSS 里对应 `[data-color-theme='…']`。
+ * 中性配色是默认值，移除属性即可。
+ */
+export function applyColorTheme(name: ColorThemeName): void {
+  const el = document.documentElement
+  if (name === 'neutral') el.removeAttribute('data-color-theme')
+  else el.setAttribute('data-color-theme', name)
+}
 
 /**
  * 同步初始化 html 根元素的主题 class。

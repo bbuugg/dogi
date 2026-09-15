@@ -4,6 +4,16 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle
+} from '@/components/ui/alert-dialog'
 import { useAppStore } from '@/stores/app-store'
 import type { ScriptEntry } from '@shared/types'
 
@@ -20,6 +30,8 @@ export function ScriptsPage() {
   const [description, setDescription] = useState('')
   const [content, setContent] = useState('')
   const [saving, setSaving] = useState(false)
+  /** 待确认删除的脚本（非 null 时弹出确认框） */
+  const [pendingDelete, setPendingDelete] = useState<ScriptEntry | null>(null)
 
   const startAdd = () => {
     setEditing({ id: '', name: '', content: '', createdAt: 0, updatedAt: 0 })
@@ -56,9 +68,11 @@ export function ScriptsPage() {
     }
   }
 
-  const remove = async (id: string) => {
-    if (!window.confirm('确定删除该脚本吗？')) return
-    await window.api.scripts.remove(id)
+  const confirmDelete = async () => {
+    const target = pendingDelete
+    if (!target) return
+    setPendingDelete(null)
+    await window.api.scripts.remove(target.id)
     await refreshScripts()
   }
 
@@ -144,7 +158,7 @@ export function ScriptsPage() {
                         variant="ghost"
                         size="icon-sm"
                         title="删除"
-                        onClick={() => void remove(s.id)}
+                        onClick={() => setPendingDelete(s)}
                       >
                         <Trash2 className="size-4 text-destructive" />
                       </Button>
@@ -201,6 +215,29 @@ export function ScriptsPage() {
           </div>
         )}
       </div>
+
+      {/* 删除确认（AlertDialog） */}
+      <AlertDialog
+        open={pendingDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingDelete(null)
+        }}
+      >
+        <AlertDialogContent size="sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除脚本？</AlertDialogTitle>
+            <AlertDialogDescription>
+              「{pendingDelete?.name}」将被永久删除，该操作不可撤销。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" onClick={() => void confirmDelete()}>
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
