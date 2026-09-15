@@ -129,11 +129,10 @@ const api = {
       ipcRenderer.invoke('zmodem:saveFileTo', filePath, data)
   },
   monitor: {
-    /** 开始对指定会话进行服务器指标采集 */
-    start: (sessionId: string): Promise<void> => ipcRenderer.invoke('monitor:start', sessionId),
-    /** 停止采集 */
-    stop: (sessionId: string): Promise<void> => ipcRenderer.invoke('monitor:stop', sessionId),
-    /** 订阅监控数据推送 */
+    /**
+     * 订阅服务器指标推送；主进程在会话建立后自动采集，
+     * 采集不到数据的主机不会有推送（前端据此不显示指标）
+     */
     onData: (cb: (payload: { sessionId: string; metrics: ServerMetrics }) => void) =>
       subscribe('monitor:data', cb)
   }

@@ -97,7 +97,10 @@ function withoutSession(
 
 /** 关闭会话后统一维护：更新组、从布局摘掉空组、折叠单子节点、重选焦点 */
 function applyTabClose(
-  s: Pick<AppStore, 'sessions' | 'layout' | 'groups' | 'activeGroupId' | 'activeSessionId' | 'exitedSessions'>,
+  s: Pick<
+    AppStore,
+    'sessions' | 'layout' | 'groups' | 'activeGroupId' | 'activeSessionId' | 'exitedSessions' | 'monitors'
+  >,
   id: string
 ): Partial<AppStore> {
   const sessions = s.sessions.filter((x) => x.id !== id)
@@ -110,7 +113,17 @@ function applyTabClose(
   const activeSessionId = activeGroupId ? (groups[activeGroupId]?.activeSessionId ?? null) : null
   const exited = new Set(s.exitedSessions)
   exited.delete(id)
-  return { sessions, groups, layout, activeGroupId, activeSessionId, exitedSessions: exited }
+  const monitors = { ...s.monitors }
+  delete monitors[id]
+  return {
+    sessions,
+    groups,
+    layout,
+    activeGroupId,
+    activeSessionId,
+    exitedSessions: exited,
+    monitors
+  }
 }
 
 interface UiState {
@@ -119,8 +132,6 @@ interface UiState {
   /** 编辑中的 SSH 配置（null=新建，undefined=关闭） */
   sshDialog: { open: boolean; editing?: SshProfile | null }
   settingsTab: 'ai' | 'terminal' | 'prefs'
-  /** 是否展开服务器监控面板 */
-  monitorOpen: boolean
   /** 是否打开脚本命令面板（Ctrl+Shift+P） */
   scriptPaletteOpen: boolean
   /** 主区域视图：终端 / 脚本管理页 */
@@ -175,11 +186,8 @@ interface AppStore {
   ui: UiState
 
   // ---------- 服务器监控 ----------
-  /** 各会话最新指标，key 为 sessionId */
+  /** 各会话最新指标，key 为 sessionId；无该 key 表示取不到数据（不显示指标） */
   monitors: Record<string, ServerMetrics>
-
-  toggleMonitor: () => void
-  setMonitorData: (sessionId: string, metrics: ServerMetrics) => void
 
   bootstrap: () => Promise<void>
   /** 创建本地终端：不传 shellId 时使用偏好设置的默认本地终端 */
@@ -289,7 +297,6 @@ let shortcutWired = false
       settingsOpen: false,
       sshDialog: { open: false, editing: null },
       settingsTab: 'prefs',
-      monitorOpen: false,
       scriptPaletteOpen: false,
       view: 'terminal',
       sidebarWidth: 240,
@@ -414,9 +421,12 @@ let shortcutWired = false
         const sessions = s.sessions.filter((x) => x.id !== id).concat(info)
         const exited = new Set(s.exitedSessions)
         exited.delete(id)
+        // 旧会话的指标随之作废（新会话的指标由主进程重新采集）
+        const monitors = { ...s.monitors }
+        delete monitors[id]
         const activeGroupId = targetGid ?? s.activeGroupId
         const activeSessionId = targetGid ? groups[targetGid].activeSessionId : s.activeSessionId
-        return { sessions, groups, activeGroupId, activeSessionId, exitedSessions: exited }
+        return { sessions, groups, activeGroupId, activeSessionId, exitedSessions: exited, monitors }
       })
       reconnectingIds.delete(id)
     },
@@ -576,12 +586,6 @@ let shortcutWired = false
     refreshScripts: async () => {
       set({ scripts: await window.api.scripts.list() })
     },
-
-    toggleMonitor: () =>
-      set((s) => ({ ui: { ...s.ui, monitorOpen: !s.ui.monitorOpen } })),
-
-    setMonitorData: (sessionId, metrics) =>
-      set((s) => ({ monitors: { ...s.monitors, [sessionId]: metrics } })),
 
     refreshAiConfigs: async () => {
       set({ aiConfigs: await window.api.ai.listConfigs() })

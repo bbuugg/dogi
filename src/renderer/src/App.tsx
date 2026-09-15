@@ -2,7 +2,7 @@ import { TerminalSquare } from 'lucide-react'
 import { useAppStore } from '@/stores/app-store'
 import { TitleBar } from '@/components/TitleBar'
 import { Sidebar } from '@/components/Sidebar'
-import { MonitorPanel } from '@/components/MonitorPanel'
+import { MonitorBadge } from '@/components/MonitorBadge'
 import { AiPanel } from '@/components/AiPanel'
 import { SshProfileDialog } from '@/components/SshProfileDialog'
 import { SettingsDialog } from '@/components/SettingsDialog'
@@ -35,7 +35,6 @@ export default function App() {
   const layout = useAppStore((s) => s.layout)
   const activeSessionId = useAppStore((s) => s.activeSessionId)
   const aiPanelOpen = useAppStore((s) => s.ui.aiPanelOpen)
-  const monitorOpen = useAppStore((s) => s.ui.monitorOpen)
   const view = useAppStore((s) => s.ui.view)
   const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth)
   const aiPanelWidth = useAppStore((s) => s.ui.aiPanelWidth)
@@ -55,14 +54,13 @@ export default function App() {
         />
 
         <main className="relative flex min-w-0 flex-1 flex-col">
-          {monitorOpen && activeSessionId && view === 'terminal' && (
-            <MonitorPanel sessionId={activeSessionId} />
-          )}
           {/* 终端区常驻挂载，切到脚本页时用 hidden 保活 xterm 实例 */}
           <div className={view === 'terminal' ? 'min-h-0 flex-1' : 'hidden'}>
             {layout ? <PaneLayout layout={layout} /> : <EmptyState />}
           </div>
           {view === 'scripts' && <ScriptsPage />}
+          {/* 底部浮动监控图标：采集不到当前会话数据时自身不渲染 */}
+          {view === 'terminal' && <MonitorBadge sessionId={activeSessionId} />}
         </main>
 
         {aiPanelOpen && (

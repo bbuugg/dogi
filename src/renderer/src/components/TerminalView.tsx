@@ -555,9 +555,8 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
     })
   }, [isActive, session.id])
 
-  // AI 面板 / 监控面板显隐会改变终端可用宽度，主动重新适配，避免关闭面板后终端仍停留在旧（较窄）宽度
+  // AI 面板显隐会改变终端可用宽度，主动重新适配，避免关闭面板后终端仍停留在旧（较窄）宽度
   const aiPanelOpen = useAppStore((s) => s.ui.aiPanelOpen)
-  const monitorOpen = useAppStore((s) => s.ui.monitorOpen)
   useEffect(() => {
     if (!isActive) return
     const raf = requestAnimationFrame(() => {
@@ -572,7 +571,7 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
       void window.api.terminal.resize(session.id, term.cols, term.rows)
     })
     return () => cancelAnimationFrame(raf)
-  }, [aiPanelOpen, monitorOpen, isActive, session.id])
+  }, [aiPanelOpen, isActive, session.id])
 
   // 初始化时布局/字体测量可能尚未稳定，首次 fit 会因 cell 尺寸为 0 而被跳过（终端停在默认列数，右侧留白）；
   // 待布局与字体就绪后再补适配，保证一打开就铺满，无需手动切换面板触发。

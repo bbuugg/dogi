@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Activity, Copy, Minus, Settings, Sparkles, Square, X } from 'lucide-react'
+import { Copy, Minus, Settings, Sparkles, Square, X } from 'lucide-react'
 import { cn } from 'cn'
 import { useAppStore } from '@/stores/app-store'
 import { Button } from '@/components/ui/button'
@@ -39,7 +39,6 @@ export function TitleBar() {
       <div className="flex min-w-0 flex-1 items-end" />
 
       <div className="app-no-drag flex items-center gap-0.5 pr-1">
-        <MonitorToggle />
         <Button
           variant="ghost"
           size="icon"
@@ -107,22 +106,5 @@ function TitleBarButton({
     >
       {children}
     </button>
-  )
-}
-
-/** 服务器监控开关 */
-function MonitorToggle() {
-  const monitorOpen = useAppStore((s) => s.ui.monitorOpen)
-  const toggleMonitor = useAppStore((s) => s.toggleMonitor)
-  return (
-    <Button
-      variant="ghost"
-      size="icon"
-      className={cn('size-7', monitorOpen && 'bg-secondary text-foreground')}
-      title="服务器监控（CPU/内存/流量等）"
-      onClick={toggleMonitor}
-    >
-      <Activity className="size-4" />
-    </Button>
   )
 }

@@ -15,6 +15,7 @@ import type {
   Preferences,
   ServerMetrics,
   ScriptEntry,
+  SessionInfo,
   SshProfile
 } from '@shared/types'
 
@@ -45,7 +46,11 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   sessionManager.on('exit', (payload: { sessionId: string; exitCode: number }) =>
     broadcast(win, 'terminal:exit', payload)
   )
-  sessionManager.on('created', (info) => broadcast(win, 'terminal:created', info))
+  sessionManager.on('created', (info: SessionInfo) => {
+    broadcast(win, 'terminal:created', info)
+    // 连接到主机后即在后台采集指标；采集不到数据的主机会自动停止（前端不显示）
+    monitorService.start(info.id)
+  })
   sessionManager.on('closed', (payload: { sessionId: string }) =>
     broadcast(win, 'terminal:closed', payload)
   )
@@ -54,14 +59,12 @@ export function registerIpc(win: () => BrowserWindow | null): void {
     monitorService.stop(sessionId)
   )
 
-  // ---------- 服务器监控（SSH 连接后查看 CPU/内存/流量等） ----------
+  // ---------- 服务器监控（自动采集 CPU/内存/流量等，仅推送有效数据） ----------
   monitorService.on(
     'data',
     (payload: { sessionId: string; metrics: ServerMetrics }) =>
       broadcast(win, 'monitor:data', payload)
   )
-  ipcMain.handle('monitor:start', (_e, sessionId: string) => monitorService.start(sessionId))
-  ipcMain.handle('monitor:stop', (_e, sessionId: string) => monitorService.stop(sessionId))
 
   // ---------- 终端控制 ----------
   ipcMain.handle('terminal:list', () => sessionManager.list())

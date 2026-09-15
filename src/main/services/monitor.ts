@@ -6,6 +6,18 @@ import type { ServerMetrics } from '@shared/types'
 const TICK_MS = 2000
 
 /**
+ * 结果无效（目标系统没有 /proc，如 Windows / BSD / macOS）的连续次数上限：
+ * 这类目标不会自愈，几轮后即停止采集，避免持续空转。
+ */
+const MAX_INVALID = 3
+
+/**
+ * 采集命令执行失败的连续次数上限：连接抖动（如 SSH 会话数受限）应能自愈，
+ * 因此阈值放宽；仅长期失败才判定该会话不可采集。
+ */
+const MAX_EXEC_FAILURES = 15
+
+/**
  * 一次性采集命令：依次输出各段，段间用固定分隔标记，便于在 Node 端解析。
  * 仅依赖 Linux 的 /proc 与 df，覆盖绝大多数服务器场景。
  */
@@ -33,9 +45,20 @@ interface NetSample {
   tx: number
 }
 
+/**
+ * 判断采集结果是否有效：命令执行成功但目标系统不含 /proc（如 Windows / BSD / macOS）
+ * 时各字段会解析为 0，这类「伪数据」不推送，前端也就不显示指标图标。
+ */
+function isSupported(m: ServerMetrics): boolean {
+  return m.memTotal > 0 || m.cores > 0 || m.disk.length > 0
+}
+
 /** 单个会话的监控器：定时采集、解析、计算速率并对外 emit 最新指标 */
 class SessionMonitor extends EventEmitter {
   private timer: NodeJS.Timeout | null = null
+  /** 连续执行失败 / 结果无效次数，达各自上限后停止采集 */
+  private execFailures = 0
+  private invalidResults = 0
   private prevTs = 0
   private prevCpuTotal = 0
   private prevCpuIdle = 0
@@ -68,12 +91,22 @@ class SessionMonitor extends EventEmitter {
     try {
       raw = await session.exec(COLLECT_CMD)
     } catch {
-      // 连接异常或远端不支持采集，跳过本轮
+      // 连接异常或目标无法执行采集命令：多为瞬时故障，连续多次失败才停止
+      this.execFailures++
+      if (this.execFailures >= MAX_EXEC_FAILURES) this.stop()
       return
     }
     const now = Date.now()
     const elapsed = this.prevTs ? (now - this.prevTs) / 1000 : 0
     const metrics = this.parse(raw, elapsed, now)
+    // 采集不到有效数据时不推送（前端据此不显示指标）
+    if (!isSupported(metrics)) {
+      this.invalidResults++
+      if (this.invalidResults >= MAX_INVALID) this.stop()
+      return
+    }
+    this.execFailures = 0
+    this.invalidResults = 0
     this.prevTs = now
     this.emit('data', metrics)
   }
@@ -197,6 +230,9 @@ class MonitorService extends EventEmitter {
 
   start(sessionId: string): void {
     if (this.monitors.has(sessionId)) return
+    // 采集依赖 Linux 的 /proc 与 df：非 Linux 的本地终端不可能取到数据，直接跳过
+    const info = sessionManager.get(sessionId)?.info
+    if (info && info.type === 'local' && process.platform !== 'linux') return
     const sm = new SessionMonitor(sessionId)
     sm.on('data', (metrics: ServerMetrics) => {
       this.emit('data', { sessionId, metrics })
