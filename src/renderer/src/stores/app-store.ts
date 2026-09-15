@@ -11,6 +11,7 @@ import type {
   ServerMetrics,
   SessionInfo,
   ShellDetectResult,
+  ScriptEntry,
   SshProfile,
   TerminalThemeName,
   ThemeMode
@@ -120,6 +121,10 @@ interface UiState {
   settingsTab: 'ai' | 'terminal' | 'prefs'
   /** 是否展开服务器监控面板 */
   monitorOpen: boolean
+  /** 是否打开脚本命令面板（Ctrl+Shift+P） */
+  scriptPaletteOpen: boolean
+  /** 主区域视图：终端 / 脚本管理页 */
+  view: 'terminal' | 'scripts'
 }
 
 /** 编辑器组：承载多个会话（标签页），并指向当前激活的会话 */
@@ -143,6 +148,9 @@ interface AppStore {
 
   // ---------- SSH ----------
   profiles: SshProfile[]
+
+  // ---------- 用户脚本 ----------
+  scripts: ScriptEntry[]
 
   // ---------- 偏好 ----------
   preferences: Preferences
@@ -189,6 +197,9 @@ interface AppStore {
 
   setAiPanelOpen: (open: boolean) => void
   setSettingsOpen: (open: boolean, tab?: UiState['settingsTab']) => void
+  setScriptPaletteOpen: (open: boolean) => void
+  setView: (view: 'terminal' | 'scripts') => void
+  refreshScripts: () => Promise<void>
   setSshDialog: (open: boolean, editing?: SshProfile | null) => void
   refreshAiConfigs: () => Promise<void>
   setActiveAiConfig: (id: string) => Promise<void>
@@ -251,6 +262,8 @@ let shortcutWired = false
 
     profiles: [],
 
+    scripts: [],
+
     preferences: { theme: 'system', terminalTheme: 'auto', copyOnSelect: true, commandPrediction: true, terminalFontSize: 13, localShell: 'default', minimizeToTray: true },
 
     shells: null,
@@ -268,20 +281,23 @@ let shortcutWired = false
       settingsOpen: false,
       sshDialog: { open: false, editing: null },
       settingsTab: 'prefs',
-      monitorOpen: false
+      monitorOpen: false,
+      scriptPaletteOpen: false,
+      view: 'terminal'
     },
 
     monitors: {},
 
     bootstrap: async () => {
-      const [profiles, configs, settings, preferences, shells] = await Promise.all([
+      const [profiles, configs, settings, preferences, shells, scripts] = await Promise.all([
         window.api.ssh.list(),
         window.api.ai.listConfigs(),
         window.api.ai.getSettings(),
         window.api.prefs.get(),
-        window.api.terminal.listShells()
+        window.api.terminal.listShells(),
+        window.api.scripts.list()
       ])
-      set({ profiles, aiConfigs: configs, aiSettings: settings, preferences, shells })
+      set({ profiles, aiConfigs: configs, aiSettings: settings, preferences, shells, scripts })
 
       // 全局快捷键：主进程触发后在此分发到具体 UI 动作
       if (!shortcutWired) {
@@ -290,6 +306,7 @@ let shortcutWired = false
           const s = get()
           if (action === 'open-settings') s.setSettingsOpen(true)
           else if (action === 'new-session') void s.createLocalSession()
+          else if (action === 'open-script-palette') s.setScriptPaletteOpen(true)
         })
       }
     },
@@ -487,6 +504,16 @@ let shortcutWired = false
       })),
     setSshDialog: (open, editing = null) =>
       set((s) => ({ ui: { ...s.ui, sshDialog: { open, editing } } })),
+
+    setScriptPaletteOpen: (open) =>
+      set((s) => ({ ui: { ...s.ui, scriptPaletteOpen: open } })),
+
+    setView: (view) =>
+      set((s) => ({ ui: { ...s.ui, view } })),
+
+    refreshScripts: async () => {
+      set({ scripts: await window.api.scripts.list() })
+    },
 
     toggleMonitor: () =>
       set((s) => ({ ui: { ...s.ui, monitorOpen: !s.ui.monitorOpen } })),

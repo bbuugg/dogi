@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import { useAppStore } from '@/stores/app-store'
 import type { AppInfo } from '@shared/types'
-import { Monitor, Pencil, Plus, Server, Trash2 } from 'lucide-react'
+import { Monitor, Pencil, Plus, Server, TerminalSquare, Trash2 } from 'lucide-react'
 import { ChevronDown } from 'lucide-react'
 import {
   DropdownMenu,
@@ -18,6 +18,9 @@ export function Sidebar() {
   const sessions = useAppStore((s) => s.sessions)
   const connectSsh = useAppStore((s) => s.connectSsh)
   const setSshDialog = useAppStore((s) => s.setSshDialog)
+  const setScriptPaletteOpen = useAppStore((s) => s.setScriptPaletteOpen)
+  const setView = useAppStore((s) => s.setView)
+  const view = useAppStore((s) => s.ui.view)
   const refreshProfiles = useAppStore((s) => s.refreshProfiles)
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null)
 
@@ -110,6 +113,27 @@ export function Sidebar() {
             )
           })}
         </div>
+
+        {/* 脚本 */}
+        <button
+          className={
+            'mb-1 mt-3 flex w-full items-center justify-between rounded-md px-2 py-1 transition-colors hover:bg-sidebar-accent ' +
+            (view === 'scripts' ? 'bg-sidebar-accent' : '')
+          }
+          onClick={() => setView('scripts')}
+          title="打开脚本管理页"
+        >
+          <span className="text-[11px] font-medium text-muted-foreground">脚本</span>
+          <TerminalSquare className="size-3.5 text-muted-foreground" />
+        </button>
+        <Button
+          variant="secondary"
+          size="sm"
+          className="mb-1 w-full justify-start gap-2"
+          onClick={() => setScriptPaletteOpen(true)}
+        >
+          <TerminalSquare className="size-4" /> 运行脚本 (Ctrl+Shift+P)
+        </Button>
       </div>
 
       <Separator />

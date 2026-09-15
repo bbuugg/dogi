@@ -14,6 +14,7 @@ import type {
   McpServerConfig,
   Preferences,
   ServerMetrics,
+  ScriptEntry,
   SshProfile
 } from '@shared/types'
 
@@ -149,6 +150,11 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   ipcMain.handle('ssh:list', () => storage.listSshProfiles())
   ipcMain.handle('ssh:save', (_e, profile: SshProfile) => storage.saveSshProfile(profile))
   ipcMain.handle('ssh:delete', (_e, id: string) => storage.deleteSshProfile(id))
+
+  // ---------- 用户脚本 CRUD ----------
+  ipcMain.handle('scripts:list', () => storage.listScripts())
+  ipcMain.handle('scripts:save', (_e, entry: ScriptEntry) => storage.saveScript(entry))
+  ipcMain.handle('scripts:delete', (_e, id: string) => storage.deleteScript(id))
 
   // ---------- AI 模型配置 ----------
   ipcMain.handle('ai:config:list', () => storage.listAiConfigs())

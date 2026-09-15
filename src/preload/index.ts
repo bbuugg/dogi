@@ -11,6 +11,7 @@ import type {
   McpServerConfig,
   McpToolInfo,
   Preferences,
+  ScriptEntry,
   ServerMetrics,
   SessionInfo,
   ShellDetectResult,
@@ -86,6 +87,12 @@ const api = {
     remove: (id: string): Promise<McpServerConfig[]> => ipcRenderer.invoke('mcp:delete', id),
     listTools: (): Promise<{ tools: McpToolInfo[]; errors: string[] }> =>
       ipcRenderer.invoke('mcp:tools')
+  },
+  scripts: {
+    list: (): Promise<ScriptEntry[]> => ipcRenderer.invoke('scripts:list'),
+    save: (entry: ScriptEntry): Promise<ScriptEntry[]> =>
+      ipcRenderer.invoke('scripts:save', entry),
+    remove: (id: string): Promise<ScriptEntry[]> => ipcRenderer.invoke('scripts:delete', id)
   },
   prefs: {
     get: (): Promise<Preferences> => ipcRenderer.invoke('prefs:get'),

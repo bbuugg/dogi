@@ -6,6 +6,7 @@ import type {
   AiSettings,
   McpServerConfig,
   Preferences,
+  ScriptEntry,
   SshProfile
 } from '@shared/types'
 
@@ -15,6 +16,7 @@ interface StoreSchema {
   mcpServers: McpServerConfig[]
   aiSettings: AiSettings
   preferences: Preferences
+  scripts: ScriptEntry[]
   windowBounds?: { x?: number; y?: number; width: number; height: number }
 }
 
@@ -39,7 +41,8 @@ class StorageService {
       aiConfigs: [],
       mcpServers: [],
       aiSettings: DEFAULT_AI_SETTINGS,
-      preferences: DEFAULT_PREFERENCES
+      preferences: DEFAULT_PREFERENCES,
+      scripts: []
     }
   })
 
@@ -138,6 +141,37 @@ class StorageService {
       this.store.get('sshProfiles').filter((p) => p.id !== id)
     )
     return this.listSshProfiles()
+  }
+
+  // ---------- 用户脚本 ----------
+  listScripts(): ScriptEntry[] {
+    return this.store.get('scripts')
+  }
+
+  /** 保存脚本（upsert）：不传 id 视为新增 */
+  saveScript(input: ScriptEntry): ScriptEntry[] {
+    const scripts = this.store.get('scripts')
+    const now = Date.now()
+    const prev = input.id ? scripts.find((s) => s.id === input.id) : undefined
+    const entry: ScriptEntry = {
+      ...input,
+      id: input.id || crypto.randomUUID(),
+      createdAt: prev?.createdAt ?? now,
+      updatedAt: now
+    }
+    const next = prev
+      ? scripts.map((s) => (s.id === entry.id ? entry : s))
+      : [...scripts, entry]
+    this.store.set('scripts', next)
+    return next
+  }
+
+  deleteScript(id: string): ScriptEntry[] {
+    this.store.set(
+      'scripts',
+      this.store.get('scripts').filter((s) => s.id !== id)
+    )
+    return this.listScripts()
   }
 
   // ---------- AI 模型配置 ----------
