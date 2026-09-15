@@ -65,7 +65,7 @@ function ToolPartCard({ part }: { part: AiMessagePart }) {
         : ''
 
   return (
-    <details className="my-1.5 rounded-md border border-border/70 bg-background/60 text-xs">
+    <details className="my-1.5 rounded-md text-xs">
       <summary className="flex cursor-pointer select-none items-center gap-1.5 px-2 py-1.5 text-muted-foreground hover:text-foreground">
         {part.type === 'tool-result' && part.isError ? (
           <span className="text-destructive">✕</span>
@@ -124,7 +124,7 @@ function MessageBubble({
     <div className="space-y-1">
       {parts.map((part, i) =>
         part.type === 'text' ? (
-          <div key={i} className="rounded-lg rounded-bl-sm bg-card px-3 py-2">
+          <div key={i} className="px-3 py-2">
             <AiMarkdown content={part.text} />
             {streaming && i === parts.length - 1 && (
               <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-primary align-middle" />
