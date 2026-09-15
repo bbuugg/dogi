@@ -34,7 +34,7 @@ export function SettingsDialog() {
     <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
       {/* 高度必须加在这层（确定高度），内层用 flex-1 + min-h-0 撑满并内部滚动；
           若把 h-[60vh] 加到内层，会被 flex-1 的 flex-basis:0% 覆盖而失效 */}
-      <DialogContent className="select-none flex h-[60vh] max-h-[85vh] w-full max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
+      <DialogContent className="select-none flex h-[60vh] max-h-[85vh] w-full max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl ring-0">
         <DialogHeader className="shrink-0 px-5 py-4">
           <DialogTitle>设置</DialogTitle>
           <DialogDescription className="text-xs">

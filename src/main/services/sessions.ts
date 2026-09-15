@@ -169,7 +169,13 @@ class SshSession implements InternalSession {
     this.onExit(1)
   }
 
+  private connectAttempt = 0
+  /** 握手阶段失败（如服务端在并发连接时短暂丢弃）时的重试次数 */
+  private readonly maxConnectAttempts = 3
+
   private connect(profile: SshProfile): void {
+    if (this.killed) return
+    this.connectAttempt++
     const config: ConnectConfig = {
       host: profile.host,
       port: profile.port || 22,
@@ -185,14 +191,18 @@ class SshSession implements InternalSession {
       config.password = profile.password
     }
 
-    this.conn
+    // 每次尝试使用独立的 Client 实例，避免失败连接的事件残留
+    const conn = new Client()
+    this.conn = conn
+    conn
       .on('ready', () => {
         if (this.killed) return
         this.ready = true
-        this.conn.shell(
+        conn.shell(
           // 用最新目标尺寸打开 shell（握手期间可能已收到渲染端下发的 resize）
           { term: TERM_TYPE, cols: this.desiredCols, rows: this.desiredRows },
           (err, stream) => {
+            if (this.killed) return
             if (err || !stream) {
               this.fail(err?.message || '无法打开 shell')
               return
@@ -219,8 +229,17 @@ class SshSession implements InternalSession {
         )
       })
       .on('error', (err: Error) => {
+        if (this.killed || this.stream) return
         this.ready = false
-        if (!this.stream) this.fail(err.message)
+        // 尚未建立 shell 且仍可重试：退避后重连（覆盖并发连接被短暂丢弃等瞬时故障）
+        if (this.connectAttempt < this.maxConnectAttempts) {
+          const delay = 600 * this.connectAttempt
+          setTimeout(() => {
+            if (!this.killed) this.connect(profile)
+          }, delay)
+          return
+        }
+        this.fail(err.message)
       })
       .connect(config)
   }
@@ -260,7 +279,11 @@ class SshSession implements InternalSession {
     } catch {
       // 忽略
     }
-    this.conn.end()
+    try {
+      this.conn.end()
+    } catch {
+      // 连接已在握手/失败中关闭
+    }
     if (!this.info.exited) {
       this.info.exited = true
       this.onExit(0)
