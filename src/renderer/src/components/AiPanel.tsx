@@ -1,20 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import {
-  CircleStop,
-  Eraser,
-  Loader2,
-  Send,
-  Settings2,
-  ShieldCheck,
-  Sparkles,
-  Terminal,
-  Wrench
-} from 'lucide-react'
-import type { AiMessagePart, AiPermissionMode } from '@shared/types'
-import { useAppStore } from '@/stores/app-store'
 import { AiMarkdown } from '@/components/AiMarkdown'
 import { Button } from '@/components/ui/button'
-import { Textarea } from '@/components/ui/textarea'
 import {
   Select,
   SelectContent,
@@ -22,6 +7,21 @@ import {
   SelectTrigger,
   SelectValue
 } from '@/components/ui/select'
+import { Textarea } from '@/components/ui/textarea'
+import { useAppStore } from '@/stores/app-store'
+import type { AiMessagePart, AiPermissionMode } from '@shared/types'
+import {
+  Eraser,
+  Loader2,
+  Send,
+  Settings2,
+  ShieldCheck,
+  Sparkles,
+  Square,
+  Terminal,
+  Wrench
+} from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 
 const TOOL_LABELS: Record<string, string> = {
   run_in_terminal: '执行终端命令',
@@ -354,7 +354,7 @@ export function AiPanel() {
                 title="停止"
                 onClick={() => void abortAi()}
               >
-                <CircleStop className="size-4" />
+                <Square className="size-4" />
               </Button>
             ) : (
               <Button
