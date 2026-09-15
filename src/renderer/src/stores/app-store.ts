@@ -189,6 +189,8 @@ interface AppStore {
   setActiveGroup: (groupId: string) => void
   /** 向当前激活组的上/下/左/右拆分出新组（镜像其会话类型） */
   splitActivePane: (direction: SplitDirectionInput) => Promise<void>
+  /** 将某个会话（标签）移动到目标组；源组若因此变空则从布局中移除 */
+  moveSessionToGroup: (sessionId: string, targetGroupId: string) => void
   /** 关闭整个组（含其全部会话） */
   closeGroup: (groupId: string) => Promise<void>
   /** 拖拽分隔条时更新某分隔节点的权重 */
@@ -447,6 +449,31 @@ let shortcutWired = false
         }
       })
     },
+
+    moveSessionToGroup: (sessionId, targetGroupId) =>
+      set((s) => {
+        const srcGid = Object.keys(s.groups).find((k) =>
+          s.groups[k].sessionIds.includes(sessionId)
+        )
+        // 同组内拖动无需处理（当前不支持组内重排）；目标组必须存在
+        if (!srcGid || srcGid === targetGroupId || !s.groups[targetGroupId]) return {}
+
+        // 先从源组摘掉该会话（源组变空会被记录为 removedGroupId）
+        const { groups: afterRemove, removedGroupId } = withoutSession(s.groups, sessionId)
+        const target = afterRemove[targetGroupId]
+        if (!target) return {}
+
+        const groups = {
+          ...afterRemove,
+          [targetGroupId]: {
+            ...target,
+            sessionIds: [...target.sessionIds, sessionId],
+            activeSessionId: sessionId
+          }
+        }
+        const layout = removedGroupId ? removeLeaf(s.layout, removedGroupId) : s.layout
+        return { groups, layout, activeGroupId: targetGroupId, activeSessionId: sessionId }
+      }),
 
     closeGroup: async (groupId) => {
       const g = get().groups[groupId]

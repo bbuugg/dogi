@@ -1,4 +1,10 @@
-import { Fragment, type PointerEvent as ReactPointerEvent, useRef } from 'react'
+import {
+  Fragment,
+  type DragEvent as ReactDragEvent,
+  type PointerEvent as ReactPointerEvent,
+  useRef,
+  useState
+} from 'react'
 import {
   ArrowDown,
   ArrowLeft,
@@ -21,6 +27,11 @@ import {
   ContextMenuTrigger
 } from '@/components/ui/context-menu'
 import type { PaneNode, SplitDirection, SplitDirectionInput } from '@/lib/pane-layout'
+
+/** 拖拽标签时用于跨组传递的 dataTransfer 类型标识 */
+const SESSION_DRAG_TYPE = 'application/x-session-id'
+/** 当前正在被拖拽的会话 ID（dragover 阶段拿不到 dataTransfer，用模块变量判断来源组） */
+let draggingSessionId: string | null = null
 
 /** 递归渲染分屏布局树 */
 export function PaneLayout({ layout }: { layout: PaneNode }) {
@@ -126,6 +137,10 @@ function GroupView({ groupId }: { groupId: string }) {
   const closeGroup = useAppStore((s) => s.closeGroup)
   const closeSession = useAppStore((s) => s.closeSession)
   const createLocalSession = useAppStore((s) => s.createLocalSession)
+  const moveSessionToGroup = useAppStore((s) => s.moveSessionToGroup)
+
+  // 是否有标签正被拖到本组上方（用于高亮放置目标）；用模块变量排除来源组
+  const [dragOver, setDragOver] = useState(false)
 
   if (!group) return null
 
@@ -141,13 +156,38 @@ function GroupView({ groupId }: { groupId: string }) {
     void splitActivePane(d)
   }
 
+  // 仅当被拖拽会话不属于本组时才作为有效放置目标
+  const canDrop = !!draggingSessionId && !group.sessionIds.includes(draggingSessionId)
+
+  const onDragOver = (e: ReactDragEvent<HTMLDivElement>) => {
+    if (!draggingSessionId) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+    if (canDrop && !dragOver) setDragOver(true)
+  }
+  const onDragLeave = (e: ReactDragEvent<HTMLDivElement>) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragOver(false)
+  }
+  const onDrop = (e: ReactDragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setDragOver(false)
+    const sid = e.dataTransfer.getData(SESSION_DRAG_TYPE) || draggingSessionId
+    if (sid) moveSessionToGroup(sid, groupId)
+    draggingSessionId = null
+  }
+
   return (
     <div
       className={cn(
         'group flex h-full w-full min-h-0 flex-col',
-        active ? 'bg-background' : 'bg-background/60'
+        active ? 'bg-background' : 'bg-background/60',
+        dragOver && 'ring-2 ring-primary/70 ring-inset'
       )}
       onMouseDown={focus}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
     >
       {/* 标签页条 */}
       <div
@@ -174,7 +214,18 @@ function GroupView({ groupId }: { groupId: string }) {
               >
                 <ContextMenuTrigger asChild>
                   <div
+                    draggable
+                    onDragStart={(e) => {
+                      draggingSessionId = sid
+                      e.dataTransfer.setData(SESSION_DRAG_TYPE, sid)
+                      e.dataTransfer.effectAllowed = 'move'
+                    }}
+                    onDragEnd={() => {
+                      draggingSessionId = null
+                      setDragOver(false)
+                    }}
                     onClick={() => setActiveSession(sid)}
+                    title="拖拽到其它面板可分屏放置"
                     className={cn(
                       'group/tab flex max-w-52 shrink-0 cursor-pointer items-center gap-1.5 border-r border-border/60 px-2.5 text-xs transition-colors',
                       isActiveTab
