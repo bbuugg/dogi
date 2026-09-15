@@ -34,8 +34,8 @@ export function SettingsDialog() {
     <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
       {/* 高度必须加在这层（确定高度），内层用 flex-1 + min-h-0 撑满并内部滚动；
           若把 h-[60vh] 加到内层，会被 flex-1 的 flex-basis:0% 覆盖而失效 */}
-      <DialogContent className="flex h-[60vh] max-h-[85vh] w-full max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
-        <DialogHeader className="shrink-0 border-b border-border px-5 py-4">
+      <DialogContent className="select-none flex h-[60vh] max-h-[85vh] w-full max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
+        <DialogHeader className="shrink-0 px-5 py-4">
           <DialogTitle>设置</DialogTitle>
           <DialogDescription className="text-xs">
             AI 配置、终端与偏好设置
@@ -44,7 +44,7 @@ export function SettingsDialog() {
 
         <div className="flex min-h-0 flex-1">
           {/* 左侧菜单 */}
-          <nav className="w-44 shrink-0 space-y-1 overflow-y-auto border-r border-border p-3">
+          <nav className="w-44 shrink-0 space-y-1 overflow-y-auto p-3">
             {MENU.map(({ value, label, desc, icon: Icon }) => {
               const active = settingsTab === value
               return (

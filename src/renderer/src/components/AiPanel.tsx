@@ -232,7 +232,7 @@ export function AiPanel() {
           value={aiSettings.activeConfigId ?? ''}
           onValueChange={(v) => void setActiveAiConfig(v)}
         >
-          <SelectTrigger className="h-7 min-w-0 flex-1 text-xs" title="切换模型">
+          <SelectTrigger className="border-none h-7 min-w-0 flex-1 text-xs" title="切换模型">
             <SelectValue placeholder="选择模型" />
           </SelectTrigger>
           <SelectContent>
@@ -326,7 +326,7 @@ export function AiPanel() {
                 onValueChange={(v) => void setAiPermissionMode(v as AiPermissionMode)}
               >
                 <SelectTrigger
-                  className="w-28 shrink-0 gap-1 px-2 text-xs"
+                  className="border-none w-28 shrink-0 gap-1 px-2 text-xs"
                   title="AI 终端执行权限（可实时切换）"
                 >
                   <SelectValue />

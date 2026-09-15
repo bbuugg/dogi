@@ -26,7 +26,7 @@ export function Sidebar() {
   }
 
   return (
-    <aside className="flex w-60 shrink-0 flex-col bg-sidebar">
+    <aside className="select-none flex w-60 shrink-0 flex-col bg-sidebar">
       <div className="flex-1 overflow-y-auto p-2">
         {/* 本地终端 */}
         <div className="mb-1 flex items-center justify-between px-2 py-1">

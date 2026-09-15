@@ -177,7 +177,7 @@ export function McpSettings() {
       </div>
 
       {servers.length === 0 && (
-        <p className="rounded-md border border-dashed border-border py-8 text-center text-xs text-muted-foreground">
+        <p className="rounded-md py-8 text-center text-xs text-muted-foreground">
           还没有 MCP 服务配置
         </p>
       )}

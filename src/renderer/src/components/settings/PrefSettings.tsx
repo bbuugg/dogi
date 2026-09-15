@@ -18,8 +18,8 @@ export function PrefSettings() {
   const setMinimizeToTray = useAppStore((s) => s.setMinimizeToTray)
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-start justify-between gap-4 rounded-md border border-border px-3 py-3">
+    <div className="space-y-5">
+      <div className="flex items-start justify-between gap-4 rounded-md">
         <div>
           <Label htmlFor="minimize-to-tray">关闭时最小化到系统托盘</Label>
           <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
@@ -33,7 +33,7 @@ export function PrefSettings() {
         />
       </div>
 
-      <div className="rounded-md border border-border px-3 py-3">
+      <div className="rounded-md">
         <Label>主题</Label>
         <p className="mt-1 mb-2.5 text-[11px] leading-4 text-muted-foreground">
           「跟随系统」随 Windows 深浅色自动切换。终端配色请在左侧「终端」中单独设置。
@@ -48,10 +48,10 @@ export function PrefSettings() {
                 aria-checked={active}
                 onClick={() => void setTheme(value)}
                 className={cn(
-                  'flex flex-col items-center gap-1.5 rounded-md border px-2 py-3 text-xs transition-colors',
+                  'flex flex-col items-center gap-1.5 rounded-md px-2 py-3 text-xs transition-colors',
                   active
-                    ? 'border-primary bg-primary/10 text-foreground'
-                    : 'border-border text-muted-foreground hover:bg-secondary hover:text-foreground'
+                    ? 'bg-primary/10 text-foreground'
+                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
                 )}
               >
                 <Icon className="size-4" />

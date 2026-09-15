@@ -280,7 +280,7 @@ export function ModelSettings() {
         </Button>
       </div>
       {aiConfigs.length === 0 && (
-        <p className="rounded-md border border-dashed border-border py-8 text-center text-xs text-muted-foreground">
+        <p className="rounded-md py-8 text-center text-xs text-muted-foreground">
           还没有模型配置，点击「新建配置」添加
         </p>
       )}

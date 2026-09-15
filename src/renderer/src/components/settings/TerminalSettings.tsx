@@ -30,8 +30,8 @@ export function TerminalSettings() {
     shells?.shells.find((s) => s.id === shells.defaultId)?.name ?? '系统默认'
 
   return (
-    <div className="space-y-4">
-      <div className="rounded-md border border-border px-3 py-3">
+    <div className="space-y-5">
+      <div className="rounded-md">
         <div className="text-sm font-medium">默认本地终端</div>
         <p className="mt-1 mb-3 text-[11px] leading-4 text-muted-foreground">
           新建本地终端时默认使用的 shell，可选项来自本机检测结果。点击标签栏「+」旁的下拉箭头也可临时使用其他 shell 新建。
@@ -54,7 +54,7 @@ export function TerminalSettings() {
         </Select>
       </div>
 
-      <div className="rounded-md border border-border px-3 py-3">
+      <div className="rounded-md">
         <div className="text-sm font-medium">终端配色</div>
         <p className="mt-1 mb-3 text-[11px] leading-4 text-muted-foreground">
           选择终端的配色方案，切换后立即对所有终端会话生效。
@@ -76,10 +76,10 @@ export function TerminalSettings() {
                 type="button"
                 onClick={() => void setTerminalTheme(preset.id as TerminalThemeName)}
                 className={cn(
-                  'flex items-center gap-2 rounded-md border px-2.5 py-2 text-left text-xs transition-colors',
+                  'flex items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs transition-colors',
                   active
-                    ? 'border-primary bg-primary/10 text-foreground'
-                    : 'border-border text-muted-foreground hover:bg-secondary hover:text-foreground'
+                    ? 'bg-primary/10 text-foreground'
+                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
                 )}
               >
                 <span
@@ -102,7 +102,7 @@ export function TerminalSettings() {
         </div>
       </div>
 
-      <div className="flex items-start justify-between gap-4 rounded-md border border-border px-3 py-3">
+      <div className="flex items-start justify-between gap-4 rounded-md">
         <div>
           <Label htmlFor="copy-on-select">选中文本即复制</Label>
           <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
@@ -116,7 +116,7 @@ export function TerminalSettings() {
         />
       </div>
 
-      <div className="flex items-start justify-between gap-4 rounded-md border border-border px-3 py-3">
+      <div className="flex items-start justify-between gap-4 rounded-md">
         <div>
           <Label htmlFor="command-prediction">命令预测补全</Label>
           <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
