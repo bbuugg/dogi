@@ -194,7 +194,7 @@ let shortcutWired = false
       aiPanelOpen: false,
       settingsOpen: false,
       sshDialog: { open: false, editing: null },
-      settingsTab: 'ai',
+      settingsTab: 'prefs',
       monitorOpen: false
     },
 
