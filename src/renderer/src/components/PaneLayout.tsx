@@ -1,0 +1,254 @@
+import { Fragment, type PointerEvent as ReactPointerEvent, useRef } from 'react'
+import {
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
+  Plus,
+  TerminalSquare,
+  X
+} from 'lucide-react'
+import { cn } from 'cn'
+import type { SessionInfo } from '@shared/types'
+import { useAppStore } from '@/stores/app-store'
+import { TerminalView } from '@/components/TerminalView'
+import type { PaneNode, SplitDirection, SplitDirectionInput } from '@/lib/pane-layout'
+
+/** 递归渲染分屏布局树 */
+export function PaneLayout({ layout }: { layout: PaneNode }) {
+  if (layout.type === 'leaf') {
+    return <GroupView groupId={layout.groupId} />
+  }
+  return (
+    <div
+      className={cn(
+        'flex h-full w-full min-h-0',
+        layout.direction === 'row' ? 'flex-row' : 'flex-col'
+      )}
+    >
+      {layout.children.map((child, i) => (
+        <Fragment key={child.id}>
+          <div
+            className="min-h-0 min-w-0"
+            style={{ flexGrow: layout.sizes[i] ?? 1, flexBasis: 0 }}
+          >
+            <PaneLayout layout={child} />
+          </div>
+          {i < layout.children.length - 1 && (
+            <Splitter
+              splitId={layout.id}
+              index={i}
+              direction={layout.direction}
+              sizes={layout.sizes}
+            />
+          )}
+        </Fragment>
+      ))}
+    </div>
+  )
+}
+
+/** 可拖拽的分隔条：调整相邻两个子面板的弹性权重 */
+function Splitter({
+  splitId,
+  index,
+  direction,
+  sizes
+}: {
+  splitId: string
+  index: number
+  direction: SplitDirection
+  sizes: number[]
+}) {
+  const resizeSplit = useAppStore((s) => s.resizeSplit)
+  const ref = useRef<HTMLDivElement>(null)
+
+  const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    const parent = ref.current?.parentElement
+    if (!parent) return
+    const rect = parent.getBoundingClientRect()
+    const axisSize = direction === 'row' ? rect.width : rect.height
+    const start = direction === 'row' ? e.clientX : e.clientY
+    const a0 = sizes[index] ?? 1
+    const b0 = sizes[index + 1] ?? 1
+    const total = a0 + b0
+    const MIN = 0.05 * total
+
+    const move = (ev: PointerEvent) => {
+      const cur = direction === 'row' ? ev.clientX : ev.clientY
+      const delta = ((cur - start) / (axisSize || 1)) * total
+      const a = Math.max(MIN, Math.min(total - MIN, a0 + delta))
+      const next = sizes.slice()
+      next[index] = a
+      next[index + 1] = total - a
+      resizeSplit(splitId, next)
+    }
+    const up = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      document.body.style.cursor = ''
+    }
+    document.body.style.cursor = direction === 'row' ? 'col-resize' : 'row-resize'
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+
+  return (
+    <div
+      ref={ref}
+      onPointerDown={onPointerDown}
+      className={cn(
+        'shrink-0 bg-border transition-colors hover:bg-primary',
+        direction === 'row' ? 'w-px cursor-col-resize' : 'h-px cursor-row-resize'
+      )}
+    />
+  )
+}
+
+/** 单个编辑器组：标题栏（标签页 + 拆分/关闭组按钮）+ 当前激活终端 */
+function GroupView({ groupId }: { groupId: string }) {
+  const group = useAppStore((s) => s.groups[groupId])
+  const sessions = useAppStore((s) => s.sessions)
+  const exited = useAppStore((s) => s.exitedSessions)
+  const active = useAppStore((s) => s.activeGroupId === groupId)
+  const setActiveGroup = useAppStore((s) => s.setActiveGroup)
+  const setActiveSession = useAppStore((s) => s.setActiveSession)
+  const splitActivePane = useAppStore((s) => s.splitActivePane)
+  const closeGroup = useAppStore((s) => s.closeGroup)
+  const closeSession = useAppStore((s) => s.closeSession)
+  const createLocalSession = useAppStore((s) => s.createLocalSession)
+
+  if (!group) return null
+
+  const focus = () => setActiveGroup(groupId)
+  // 在本组内新建终端：先让本组成为激活组，再追加标签
+  const newInGroup = () => {
+    setActiveGroup(groupId)
+    void createLocalSession()
+  }
+  // 向某方向拆分：先让本组成为激活组，再在旁新建组
+  const doSplit = (d: SplitDirectionInput) => {
+    setActiveGroup(groupId)
+    void splitActivePane(d)
+  }
+
+  return (
+    <div
+      className={cn(
+        'group flex h-full w-full min-h-0 flex-col',
+        active ? 'bg-background' : 'bg-background/60'
+      )}
+      onMouseDown={focus}
+    >
+      {/* 标签页条 */}
+      <div
+        className={cn(
+          'flex h-8 shrink-0 items-stretch border-b',
+          active ? 'border-border' : 'border-border/60'
+        )}
+      >
+        <div className="no-scrollbar flex flex-1 items-stretch overflow-x-auto">
+          {group.sessionIds.map((sid) => {
+            const session = sessions.find((x: SessionInfo) => x.id === sid)
+            const isActiveTab = group.activeSessionId === sid
+            const isExited = exited.has(sid)
+            return (
+              <div
+                key={sid}
+                onClick={() => setActiveSession(sid)}
+                className={cn(
+                  'group/tab flex max-w-52 shrink-0 cursor-pointer items-center gap-1.5 border-r border-border/60 px-2.5 text-xs transition-colors',
+                  isActiveTab
+                    ? 'bg-background text-foreground'
+                    : 'text-muted-foreground hover:text-foreground'
+                )}
+              >
+                <TerminalSquare className="size-3.5 shrink-0" />
+                <span className="truncate" title={session?.title}>
+                  {session?.title ?? '终端'}
+                </span>
+                {isExited && (
+                  <span className="shrink-0 text-[10px] text-destructive">已退出</span>
+                )}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    void closeSession(sid)
+                  }}
+                  className="ml-0.5 rounded p-0.5 opacity-0 transition-opacity hover:bg-secondary group-hover/tab:opacity-100"
+                  title="关闭标签"
+                >
+                  <X className="size-3" />
+                </button>
+              </div>
+            )
+          })}
+        </div>
+
+        {/* 组操作按钮 */}
+        <div className="flex shrink-0 items-center gap-0.5 px-1 opacity-0 transition-opacity group-hover:opacity-100">
+          <HeaderButton title="在本组新建终端" onClick={newInGroup}>
+            <Plus className="size-3.5" />
+          </HeaderButton>
+          <HeaderButton title="向上拆分" onClick={() => doSplit('up')}>
+            <ArrowUp className="size-3.5" />
+          </HeaderButton>
+          <HeaderButton title="向下拆分" onClick={() => doSplit('down')}>
+            <ArrowDown className="size-3.5" />
+          </HeaderButton>
+          <HeaderButton title="向左拆分" onClick={() => doSplit('left')}>
+            <ArrowLeft className="size-3.5" />
+          </HeaderButton>
+          <HeaderButton title="向右拆分" onClick={() => doSplit('right')}>
+            <ArrowRight className="size-3.5" />
+          </HeaderButton>
+          <HeaderButton title="关闭整个组" onClick={() => void closeGroup(groupId)}>
+            <X className="size-3.5" />
+          </HeaderButton>
+        </div>
+      </div>
+
+      {/* 当前激活终端（同组内其余标签保持挂载以保留输出） */}
+      <div className="min-h-0 flex-1">
+        {group.sessionIds.map((sid) => {
+          const session = sessions.find((x: SessionInfo) => x.id === sid)
+          if (!session) return null
+          const isActive = group.activeSessionId === sid
+          return (
+            <div
+              key={sid}
+              className={isActive ? 'h-full' : 'hidden'}
+            >
+              <TerminalView session={session} isActive={active && isActive} />
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function HeaderButton({
+  title,
+  onClick,
+  children
+}: {
+  title: string
+  onClick: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={(e) => {
+        e.stopPropagation()
+        onClick()
+      }}
+      className="rounded p-0.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+    >
+      {children}
+    </button>
+  )
+}

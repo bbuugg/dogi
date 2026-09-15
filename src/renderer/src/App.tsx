@@ -2,11 +2,11 @@ import { TerminalSquare } from 'lucide-react'
 import { useAppStore } from '@/stores/app-store'
 import { TitleBar } from '@/components/TitleBar'
 import { Sidebar } from '@/components/Sidebar'
-import { TerminalView } from '@/components/TerminalView'
 import { MonitorPanel } from '@/components/MonitorPanel'
 import { AiPanel } from '@/components/AiPanel'
 import { SshProfileDialog } from '@/components/SshProfileDialog'
 import { SettingsDialog } from '@/components/SettingsDialog'
+import { PaneLayout } from '@/components/PaneLayout'
 import { Button } from '@/components/ui/button'
 
 function EmptyState() {
@@ -29,7 +29,7 @@ function EmptyState() {
 }
 
 export default function App() {
-  const sessions = useAppStore((s) => s.sessions)
+  const layout = useAppStore((s) => s.layout)
   const activeSessionId = useAppStore((s) => s.activeSessionId)
   const aiPanelOpen = useAppStore((s) => s.ui.aiPanelOpen)
   const monitorOpen = useAppStore((s) => s.ui.monitorOpen)
@@ -45,18 +45,7 @@ export default function App() {
             <MonitorPanel sessionId={activeSessionId} />
           )}
           <div className="min-h-0 flex-1">
-            {sessions.length === 0 ? (
-              <EmptyState />
-            ) : (
-              sessions.map((session) => (
-                <div
-                  key={session.id}
-                  className={session.id === activeSessionId ? 'h-full' : 'hidden'}
-                >
-                  <TerminalView session={session} isActive={session.id === activeSessionId} />
-                </div>
-              ))
-            )}
+            {layout ? <PaneLayout layout={layout} /> : <EmptyState />}
           </div>
         </main>
 

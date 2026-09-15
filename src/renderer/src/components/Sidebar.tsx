@@ -4,12 +4,18 @@ import { Separator } from '@/components/ui/separator'
 import { useAppStore } from '@/stores/app-store'
 import type { AppInfo } from '@shared/types'
 import { Monitor, Pencil, Plus, Server, Trash2 } from 'lucide-react'
+import { ChevronDown } from 'lucide-react'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger
+} from '@/components/ui/dropdown-menu'
 import { useEffect, useState } from 'react'
 
 export function Sidebar() {
   const profiles = useAppStore((s) => s.profiles)
   const sessions = useAppStore((s) => s.sessions)
-  const createLocalSession = useAppStore((s) => s.createLocalSession)
   const connectSsh = useAppStore((s) => s.connectSsh)
   const setSshDialog = useAppStore((s) => s.setSshDialog)
   const refreshProfiles = useAppStore((s) => s.refreshProfiles)
@@ -32,14 +38,7 @@ export function Sidebar() {
         <div className="mb-1 flex items-center justify-between px-2 py-1">
           <span className="text-[11px] font-medium text-muted-foreground">本地终端</span>
         </div>
-        <Button
-          variant="secondary"
-          size="sm"
-          className="mb-4 w-full justify-start gap-2"
-          onClick={() => void createLocalSession()}
-        >
-          <Plus className="size-4" /> 新建本地终端
-        </Button>
+        <NewTerminalMenu />
 
         {/* SSH 连接 */}
         <div className="mb-1 flex items-center justify-between px-2 py-1">
@@ -119,6 +118,52 @@ export function Sidebar() {
         Electron {appInfo?.electron ?? '-'} · v{appInfo?.version ?? '-'}
       </div>
     </aside>
+  )
+}
+
+/** 新建终端：默认 shell 直接新建，下拉可选择具体 shell（在当前激活组开标签） */
+function NewTerminalMenu() {
+  const createLocalSession = useAppStore((s) => s.createLocalSession)
+  const shells = useAppStore((s) => s.shells)
+  const localShell = useAppStore((s) => s.preferences.localShell)
+  const effectiveShellId = localShell || 'default'
+
+  return (
+    <div className="mb-4 flex">
+      <Button
+        variant="secondary"
+        size="sm"
+        className="flex-1 justify-start gap-2 rounded-r-none"
+        onClick={() => void createLocalSession()}
+      >
+        <Plus className="size-4" /> 新建本地终端
+      </Button>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="secondary"
+            size="sm"
+            className="rounded-l-none border-l border-border/60 px-2"
+            title="选择 shell 新建终端"
+          >
+            <ChevronDown className="size-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="min-w-40">
+          {shells?.shells.map((shell) => (
+            <DropdownMenuItem
+              key={shell.id}
+              onClick={() => void createLocalSession(shell.id)}
+            >
+              <span className="flex-1">{shell.name}</span>
+              {shell.id === effectiveShellId && (
+                <span className="text-[10px] text-muted-foreground">默认</span>
+              )}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
   )
 }
 

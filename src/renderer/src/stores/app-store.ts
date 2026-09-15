@@ -17,9 +17,22 @@ import type {
 } from '@shared/types'
 import type { AppShortcutAction } from '@shared/types'
 import { clampTerminalFontSize } from '@/lib/terminal-font'
+import {
+  firstGroupId,
+  genPaneId,
+  insertSibling,
+  makeLeaf,
+  removeLeaf,
+  updateSizes,
+  type PaneNode,
+  type SplitDirectionInput
+} from '@/lib/pane-layout'
 
 /** 终端字号持久化写入的防抖句柄（Ctrl+滚轮会触发连续调整） */
 let fontSizeSaveTimer: number | undefined
+
+/** 重连中的旧会话 ID：其 onClosed 事件不应从布局摘掉面板（会被新会话原地替换） */
+const reconnectingIds = new Set<string>()
 
 /** AI 回复生成中的占位 assistant 消息尾部追加 part */
 function appendAssistantPart(
@@ -55,6 +68,50 @@ function appendAssistantPart(
   return next
 }
 
+/** 从组中摘掉某会话；若组因此变空则返回被移除的组 ID */
+function withoutSession(
+  groups: Record<string, EditorGroup>,
+  id: string
+): { groups: Record<string, EditorGroup>; removedGroupId: string | null } {
+  const next: Record<string, EditorGroup> = { ...groups }
+  let removedGroupId: string | null = null
+  for (const gid of Object.keys(next)) {
+    const g = next[gid]
+    if (!g.sessionIds.includes(id)) continue
+    const sessionIds = g.sessionIds.filter((x) => x !== id)
+    if (sessionIds.length === 0) {
+      delete next[gid]
+      removedGroupId = gid
+    } else {
+      next[gid] = {
+        ...g,
+        sessionIds,
+        activeSessionId: g.activeSessionId === id ? sessionIds[sessionIds.length - 1] : g.activeSessionId
+      }
+    }
+    break
+  }
+  return { groups: next, removedGroupId }
+}
+
+/** 关闭会话后统一维护：更新组、从布局摘掉空组、折叠单子节点、重选焦点 */
+function applyTabClose(
+  s: Pick<AppStore, 'sessions' | 'layout' | 'groups' | 'activeGroupId' | 'activeSessionId' | 'exitedSessions'>,
+  id: string
+): Partial<AppStore> {
+  const sessions = s.sessions.filter((x) => x.id !== id)
+  const { groups, removedGroupId } = withoutSession(s.groups, id)
+  const layout = removedGroupId ? removeLeaf(s.layout, removedGroupId) : s.layout
+  const activeGroupId =
+    s.activeGroupId && groups[s.activeGroupId]
+      ? s.activeGroupId
+      : (firstGroupId(layout) ?? Object.keys(groups)[0] ?? null)
+  const activeSessionId = activeGroupId ? (groups[activeGroupId]?.activeSessionId ?? null) : null
+  const exited = new Set(s.exitedSessions)
+  exited.delete(id)
+  return { sessions, groups, layout, activeGroupId, activeSessionId, exitedSessions: exited }
+}
+
 interface UiState {
   aiPanelOpen: boolean
   settingsOpen: boolean
@@ -65,11 +122,24 @@ interface UiState {
   monitorOpen: boolean
 }
 
+/** 编辑器组：承载多个会话（标签页），并指向当前激活的会话 */
+interface EditorGroup {
+  id: string
+  sessionIds: string[]
+  activeSessionId: string | null
+}
+
 interface AppStore {
   // ---------- 终端 ----------
   sessions: SessionInfo[]
   activeSessionId: string | null
   exitedSessions: Set<string>
+  /** 分屏布局树：每个叶子承载一个编辑器组；null 表示尚无任何会话 */
+  layout: PaneNode | null
+  /** 所有编辑器组，key 为组 ID */
+  groups: Record<string, EditorGroup>
+  /** 当前聚焦的组 ID（决定拆分/新建终端落在哪个组，以及监控/AI 的上下文） */
+  activeGroupId: string | null
 
   // ---------- SSH ----------
   profiles: SshProfile[]
@@ -107,6 +177,14 @@ interface AppStore {
   /** 会话结束后重连：按原类型/SSH 配置新建一个会话并替换旧的 */
   reconnectSession: (id: string) => Promise<void>
   setActiveSession: (id: string) => void
+  /** 聚焦某个编辑器组 */
+  setActiveGroup: (groupId: string) => void
+  /** 向当前激活组的上/下/左/右拆分出新组（镜像其会话类型） */
+  splitActivePane: (direction: SplitDirectionInput) => Promise<void>
+  /** 关闭整个组（含其全部会话） */
+  closeGroup: (groupId: string) => Promise<void>
+  /** 拖拽分隔条时更新某分隔节点的权重 */
+  resizeSplit: (splitId: string, sizes: number[]) => void
   refreshProfiles: () => Promise<void>
 
   setAiPanelOpen: (open: boolean) => void
@@ -148,16 +226,8 @@ let shortcutWired = false
       })
     })
     window.api.terminal.onClosed(({ sessionId }) => {
-      set((s) => {
-        const sessions = s.sessions.filter((x) => x.id !== sessionId)
-        const exited = new Set(s.exitedSessions)
-        exited.delete(sessionId)
-        const activeSessionId =
-          s.activeSessionId === sessionId
-            ? (sessions[sessions.length - 1]?.id ?? null)
-            : s.activeSessionId
-        return { sessions, exitedSessions: exited, activeSessionId }
-      })
+      if (reconnectingIds.has(sessionId)) return
+      set((s) => applyTabClose(s, sessionId))
     })
     window.api.ai.onChatEvent(({ requestId, event }) => {
       get().handleAiEvent(requestId, event)
@@ -175,6 +245,9 @@ let shortcutWired = false
     sessions: [],
     activeSessionId: null,
     exitedSessions: new Set(),
+    layout: null,
+    groups: {},
+    activeGroupId: null,
 
     profiles: [],
 
@@ -223,55 +296,181 @@ let shortcutWired = false
 
     createLocalSession: async (shellId) => {
       const info = await window.api.terminal.createLocal(80, 24, shellId)
-      set((s) => ({
-        sessions: [...s.sessions, info],
-        activeSessionId: info.id
-      }))
+      set((s) => {
+        const groups = { ...s.groups }
+        let activeGroupId = s.activeGroupId ?? firstGroupId(s.layout)
+        // 无可用组：新建一个组并放入布局（若已有布局则整体重置为该组）
+        if (!activeGroupId || !groups[activeGroupId]) {
+          const gid = genPaneId()
+          groups[gid] = { id: gid, sessionIds: [info.id], activeSessionId: info.id }
+          return {
+            sessions: [...s.sessions, info],
+            groups,
+            layout: makeLeaf(gid),
+            activeGroupId: gid,
+            activeSessionId: info.id
+          }
+        }
+        // 否则作为新标签页加入当前激活组（VS Code 行为）
+        const g = groups[activeGroupId]
+        groups[activeGroupId] = {
+          ...g,
+          sessionIds: [...g.sessionIds, info.id],
+          activeSessionId: info.id
+        }
+        return { sessions: [...s.sessions, info], groups, activeGroupId, activeSessionId: info.id }
+      })
     },
 
     connectSsh: async (profile) => {
       const info = await window.api.terminal.createSsh(profile.id, 80, 24)
-      set((s) => ({
-        sessions: [...s.sessions, info],
-        activeSessionId: info.id
-      }))
+      set((s) => {
+        const groups = { ...s.groups }
+        let activeGroupId = s.activeGroupId ?? firstGroupId(s.layout)
+        if (!activeGroupId || !groups[activeGroupId]) {
+          const gid = genPaneId()
+          groups[gid] = { id: gid, sessionIds: [info.id], activeSessionId: info.id }
+          return {
+            sessions: [...s.sessions, info],
+            groups,
+            layout: makeLeaf(gid),
+            activeGroupId: gid,
+            activeSessionId: info.id
+          }
+        }
+        const g = groups[activeGroupId]
+        groups[activeGroupId] = {
+          ...g,
+          sessionIds: [...g.sessionIds, info.id],
+          activeSessionId: info.id
+        }
+        return { sessions: [...s.sessions, info], groups, activeGroupId, activeSessionId: info.id }
+      })
     },
 
     closeSession: async (id) => {
       await window.api.terminal.kill(id)
       // closed 事件会同步状态，双保险
-      set((s) => ({
-        sessions: s.sessions.filter((x) => x.id !== id),
-        activeSessionId:
-          s.activeSessionId === id
-            ? (s.sessions.filter((x) => x.id !== id).slice(-1)[0]?.id ?? null)
-            : s.activeSessionId
-      }))
+      set((s) => applyTabClose(s, id))
     },
 
     reconnectSession: async (id) => {
       const old = get().sessions.find((x) => x.id === id)
       if (!old) return
+      reconnectingIds.add(id)
       // 按原会话类型创建新会话：SSH 沿用原 profileId，本地则新建本地 Shell
       const info: SessionInfo =
         old.type === 'ssh' && old.profileId
           ? await window.api.terminal.createSsh(old.profileId, 80, 24)
           : await window.api.terminal.createLocal(80, 24)
-      // 关闭已退出的旧会话
+      // 关闭已退出的旧会话（onClosed 已被 reconnectingIds 屏蔽，不会摘掉组）
       await window.api.terminal.kill(id)
       set((s) => {
-        const sessions = s.sessions.filter((x) => x.id !== id)
+        // 找到承载该会话的组，原地替换会话 ID（保留组与面板位置）
+        const groups = { ...s.groups }
+        let targetGid: string | null = null
+        for (const gid of Object.keys(groups)) {
+          if (groups[gid].sessionIds.includes(id)) {
+            targetGid = gid
+            break
+          }
+        }
+        if (targetGid) {
+          const g = groups[targetGid]
+          const wasActive = g.activeSessionId === id
+          groups[targetGid] = {
+            ...g,
+            sessionIds: g.sessionIds.map((x) => (x === id ? info.id : x)),
+            activeSessionId: wasActive ? info.id : g.activeSessionId
+          }
+        }
+        const sessions = s.sessions.filter((x) => x.id !== id).concat(info)
         const exited = new Set(s.exitedSessions)
         exited.delete(id)
+        const activeGroupId = targetGid ?? s.activeGroupId
+        const activeSessionId = targetGid ? groups[targetGid].activeSessionId : s.activeSessionId
+        return { sessions, groups, activeGroupId, activeSessionId, exitedSessions: exited }
+      })
+      reconnectingIds.delete(id)
+    },
+
+    splitActivePane: async (direction) => {
+      const s = get()
+      const activeGroupId = s.activeGroupId
+      // 无激活组时退化为新建一个终端
+      if (!activeGroupId || !s.groups[activeGroupId]) {
+        await get().createLocalSession()
+        return
+      }
+      const g = s.groups[activeGroupId]
+      const src =
+        s.sessions.find((x) => x.id === g.activeSessionId) ??
+        s.sessions.find((x) => g.sessionIds.includes(x.id))
+      // 镜像当前组激活会话的类型：SSH 沿用原 profileId，本地则新建本地 Shell
+      const info: SessionInfo =
+        src?.type === 'ssh' && src.profileId
+          ? await window.api.terminal.createSsh(src.profileId, 80, 24)
+          : await window.api.terminal.createLocal(80, 24)
+      set((st) => {
+        const gid = genPaneId()
+        const groups = {
+          ...st.groups,
+          [gid]: { id: gid, sessionIds: [info.id], activeSessionId: info.id }
+        }
+        // 在激活组旁插入承载新组的叶子
+        const layout = st.layout
+          ? insertSibling(st.layout, activeGroupId, direction, makeLeaf(gid))
+          : makeLeaf(gid)
         return {
-          sessions: [...sessions, info],
-          activeSessionId: info.id,
-          exitedSessions: exited
+          sessions: [...st.sessions, info],
+          groups,
+          layout,
+          activeGroupId: gid,
+          activeSessionId: info.id
         }
       })
     },
 
-    setActiveSession: (id) => set({ activeSessionId: id }),
+    closeGroup: async (groupId) => {
+      const g = get().groups[groupId]
+      if (!g) return
+      await Promise.all(g.sessionIds.map((id) => window.api.terminal.kill(id)))
+      set((s) => {
+        const groups = { ...s.groups }
+        delete groups[groupId]
+        const layout = removeLeaf(s.layout, groupId)
+        const activeGroupId =
+          s.activeGroupId === groupId
+            ? (firstGroupId(layout) ?? Object.keys(groups)[0] ?? null)
+            : s.activeGroupId
+        const activeSessionId = activeGroupId
+          ? (groups[activeGroupId]?.activeSessionId ?? null)
+          : null
+        return { groups, layout, activeGroupId, activeSessionId }
+      })
+    },
+
+    resizeSplit: (splitId, sizes) =>
+      set((s) => (s.layout ? { layout: updateSizes(s.layout, splitId, sizes) } : {})),
+
+    setActiveSession: (id) =>
+      set((s) => {
+        const gid = Object.keys(s.groups).find((k) => s.groups[k].sessionIds.includes(id))
+        if (!gid) return {}
+        const g = s.groups[gid]
+        const groups =
+          g.activeSessionId === id
+            ? s.groups
+            : { ...s.groups, [gid]: { ...g, activeSessionId: id } }
+        return { groups, activeGroupId: gid, activeSessionId: id }
+      }),
+
+    setActiveGroup: (groupId) =>
+      set((s) => {
+        const g = s.groups[groupId]
+        if (!g) return {}
+        return { activeGroupId: groupId, activeSessionId: g.activeSessionId }
+      }),
 
     refreshProfiles: async () => {
       set({ profiles: await window.api.ssh.list() })
