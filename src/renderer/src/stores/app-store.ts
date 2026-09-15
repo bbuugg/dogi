@@ -422,6 +422,27 @@ let shortcutWired = false
         return
       }
       const g = s.groups[activeGroupId]
+
+      // 组内有多个会话：把当前激活会话「拎出来」放到该方向的新分组，不新建会话
+      if (g.sessionIds.length > 1) {
+        const movingId = g.activeSessionId ?? g.sessionIds[0]
+        set((st) => {
+          // 从原组摘掉该会话（原组仍留有其它会话，不会被移除）
+          const { groups: afterRemove } = withoutSession(st.groups, movingId)
+          const gid = genPaneId()
+          const groups = {
+            ...afterRemove,
+            [gid]: { id: gid, sessionIds: [movingId], activeSessionId: movingId }
+          }
+          const layout = st.layout
+            ? insertSibling(st.layout, activeGroupId, direction, makeLeaf(gid))
+            : makeLeaf(gid)
+          return { groups, layout, activeGroupId: gid, activeSessionId: movingId }
+        })
+        return
+      }
+
+      // 组内只有一个会话：新建一个同类型会话并拆到该方向（原行为）
       const src =
         s.sessions.find((x) => x.id === g.activeSessionId) ??
         s.sessions.find((x) => g.sessionIds.includes(x.id))

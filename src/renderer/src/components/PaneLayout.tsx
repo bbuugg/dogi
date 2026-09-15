@@ -288,16 +288,6 @@ function GroupView({ groupId }: { groupId: string }) {
             )
           })}
         </div>
-
-        {/* 组操作按钮（拆分等操作已移至会话标签右键菜单） */}
-        <div className="flex shrink-0 items-center gap-0.5 px-1 opacity-0 transition-opacity group-hover:opacity-100">
-          <HeaderButton title="在本组新建终端" onClick={newInGroup}>
-            <Plus className="size-3.5" />
-          </HeaderButton>
-          <HeaderButton title="关闭整个组" onClick={() => void closeGroup(groupId)}>
-            <X className="size-3.5" />
-          </HeaderButton>
-        </div>
       </div>
 
       {/* 当前激活终端（同组内其余标签保持挂载以保留输出） */}
@@ -317,29 +307,5 @@ function GroupView({ groupId }: { groupId: string }) {
         })}
       </div>
     </div>
-  )
-}
-
-function HeaderButton({
-  title,
-  onClick,
-  children
-}: {
-  title: string
-  onClick: () => void
-  children: React.ReactNode
-}) {
-  return (
-    <button
-      type="button"
-      title={title}
-      onClick={(e) => {
-        e.stopPropagation()
-        onClick()
-      }}
-      className="rounded p-0.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-    >
-      {children}
-    </button>
   )
 }
