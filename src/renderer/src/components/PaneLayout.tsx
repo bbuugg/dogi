@@ -12,6 +12,14 @@ import { cn } from 'cn'
 import type { SessionInfo } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import { TerminalView } from '@/components/TerminalView'
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuLabel,
+  ContextMenuSeparator,
+  ContextMenuTrigger
+} from '@/components/ui/context-menu'
 import type { PaneNode, SplitDirection, SplitDirectionInput } from '@/lib/pane-layout'
 
 /** 递归渲染分屏布局树 */
@@ -144,7 +152,7 @@ function GroupView({ groupId }: { groupId: string }) {
       {/* 标签页条 */}
       <div
         className={cn(
-          'flex h-8 shrink-0 items-stretch border-b',
+          'select-none flex h-8 shrink-0 items-stretch border-b',
           active ? 'border-border' : 'border-border/60'
         )}
       >
@@ -154,54 +162,86 @@ function GroupView({ groupId }: { groupId: string }) {
             const isActiveTab = group.activeSessionId === sid
             const isExited = exited.has(sid)
             return (
-              <div
+              <ContextMenu
                 key={sid}
-                onClick={() => setActiveSession(sid)}
-                className={cn(
-                  'group/tab flex max-w-52 shrink-0 cursor-pointer items-center gap-1.5 border-r border-border/60 px-2.5 text-xs transition-colors',
-                  isActiveTab
-                    ? 'bg-background text-foreground'
-                    : 'text-muted-foreground hover:text-foreground'
-                )}
+                onOpenChange={(o) => {
+                  // 右键菜单打开时，先让所在组/该标签成为激活目标，拆分才作用在正确的组上
+                  if (o) {
+                    setActiveGroup(groupId)
+                    setActiveSession(sid)
+                  }
+                }}
               >
-                <TerminalSquare className="size-3.5 shrink-0" />
-                <span className="truncate" title={session?.title}>
-                  {session?.title ?? '终端'}
-                </span>
-                {isExited && (
-                  <span className="shrink-0 text-[10px] text-destructive">已退出</span>
-                )}
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    void closeSession(sid)
-                  }}
-                  className="ml-0.5 rounded p-0.5 opacity-0 transition-opacity hover:bg-secondary group-hover/tab:opacity-100"
-                  title="关闭标签"
-                >
-                  <X className="size-3" />
-                </button>
-              </div>
+                <ContextMenuTrigger asChild>
+                  <div
+                    onClick={() => setActiveSession(sid)}
+                    className={cn(
+                      'group/tab flex max-w-52 shrink-0 cursor-pointer items-center gap-1.5 border-r border-border/60 px-2.5 text-xs transition-colors',
+                      isActiveTab
+                        ? 'bg-background text-foreground'
+                        : 'text-muted-foreground hover:text-foreground'
+                    )}
+                  >
+                    <TerminalSquare className="size-3.5 shrink-0" />
+                    <span className="truncate" title={session?.title}>
+                      {session?.title ?? '终端'}
+                    </span>
+                    {isExited && (
+                      <span className="shrink-0 text-[10px] text-destructive">已退出</span>
+                    )}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        void closeSession(sid)
+                      }}
+                      className="ml-0.5 rounded p-0.5 opacity-0 transition-opacity hover:bg-secondary group-hover/tab:opacity-100"
+                      title="关闭标签"
+                    >
+                      <X className="size-3" />
+                    </button>
+                  </div>
+                </ContextMenuTrigger>
+                <ContextMenuContent>
+                  <ContextMenuLabel className="truncate">
+                    {session?.title ?? '终端'}
+                  </ContextMenuLabel>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem onSelect={() => doSplit('up')}>
+                    <ArrowUp /> 向上拆分
+                  </ContextMenuItem>
+                  <ContextMenuItem onSelect={() => doSplit('down')}>
+                    <ArrowDown /> 向下拆分
+                  </ContextMenuItem>
+                  <ContextMenuItem onSelect={() => doSplit('left')}>
+                    <ArrowLeft /> 向左拆分
+                  </ContextMenuItem>
+                  <ContextMenuItem onSelect={() => doSplit('right')}>
+                    <ArrowRight /> 向右拆分
+                  </ContextMenuItem>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem onSelect={newInGroup}>
+                    <Plus /> 在本组新建终端
+                  </ContextMenuItem>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem variant="destructive" onSelect={() => void closeSession(sid)}>
+                    <X /> 关闭标签
+                  </ContextMenuItem>
+                  <ContextMenuItem
+                    variant="destructive"
+                    onSelect={() => void closeGroup(groupId)}
+                  >
+                    <X /> 关闭整个组
+                  </ContextMenuItem>
+                </ContextMenuContent>
+              </ContextMenu>
             )
           })}
         </div>
 
-        {/* 组操作按钮 */}
+        {/* 组操作按钮（拆分等操作已移至会话标签右键菜单） */}
         <div className="flex shrink-0 items-center gap-0.5 px-1 opacity-0 transition-opacity group-hover:opacity-100">
           <HeaderButton title="在本组新建终端" onClick={newInGroup}>
             <Plus className="size-3.5" />
-          </HeaderButton>
-          <HeaderButton title="向上拆分" onClick={() => doSplit('up')}>
-            <ArrowUp className="size-3.5" />
-          </HeaderButton>
-          <HeaderButton title="向下拆分" onClick={() => doSplit('down')}>
-            <ArrowDown className="size-3.5" />
-          </HeaderButton>
-          <HeaderButton title="向左拆分" onClick={() => doSplit('left')}>
-            <ArrowLeft className="size-3.5" />
-          </HeaderButton>
-          <HeaderButton title="向右拆分" onClick={() => doSplit('right')}>
-            <ArrowRight className="size-3.5" />
           </HeaderButton>
           <HeaderButton title="关闭整个组" onClick={() => void closeGroup(groupId)}>
             <X className="size-3.5" />
