@@ -1,4 +1,5 @@
 import { join } from 'node:path'
+import { existsSync } from 'node:fs'
 import { app, BrowserWindow, Menu, nativeTheme, Tray } from 'electron'
 import { registerIpc, openExternalSafe } from './ipc'
 import { registerShortcuts } from './shortcuts'
@@ -33,6 +34,21 @@ function installMenu(): void {
 }
 
 /**
+ * 解析应用图标路径。打包后由 extraResources 把 app-icon.png 带到安装目录的
+ * resources/ 下；兼容 extraResources 旧写法（多嵌套一层 resources/）作为兜底。
+ * 返回第一个存在的路径，避免图标缺失导致 new Tray() 抛错、角标建不出来。
+ */
+function resolveIconPath(): string {
+  const candidates = app.isPackaged
+    ? [
+        join(process.resourcesPath, 'app-icon.png'),
+        join(process.resourcesPath, 'resources', 'app-icon.png')
+      ]
+    : [join(import.meta.dirname, '../../resources/app-icon.png')]
+  return candidates.find((p) => existsSync(p)) ?? candidates[0]
+}
+
+/**
  * 显示并聚焦主窗口（从托盘图标恢复时调用）。
  */
 function showMainWindow(): void {
@@ -47,11 +63,16 @@ function showMainWindow(): void {
  * 右键菜单提供「显示主窗口」与「退出」。退出会真正关闭程序。
  */
 function createTray(): void {
-  // 托盘图标：开发时取项目 resources 目录；打包后由 extraResources 带入安装目录 resources
-  const iconPath = app.isPackaged
-    ? join(process.resourcesPath, 'app-icon.png')
-    : join(import.meta.dirname, '../../resources/app-icon.png')
-  tray = new Tray(iconPath)
+  const iconPath = resolveIconPath()
+  try {
+    tray = new Tray(iconPath)
+  } catch (e) {
+    // 图标缺失/加载失败时记录错误，避免静默失败；最小化后仍能靠窗口隐藏存活，
+    // 但无角标可点击恢复（正常打包下 iconPath 必然存在，不会走到这里）
+    console.error('[tray] 创建托盘图标失败，图标路径：', iconPath, e)
+    tray = null
+    return
+  }
   tray.setToolTip('OpsDesk')
   tray.setContextMenu(
     Menu.buildFromTemplate([
@@ -70,9 +91,7 @@ function createWindow(): void {
   const bounds = storage.getWindowBounds()
   const isMac = process.platform === 'darwin'
   // 窗口/任务栏图标：开发时取项目 resources 目录；打包后由 extraResources 带入安装目录 resources
-  const iconPath = app.isPackaged
-    ? join(process.resourcesPath, 'app-icon.png')
-    : join(import.meta.dirname, '../../resources/app-icon.png')
+  const iconPath = resolveIconPath()
   mainWindow = new BrowserWindow({
     width: bounds?.width ?? 1280,
     height: bounds?.height ?? 800,
