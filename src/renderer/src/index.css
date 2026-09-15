@@ -90,6 +90,17 @@
   border-radius: 4px;
 }
 
+/* 服务器监控：距下次采集的进度条（时长由内联样式按采集间隔注入） */
+@keyframes monitor-tick {
+  from {
+    width: 0%;
+  }
+
+  to {
+    width: 100%;
+  }
+}
+
 @theme inline {
   --font-heading:
       var(--font-sans);

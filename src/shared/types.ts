@@ -35,6 +35,8 @@ export interface Preferences {
    * 关闭程序需在托盘图标的右键菜单中选择「退出」。
    */
   minimizeToTray: boolean
+  /** 服务器指标采集间隔（毫秒），缺省 2000 */
+  monitorInterval: number
 }
 
 /** 检测到的本地可用 shell */

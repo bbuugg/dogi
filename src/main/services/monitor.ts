@@ -2,8 +2,18 @@ import { EventEmitter } from 'node:events'
 import { sessionManager } from './sessions'
 import type { ServerMetrics } from '@shared/types'
 
-/** 采集间隔（毫秒） */
-const TICK_MS = 2000
+/** 采集间隔（毫秒）缺省值 */
+const DEFAULT_INTERVAL_MS = 2000
+
+/** 允许的采集间隔范围（渲染端提供 200ms~5s 选项，此处仅做兜底校验） */
+const MIN_INTERVAL_MS = 100
+const MAX_INTERVAL_MS = 60_000
+
+/** 归一化采集间隔：非法值回落缺省，越界值收敛到边界 */
+function normalizeInterval(ms: number): number {
+  if (!Number.isFinite(ms)) return DEFAULT_INTERVAL_MS
+  return Math.min(MAX_INTERVAL_MS, Math.max(MIN_INTERVAL_MS, Math.round(ms)))
+}
 
 /**
  * 结果无效（目标系统没有 /proc，如 Windows / BSD / macOS）的连续次数上限：
@@ -64,19 +74,34 @@ class SessionMonitor extends EventEmitter {
   private prevCpuIdle = 0
   private prevNet: Record<string, NetSample> = {}
 
-  constructor(private readonly sessionId: string) {
+  /** 当前采集间隔（毫秒），可随时调整 */
+  private intervalMs: number
+
+  constructor(private readonly sessionId: string, intervalMs: number) {
     super()
+    this.intervalMs = normalizeInterval(intervalMs)
   }
 
   start(): void {
     if (this.timer) return
     void this.tick()
-    this.timer = setInterval(() => void this.tick(), TICK_MS)
+    this.timer = setInterval(() => void this.tick(), this.intervalMs)
   }
 
   stop(): void {
     if (this.timer) clearInterval(this.timer)
     this.timer = null
+  }
+
+  /** 调整采集间隔：正在采集时立即按新节奏重建定时器 */
+  setTick(ms: number): void {
+    const next = normalizeInterval(ms)
+    if (next === this.intervalMs) return
+    this.intervalMs = next
+    if (this.timer) {
+      clearInterval(this.timer)
+      this.timer = setInterval(() => void this.tick(), next)
+    }
   }
 
   private async tick(): Promise<void> {
@@ -227,13 +252,26 @@ class SessionMonitor extends EventEmitter {
 /** 监控服务：按会话管理各自的 SessionMonitor，并对外广播最新指标 */
 class MonitorService extends EventEmitter {
   private monitors = new Map<string, SessionMonitor>()
+  /** 新会话使用的采集间隔（毫秒） */
+  private intervalMs = DEFAULT_INTERVAL_MS
+
+  /** 全局调整采集间隔：现有会话立即生效，后续新建的会话沿用 */
+  setInterval(ms: number): void {
+    const next = normalizeInterval(ms)
+    this.intervalMs = next
+    for (const sm of this.monitors.values()) sm.setTick(next)
+  }
+
+  getInterval(): number {
+    return this.intervalMs
+  }
 
   start(sessionId: string): void {
     if (this.monitors.has(sessionId)) return
     // 采集依赖 Linux 的 /proc 与 df：非 Linux 的本地终端不可能取到数据，直接跳过
     const info = sessionManager.get(sessionId)?.info
     if (info && info.type === 'local' && process.platform !== 'linux') return
-    const sm = new SessionMonitor(sessionId)
+    const sm = new SessionMonitor(sessionId, this.intervalMs)
     sm.on('data', (metrics: ServerMetrics) => {
       this.emit('data', { sessionId, metrics })
     })

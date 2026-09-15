@@ -231,6 +231,8 @@ interface AppStore {
   /** 设置本地终端默认 shell（持久化到偏好设置） */
   setLocalShell: (shellId: string) => Promise<void>
   setTerminalFontSize: (size: number) => Promise<void>
+  /** 设置服务器指标采集间隔（毫秒）：立即生效并持久化 */
+  setMonitorInterval: (ms: number) => Promise<void>
   sendAiMessage: (text: string, targetSessionId?: string | null) => Promise<void>
   abortAi: () => Promise<void>
   clearAiMessages: () => void
@@ -280,7 +282,7 @@ let shortcutWired = false
 
     scripts: [],
 
-    preferences: { theme: 'system', terminalTheme: 'auto', copyOnSelect: true, commandPrediction: true, terminalFontSize: 13, localShell: 'default', minimizeToTray: true },
+    preferences: { theme: 'system', terminalTheme: 'auto', copyOnSelect: true, commandPrediction: true, terminalFontSize: 13, localShell: 'default', minimizeToTray: true, monitorInterval: 2000 },
 
     shells: null,
 
@@ -661,6 +663,12 @@ let shortcutWired = false
           .save({ terminalFontSize: get().preferences.terminalFontSize })
           .then((preferences) => set({ preferences }))
       }, 300)
+    },
+
+    setMonitorInterval: async (ms) => {
+      // 先本地生效（进度条节奏随之变化），主进程归一化后返回最终值
+      set((s) => ({ preferences: { ...s.preferences, monitorInterval: ms } }))
+      set({ preferences: await window.api.monitor.setInterval(ms) })
     },
 
     sendAiMessage: async (text, targetSessionId) => {

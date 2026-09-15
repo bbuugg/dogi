@@ -28,7 +28,8 @@ const DEFAULT_PREFERENCES: Preferences = {
   commandPrediction: true,
   terminalFontSize: 13,
   localShell: 'default',
-  minimizeToTray: true
+  minimizeToTray: true,
+  monitorInterval: 2000
 }
 
 /** 密钥类字段加密前缀（safeStorage 密文 base64） */

@@ -129,6 +129,9 @@ const api = {
       ipcRenderer.invoke('zmodem:saveFileTo', filePath, data)
   },
   monitor: {
+    /** 设置采集间隔（毫秒）：立即生效并持久化，返回更新后的偏好设置 */
+    setInterval: (ms: number): Promise<Preferences> =>
+      ipcRenderer.invoke('monitor:setInterval', ms),
     /**
      * 订阅服务器指标推送；主进程在会话建立后自动采集，
      * 采集不到数据的主机不会有推送（前端据此不显示指标）

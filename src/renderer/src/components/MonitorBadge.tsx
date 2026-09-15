@@ -1,17 +1,20 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Activity } from 'lucide-react'
+import { Activity, ChevronLeft, ChevronRight, X } from 'lucide-react'
 import { cn } from 'cn'
 import { useAppStore } from '@/stores/app-store'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { formatBytes, formatDuration, formatRate } from '@/lib/format'
 import type { ServerMetrics } from '@shared/types'
 
-/** 超过该时长未收到新指标即视为采集已中断，隐藏浮动图标 */
-const STALE_MS = 6000
+/** 可选的采集间隔（毫秒），由左/右箭头在两者间切换 */
+const INTERVAL_OPTIONS = [200, 500, 1000, 2000, 5000]
 
-/** 图标与气泡之间的悬停缓冲：鼠标从图标移入气泡所需的宽限时间 */
-const CLOSE_DELAY_MS = 120
+/** 采集间隔缺省值（非法持久化值的回退项） */
+const DEFAULT_INTERVAL = 2000
+
+/** 数据陈旧判定下限（毫秒）：实际阈值为 max(该值, 采集间隔 × 3)，间隔越长容忍越久 */
+const STALE_MS = 6000
 
 function barColor(pct: number): string {
   if (pct >= 85) return 'bg-red-500'
@@ -23,6 +26,10 @@ function textColor(pct: number): string {
   if (pct >= 85) return 'text-red-500'
   if (pct >= 60) return 'text-amber-500'
   return 'text-emerald-500'
+}
+
+function intervalLabel(ms: number): string {
+  return ms < 1000 ? `${ms} 毫秒` : `${ms / 1000} 秒`
 }
 
 function Bar({ pct }: { pct: number }) {
@@ -47,14 +54,72 @@ function Stat({ label, children }: { label: string; children: ReactNode }) {
   )
 }
 
+/** 刷新间隔切换：左右箭头在选项间循环，中间显示当前间隔 */
+function IntervalStepper() {
+  const interval = useAppStore((s) => s.preferences.monitorInterval)
+  const setMonitorInterval = useAppStore((s) => s.setMonitorInterval)
+  const exact = INTERVAL_OPTIONS.indexOf(interval)
+  const current = exact >= 0 ? exact : INTERVAL_OPTIONS.indexOf(DEFAULT_INTERVAL)
+
+  // 左箭头 = 更短的间隔（刷新更快），右箭头 = 更长的间隔
+  const step = (delta: number): void => {
+    const next = (current + delta + INTERVAL_OPTIONS.length) % INTERVAL_OPTIONS.length
+    void setMonitorInterval(INTERVAL_OPTIONS[next])
+  }
+
+  const arrow = 'flex size-5 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground'
+
+  return (
+    <div className="flex items-center gap-0.5 rounded-md border border-border/60 px-0.5 py-px">
+      <button type="button" aria-label="刷新更快" className={arrow} onClick={() => step(-1)}>
+        <ChevronLeft className="size-3.5" />
+      </button>
+      <span className="w-14 text-center text-[11px] tabular-nums text-muted-foreground">
+        {intervalLabel(INTERVAL_OPTIONS[current])}
+      </span>
+      <button type="button" aria-label="刷新更慢" className={arrow} onClick={() => step(1)}>
+        <ChevronRight className="size-3.5" />
+      </button>
+    </div>
+  )
+}
+
 /** 气泡内的指标详情 */
-function MetricsDetail({ metrics }: { metrics: ServerMetrics }) {
+function MetricsDetail({
+  metrics,
+  intervalMs,
+  onClose
+}: {
+  metrics: ServerMetrics
+  intervalMs: number
+  onClose: () => void
+}) {
   const root = metrics.disk.find((d) => d.mount === '/') ?? metrics.disk[0]
   return (
     <>
-      <div className="flex items-center justify-between">
+      <div className="flex items-center gap-2">
         <span className="text-xs font-semibold">服务器指标</span>
-        <span className="text-[10px] text-muted-foreground">每 2 秒刷新</span>
+        <div className="ml-auto">
+          <IntervalStepper />
+        </div>
+        <button
+          type="button"
+          aria-label="关闭"
+          title="关闭"
+          onClick={onClose}
+          className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+        >
+          <X className="size-3.5" />
+        </button>
+      </div>
+
+      {/* 距下次采集的进度：每次收到新数据重新开始（key 变化触发动画重放） */}
+      <div className="h-1 w-full overflow-hidden rounded-full bg-secondary">
+        <div
+          key={metrics.timestamp}
+          className="h-full rounded-full bg-primary/60"
+          style={{ animation: `monitor-tick ${intervalMs}ms linear forwards` }}
+        />
       </div>
 
       <div className="grid grid-cols-2 gap-x-4 gap-y-3">
@@ -83,10 +148,10 @@ function MetricsDetail({ metrics }: { metrics: ServerMetrics }) {
         </Stat>
 
         <Stat label="负载">
-          <span className="text-[13px]">
+          <div className="text-[10px] font-normal text-muted-foreground">1m / 5m / 15m</div>
+          <div className="text-[13px]">
             {metrics.load1.toFixed(2)} / {metrics.load5.toFixed(2)} / {metrics.load15.toFixed(2)}
-          </span>
-          <span className="text-[10px] font-normal text-muted-foreground">1m / 5m / 15m</span>
+          </div>
         </Stat>
 
         <Stat label="网络">
@@ -123,75 +188,69 @@ function MetricsDetail({ metrics }: { metrics: ServerMetrics }) {
 /**
  * 终端底部的浮动服务器指标图标：
  * - 仅在能采集到当前会话数据时显示（取不到数据或数据已陈旧则完全不渲染）
- * - 鼠标悬停展开气泡（popover）显示详细指标
+ * - 点击图标展开气泡（popover）：气泡贴在图标上方并**盖住图标本身**，
+ *   只能通过气泡内的关闭按钮收起（点击外部 / ESC 均不关闭）；气泡内可切换采集间隔
  */
 export function MonitorBadge({ sessionId }: { sessionId: string | null }) {
   const metrics = useAppStore((s) => (sessionId ? s.monitors[sessionId] : undefined))
+  const interval = useAppStore((s) => s.preferences.monitorInterval)
   const [open, setOpen] = useState(false)
   // 需要按时间重新渲染，才能判断已有指标是否已陈旧
   const [now, setNow] = useState(() => Date.now())
-  const closeTimer = useRef<number | null>(null)
 
   useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 2000)
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(timer)
   }, [])
 
-  useEffect(
-    () => () => {
-      if (closeTimer.current !== null) window.clearTimeout(closeTimer.current)
-    },
-    []
-  )
+  // 采不到数据（主机不支持/连接已断开）就不显示；间隔越长，陈旧阈值越宽松
+  const staleAfter = Math.max(STALE_MS, interval * 3)
+  const visible = !!metrics && now - metrics.timestamp <= staleAfter
 
-  // 采不到数据（主机不支持/连接已断开）就不显示
-  if (!metrics || now - metrics.timestamp > STALE_MS) return null
+  // 数据消失时顺手收起气泡，避免数据恢复后气泡莫名自动弹出
+  useEffect(() => {
+    if (!visible) setOpen(false)
+  }, [visible])
 
-  const cancelClose = (): void => {
-    if (closeTimer.current !== null) {
-      window.clearTimeout(closeTimer.current)
-      closeTimer.current = null
-    }
-  }
-  const scheduleClose = (): void => {
-    cancelClose()
-    closeTimer.current = window.setTimeout(() => setOpen(false), CLOSE_DELAY_MS)
-  }
+  if (!visible || !metrics) return null
 
   const root = metrics.disk.find((d) => d.mount === '/') ?? metrics.disk[0]
   const worst = Math.max(metrics.cpuPercent ?? 0, metrics.memPercent, root?.percent ?? 0)
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover
+      open={open}
+      // 仅允许打开：点击外部 / ESC 触发的关闭请求一律忽略，只有气泡内的关闭按钮能收起
+      onOpenChange={(next) => {
+        if (next) setOpen(true)
+      }}
+    >
       <PopoverTrigger asChild>
         <button
           type="button"
           aria-label="服务器指标"
-          onPointerEnter={() => {
-            cancelClose()
-            setOpen(true)
-          }}
-          onPointerLeave={scheduleClose}
-          // 悬停即展开，点击不再切换，避免点击后气泡收起
-          onClick={(e) => e.preventDefault()}
+          title="服务器指标"
           className="absolute right-3 bottom-3 z-20 flex size-8 items-center justify-center rounded-full border border-border/60 bg-card/80 shadow-lg backdrop-blur transition-colors hover:bg-card"
         >
           <Activity className={cn('size-4', textColor(worst))} />
         </button>
       </PopoverTrigger>
-      <PopoverContent
-        side="top"
-        align="end"
-        sideOffset={6}
-        className="w-[300px] gap-3 p-3"
-        onPointerEnter={cancelClose}
-        onPointerLeave={scheduleClose}
-        // 悬停打开时保持终端焦点，避免打断输入
-        onOpenAutoFocus={(e) => e.preventDefault()}
-        onCloseAutoFocus={(e) => e.preventDefault()}
-      >
-        <MetricsDetail metrics={metrics} />
-      </PopoverContent>
+      {/* 关闭时直接卸载：不依赖 Radix 的退出动画（与 tw-animate-css 的 exit 动画配合时
+          存在节点卡在退出态、面板关不掉的缺陷），入场动画仍保留 */}
+      {open && (
+        <PopoverContent
+          side="top"
+          align="end"
+          // 负偏移让气泡下沿压到图标上，把图标完全盖住
+          sideOffset={-36}
+          className="w-[300px] gap-3 p-3"
+          // 打开/关闭都不接管焦点，避免打断终端输入
+          onOpenAutoFocus={(e) => e.preventDefault()}
+          onCloseAutoFocus={(e) => e.preventDefault()}
+        >
+          <MetricsDetail metrics={metrics} intervalMs={interval} onClose={() => setOpen(false)} />
+        </PopoverContent>
+      )}
     </Popover>
   )
 }

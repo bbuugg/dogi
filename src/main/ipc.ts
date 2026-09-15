@@ -65,6 +65,12 @@ export function registerIpc(win: () => BrowserWindow | null): void {
     (payload: { sessionId: string; metrics: ServerMetrics }) =>
       broadcast(win, 'monitor:data', payload)
   )
+  // 采集间隔：启动时沿用上次的设置；渲染端调整后立即对现有会话生效并持久化
+  monitorService.setInterval(storage.getPreferences().monitorInterval)
+  ipcMain.handle('monitor:setInterval', (_e, ms: number) => {
+    monitorService.setInterval(ms)
+    return storage.savePreferences({ monitorInterval: monitorService.getInterval() })
+  })
 
   // ---------- 终端控制 ----------
   ipcMain.handle('terminal:list', () => sessionManager.list())
