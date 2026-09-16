@@ -149,6 +149,8 @@ interface UiState {
   pluginView: string | null
   /** 侧边栏宽度（px） */
   sidebarWidth: number
+  /** 侧边栏是否折叠（折叠后不渲染侧边栏与拖拽条） */
+  sidebarCollapsed: boolean
   /** AI 助手面板宽度（px） */
   aiPanelWidth: number
 }
@@ -256,6 +258,7 @@ interface AppStore {
     cmd: { id: string; title: string; run: () => void }
   ) => void
   setSidebarWidth: (width: number) => void
+  setSidebarCollapsed: (collapsed: boolean) => void
   setAiPanelWidth: (width: number) => void
   refreshScripts: () => Promise<void>
   setSshDialog: (open: boolean, editing?: SshProfile | null) => void
@@ -359,6 +362,7 @@ let shortcutWired = false
       view: 'terminal',
       pluginView: null,
       sidebarWidth: 240,
+      sidebarCollapsed: false,
       aiPanelWidth: 350
     },
 
@@ -736,6 +740,9 @@ let shortcutWired = false
 
     setSidebarWidth: (width) =>
       set((s) => ({ ui: { ...s.ui, sidebarWidth: width } })),
+
+    setSidebarCollapsed: (collapsed) =>
+      set((s) => ({ ui: { ...s.ui, sidebarCollapsed: collapsed } })),
 
     setAiPanelWidth: (width) =>
       set((s) => ({ ui: { ...s.ui, aiPanelWidth: width } })),

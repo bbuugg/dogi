@@ -44,6 +44,7 @@ export default function App() {
   const pluginView = useAppStore((s) => s.ui.pluginView)
   const plugins = useAppStore((s) => s.plugins)
   const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth)
+  const sidebarCollapsed = useAppStore((s) => s.ui.sidebarCollapsed)
   const aiPanelWidth = useAppStore((s) => s.ui.aiPanelWidth)
   const setSidebarWidth = useAppStore((s) => s.setSidebarWidth)
   const setAiPanelWidth = useAppStore((s) => s.setAiPanelWidth)
@@ -75,13 +76,18 @@ export default function App() {
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
       <TitleBar />
       <div className="flex min-h-0 flex-1">
-        <Sidebar />
-        <ResizeHandle
-          width={sidebarWidth}
-          min={180}
-          max={480}
-          onResize={setSidebarWidth}
-        />
+        {/* 侧边栏可折叠：折叠时不渲染侧边栏与拖拽条（展开入口在标题栏） */}
+        {!sidebarCollapsed && (
+          <>
+            <Sidebar />
+            <ResizeHandle
+              width={sidebarWidth}
+              min={180}
+              max={480}
+              onResize={setSidebarWidth}
+            />
+          </>
+        )}
 
         <main className="relative flex min-w-0 flex-1 flex-col">
           {/* 终端区常驻挂载，切到脚本页时用 hidden 保活 xterm 实例 */}

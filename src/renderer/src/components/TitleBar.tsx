@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Copy, Minus, Sparkles, Square, X } from 'lucide-react'
+import { Copy, Minus, PanelLeftClose, PanelLeftOpen, Sparkles, Square, X } from 'lucide-react'
 import { cn } from 'cn'
 import { useAppStore } from '@/stores/app-store'
 import { Button } from '@/components/ui/button'
@@ -18,6 +18,8 @@ export function TitleBar() {
   const [maximized, setMaximized] = useState(false)
   const aiPanelOpen = useAppStore((s) => s.ui.aiPanelOpen)
   const setAiPanelOpen = useAppStore((s) => s.setAiPanelOpen)
+  const sidebarCollapsed = useAppStore((s) => s.ui.sidebarCollapsed)
+  const setSidebarCollapsed = useAppStore((s) => s.setSidebarCollapsed)
 
   useEffect(() => {
     void window.api.window.isMaximized().then(setMaximized)
@@ -38,6 +40,19 @@ export function TitleBar() {
       <div className="flex min-w-0 flex-1 items-end" />
 
       <div className="app-no-drag flex items-center gap-0.5 pr-1">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-8"
+          title={sidebarCollapsed ? '展开侧边栏' : '折叠侧边栏'}
+          onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+        >
+          {sidebarCollapsed ? (
+            <PanelLeftOpen className="size-4" />
+          ) : (
+            <PanelLeftClose className="size-4" />
+          )}
+        </Button>
         <Button
           variant="ghost"
           size="icon"

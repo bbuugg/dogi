@@ -21,6 +21,7 @@ import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuIte
 import { AlertDialog, AlertDialogTrigger, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel } from '@/components/ui/alert-dialog'
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuLabel, ContextMenuSeparator } from '@/components/ui/context-menu'
 import { Table, TableHeader, TableBody, TableFooter, TableHead, TableRow, TableCell, TableCaption } from '@/components/ui/table'
+import { Drawer, DrawerTrigger, DrawerClose, DrawerContent, DrawerHeader, DrawerFooter, DrawerTitle, DrawerDescription } from '@/components/ui/drawer'
 
 /** 插件向宿主注册的一个视图（侧边栏入口 + 主区域渲染组件） */
 export interface PluginViewInstance {
@@ -114,6 +115,14 @@ export interface RendererHostApi {
     TableRow: typeof TableRow
     TableCell: typeof TableCell
     TableCaption: typeof TableCaption
+    Drawer: typeof Drawer
+    DrawerTrigger: typeof DrawerTrigger
+    DrawerClose: typeof DrawerClose
+    DrawerContent: typeof DrawerContent
+    DrawerHeader: typeof DrawerHeader
+    DrawerFooter: typeof DrawerFooter
+    DrawerTitle: typeof DrawerTitle
+    DrawerDescription: typeof DrawerDescription
   }
   /** 注入的 lucide 图标集合，按名取用：api.icons.Play */
   icons: typeof Icons
@@ -201,7 +210,15 @@ function buildRendererHostApi(manifest: {
       TableHead,
       TableRow,
       TableCell,
-      TableCaption
+      TableCaption,
+      Drawer,
+      DrawerTrigger,
+      DrawerClose,
+      DrawerContent,
+      DrawerHeader,
+      DrawerFooter,
+      DrawerTitle,
+      DrawerDescription
     },
     icons: Icons,
     // 注入全局通知，插件可直接 api.toast.success / error / info ...

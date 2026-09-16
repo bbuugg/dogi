@@ -26,9 +26,16 @@ export function activate(api) {
     TableBody,
     TableHead,
     TableRow,
-    TableCell
+    TableCell,
+    Drawer,
+    DrawerClose,
+    DrawerContent,
+    DrawerHeader,
+    DrawerFooter,
+    DrawerTitle,
+    DrawerDescription
   } = api.ui
-  const { Send, Save, Trash2, Plus } = api.icons
+  const { Send, Save, Trash2, Plus, History } = api.icons
   const cn = api.ui.cn
   const toast = api.toast
   const MonacoEditor = api.MonacoEditor
@@ -219,6 +226,10 @@ export function activate(api) {
     const [error, setError] = useState(null)
     const [saved, setSaved] = useState([])
     const [history, setHistory] = useState([])
+    /** 请求历史抽屉是否打开 */
+    const [historyOpen, setHistoryOpen] = useState(false)
+    /** 响应面板高度占主列的比例（拖动分隔条调整，范围 0.15–0.8） */
+    const [resRatio, setResRatio] = useState(0.5)
     const [resTab, setResTab] = useState('body')
     /** 响应体是否格式化（JSON 美化） */
     const [format, setFormat] = useState(true)
@@ -487,7 +498,15 @@ export function activate(api) {
                 el('span', { className: 'shrink-0 text-[10px] text-muted-foreground' }, relTime(entry.at)),
                 h(
                   Button,
-                  { variant: 'ghost', size: 'sm', className: 'h-6 shrink-0 px-2 text-[11px]', onClick: () => applyRequest(entry) },
+                  {
+                    variant: 'ghost',
+                    size: 'sm',
+                    className: 'h-6 shrink-0 px-2 text-[11px]',
+                    onClick: () => {
+                      applyRequest(entry)
+                      setHistoryOpen(false)
+                    }
+                  },
                   '载入'
                 ),
                 h(
@@ -505,32 +524,36 @@ export function activate(api) {
             )
           )
 
-    // 已保存请求行
-    const savedList =
+    // 左侧栏：保存的请求列表（点击即载入）
+    const savedSidebar =
       saved.length === 0
-        ? el(
-            'div',
-            { className: 'text-xs text-muted-foreground' },
-            '还没有保存的请求。填好地址后在「请求头 / 请求体」页点下方的「保存当前请求」。'
-          )
+        ? el('div', { className: 'px-2 py-3 text-center text-xs text-muted-foreground' }, '还没有保存的请求')
         : el(
             'div',
-            { className: 'space-y-1' },
+            { className: 'space-y-0.5 p-2' },
             ...saved.map((req, idx) =>
               el(
                 'div',
-                { key: req.id || idx, className: 'flex items-center gap-2 rounded-md border border-border/60 px-2 py-1.5' },
-                h(Badge, { variant: 'secondary', className: 'font-mono text-[10px]' }, req.method || 'GET'),
-                el('span', { className: 'min-w-0 flex-1 truncate font-mono text-[11px]', title: req.url }, req.url),
-                h(Button, { variant: 'ghost', size: 'sm', className: 'h-6 px-2 text-[11px]', onClick: () => applyRequest(req) }, '载入'),
+                {
+                  key: req.id || idx,
+                  className:
+                    'group flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-sidebar-accent',
+                  title: (req.method || 'GET') + ' ' + req.url,
+                  onClick: () => applyRequest(req)
+                },
+                h(Badge, { variant: 'secondary', className: 'shrink-0 font-mono text-[10px]' }, req.method || 'GET'),
+                el('span', { className: 'min-w-0 flex-1 truncate text-xs' }, req.url),
                 h(
                   Button,
                   {
                     variant: 'ghost',
                     size: 'icon-xs',
-                    className: 'text-muted-foreground',
+                    className: 'shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100',
                     title: '删除',
-                    onClick: () => deleteSaved(idx)
+                    onClick: (e) => {
+                      e.stopPropagation()
+                      deleteSaved(idx)
+                    }
                   },
                   h(Trash2, { className: 'size-3' })
                 )
@@ -591,7 +614,7 @@ export function activate(api) {
     return el(
       'div',
       {
-        className: 'api-client-root flex h-full flex-col bg-background text-foreground',
+        className: 'api-client-root flex h-full bg-background text-foreground',
         // Ctrl/Cmd + Enter 发送请求（在插件区域内任意位置均可）
         onKeyDown: (e) => {
           if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
@@ -600,10 +623,25 @@ export function activate(api) {
           }
         }
       },
-      // 顶部工具栏：方法 + 地址 + 发送
+      // 左侧栏：保存的请求（点击行即载入到右侧编辑区）
+      el(
+        'aside',
+        { className: 'flex w-52 shrink-0 flex-col border-r border-border bg-sidebar' },
+        el(
+          'div',
+          { className: 'border-b border-border px-3 py-2' },
+          el('span', { className: 'text-[11px] font-medium text-muted-foreground' }, '保存的请求 (' + saved.length + ')')
+        ),
+        el('div', { className: 'min-h-0 flex-1 overflow-y-auto' }, savedSidebar)
+      ),
+      // 右侧主列：工具栏 + 请求构造 + 响应区
       el(
         'div',
-        { className: 'flex items-center gap-2 border-b border-border px-3 py-2' },
+        { className: 'flex min-w-0 flex-1 flex-col' },
+        // 顶部工具栏：方法 + 地址 + 发送
+        el(
+          'div',
+          { className: 'flex items-center gap-2 border-b border-border px-3 py-2' },
         h(
           Select,
           { value: method, onValueChange: setMethod },
@@ -623,22 +661,34 @@ export function activate(api) {
           sending ? '发送中…' : '发送'
         )
       ),
-      // 请求构造区（Tab）
+      // 请求构造区（Tab）：历史入口改为右侧抽屉，由工具栏按钮唤起
       h(
         Tabs,
         { value: tab, onValueChange: setTab, className: 'flex min-h-0 flex-1 flex-col' },
-        h(
-          TabsList,
-          { className: 'w-full justify-start gap-1 rounded-none border-b border-border bg-transparent px-3' },
-          h(TabsTrigger, { value: 'headers' }, '请求头'),
-          h(TabsTrigger, { value: 'body' }, '请求体'),
-          h(TabsTrigger, { value: 'history' }, '历史 (' + history.length + ')'),
-          h(TabsTrigger, { value: 'saved' }, '已保存 (' + saved.length + ')')
+        el(
+          'div',
+          { className: 'flex items-center border-b border-border' },
+          h(
+            TabsList,
+            { className: 'w-full justify-start gap-1 rounded-none border-b-0 bg-transparent px-3' },
+            h(TabsTrigger, { value: 'headers' }, '请求头'),
+            h(TabsTrigger, { value: 'body' }, '请求体')
+          ),
+          h(
+            Button,
+            {
+              variant: 'ghost',
+              size: 'sm',
+              className: 'mr-2 shrink-0 gap-1.5 text-[11px] text-muted-foreground',
+              title: '查看请求历史',
+              onClick: () => setHistoryOpen(true)
+            },
+            h(History, { className: 'size-3.5' }),
+            '历史 (' + history.length + ')'
+          )
         ),
         h(TabsContent, { value: 'headers', className: 'min-h-0 flex-1 overflow-auto p-3' }, headerRows),
-        h(
-          TabsContent,
-          { value: 'body', className: 'min-h-0 flex-1 overflow-auto p-3' },
+        h(TabsContent, { value: 'body', className: 'min-h-0 flex-1 overflow-auto p-3' },
           el(
             'div',
             { className: 'h-64 overflow-hidden rounded-md border border-border' },
@@ -652,37 +702,55 @@ export function activate(api) {
               showWordWrapToggle: true
             })
           )
-        ),
-        h(
-          TabsContent,
-          { value: 'history', className: 'min-h-0 flex-1 overflow-auto p-3' },
-          history.length > 0 &&
-            el(
-              'div',
-              { className: 'mb-2 flex items-center justify-between' },
-              el('span', { className: 'text-[11px] text-muted-foreground' }, '共 ' + history.length + ' 条记录'),
-              h(
-                Button,
-                { variant: 'ghost', size: 'sm', className: 'h-7 px-2 text-[11px] text-destructive', onClick: clearHistory },
-                h(Trash2, { className: 'size-3.5' }),
-                '清空历史'
-              )
-            ),
-          historyList
-        ),
-        h(TabsContent, { value: 'saved', className: 'min-h-0 flex-1 overflow-auto p-3' }, savedList)
+        )
       ),
-      // 非「已保存 / 历史」页时的保存按钮
-      (tab === 'headers' || tab === 'body') &&
-        el(
-          'div',
-          { className: 'flex items-center justify-end gap-2 border-t border-border px-3 py-1.5' },
-          h(Button, { variant: 'outline', size: 'sm', onClick: saveCurrent }, h(Save, { className: 'size-3.5' }), '保存当前请求')
-        ),
-      // 响应区：状态行 + 响应体 / 响应头
+      // 保存当前请求
       el(
         'div',
-        { className: 'flex min-h-0 flex-1 flex-col border-t border-border' },
+        { className: 'flex items-center justify-end gap-2 border-t border-border px-3 py-1.5' },
+        h(Button, { variant: 'outline', size: 'sm', onClick: saveCurrent }, h(Save, { className: 'size-3.5' }), '保存当前请求')
+      ),
+      // 拖拽条：上下拖动调整响应面板高度（与项目内 ResizeHandle 同款的视觉与热区处理）
+      el(
+        'div',
+        {
+          className: 'group/res relative z-10 -my-1 h-2 shrink-0 cursor-row-resize select-none',
+          title: '拖动调整响应面板高度',
+          onPointerDown: (e) => {
+            e.preventDefault()
+            const root = e.currentTarget.parentElement
+            const total = root ? root.getBoundingClientRect().height : 0
+            const startY = e.clientY
+            const startRatio = resRatio
+            const move = (ev) => {
+              if (!total) return
+              const next = startRatio - (ev.clientY - startY) / total
+              setResRatio(Math.max(0.15, Math.min(0.8, next)))
+            }
+            const up = () => {
+              window.removeEventListener('pointermove', move)
+              window.removeEventListener('pointerup', up)
+              document.body.style.cursor = ''
+              document.body.style.userSelect = ''
+            }
+            document.body.style.cursor = 'row-resize'
+            document.body.style.userSelect = 'none'
+            window.addEventListener('pointermove', move)
+            window.addEventListener('pointerup', up)
+          }
+        },
+        el('div', {
+          className:
+            'absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-border transition-colors group-hover/res:bg-primary'
+        })
+      ),
+      // 响应区：状态行 + 响应体 / 响应头（高度由拖拽条决定）
+      el(
+        'div',
+        {
+          className: 'flex min-h-0 shrink-0 flex-col',
+          style: { height: Math.round(resRatio * 100) + '%' }
+        },
         el(
           'div',
           { className: 'flex items-center gap-3 px-3 py-1.5 text-xs' },
@@ -704,6 +772,52 @@ export function activate(api) {
           ),
           h(TabsContent, { value: 'body', className: 'min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2' }, responseBody),
           h(TabsContent, { value: 'headers', className: 'min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2' }, responseHeaders)
+        )
+      )
+      ),
+      // 请求历史抽屉（右侧滑出）
+      h(
+        Drawer,
+        { open: historyOpen, onOpenChange: setHistoryOpen, direction: 'right' },
+        h(
+          DrawerContent,
+          { className: 'sm:max-w-md' },
+          h(
+            DrawerHeader,
+            { className: 'flex-row items-center justify-between gap-2 border-b border-border px-4 py-3' },
+            el(
+              'div',
+              { className: 'min-w-0' },
+              h(DrawerTitle, { className: 'text-sm' }, '请求历史'),
+              h(
+                DrawerDescription,
+                { className: 'text-[11px]' },
+                '发送请求后自动记录，最多保留 ' + HISTORY_LIMIT + ' 条'
+              )
+            ),
+            h(
+              Button,
+              {
+                variant: 'ghost',
+                size: 'sm',
+                className: 'h-7 shrink-0 gap-1.5 px-2 text-[11px] text-destructive',
+                disabled: history.length === 0,
+                onClick: clearHistory
+              },
+              h(Trash2, { className: 'size-3.5' }),
+              '清空'
+            )
+          ),
+          el('div', { className: 'min-h-0 flex-1 overflow-auto p-4' }, historyList),
+          h(
+            DrawerFooter,
+            { className: 'flex-row justify-end border-t border-border px-4 py-3' },
+            h(
+              DrawerClose,
+              null,
+              h(Button, { variant: 'outline', size: 'sm' }, '关闭')
+            )
+          )
         )
       )
     )
