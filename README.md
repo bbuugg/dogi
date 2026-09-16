@@ -5,7 +5,7 @@
 ## 功能
 
 ### 终端
-- **本地终端**：基于 `@lydell/node-pty`（预编译 PTY，Windows 下默认 PowerShell）
+- **本地终端**：基于 `node-pty`（PTY，Windows 下默认 PowerShell）
 - **SSH**：基于 `ssh2`，支持密码 / 私钥认证，keepalive、多会话
 - **多标签**：基于 `@xterm/xterm`（v6），xterm 6 默认 WebGL 渲染
 - 会话输出环形缓冲（256KB / 会话），供 AI 与调试读取

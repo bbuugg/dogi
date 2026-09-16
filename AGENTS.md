@@ -4,20 +4,20 @@
 
 ## 环境与原生依赖
 
-### 1. node-pty 无法本地编译，使用 @lydell/node-pty
+### 1. node-pty 本地编译依赖
 
 - **触发信号**：`npm install node-pty` 或 `node-gyp rebuild` 报错（本机缺 MSVC / Windows Build Tools）。
-- **根因/约束**：node-pty 是需要本地编译的原生模块；@lydell/node-pty 提供预编译二进制（N-API，Node/Electron 通用），API 与 node-pty 兼容。
-- **正确做法**：依赖用 `@lydell/node-pty`，import 路径同（`src/main/services/sessions.ts`）。若机器装了 VS Build Tools 想换回官方包，仅需改 import 并重装。
+- **根因/约束**：node-pty 是需要本地编译的原生模块，安装时需 MSVC 工具链。本机已具备编译条件，直接使用官方 `node-pty`。
+- **正确做法**：依赖用 `node-pty`，import 路径 `node-pty`（`src/main/services/sessions.ts`）。若机器缺编译环境，可回退到 `@lydell/node-pty` 预编译包（仅改 import 与依赖并重装）。
 - **注意**：Windows ConPTY 下 `pty.spawn()` 返回的 `pid` 恒为 **0**，这不是错误，不要用 pid 判断进程是否存活，应以 `onExit` 事件为准。
-- **验证方式**：`ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron.exe -e "require('@lydell/node-pty').spawn('cmd.exe',[],{})"` 能收到输出即正常。
+- **验证方式**：`ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron.exe -e "require('node-pty').spawn('cmd.exe',[],{})"` 能收到输出即正常。
 
 ### 2. npm 12 install-scripts 安全策略会静默跳过安装脚本
 
 - **触发信号**：安装后 `node_modules/electron/dist/electron.exe` 不存在、esbuild 运行报二进制缺失；npm 输出 `install-scripts blocked` 警告。
 - **根因/约束**：npm 12 默认阻止未批准的 postinstall/install 脚本，批准记录写在 `package.json` 的 `allowScripts` 字段。
 - **正确做法**：`npm install-scripts approve electron esbuild node-pty ssh2` 后执行 `npm rebuild`；新装原生依赖后检查产物是否存在。
-- **验证方式**：`ls node_modules/electron/dist/electron.exe`、`ls node_modules/@lydell/node-pty/build`。
+- **验证方式**：`ls node_modules/electron/dist/electron.exe`、`ls node_modules/node-pty/build`。
 
 ### 3. Electron 二进制下载需要镜像
 

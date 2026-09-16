@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { exec as cpExec } from 'node:child_process'
 import * as os from 'node:os'
-import * as pty from '@lydell/node-pty'
+import * as pty from 'node-pty'
 import { Client, type ClientChannel, type ConnectConfig } from 'ssh2'
 import type { SessionInfo, SessionType, SshProfile } from '@shared/types'
 import { resolveLocalShell } from './shells'
