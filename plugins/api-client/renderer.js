@@ -35,7 +35,7 @@ export function activate(api) {
     DrawerTitle,
     DrawerDescription
   } = api.ui
-  const { Send, Save, Trash2, Plus, History } = api.icons
+  const { Send, Save, Trash2, Plus, History, X } = api.icons
   const cn = api.ui.cn
   const toast = api.toast
   const MonacoEditor = api.MonacoEditor
@@ -215,26 +215,39 @@ export function activate(api) {
     return status < 400 ? 'bg-emerald-500/15 text-emerald-500' : 'bg-destructive/15 text-destructive'
   }
 
+  /** 新建一个空白请求标签 */
+  const newTab = () => ({
+    id: 't' + Date.now() + Math.random().toString(36).slice(2, 6),
+    method: 'GET',
+    url: '',
+    headers: [emptyHeader()],
+    body: '',
+    /** 请求构造区当前页：headers / body */
+    tab: 'headers',
+    sending: false,
+    response: null,
+    error: null,
+    /** 响应体是否格式化（JSON 美化） */
+    format: true,
+    /** 响应区当前页：body / headers */
+    resTab: 'body',
+    /** 请求体编辑器语言 */
+    bodyLang: 'json'
+  })
+
   function ApiClientView() {
-    const [method, setMethod] = useState('GET')
-    const [url, setUrl] = useState('')
-    const [headers, setHeaders] = useState([emptyHeader()])
-    const [body, setBody] = useState('')
-    const [tab, setTab] = useState('headers')
-    const [sending, setSending] = useState(false)
-    const [response, setResponse] = useState(null)
-    const [error, setError] = useState(null)
+    /** 请求标签列表（每个标签独立持有方法/地址/请求头/请求体/响应等状态） */
+    const [tabs, setTabs] = useState(() => [newTab()])
+    /** 当前激活的标签 id（null 时回退到第一个） */
+    const [activeId, setActiveId] = useState(null)
     const [saved, setSaved] = useState([])
     const [history, setHistory] = useState([])
     /** 请求历史抽屉是否打开 */
     const [historyOpen, setHistoryOpen] = useState(false)
     /** 响应面板高度占主列的比例（拖动分隔条调整，范围 0.15–0.8） */
     const [resRatio, setResRatio] = useState(0.5)
-    const [resTab, setResTab] = useState('body')
-    /** 响应体是否格式化（JSON 美化） */
-    const [format, setFormat] = useState(true)
-    /** 请求体编辑器语言 */
-    const [bodyLang, setBodyLang] = useState('json')
+
+    const activeTab = tabs.find((t) => t.id === activeId) || tabs[0]
 
     useEffect(() => {
       api.storage.get(SAVED_KEY).then((v) => {
@@ -245,23 +258,51 @@ export function activate(api) {
       })
     }, [])
 
-    const updateHeader = (idx, field, value) => {
-      setHeaders((prev) => prev.map((p, i) => (i === idx ? { ...p, [field]: value } : p)))
-    }
-    const addHeader = () => setHeaders((prev) => [...prev, emptyHeader()])
-    const removeHeader = (idx) =>
-      setHeaders((prev) => {
-        const next = prev.filter((_, i) => i !== idx)
-        return next.length ? next : [emptyHeader()]
-      })
+    /** 局部更新当前激活标签的字段 */
+    const updateActive = (patch) =>
+      setTabs((prev) => prev.map((t) => (t.id === activeTab.id ? { ...t, ...patch } : t)))
 
-    const pushHistory = (res) => {
+    /** 新增一个请求标签并激活 */
+    const addTab = () => {
+      const t = newTab()
+      setTabs((prev) => [...prev, t])
+      setActiveId(t.id)
+    }
+
+    /** 关闭标签：关闭最后一个时重置为空白标签 */
+    const closeTab = (id) => {
+      if (tabs.length === 1) {
+        const t = newTab()
+        setTabs([t])
+        setActiveId(t.id)
+        return
+      }
+      const idx = tabs.findIndex((t) => t.id === id)
+      const next = tabs.filter((t) => t.id !== id)
+      setTabs(next)
+      if (id === activeTab.id) {
+        setActiveId(next[Math.max(0, Math.min(idx, next.length - 1))].id)
+      }
+    }
+
+    const updateHeader = (idx, field, value) => {
+      updateActive({
+        headers: activeTab.headers.map((p, i) => (i === idx ? { ...p, [field]: value } : p))
+      })
+    }
+    const addHeader = () => updateActive({ headers: [...activeTab.headers, emptyHeader()] })
+    const removeHeader = (idx) => {
+      const next = activeTab.headers.filter((_, i) => i !== idx)
+      updateActive({ headers: next.length ? next : [emptyHeader()] })
+    }
+
+    const pushHistory = (req, res) => {
       const entry = {
         id: String(Date.now()) + Math.random().toString(36).slice(2, 6),
-        method,
-        url: url.trim(),
-        headers,
-        body,
+        method: req.method,
+        url: req.url.trim(),
+        headers: req.headers,
+        body: req.body,
         status: res ? res.status : 0,
         statusText: res ? res.statusText : '',
         timeMs: res ? res.timeMs : 0,
@@ -275,31 +316,30 @@ export function activate(api) {
     }
 
     const send = async () => {
-      if (!url.trim()) {
-        setError('请填写请求地址')
+      const req = activeTab
+      if (!req.url.trim()) {
+        updateActive({ error: '请填写请求地址' })
         return
       }
-      setSending(true)
-      setError(null)
-      setResponse(null)
+      updateActive({ sending: true, error: null, response: null })
       let res = null
       try {
         res = await api.http({
-          method,
-          url: url.trim(),
-          headers: pairsToHeaders(headers),
-          body: method !== 'GET' && method !== 'HEAD' ? body : undefined,
+          method: req.method,
+          url: req.url.trim(),
+          headers: pairsToHeaders(req.headers),
+          body: req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined,
           timeoutMs: 30000
         })
-        setResponse(res)
+        updateActive({ response: res })
         if (res.error) toast.error('请求失败', { description: res.error })
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
-        setError(msg)
+        updateActive({ error: msg })
         toast.error('请求失败', { description: msg })
       } finally {
-        setSending(false)
-        pushHistory(res)
+        updateActive({ sending: false })
+        pushHistory(req, res)
       }
     }
 
@@ -309,20 +349,30 @@ export function activate(api) {
     }
 
     const saveCurrent = () => {
-      if (!url.trim()) return
+      if (!activeTab.url.trim()) return
       persistSaved([
         ...saved,
-        { id: String(Date.now()), method, url: url.trim(), headers, body, at: Date.now() }
+        {
+          id: String(Date.now()),
+          method: activeTab.method,
+          url: activeTab.url.trim(),
+          headers: activeTab.headers,
+          body: activeTab.body,
+          at: Date.now()
+        }
       ])
       toast.success('已保存请求')
     }
 
+    /** 把保存的请求载入到当前激活标签 */
     const applyRequest = (req) => {
-      setMethod(req.method || 'GET')
-      setUrl(req.url || '')
-      setHeaders(normalizeHeaders(req.headers ?? req.headersText))
-      setBody(req.body || '')
-      setTab('headers')
+      updateActive({
+        method: req.method || 'GET',
+        url: req.url || '',
+        headers: normalizeHeaders(req.headers ?? req.headersText),
+        body: req.body || '',
+        tab: 'headers'
+      })
     }
 
     const deleteSaved = (idx) => {
@@ -343,6 +393,8 @@ export function activate(api) {
       toast('已清空请求历史')
     }
 
+    const response = activeTab.response
+    const error = activeTab.error
     const statusOk = response && response.status > 0 && response.status < 400
     const statusPill = response
       ? h(
@@ -389,7 +441,7 @@ export function activate(api) {
         h(
           TableBody,
           null,
-          ...headers.map((p, i) => {
+          ...activeTab.headers.map((p, i) => {
             const valueSuggestions = headerValueSuggestions(p.key)
             const valueDatalistId = valueSuggestions ? HEADER_VALUE_DATALIST_PREFIX + i : undefined
             return h(
@@ -572,20 +624,20 @@ export function activate(api) {
             { className: 'flex items-center gap-2' },
             h(
               Button,
-              { variant: 'ghost', size: 'sm', className: 'h-7 px-2 text-[11px]', onClick: () => setFormat((f) => !f) },
-              format ? '已格式化' : '格式化'
+              { variant: 'ghost', size: 'sm', className: 'h-7 px-2 text-[11px]', onClick: () => updateActive({ format: !activeTab.format }) },
+              activeTab.format ? '已格式化' : '格式化'
             ),
             el(
               'span',
               { className: 'text-[10px] text-muted-foreground' },
-              format ? '已按内容类型美化（JSON 缩进）' : '显示原始响应正文'
+              activeTab.format ? '已按内容类型美化（JSON 缩进）' : '显示原始响应正文'
             )
           ),
           el(
             'div',
             { className: 'h-[320px] overflow-hidden rounded-md border border-border' },
             h(MonacoEditor, {
-              value: formatBody(response.body, contentType, format),
+              value: formatBody(response.body, contentType, activeTab.format),
               language: detectLanguage(contentType, response.body),
               readOnly: true,
               showCopyButton: true,
@@ -634,76 +686,116 @@ export function activate(api) {
         ),
         el('div', { className: 'min-h-0 flex-1 overflow-y-auto' }, savedSidebar)
       ),
-      // 右侧主列：工具栏 + 请求构造 + 响应区
+      // 右侧主列：请求标签条 + 工具栏 + 请求构造 + 响应区
       el(
         'div',
         { className: 'flex min-w-0 flex-1 flex-col' },
+        // 请求标签条：切换不同请求，右侧 + 新建
+        el(
+          'div',
+          { className: 'flex h-8 shrink-0 items-stretch border-b border-border' },
+          el(
+            'div',
+            { className: 'no-scrollbar flex min-w-0 flex-1 items-stretch overflow-x-auto' },
+            ...tabs.map((t) => {
+              const active = t.id === activeTab.id
+              return el(
+                'div',
+                {
+                  key: t.id,
+                  title: t.url || '未命名请求',
+                  onClick: () => setActiveId(t.id),
+                  className: cn(
+                    'group/tt flex max-w-52 shrink-0 cursor-pointer items-center gap-1.5 border-r border-border/60 px-2.5 text-xs transition-colors',
+                    active ? 'bg-background text-foreground' : 'text-muted-foreground hover:text-foreground'
+                  )
+                },
+                h(Badge, { variant: 'secondary', className: 'shrink-0 font-mono text-[10px]' }, t.method),
+                el('span', { className: 'min-w-0 truncate' }, t.url || '未命名'),
+                el('button', {
+                  className:
+                    'ml-0.5 shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-secondary hover:text-foreground group-hover/tt:opacity-100',
+                  title: '关闭标签',
+                  onClick: (e) => {
+                    e.stopPropagation()
+                    closeTab(t.id)
+                  }
+                }, h(X, { className: 'size-3' }))
+              )
+            })
+          ),
+          el('button', {
+            className: 'shrink-0 px-2.5 text-muted-foreground transition-colors hover:text-foreground',
+            title: '新建请求标签',
+            onClick: addTab
+          }, h(Plus, { className: 'size-3.5' }))
+        ),
         // 顶部工具栏：方法 + 地址 + 发送
         el(
           'div',
           { className: 'flex items-center gap-2 border-b border-border px-3 py-2' },
-        h(
-          Select,
-          { value: method, onValueChange: setMethod },
-          h(SelectTrigger, { className: 'w-28' }, h(SelectValue, { placeholder: '方法' })),
-          h(SelectContent, null, ...METHODS.map((m) => h(SelectItem, { key: m, value: m }, m)))
-        ),
-        h(Input, {
-          value: url,
-          onChange: (e) => setUrl(e.target.value),
-          placeholder: '请求地址，如 https://api.example.com/users',
-          className: 'min-w-0 flex-1 font-mono text-xs'
-        }),
-        h(
-          Button,
-          { type: 'button', onClick: send, disabled: sending, title: '发送（Ctrl+Enter）' },
-          h(Send, { className: 'size-4' }),
-          sending ? '发送中…' : '发送'
-        )
-      ),
-      // 请求构造区（Tab）：历史入口改为右侧抽屉，由工具栏按钮唤起
-      h(
-        Tabs,
-        { value: tab, onValueChange: setTab, className: 'flex min-h-0 flex-1 flex-col' },
-        el(
-          'div',
-          { className: 'flex items-center border-b border-border' },
           h(
-            TabsList,
-            { className: 'w-full justify-start gap-1 rounded-none border-b-0 bg-transparent px-3' },
-            h(TabsTrigger, { value: 'headers' }, '请求头'),
-            h(TabsTrigger, { value: 'body' }, '请求体')
+            Select,
+            { value: activeTab.method, onValueChange: (m) => updateActive({ method: m }) },
+            h(SelectTrigger, { className: 'w-28' }, h(SelectValue, { placeholder: '方法' })),
+            h(SelectContent, null, ...METHODS.map((m) => h(SelectItem, { key: m, value: m }, m)))
           ),
+          h(Input, {
+            value: activeTab.url,
+            onChange: (e) => updateActive({ url: e.target.value }),
+            placeholder: '请求地址，如 https://api.example.com/users',
+            className: 'min-w-0 flex-1 font-mono text-xs'
+          }),
           h(
             Button,
-            {
-              variant: 'ghost',
-              size: 'sm',
-              className: 'mr-2 shrink-0 gap-1.5 text-[11px] text-muted-foreground',
-              title: '查看请求历史',
-              onClick: () => setHistoryOpen(true)
-            },
-            h(History, { className: 'size-3.5' }),
-            '历史 (' + history.length + ')'
+            { type: 'button', onClick: send, disabled: activeTab.sending, title: '发送（Ctrl+Enter）' },
+            h(Send, { className: 'size-4' }),
+            activeTab.sending ? '发送中…' : '发送'
           )
         ),
-        h(TabsContent, { value: 'headers', className: 'min-h-0 flex-1 overflow-auto p-3' }, headerRows),
-        h(TabsContent, { value: 'body', className: 'min-h-0 flex-1 overflow-auto p-3' },
+        // 请求构造区（Tab）：历史入口改为右侧抽屉，由工具栏按钮唤起
+        h(
+          Tabs,
+          { value: activeTab.tab, onValueChange: (v) => updateActive({ tab: v }), className: 'flex min-h-0 flex-1 flex-col' },
           el(
             'div',
-            { className: 'h-64 overflow-hidden rounded-md border border-border' },
-            h(MonacoEditor, {
-              value: body,
-              onChange: (v) => setBody(v || ''),
-              language: bodyLang,
-              onLanguageChange: setBodyLang,
-              showLanguageSelector: true,
-              showLineNumbersToggle: true,
-              showWordWrapToggle: true
-            })
+            { className: 'flex items-center border-b border-border' },
+            h(
+              TabsList,
+              { className: 'w-full justify-start gap-1 rounded-none border-b-0 bg-transparent px-3' },
+              h(TabsTrigger, { value: 'headers' }, '请求头'),
+              h(TabsTrigger, { value: 'body' }, '请求体')
+            ),
+            h(
+              Button,
+              {
+                variant: 'ghost',
+                size: 'sm',
+                className: 'mr-2 shrink-0 gap-1.5 text-[11px] text-muted-foreground',
+                title: '查看请求历史',
+                onClick: () => setHistoryOpen(true)
+              },
+              h(History, { className: 'size-3.5' }),
+              '历史 (' + history.length + ')'
+            )
+          ),
+          h(TabsContent, { value: 'headers', className: 'min-h-0 flex-1 overflow-auto p-3' }, headerRows),
+          h(TabsContent, { value: 'body', className: 'min-h-0 flex-1 overflow-auto p-3' },
+            el(
+              'div',
+              { className: 'h-64 overflow-hidden rounded-md border border-border' },
+              h(MonacoEditor, {
+                value: activeTab.body,
+                onChange: (v) => updateActive({ body: v || '' }),
+                language: activeTab.bodyLang,
+                onLanguageChange: (l) => updateActive({ bodyLang: l }),
+                showLanguageSelector: true,
+                showLineNumbersToggle: true,
+                showWordWrapToggle: true
+              })
+            )
           )
-        )
-      ),
+        ),
       // 保存当前请求
       el(
         'div',
@@ -763,7 +855,7 @@ export function activate(api) {
         ),
         h(
           Tabs,
-          { value: resTab, onValueChange: setResTab, className: 'flex min-h-0 flex-1 flex-col' },
+          { value: activeTab.resTab, onValueChange: (v) => updateActive({ resTab: v }), className: 'flex min-h-0 flex-1 flex-col' },
           h(
             TabsList,
             { className: 'w-full justify-start gap-1 rounded-none border-b border-border bg-transparent px-3' },
