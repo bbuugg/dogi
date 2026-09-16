@@ -12,6 +12,7 @@ export function activate(api) {
     Button,
     Input,
     Badge,
+    Textarea,
     Select,
     SelectTrigger,
     SelectValue,
@@ -33,9 +34,15 @@ export function activate(api) {
     DrawerHeader,
     DrawerFooter,
     DrawerTitle,
-    DrawerDescription
+    DrawerDescription,
+    Dialog,
+    DialogContent,
+    DialogHeader,
+    DialogTitle,
+    DialogDescription,
+    DialogFooter
   } = api.ui
-  const { Send, Save, Trash2, Plus, History, X } = api.icons
+  const { Send, Save, Trash2, Plus, History, X, Terminal } = api.icons
   const cn = api.ui.cn
   const toast = api.toast
   const MonacoEditor = api.MonacoEditor
@@ -173,6 +180,143 @@ export function activate(api) {
     return [emptyHeader()]
   }
 
+  /**
+   * 解析 cURL 命令为 { method, url, headers, body }。
+   * 支持 -X/-H/-d 系列/--json/-F/-u/-G 与行接续符，其余选项忽略；解析失败抛错。
+   */
+  function parseCurl(cmd) {
+    // 归一换行，再去掉三种 shell 的续行符：bash `\`、cmd `^`、PowerShell backtick
+    const text = String(cmd || '')
+      .replace(/\r\n?/g, '\n')
+      .replace(/\\\n/g, ' ')
+      .replace(/\^\n/g, ' ')
+      .replace(/`\n/g, ' ')
+    const tokens = []
+    let cur = ''
+    let quote = null
+    let has = false
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i]
+      if (quote) {
+        if (ch === quote) {
+          quote = null
+        } else if (quote === '"' && ch === '\\' && text[i + 1] !== undefined) {
+          cur += text[++i] // "..." 内 \x 转义取原字符
+        } else {
+          cur += ch
+        }
+      } else if (ch === '"' || ch === "'") {
+        quote = ch
+        has = true
+      } else if (/\s/.test(ch)) {
+        if (cur || has) {
+          tokens.push(cur)
+          cur = ''
+          has = false
+        }
+      } else {
+        cur += ch
+      }
+    }
+    if (cur || has) tokens.push(cur)
+
+    if (!tokens.length || tokens[0] !== 'curl') throw new Error('不是有效的 cURL 命令（需以 curl 开头）')
+
+    const optValue = (i) => {
+      const v = tokens[i + 1]
+      if (v === undefined) throw new Error('cURL 参数缺少值：' + tokens[i])
+      return v
+    }
+
+    let method = null
+    let url = ''
+    let basic = null
+    let isGet = false
+    const headerLines = []
+    const dataParts = []
+    const formParts = []
+    for (let i = 1; i < tokens.length; i++) {
+      const t = tokens[i]
+      if (t === '-X' || t === '--request') {
+        method = optValue(i).toUpperCase()
+        i++
+      } else if (t === '-H' || t === '--header') {
+        headerLines.push(optValue(i))
+        i++
+      } else if (t === '-d' || t === '--data' || t === '--data-raw' || t === '--data-binary' || t === '--data-ascii' || t === '--data-urlencode') {
+        dataParts.push(optValue(i))
+        i++
+      } else if (t === '--json') {
+        // curl 8.x：--json 'body' 等价于 -d body + JSON 相关头
+        headerLines.push('Content-Type: application/json', 'Accept: application/json')
+        dataParts.push(optValue(i))
+        i++
+      } else if (t === '-F' || t === '--form') {
+        formParts.push(optValue(i))
+        i++
+      } else if (t === '-u' || t === '--user') {
+        basic = optValue(i)
+        i++
+      } else if (t === '-G' || t === '--get') {
+        isGet = true
+      } else if (t.startsWith('-')) {
+        // 其它选项（-L/-k/--compressed/-o 等）不影响请求语义，忽略
+      } else if (!url) {
+        url = t
+      }
+    }
+
+    if (!url) throw new Error('cURL 命令中未找到请求地址')
+
+    // 请求头行 -> 名称-值对
+    const pairs = []
+    for (const line of headerLines) {
+      const idx = line.indexOf(':')
+      if (idx <= 0) continue
+      pairs.push({ key: line.slice(0, idx).trim(), value: line.slice(idx + 1).trim() })
+    }
+    if (basic) {
+      pairs.push({ key: 'Authorization', value: 'Basic ' + btoa(basic) })
+    }
+
+    let body = ''
+    let autoCt = null
+    if (formParts.length) {
+      // -F 近似处理：字段以 & 拼接（文件字段 @path 需导入后手动调整）
+      body = formParts.join('&')
+      if (!pairs.some((p) => p.key.toLowerCase() === 'content-type')) {
+        autoCt = 'multipart/form-data'
+        pairs.push({ key: 'Content-Type', value: autoCt })
+      }
+    } else if (dataParts.length) {
+      body = dataParts.join('&')
+      if (!pairs.some((p) => p.key.toLowerCase() === 'content-type')) {
+        autoCt = 'application/x-www-form-urlencoded'
+        pairs.push({ key: 'Content-Type', value: autoCt })
+      }
+    }
+
+    // -G：强制 GET，把 data 追加到 URL 查询串（此时不发送 body，撤回自动补的 Content-Type）
+    if (isGet) {
+      method = 'GET'
+      if (body) {
+        url += (url.includes('?') ? '&' : '?') + body.replace(/&$/, '')
+        body = ''
+      }
+      if (autoCt) {
+        const idx = pairs.findIndex((p) => p.key.toLowerCase() === 'content-type' && p.value === autoCt)
+        if (idx >= 0) pairs.splice(idx, 1)
+      }
+    }
+
+    return {
+      method: method || (dataParts.length || formParts.length ? 'POST' : 'GET'),
+      url,
+      headers: pairs,
+      body
+    }
+  }
+
   /** 按内容类型格式化响应体：JSON 美化缩进，其余原样返回 */
   function formatBody(body, contentType, enabled) {
     if (!body || !enabled) return body
@@ -244,6 +388,9 @@ export function activate(api) {
     const [history, setHistory] = useState([])
     /** 请求历史抽屉是否打开 */
     const [historyOpen, setHistoryOpen] = useState(false)
+    /** cURL 导入弹窗 */
+    const [curlOpen, setCurlOpen] = useState(false)
+    const [curlText, setCurlText] = useState('')
     /** 响应面板高度占主列的比例（拖动分隔条调整，范围 0.15–0.8） */
     const [resRatio, setResRatio] = useState(0.5)
 
@@ -373,6 +520,27 @@ export function activate(api) {
         body: req.body || '',
         tab: 'headers'
       })
+    }
+
+    /** 解析粘贴的 cURL 命令，载入为新请求标签 */
+    const importCurl = () => {
+      try {
+        const parsed = parseCurl(curlText)
+        const t = {
+          ...newTab(),
+          method: parsed.method,
+          url: parsed.url,
+          headers: parsed.headers.length ? normalizeHeaders(parsed.headers) : newTab().headers,
+          body: parsed.body || ''
+        }
+        setTabs((prev) => [...prev, t])
+        setActiveId(t.id)
+        setCurlOpen(false)
+        setCurlText('')
+        toast.success('已导入 cURL 命令')
+      } catch (e) {
+        toast.error('导入失败', { description: e instanceof Error ? e.message : String(e) })
+      }
     }
 
     const deleteSaved = (idx) => {
@@ -722,13 +890,25 @@ export function activate(api) {
                   }
                 }, h(X, { className: 'size-3' }))
               )
-            })
-          ),
-          el('button', {
-            className: 'shrink-0 px-2.5 text-muted-foreground transition-colors hover:text-foreground',
-            title: '新建请求标签',
-            onClick: addTab
-          }, h(Plus, { className: 'size-3.5' }))
+            }),
+            // 右缘固定区：导入 cURL + 新建标签；标签溢出后 sticky 固定（bg-background 遮住滑过的内容）
+            el(
+              'div',
+              { className: 'sticky right-0 flex shrink-0 items-center bg-background' },
+              el('button', {
+                className:
+                  'flex h-8 items-center px-2 text-muted-foreground transition-colors hover:text-foreground',
+                title: '导入 cURL 命令',
+                onClick: () => setCurlOpen(true)
+              }, h(Terminal, { className: 'size-3.5' })),
+              el('button', {
+                className:
+                  'flex h-8 items-center px-2.5 text-muted-foreground transition-colors hover:text-foreground',
+                title: '新建请求标签',
+                onClick: addTab
+              }, h(Plus, { className: 'size-3.5' }))
+            )
+          )
         ),
         // 顶部工具栏：方法 + 地址 + 发送
         el(
@@ -909,6 +1089,43 @@ export function activate(api) {
               null,
               h(Button, { variant: 'outline', size: 'sm' }, '关闭')
             )
+          )
+        )
+      ),
+      // cURL 导入弹窗
+      h(
+        Dialog,
+        { open: curlOpen, onOpenChange: setCurlOpen },
+        h(
+          DialogContent,
+          { className: 'sm:max-w-xl' },
+          h(
+            DialogHeader,
+            null,
+            h(DialogTitle, { className: 'text-sm' }, '导入 cURL 命令'),
+            h(DialogDescription, { className: 'text-[11px]' }, '粘贴 curl 命令，解析后载入为新的请求标签')
+          ),
+          el(Textarea, {
+            value: curlText,
+            onChange: (e) => setCurlText(e.target.value),
+            placeholder:
+              'curl -X POST https://api.example.com/users \\\n  -H "Content-Type: application/json" \\\n  -d \'{"name":"foo"}\'',
+            className: 'min-h-32 max-h-64 font-mono text-xs',
+            spellCheck: false,
+            autoFocus: true,
+            // Ctrl/Cmd + Enter 直接导入
+            onKeyDown: (e) => {
+              if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault()
+                importCurl()
+              }
+            }
+          }),
+          h(
+            DialogFooter,
+            null,
+            h(Button, { variant: 'outline', size: 'sm', onClick: () => setCurlOpen(false) }, '取消'),
+            h(Button, { size: 'sm', disabled: !curlText.trim(), onClick: importCurl }, '导入')
           )
         )
       )
