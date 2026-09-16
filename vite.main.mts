@@ -22,9 +22,12 @@ export default defineConfig({
       fileName: () => 'index.js'
     },
     rollupOptions: {
-      // 本地模块（相对路径 / 盘符绝对路径）参与打包，其余 bare import 全部 external
+      // 本地模块（相对路径 / 盘符绝对路径 / @shared 别名）参与打包，其余 bare import 全部 external
       external: (id) =>
-        !id.startsWith('.') && !id.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(id)
+        !id.startsWith('.') &&
+        !id.startsWith('/') &&
+        !id.startsWith('@shared') &&
+        !/^[A-Za-z]:[\\/]/.test(id)
     }
   }
 })
