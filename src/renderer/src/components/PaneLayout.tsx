@@ -193,7 +193,7 @@ function GroupView({ groupId }: { groupId: string }) {
       <div
         className={cn(
           'flex h-8 shrink-0 items-stretch border-b',
-          active ? 'border-border' : 'border-border/60'
+          active ? 'border-border' : 'border-border/10'
         )}
       >
         <div className="no-scrollbar flex flex-1 items-stretch overflow-x-auto">

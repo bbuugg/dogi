@@ -77,7 +77,7 @@ function createTray(): void {
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: '显示主窗口', click: () => showMainWindow() },
-      { type: 'separator' },
+      // { type: 'separator' },
       { label: '退出', click: () => app.quit() }
     ])
   )
