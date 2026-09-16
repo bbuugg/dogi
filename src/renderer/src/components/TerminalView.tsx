@@ -194,6 +194,17 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
       adjustTerminalFontSize(e.deltaY < 0 ? 1 : -1)
       return false
     })
+    // Ctrl + 滚轮必须在捕获阶段拦截：xterm 6 的平滑滚动元素把滚轮监听挂在更深的
+    // .xterm-scrollable-element 上，冒泡时先于 attachCustomWheelEventHandler 的根节点闸门触发，
+    // 且有可滚动内容时会 preventDefault + stopPropagation 消费掉事件，
+    // 导致 Ctrl+滚轮变成滚动回滚缓冲而非缩放（仅在滚到顶/底无内容可滚时才轮到缩放）。
+    const handleWheelCapture = (e: WheelEvent) => {
+      if (!e.ctrlKey) return
+      e.preventDefault()
+      e.stopPropagation()
+      adjustTerminalFontSize(e.deltaY < 0 ? 1 : -1)
+    }
+    container.addEventListener('wheel', handleWheelCapture, { capture: true, passive: false })
     // 右键粘贴：开启时拦截原生菜单，读取剪贴板并写入终端；关闭时保留浏览器默认右键菜单
     const handleContextMenu = (e: MouseEvent) => {
       if (!rightClickPasteRef.current) return
@@ -521,6 +532,7 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
     return () => {
       resizeObserver.disconnect()
       charSizeDisp?.dispose?.()
+      container.removeEventListener('wheel', handleWheelCapture, { capture: true })
       container.removeEventListener('contextmenu', handleContextMenu)
       unsubscribeData()
       zsessionRef.current = null
