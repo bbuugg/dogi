@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import {
+  Boxes,
   ChevronLeft,
   ListPlus,
   Plug,
@@ -176,6 +177,18 @@ export function CommandPalette() {
       run: () => {
         close()
         setAiPanelOpen(!aiPanelOpen)
+      }
+    },
+    {
+      id: 'plugin.manage',
+      group: '界面',
+      title: '插件管理',
+      description: '安装 / 启用 / 卸载插件',
+      keywords: 'plugin manage 插件 管理 扩展',
+      icon: Boxes,
+      run: () => {
+        close()
+        setView('plugins')
       }
     },
     {

@@ -20,6 +20,7 @@ import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator } from '@/components/ui/dropdown-menu'
 import { AlertDialog, AlertDialogTrigger, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel } from '@/components/ui/alert-dialog'
 import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuLabel, ContextMenuSeparator } from '@/components/ui/context-menu'
+import { Table, TableHeader, TableBody, TableFooter, TableHead, TableRow, TableCell, TableCaption } from '@/components/ui/table'
 
 /** 插件向宿主注册的一个视图（侧边栏入口 + 主区域渲染组件） */
 export interface PluginViewInstance {
@@ -105,6 +106,14 @@ export interface RendererHostApi {
     ContextMenuItem: typeof ContextMenuItem
     ContextMenuLabel: typeof ContextMenuLabel
     ContextMenuSeparator: typeof ContextMenuSeparator
+    Table: typeof Table
+    TableHeader: typeof TableHeader
+    TableBody: typeof TableBody
+    TableFooter: typeof TableFooter
+    TableHead: typeof TableHead
+    TableRow: typeof TableRow
+    TableCell: typeof TableCell
+    TableCaption: typeof TableCaption
   }
   /** 注入的 lucide 图标集合，按名取用：api.icons.Play */
   icons: typeof Icons
@@ -184,7 +193,15 @@ function buildRendererHostApi(manifest: {
       ContextMenuContent,
       ContextMenuItem,
       ContextMenuLabel,
-      ContextMenuSeparator
+      ContextMenuSeparator,
+      Table,
+      TableHeader,
+      TableBody,
+      TableFooter,
+      TableHead,
+      TableRow,
+      TableCell,
+      TableCaption
     },
     icons: Icons,
     // 注入全局通知，插件可直接 api.toast.success / error / info ...

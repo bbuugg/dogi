@@ -20,7 +20,13 @@ export function activate(api) {
     Tabs,
     TabsList,
     TabsTrigger,
-    TabsContent
+    TabsContent,
+    Table,
+    TableHeader,
+    TableBody,
+    TableHead,
+    TableRow,
+    TableCell
   } = api.ui
   const { Send, Save, Trash2, Plus } = api.icons
   const cn = api.ui.cn
@@ -32,6 +38,7 @@ export function activate(api) {
   const HISTORY_KEY = 'history'
   const HISTORY_LIMIT = 50
   const HEADER_DATALIST_ID = 'api-client-common-headers'
+  const HEADER_VALUE_DATALIST_PREFIX = 'api-client-header-values-'
 
   /** 常见请求头：作为名称输入框的自动补全候选 */
   const COMMON_HEADERS = [
@@ -40,6 +47,7 @@ export function activate(api) {
     'Accept-Language',
     'Authorization',
     'Cache-Control',
+    'Connection',
     'Content-Type',
     'Cookie',
     'If-None-Match',
@@ -49,6 +57,59 @@ export function activate(api) {
     'X-Api-Key',
     'X-Requested-With'
   ]
+
+  /** 常见 MIME 类型：Content-Type / Accept 的取值候选 */
+  const COMMON_MIME_TYPES = [
+    'application/json',
+    'application/x-www-form-urlencoded',
+    'application/xml',
+    'application/octet-stream',
+    'application/pdf',
+    'application/zip',
+    'application/javascript',
+    'text/plain',
+    'text/html',
+    'text/css',
+    'text/csv',
+    'text/xml',
+    'multipart/form-data',
+    '*/*'
+  ]
+
+  /**
+   * 请求头取值候选：键为小写头名，值为常见取值数组。
+   * 用于值输入框的自动补全（依据当前行填写的头名动态匹配）。
+   */
+  const HEADER_VALUE_SUGGESTIONS = {
+    'content-type': COMMON_MIME_TYPES,
+    accept: COMMON_MIME_TYPES,
+    'accept-encoding': ['gzip', 'deflate', 'br', 'identity', '*/*'],
+    'accept-language': ['zh-CN', 'zh-CN,zh;q=0.9', 'en-US', 'en-US,en;q=0.9', 'zh-CN,zh;q=0.9,en;q=0.8', '*'],
+    'accept-charset': ['UTF-8', 'ISO-8859-1', 'UTF-8,ISO-8859-1;q=0.8'],
+    authorization: ['Bearer ', 'Basic ', 'Token '],
+    'cache-control': ['no-cache', 'no-store', 'max-age=0', 'max-age=3600', 'public', 'private', 'must-revalidate'],
+    connection: ['keep-alive', 'close', 'Upgrade'],
+    pragma: ['no-cache'],
+    'if-none-match': ['*'],
+    'x-requested-with': ['XMLHttpRequest'],
+    'content-encoding': ['gzip', 'deflate', 'br', 'identity'],
+    origin: ['http://localhost:5173', 'https://example.com'],
+    'upgrade-insecure-requests': ['1'],
+    dnt: ['1', '0'],
+    'sec-fetch-mode': ['cors', 'navigate', 'no-cors', 'same-origin'],
+    'sec-fetch-site': ['same-origin', 'cross-site', 'same-site', 'none']
+  }
+
+  /** 依据头名（大小写不敏感）取该头的常见取值候选，无匹配返回 null */
+  function headerValueSuggestions(key) {
+    const k = String(key || '').trim().toLowerCase()
+    if (!k) return null
+    return HEADER_VALUE_SUGGESTIONS[k] || null
+  }
+
+  /** 单元格内的扁平输入框：无边框无阴影，聚焦时以淡背景高亮，视觉上与表格浑然一体 */
+  const HEADER_CELL_INPUT =
+    'h-8 w-full min-w-0 bg-transparent px-2.5 font-mono text-[11px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus:bg-accent/60'
 
   const el = (tag, props, ...children) => h(tag, props, ...children)
 
@@ -268,48 +329,88 @@ export function activate(api) {
     const contentType = response?.headers?.['content-type'] || ''
     const respHeaders = response ? Object.entries(response.headers || {}) : []
 
-    // 请求头行（名称带常见头自动补全）
+    // 请求头表格（Postman 风格：单一容器 + 分隔线，单元格输入框扁平无边框）
     const headerRows = el(
       'div',
-      { className: 'space-y-2' },
-      ...headers.map((p, i) =>
-        el(
-          'div',
-          { key: i, className: 'flex items-center gap-2' },
-          h(Input, {
-            value: p.key,
-            list: HEADER_DATALIST_ID,
-            placeholder: '名称，如 Content-Type',
-            onChange: (e) => updateHeader(i, 'key', e.target.value),
-            className: 'w-56 shrink-0 font-mono text-[11px]'
-          }),
-          h(Input, {
-            value: p.value,
-            placeholder: '值，如 application/json',
-            onChange: (e) => updateHeader(i, 'value', e.target.value),
-            className: 'min-w-0 flex-1 font-mono text-[11px]'
-          }),
-          h(
-            Button,
-            {
-              variant: 'ghost',
-              size: 'icon-sm',
-              className: 'shrink-0 text-muted-foreground',
-              title: '删除该请求头',
-              onClick: () => removeHeader(i)
-            },
-            h(Trash2, { className: 'size-3.5' })
-          )
-        )
-      ),
+      { className: 'overflow-hidden rounded-md border border-border' },
+      // 表头
       el(
         'div',
-        { className: 'flex items-center gap-2 pt-1' },
-        h(Button, { variant: 'outline', size: 'sm', onClick: addHeader }, h(Plus, { className: 'size-3.5' }), '添加请求头'),
+        { className: HEADER_GRID + ' border-b border-border bg-muted/50 text-[10px] text-muted-foreground' },
+        el('div', { className: 'px-2.5 py-1.5' }, '名称'),
+        el('div', { className: 'border-l border-border px-2.5 py-1.5' }, '值'),
+        el('div', { className: 'border-l border-border' })
+      ),
+      // 数据行
+      el(
+        'div',
+        { className: 'divide-y divide-border' },
+        ...headers.map((p, i) => {
+          const valueSuggestions = headerValueSuggestions(p.key)
+          const valueDatalistId = valueSuggestions ? HEADER_VALUE_DATALIST_PREFIX + i : undefined
+          return el(
+            'div',
+            { key: i, className: HEADER_GRID + ' group' },
+            el(
+              'input',
+              {
+                value: p.key,
+                list: HEADER_DATALIST_ID,
+                placeholder: '名称，如 Content-Type',
+                onChange: (e) => updateHeader(i, 'key', e.target.value),
+                className: HEADER_CELL_INPUT
+              }
+            ),
+            el(
+              'div',
+              { className: 'flex items-center border-l border-border' },
+              el('input', {
+                value: p.value,
+                list: valueDatalistId,
+                placeholder: valueSuggestions ? '可从常见取值中选择' : '值，如 application/json',
+                onChange: (e) => updateHeader(i, 'value', e.target.value),
+                className: HEADER_CELL_INPUT
+              }),
+              valueSuggestions
+                ? el(
+                    'datalist',
+                    { id: valueDatalistId },
+                    ...valueSuggestions.map((v) => el('option', { key: v, value: v }))
+                  )
+                : null
+            ),
+            el(
+              'div',
+              { className: 'flex justify-center border-l border-border' },
+              h(
+                Button,
+                {
+                  variant: 'ghost',
+                  size: 'icon-sm',
+                  className: 'size-7 text-muted-foreground opacity-50 transition-opacity hover:text-destructive group-hover:opacity-100 focus-visible:opacity-100',
+                  title: '删除该请求头',
+                  onClick: () => removeHeader(i)
+                },
+                h(Trash2, { className: 'size-3.5' })
+              )
+            )
+          )
+        })
+      ),
+      // 底部：添加按钮 + 提示
+      el(
+        'div',
+        { className: 'flex items-center gap-2 border-t border-border bg-muted/30 px-2 py-1.5' },
+        h(
+          Button,
+          { variant: 'ghost', size: 'sm', className: 'h-7 px-2 text-[11px]', onClick: addHeader },
+          h(Plus, { className: 'size-3.5' }),
+          '添加请求头'
+        ),
         el(
           'span',
           { className: 'text-[10px] text-muted-foreground' },
-          '名称支持输入或从常见请求头中选择：Accept / Content-Type / Authorization 等'
+          '名称可从常见请求头中选择；填写 Accept / Content-Type / Authorization 等后，值也会给出常见候选'
         )
       ),
       el(
