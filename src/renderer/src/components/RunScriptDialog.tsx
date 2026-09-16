@@ -38,6 +38,9 @@ export function RunScriptDialog() {
   const runScriptOnHost = useAppStore((s) => s.runScriptOnHost)
   const setSshDialog = useAppStore((s) => s.setSshDialog)
 
+  /** 带预设脚本进入（列表/命令面板点运行）：锁定该脚本并隐藏脚本选择 */
+  const hasPreset = Boolean(scriptId)
+
   const onOpenChange = (next: boolean): void => setRunScriptDialog(next, next ? scriptId : undefined)
 
   const [selectedScript, setSelectedScript] = useState('')
@@ -47,19 +50,25 @@ export function RunScriptDialog() {
   /** 预设脚本每次打开只应用一次，之后用户可自由改选 */
   const presetApplied = useRef(false)
 
+  /** 预设时直接用 scriptId，否则用下拉选择的脚本 */
+  const effectiveScriptId = hasPreset ? scriptId : selectedScript
+
   useEffect(() => {
     if (!open) {
       presetApplied.current = false
       return
     }
-    const preferred = presetApplied.current ? undefined : scriptId
-    presetApplied.current = true
+    // 带预设脚本进入时锁定该脚本，不再做下拉预选
+    if (!hasPreset) {
+      const preferred = presetApplied.current ? undefined : scriptId
+      presetApplied.current = true
+      setSelectedScript((cur) => pickId(cur, scripts.map((s) => s.id), preferred))
+    }
     setError(null)
-    setSelectedScript((cur) => pickId(cur, scripts.map((s) => s.id), preferred))
     setSelectedProfile((cur) => pickId(cur, profiles.map((p) => p.id)))
-  }, [open, scriptId, scripts, profiles])
+  }, [open, scriptId, hasPreset, scripts, profiles])
 
-  const script = scripts.find((s) => s.id === selectedScript)
+  const script = scripts.find((s) => s.id === effectiveScriptId)
   const profile = profiles.find((p) => p.id === selectedProfile)
   const canRun = Boolean(script && profile) && !running
 
@@ -89,25 +98,34 @@ export function RunScriptDialog() {
         </DialogHeader>
 
         <div className="grid gap-3 py-2">
-          <div className="grid gap-1.5">
-            <Label>脚本</Label>
-            {scripts.length === 0 ? (
-              <p className="text-xs text-muted-foreground">还没有脚本，请先在脚本管理页新增。</p>
-            ) : (
-              <Select value={selectedScript} onValueChange={setSelectedScript}>
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="选择脚本" />
-                </SelectTrigger>
-                <SelectContent>
-                  {scripts.map((s) => (
-                    <SelectItem key={s.id} value={s.id}>
-                      {s.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
-          </div>
+          {hasPreset ? (
+            <div className="grid gap-1.5">
+              <Label>脚本</Label>
+              <div className="rounded-md border border-border/60 bg-secondary/40 px-3 py-2 text-sm text-foreground">
+                {script ? script.name : '（脚本不存在）'}
+              </div>
+            </div>
+          ) : (
+            <div className="grid gap-1.5">
+              <Label>脚本</Label>
+              {scripts.length === 0 ? (
+                <p className="text-xs text-muted-foreground">还没有脚本，请先在脚本管理页新增。</p>
+              ) : (
+                <Select value={selectedScript} onValueChange={setSelectedScript}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder="选择脚本" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {scripts.map((s) => (
+                      <SelectItem key={s.id} value={s.id}>
+                        {s.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+          )}
 
           <div className="grid gap-1.5">
             <Label>主机</Label>

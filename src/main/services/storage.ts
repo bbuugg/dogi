@@ -7,8 +7,10 @@ import type {
   McpServerConfig,
   Preferences,
   ScriptEntry,
+  ShortcutConfig,
   SshProfile
 } from '@shared/types'
+import { DEFAULT_SHORTCUTS } from '@shared/shortcuts'
 
 interface StoreSchema {
   sshProfiles: SshProfile[]
@@ -17,6 +19,7 @@ interface StoreSchema {
   aiSettings: AiSettings
   preferences: Preferences
   scripts: ScriptEntry[]
+  shortcuts: ShortcutConfig[]
   windowBounds?: { x?: number; y?: number; width: number; height: number }
 }
 
@@ -26,6 +29,7 @@ const DEFAULT_PREFERENCES: Preferences = {
   colorTheme: 'neutral',
   terminalTheme: 'auto',
   copyOnSelect: true,
+  rightClickPaste: true,
   commandPrediction: true,
   terminalFontSize: 13,
   localShell: 'default',
@@ -44,7 +48,8 @@ class StorageService {
       mcpServers: [],
       aiSettings: DEFAULT_AI_SETTINGS,
       preferences: DEFAULT_PREFERENCES,
-      scripts: []
+      scripts: [],
+      shortcuts: DEFAULT_SHORTCUTS
     }
   })
 
@@ -174,6 +179,23 @@ class StorageService {
       this.store.get('scripts').filter((s) => s.id !== id)
     )
     return this.listScripts()
+  }
+
+  // ---------- 快捷键（全局，系统级） ----------
+  getShortcuts(): ShortcutConfig[] {
+    const stored = this.store.get('shortcuts')
+    // 合并缺省，确保新增动作有条目（旧的存储不含该动作时不丢配置）
+    const byAction = new Map(stored.map((s) => [s.action, s]))
+    return DEFAULT_SHORTCUTS.map((d) => byAction.get(d.action) ?? d)
+  }
+
+  saveShortcuts(shortcuts: ShortcutConfig[]): ShortcutConfig[] {
+    const next = DEFAULT_SHORTCUTS.map((d) => {
+      const found = shortcuts.find((s) => s.action === d.action)
+      return found ?? d
+    })
+    this.store.set('shortcuts', next)
+    return next
   }
 
   // ---------- AI 模型配置 ----------

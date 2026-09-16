@@ -61,10 +61,13 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
   const isDark = useIsDarkTheme()
   const terminalThemeName = useAppStore((s) => s.preferences.terminalTheme)
   const copyOnSelect = useAppStore((s) => s.preferences.copyOnSelect)
+  const rightClickPaste = useAppStore((s) => s.preferences.rightClickPaste)
   const terminalFontSize = useAppStore((s) => s.preferences.terminalFontSize)
   // 创建 effect 只跑一次，用 ref 读取最新偏好，避免闭包读到旧值
   const copyOnSelectRef = useRef(copyOnSelect)
   copyOnSelectRef.current = copyOnSelect
+  const rightClickPasteRef = useRef(rightClickPaste)
+  rightClickPasteRef.current = rightClickPaste
   const fontSizeRef = useRef(terminalFontSize)
   fontSizeRef.current = terminalFontSize
   const theme = useMemo(() => resolveTerminalTheme(terminalThemeName, isDark), [
@@ -191,6 +194,18 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
       adjustTerminalFontSize(e.deltaY < 0 ? 1 : -1)
       return false
     })
+    // 右键粘贴：开启时拦截原生菜单，读取剪贴板并写入终端；关闭时保留浏览器默认右键菜单
+    const handleContextMenu = (e: MouseEvent) => {
+      if (!rightClickPasteRef.current) return
+      e.preventDefault()
+      void navigator.clipboard
+        ?.readText()
+        .then((text) => {
+          if (text) term.paste(text)
+        })
+        .catch(() => {})
+    }
+    container.addEventListener('contextmenu', handleContextMenu)
     // Ctrl + + / - / 0：放大 / 缩小 / 复位（返回 false 阻止按键发往 PTY）
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown' || !e.ctrlKey || e.altKey) return true
@@ -506,6 +521,7 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
     return () => {
       resizeObserver.disconnect()
       charSizeDisp?.dispose?.()
+      container.removeEventListener('contextmenu', handleContextMenu)
       unsubscribeData()
       zsessionRef.current = null
       term.dispose()

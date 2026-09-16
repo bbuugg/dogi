@@ -37,6 +37,8 @@ export interface Preferences {
   terminalTheme: TerminalThemeName
   /** 选中终端文本时自动复制到剪贴板，缺省开启 */
   copyOnSelect: boolean
+  /** 鼠标右键粘贴剪贴板内容到终端，缺省关闭 */
+  rightClickPaste: boolean
   /** 命令预测（历史 / 常见命令补全下拉），缺省开启 */
   commandPrediction: boolean
   /** 终端字号（Ctrl+滚轮 / Ctrl +/- 缩放），缺省 13 */
@@ -110,7 +112,22 @@ export interface SshProfile {
 }
 
 /** 全局快捷键触发的应用动作 */
-export type AppShortcutAction = 'open-settings' | 'new-session' | 'open-command-palette'
+export type AppShortcutAction =
+  | 'open-settings'
+  | 'new-session'
+  | 'open-command-palette'
+  | 'toggle-ai-panel'
+  | 'open-scripts'
+
+/**
+ * 单条快捷键配置：动作 + Electron accelerator 字符串。
+ * accelerator 为空字符串表示「禁用」该动作。
+ * 跨平台写法用 `CommandOrControl`（mac 解析为 ⌘、Win/Linux 解析为 Ctrl）。
+ */
+export interface ShortcutConfig {
+  action: AppShortcutAction
+  accelerator: string
+}
 
 /** 用户保存的脚本：在命令面板（Ctrl+Shift+P）的「运行脚本」中选择后写入并自动执行 */
 export interface ScriptEntry {

@@ -1,4 +1,4 @@
-import { Bot, SlidersHorizontal, TerminalSquare } from 'lucide-react'
+import { Bot, Keyboard, SlidersHorizontal, TerminalSquare } from 'lucide-react'
 import { useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'
 import {
@@ -11,8 +11,9 @@ import {
 import { AiConfigSettings } from '@/components/settings/AiConfigSettings'
 import { TerminalSettings } from '@/components/settings/TerminalSettings'
 import { PrefSettings } from '@/components/settings/PrefSettings'
+import { ShortcutSettings } from '@/components/settings/ShortcutSettings'
 
-type SettingsTab = 'ai' | 'terminal' | 'prefs'
+type SettingsTab = 'ai' | 'terminal' | 'prefs' | 'shortcuts'
 
 const MENU: Array<{
   value: SettingsTab
@@ -22,6 +23,7 @@ const MENU: Array<{
 }> = [
   { value: 'prefs', label: '偏好', desc: '应用主题', icon: SlidersHorizontal },
   { value: 'terminal', label: '终端', desc: '配色与外观', icon: TerminalSquare },
+  { value: 'shortcuts', label: '快捷键', desc: '全局快捷键设置', icon: Keyboard },
   { value: 'ai', label: 'AI 配置', desc: '模型、MCP 服务与提示词', icon: Bot },
 ]
 
@@ -76,6 +78,7 @@ export function SettingsDialog() {
             {settingsTab === 'ai' && <AiConfigSettings />}
             {settingsTab === 'terminal' && <TerminalSettings />}
             {settingsTab === 'prefs' && <PrefSettings />}
+            {settingsTab === 'shortcuts' && <ShortcutSettings />}
           </div>
         </div>
       </DialogContent>

@@ -6,6 +6,7 @@ import { storage } from './services/storage'
 import { detectShells } from './services/shells'
 import { aiService } from './services/ai'
 import { mcpManager } from './services/mcp'
+import { registerShortcuts } from './shortcuts'
 import { app } from 'electron'
 import type {
   AiChatMessage,
@@ -216,6 +217,15 @@ export function registerIpc(win: () => BrowserWindow | null): void {
     // themeSource 变化会同步影响 renderer 的 prefers-color-scheme
     nativeTheme.themeSource = prefs.theme
     return prefs
+  })
+
+  // ---------- 快捷键（全局，系统级） ----------
+  ipcMain.handle('shortcuts:get', () => storage.getShortcuts())
+  ipcMain.handle('shortcuts:save', (_e, shortcuts: import('@shared/types').ShortcutConfig[]) => {
+    const next = storage.saveShortcuts(shortcuts)
+    // 立即重新注册系统级快捷键，使改动即时生效
+    registerShortcuts(win, () => next)
+    return next
   })
 
   // ---------- 窗口控制（自定义标题栏） ----------

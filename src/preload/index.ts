@@ -114,6 +114,15 @@ const api = {
     /** 用系统默认程序打开外部链接（主进程会按安全协议过滤，避免弹窗） */
     openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url)
   },
+  shortcuts: {
+    /** 读取当前快捷键配置（动作 -> accelerator） */
+    get: (): Promise<import('@shared/types').ShortcutConfig[]> =>
+      ipcRenderer.invoke('shortcuts:get'),
+    /** 保存快捷键配置并立即重注册系统级快捷键 */
+    save: (shortcuts: import('@shared/types').ShortcutConfig[]): Promise<
+      import('@shared/types').ShortcutConfig[]
+    > => ipcRenderer.invoke('shortcuts:save', shortcuts)
+  },
   window: {
     minimize: (): Promise<void> => ipcRenderer.invoke('window:minimize'),
     toggleMaximize: (): Promise<void> => ipcRenderer.invoke('window:toggleMaximize'),

@@ -184,7 +184,7 @@ app.whenReady().then(() => {
   installMenu()
   registerIpc(() => mainWindow)
   createWindow()
-  registerShortcuts(() => mainWindow)
+  registerShortcuts(() => mainWindow, () => storage.getShortcuts())
   createTray()
 
   app.on('activate', () => {

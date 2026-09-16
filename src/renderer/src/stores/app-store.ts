@@ -13,11 +13,13 @@ import type {
   SessionInfo,
   ShellDetectResult,
   ScriptEntry,
+  ShortcutConfig,
   SshProfile,
   TerminalThemeName,
   ThemeMode
 } from '@shared/types'
 import type { AppShortcutAction } from '@shared/types'
+import { DEFAULT_SHORTCUTS } from '@shared/shortcuts'
 import { clampTerminalFontSize } from '@/lib/terminal-font'
 import { scriptToTerminalInput } from '@/lib/script'
 import { applyColorTheme } from '@/lib/theme'
@@ -136,7 +138,7 @@ interface UiState {
   sshDialog: { open: boolean; editing?: SshProfile | null }
   /** 运行脚本对话框：scriptId 为预设脚本（可空，在对话框内选择） */
   runScriptDialog: { open: boolean; scriptId?: string }
-  settingsTab: 'ai' | 'terminal' | 'prefs'
+  settingsTab: 'ai' | 'terminal' | 'prefs' | 'shortcuts'
   /** 是否打开命令面板（Ctrl+Shift+P：脚本、终端、主机、设置等命令入口） */
   commandPaletteOpen: boolean
   /** 主区域视图：终端 / 脚本管理页 */
@@ -174,6 +176,8 @@ interface AppStore {
 
   // ---------- 偏好 ----------
   preferences: Preferences
+  /** 全局快捷键配置（动作 -> accelerator），主进程据此注册系统级快捷键 */
+  shortcuts: ShortcutConfig[]
   /** 本地可用 shell 检测结果（null = 尚未加载） */
   shells: ShellDetectResult | null
 
@@ -237,6 +241,7 @@ interface AppStore {
   setColorTheme: (name: ColorThemeName) => Promise<void>
   setTerminalTheme: (name: TerminalThemeName) => Promise<void>
   setCopyOnSelect: (enabled: boolean) => Promise<void>
+  setRightClickPaste: (enabled: boolean) => Promise<void>
   setCommandPrediction: (enabled: boolean) => Promise<void>
   /** 关闭窗口时是否最小化到系统托盘（持久化到偏好设置） */
   setMinimizeToTray: (enabled: boolean) => Promise<void>
@@ -244,6 +249,8 @@ interface AppStore {
   setLocalShell: (shellId: string) => Promise<void>
   setTerminalFontSize: (size: number) => Promise<void>
   /** 设置服务器指标采集间隔（毫秒）：立即生效并持久化 */
+  /** 保存快捷键配置（持久化到主进程并立即重注册系统级快捷键） */
+  saveShortcuts: (shortcuts: ShortcutConfig[]) => Promise<void>
   setMonitorInterval: (ms: number) => Promise<void>
   sendAiMessage: (text: string, targetSessionId?: string | null) => Promise<void>
   abortAi: () => Promise<void>
@@ -294,7 +301,9 @@ let shortcutWired = false
 
     scripts: [],
 
-    preferences: { theme: 'system', colorTheme: 'neutral', terminalTheme: 'auto', copyOnSelect: true, commandPrediction: true, terminalFontSize: 13, localShell: 'default', minimizeToTray: true, monitorInterval: 2000 },
+    preferences: { theme: 'system', colorTheme: 'neutral', terminalTheme: 'auto', copyOnSelect: true, rightClickPaste: true, commandPrediction: true, terminalFontSize: 13, localShell: 'default', minimizeToTray: true, monitorInterval: 2000 },
+
+    shortcuts: DEFAULT_SHORTCUTS,
 
     shells: null,
 
@@ -321,15 +330,16 @@ let shortcutWired = false
     monitors: {},
 
     bootstrap: async () => {
-      const [profiles, configs, settings, preferences, shells, scripts] = await Promise.all([
+      const [profiles, configs, settings, preferences, shells, scripts, shortcuts] = await Promise.all([
         window.api.ssh.list(),
         window.api.ai.listConfigs(),
         window.api.ai.getSettings(),
         window.api.prefs.get(),
         window.api.terminal.listShells(),
-        window.api.scripts.list()
+        window.api.scripts.list(),
+        window.api.shortcuts.get()
       ])
-      set({ profiles, aiConfigs: configs, aiSettings: settings, preferences, shells, scripts })
+      set({ profiles, aiConfigs: configs, aiSettings: settings, preferences, shells, scripts, shortcuts })
       // 配色在偏好加载后立即应用（之前用默认中性配色）
       applyColorTheme(preferences.colorTheme)
 
@@ -341,6 +351,8 @@ let shortcutWired = false
           if (action === 'open-settings') s.setSettingsOpen(true)
           else if (action === 'new-session') void s.createLocalSession()
           else if (action === 'open-command-palette') s.setCommandPaletteOpen(true)
+          else if (action === 'toggle-ai-panel') s.setAiPanelOpen(!s.ui.aiPanelOpen)
+          else if (action === 'open-scripts') s.setView('scripts')
         })
       }
     },
@@ -672,6 +684,12 @@ let shortcutWired = false
       set({ preferences })
     },
 
+    setRightClickPaste: async (enabled) => {
+      set((s) => ({ preferences: { ...s.preferences, rightClickPaste: enabled } }))
+      const preferences = await window.api.prefs.save({ rightClickPaste: enabled })
+      set({ preferences })
+    },
+
     setCommandPrediction: async (enabled) => {
       set((s) => ({ preferences: { ...s.preferences, commandPrediction: enabled } }))
       const preferences = await window.api.prefs.save({ commandPrediction: enabled })
@@ -706,6 +724,12 @@ let shortcutWired = false
       // 先本地生效（进度条节奏随之变化），主进程归一化后返回最终值
       set((s) => ({ preferences: { ...s.preferences, monitorInterval: ms } }))
       set({ preferences: await window.api.monitor.setInterval(ms) })
+    },
+
+    saveShortcuts: async (shortcuts) => {
+      set({ shortcuts })
+      const next = await window.api.shortcuts.save(shortcuts)
+      set({ shortcuts: next })
     },
 
     sendAiMessage: async (text, targetSessionId) => {

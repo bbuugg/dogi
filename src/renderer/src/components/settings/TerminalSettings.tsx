@@ -19,6 +19,8 @@ export function TerminalSettings() {
   const setTerminalTheme = useAppStore((s) => s.setTerminalTheme)
   const copyOnSelect = useAppStore((s) => s.preferences.copyOnSelect)
   const setCopyOnSelect = useAppStore((s) => s.setCopyOnSelect)
+  const rightClickPaste = useAppStore((s) => s.preferences.rightClickPaste)
+  const setRightClickPaste = useAppStore((s) => s.setRightClickPaste)
   const commandPrediction = useAppStore((s) => s.preferences.commandPrediction)
   const setCommandPrediction = useAppStore((s) => s.setCommandPrediction)
   const localShell = useAppStore((s) => s.preferences.localShell)
@@ -113,6 +115,20 @@ export function TerminalSettings() {
           id="copy-on-select"
           checked={copyOnSelect}
           onCheckedChange={(v) => void setCopyOnSelect(v)}
+        />
+      </div>
+
+      <div className="flex items-start justify-between gap-4 rounded-md">
+        <div>
+          <Label htmlFor="right-click-paste">右键粘贴</Label>
+          <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+            在终端内点击鼠标右键，将剪贴板内容直接粘贴到终端（开启后不再弹出浏览器右键菜单）。
+          </p>
+        </div>
+        <Switch
+          id="right-click-paste"
+          checked={rightClickPaste}
+          onCheckedChange={(v) => void setRightClickPaste(v)}
         />
       </div>
 
