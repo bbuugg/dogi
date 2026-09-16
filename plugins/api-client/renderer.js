@@ -329,73 +329,88 @@ export function activate(api) {
     const contentType = response?.headers?.['content-type'] || ''
     const respHeaders = response ? Object.entries(response.headers || {}) : []
 
-    // 请求头表格（Postman 风格：单一容器 + 分隔线，单元格输入框扁平无边框）
+    // 请求头表格（shadcn Table：单一容器 + 分隔线，单元格输入框扁平无边框）
     const headerRows = el(
       'div',
       { className: 'overflow-hidden rounded-md border border-border' },
-      // 表头
-      el(
-        'div',
-        { className: HEADER_GRID + ' border-b border-border bg-muted/50 text-[10px] text-muted-foreground' },
-        el('div', { className: 'px-2.5 py-1.5' }, '名称'),
-        el('div', { className: 'border-l border-border px-2.5 py-1.5' }, '值'),
-        el('div', { className: 'border-l border-border' })
-      ),
-      // 数据行
-      el(
-        'div',
-        { className: 'divide-y divide-border' },
-        ...headers.map((p, i) => {
-          const valueSuggestions = headerValueSuggestions(p.key)
-          const valueDatalistId = valueSuggestions ? HEADER_VALUE_DATALIST_PREFIX + i : undefined
-          return el(
-            'div',
-            { key: i, className: HEADER_GRID + ' group' },
-            el(
-              'input',
-              {
-                value: p.key,
-                list: HEADER_DATALIST_ID,
-                placeholder: '名称，如 Content-Type',
-                onChange: (e) => updateHeader(i, 'key', e.target.value),
-                className: HEADER_CELL_INPUT
-              }
+      h(
+        Table,
+        { className: 'text-[11px]' },
+        h(
+          TableHeader,
+          { className: 'bg-muted/50' },
+          h(
+            TableRow,
+            { className: 'hover:bg-transparent' },
+            h(
+              TableHead,
+              { className: 'h-8 w-[176px] px-2.5 text-[10px] font-medium text-muted-foreground' },
+              '名称'
             ),
-            el(
-              'div',
-              { className: 'flex items-center border-l border-border' },
-              el('input', {
-                value: p.value,
-                list: valueDatalistId,
-                placeholder: valueSuggestions ? '可从常见取值中选择' : '值，如 application/json',
-                onChange: (e) => updateHeader(i, 'value', e.target.value),
-                className: HEADER_CELL_INPUT
-              }),
-              valueSuggestions
-                ? el(
-                    'datalist',
-                    { id: valueDatalistId },
-                    ...valueSuggestions.map((v) => el('option', { key: v, value: v }))
-                  )
-                : null
+            h(
+              TableHead,
+              { className: 'h-8 px-2.5 text-[10px] font-medium text-muted-foreground' },
+              '值'
             ),
-            el(
-              'div',
-              { className: 'flex justify-center border-l border-border' },
+            h(TableHead, { className: 'h-8 w-8 px-0' })
+          )
+        ),
+        h(
+          TableBody,
+          null,
+          ...headers.map((p, i) => {
+            const valueSuggestions = headerValueSuggestions(p.key)
+            const valueDatalistId = valueSuggestions ? HEADER_VALUE_DATALIST_PREFIX + i : undefined
+            return h(
+              TableRow,
+              { key: i, className: 'group' },
               h(
-                Button,
-                {
-                  variant: 'ghost',
-                  size: 'icon-sm',
-                  className: 'size-7 text-muted-foreground opacity-50 transition-opacity hover:text-destructive group-hover:opacity-100 focus-visible:opacity-100',
-                  title: '删除该请求头',
-                  onClick: () => removeHeader(i)
-                },
-                h(Trash2, { className: 'size-3.5' })
+                TableCell,
+                { className: 'p-0' },
+                el('input', {
+                  value: p.key,
+                  list: HEADER_DATALIST_ID,
+                  placeholder: '名称，如 Content-Type',
+                  onChange: (e) => updateHeader(i, 'key', e.target.value),
+                  className: HEADER_CELL_INPUT
+                })
+              ),
+              h(
+                TableCell,
+                { className: 'p-0' },
+                el('input', {
+                  value: p.value,
+                  list: valueDatalistId,
+                  placeholder: valueSuggestions ? '可从常见取值中选择' : '值，如 application/json',
+                  onChange: (e) => updateHeader(i, 'value', e.target.value),
+                  className: HEADER_CELL_INPUT
+                }),
+                valueSuggestions
+                  ? el(
+                      'datalist',
+                      { id: valueDatalistId },
+                      ...valueSuggestions.map((v) => el('option', { key: v, value: v }))
+                    )
+                  : null
+              ),
+              h(
+                TableCell,
+                { className: 'p-0 text-center' },
+                h(
+                  Button,
+                  {
+                    variant: 'ghost',
+                    size: 'icon-sm',
+                    className: 'size-7 text-muted-foreground opacity-50 transition-opacity hover:text-destructive group-hover:opacity-100 focus-visible:opacity-100',
+                    title: '删除该请求头',
+                    onClick: () => removeHeader(i)
+                  },
+                  h(Trash2, { className: 'size-3.5' })
+                )
               )
             )
-          )
-        })
+          })
+        )
       ),
       // 底部：添加按钮 + 提示
       el(

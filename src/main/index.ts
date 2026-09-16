@@ -23,8 +23,25 @@ function installMenu(): void {
       {
         label: 'View',
         submenu: [
-          { role: 'reload' },
-          { role: 'forceReload' },
+          {
+            label: 'Reload',
+            accelerator: 'CmdOrCtrl+R',
+            // 仅在 DevTools 打开时允许刷新，避免误触刷新快捷键重载页面
+            click: (_item, win) => {
+              if (win && !win.isDestroyed() && win.webContents.isDevToolsOpened()) {
+                win.webContents.reload()
+              }
+            }
+          },
+          {
+            label: 'Force Reload',
+            accelerator: 'CmdOrCtrl+Shift+R',
+            click: (_item, win) => {
+              if (win && !win.isDestroyed() && win.webContents.isDevToolsOpened()) {
+                win.webContents.reloadIgnoringCache()
+              }
+            }
+          },
           { role: 'toggleDevTools' },
           { type: 'separator' },
           { role: 'togglefullscreen' }
@@ -149,6 +166,17 @@ function createWindow(): void {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     openExternalSafe(url)
     return { action: 'deny' }
+  })
+
+  // 未打开 DevTools 时，禁止刷新快捷键（F5 / Ctrl+R / Cmd+R / Ctrl+Shift+R）刷新页面。
+  // 菜单里的 Reload/Force Reload 加速键已同样按 DevTools 状态放行，这里再拦一道
+  // before-input-event，兜住 F5 及任何绕过菜单加速键的刷新按键。
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return
+    if (mainWindow?.webContents.isDevToolsOpened()) return
+    const key = input.key.toLowerCase()
+    const isReload = key === 'f5' || ((input.control || input.meta) && key === 'r')
+    if (isReload) event.preventDefault()
   })
 
   mainWindow.on('resize', saveBounds)

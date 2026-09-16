@@ -155,7 +155,7 @@ export function PluginsPage() {
             </Button>
           </div>
         ) : (
-          <div className="grid gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {pluginList.map((info) => {
               const hasView = Boolean(info.renderer)
               const canOpen = hasView && info.enabled
@@ -163,85 +163,89 @@ export function PluginsPage() {
                 <div
                   key={info.id}
                   className={cn(
-                    'flex items-start gap-3 rounded-lg border border-border bg-card p-3',
+                    'flex flex-col gap-2 rounded-lg border border-border bg-card p-3',
                     !info.enabled && 'opacity-60'
                   )}
                 >
-                  <div className="flex size-10 shrink-0 items-center justify-center rounded-md bg-secondary/60 text-lg">
-                    {info.icon ?? <Package className="size-5" />}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-sm font-medium">{info.name}</span>
-                      <Badge variant="outline" className="text-[10px] font-normal">
-                        v{info.version}
-                      </Badge>
-                      {info.author && (
-                        <span className="text-[11px] text-muted-foreground">by {info.author}</span>
-                      )}
-                      {!info.enabled && (
-                        <Badge variant="secondary" className="text-[10px] font-normal">
-                          已禁用
+                  {/* 顶部：图标 + 名称/版本/作者 + 启用开关 */}
+                  <div className="flex items-start gap-2.5">
+                    <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-secondary/60 text-lg">
+                      {info.icon ?? <Package className="size-5" />}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="truncate text-sm font-medium">{info.name}</span>
+                        <Badge variant="outline" className="text-[10px] font-normal">
+                          v{info.version}
                         </Badge>
-                      )}
-                    </div>
-                    {info.description && (
-                      <p className="mt-0.5 text-xs text-muted-foreground">{info.description}</p>
-                    )}
-                    {info.error && (
-                      <p className="mt-1 text-[11px] text-destructive">加载失败：{info.error}</p>
-                    )}
-                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                      <span className="text-[10px] text-muted-foreground">权限</span>
-                      {(info.permissions ?? []).length === 0 ? (
-                        <span className="text-[10px] text-muted-foreground">无</span>
-                      ) : (
-                        info.permissions!.map((perm) => (
-                          <Badge key={perm} variant="secondary" className="text-[10px] font-normal">
-                            {PERMISSION_LABEL[perm] ?? perm}
+                        {!info.enabled && (
+                          <Badge variant="secondary" className="text-[10px] font-normal">
+                            已禁用
                           </Badge>
-                        ))
+                        )}
+                      </div>
+                      {info.author && (
+                        <div className="truncate text-[11px] text-muted-foreground">by {info.author}</div>
                       )}
-                      <span className="ml-2 text-[10px] text-muted-foreground">id: {info.id}</span>
                     </div>
-                  </div>
-
-                  <div className="flex shrink-0 flex-col items-end gap-2">
                     <Switch
                       checked={info.enabled}
                       onCheckedChange={(v) => void toggleEnabled(info, v)}
                       aria-label="启用/禁用"
                     />
-                    <div className="flex items-center gap-1">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 px-2 text-[11px]"
-                        onClick={() => openPlugin(info)}
-                        disabled={!canOpen}
-                      >
-                        <ExternalLink className="size-3.5" />
-                        打开
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        className="h-7 text-muted-foreground"
-                        title="重新加载该插件（改动后无需重启）"
-                        onClick={() => void reloadOne(info)}
-                      >
-                        <RotateCw className="size-3.5" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 px-2 text-[11px] text-destructive hover:bg-destructive/10"
-                        onClick={() => setPendingUninstall(info)}
-                      >
-                        <Trash2 className="size-3.5" />
-                        卸载
-                      </Button>
-                    </div>
+                  </div>
+
+                  {info.description && (
+                    <p className="line-clamp-2 text-xs text-muted-foreground">{info.description}</p>
+                  )}
+                  {info.error && (
+                    <p className="text-[11px] text-destructive">加载失败：{info.error}</p>
+                  )}
+
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[10px] text-muted-foreground">权限</span>
+                    {(info.permissions ?? []).length === 0 ? (
+                      <span className="text-[10px] text-muted-foreground">无</span>
+                    ) : (
+                      info.permissions!.map((perm) => (
+                        <Badge key={perm} variant="secondary" className="text-[10px] font-normal">
+                          {PERMISSION_LABEL[perm] ?? perm}
+                        </Badge>
+                      ))
+                    )}
+                  </div>
+                  <div className="truncate text-[10px] text-muted-foreground">id: {info.id}</div>
+
+                  {/* 底部操作栏 */}
+                  <div className="mt-auto flex items-center gap-1 border-t border-border pt-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 text-[11px]"
+                      onClick={() => openPlugin(info)}
+                      disabled={!canOpen}
+                    >
+                      <ExternalLink className="size-3.5" />
+                      打开
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="h-7 text-muted-foreground"
+                      title="重新加载该插件（改动后无需重启）"
+                      onClick={() => void reloadOne(info)}
+                    >
+                      <RotateCw className="size-3.5" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="ml-auto h-7 px-2 text-[11px] text-destructive hover:bg-destructive/10"
+                      onClick={() => setPendingUninstall(info)}
+                    >
+                      <Trash2 className="size-3.5" />
+                      卸载
+                    </Button>
                   </div>
                 </div>
               )
