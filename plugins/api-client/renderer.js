@@ -42,7 +42,7 @@ export function activate(api) {
     DialogDescription,
     DialogFooter
   } = api.ui
-  const { Send, Save, Trash2, Plus, History, X, Terminal } = api.icons
+  const { Send, Save, Trash2, Plus, History, X, Terminal, ChevronUp, ChevronDown } = api.icons
   const cn = api.ui.cn
   const toast = api.toast
   const MonacoEditor = api.MonacoEditor
@@ -375,6 +375,8 @@ export function activate(api) {
     format: true,
     /** 响应区当前页：body / headers */
     resTab: 'body',
+    /** 响应面板是否折叠为仅状态行 */
+    respCollapsed: false,
     /** 请求体编辑器语言 */
     bodyLang: 'json'
   })
@@ -982,7 +984,8 @@ export function activate(api) {
         { className: 'flex items-center justify-end gap-2 border-t border-border px-3 py-1.5' },
         h(Button, { variant: 'outline', size: 'sm', onClick: saveCurrent }, h(Save, { className: 'size-3.5' }), '保存当前请求')
       ),
-      // 拖拽条：上下拖动调整响应面板高度（与项目内 ResizeHandle 同款的视觉与热区处理）
+      // 拖拽条：上下拖动调整响应面板高度（与项目内 ResizeHandle 同款的视觉与热区处理；响应折叠时隐藏）
+      !activeTab.respCollapsed &&
       el(
         'div',
         {
@@ -1016,12 +1019,12 @@ export function activate(api) {
             'absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-border transition-colors group-hover/res:bg-primary'
         })
       ),
-      // 响应区：状态行 + 响应体 / 响应头（高度由拖拽条决定）
+      // 响应区：状态行 + 响应体 / 响应头（高度由拖拽条决定；可折叠为仅状态行）
       el(
         'div',
         {
-          className: 'flex min-h-0 shrink-0 flex-col',
-          style: { height: Math.round(resRatio * 100) + '%' }
+          className: 'flex shrink-0 flex-col',
+          style: activeTab.respCollapsed ? undefined : { height: Math.round(resRatio * 100) + '%' }
         },
         el(
           'div',
@@ -1031,8 +1034,16 @@ export function activate(api) {
           response && el('span', { className: 'text-muted-foreground' }, response.timeMs + ' ms'),
           response && el('span', { className: 'text-muted-foreground' }, (response.body || '').length + ' B'),
           contentType && el('span', { className: 'truncate text-muted-foreground/80', title: contentType }, contentType),
-          error && el('span', { className: 'text-destructive' }, '错误：' + error)
+          error && el('span', { className: 'text-destructive' }, '错误：' + error),
+          // 响应面板折叠 / 展开
+          el('button', {
+            className:
+              'ml-auto shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground',
+            title: activeTab.respCollapsed ? '展开响应面板' : '折叠响应面板',
+            onClick: () => updateActive({ respCollapsed: !activeTab.respCollapsed })
+          }, h(activeTab.respCollapsed ? ChevronUp : ChevronDown, { className: 'size-3.5' }))
         ),
+        !activeTab.respCollapsed &&
         h(
           Tabs,
           { value: activeTab.resTab, onValueChange: (v) => updateActive({ resTab: v }), className: 'flex min-h-0 flex-1 flex-col' },
