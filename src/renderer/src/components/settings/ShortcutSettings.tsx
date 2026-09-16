@@ -9,6 +9,7 @@ import {
 } from '@shared/shortcuts'
 import { useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'
+import { Button } from '@/components/ui/button'
 
 /** 把一次键盘事件转成 Electron accelerator（跨平台用 CommandOrControl） */
 function eventToAccelerator(e: KeyboardEvent): string | null {
@@ -52,6 +53,16 @@ export function ShortcutSettings() {
   const saveShortcuts = useAppStore((s) => s.saveShortcuts)
   const platform = window.api.app.platform
   const [recording, setRecording] = useState<AppShortcutAction | null>(null)
+
+  // 进入/退出录制时挂起系统级快捷键，避免已注册的全局快捷键（如 Ctrl+Alt+T）
+  // 抢先触发动作、干扰录制。退出时无论成功/取消/改选都恢复注册。
+  useEffect(() => {
+    if (!recording) return
+    void window.api.shortcuts.setCapture(true)
+    return () => {
+      void window.api.shortcuts.setCapture(false)
+    }
+  }, [recording])
 
   // 捕获模式：监听全局 keydown，组成 accelerator 后写入并退出捕获。
   // 直接读 store 最新状态，避免闭包拿到过期的 shortcuts。
@@ -137,21 +148,22 @@ export function ShortcutSettings() {
                       : '未绑定：该动作被禁用'}
                 </div>
               </div>
-              <button
+              <Button
                 type="button"
+                variant="ghost"
                 onClick={() => setRecording(isRecording ? null : meta.action)}
                 title={accelerator || undefined}
                 className={cn(
                   'shrink-0 rounded-md border px-3 py-1.5 text-[12px] font-medium tabular-nums transition-colors',
                   isRecording
-                    ? 'border-primary bg-primary/10 text-primary'
+                    ? 'bg-primary/10 text-primary'
                     : isConflict
-                      ? 'border-destructive/50 text-destructive hover:bg-destructive/10'
-                      : 'border-border text-foreground hover:bg-secondary'
+                      ? 'text-destructive'
+                      : 'text-foreground hover:bg-secondary'
                 )}
               >
                 {isRecording ? '按下按键组合…（Esc 取消）' : display || '点击设置'}
-              </button>
+              </Button>
             </div>
           )
         })}

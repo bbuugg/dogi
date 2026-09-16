@@ -121,7 +121,13 @@ const api = {
     /** 保存快捷键配置并立即重注册系统级快捷键 */
     save: (shortcuts: import('@shared/types').ShortcutConfig[]): Promise<
       import('@shared/types').ShortcutConfig[]
-    > => ipcRenderer.invoke('shortcuts:save', shortcuts)
+    > => ipcRenderer.invoke('shortcuts:save', shortcuts),
+    /**
+     * 录制模式开关：开启时注销全部系统级快捷键，避免已注册的全局快捷键
+     * （如 Ctrl+Alt+T）抢先触发动作、干扰录制；关闭时按存储重新注册。
+     */
+    setCapture: (enabled: boolean): Promise<void> =>
+      ipcRenderer.invoke('shortcuts:capture', enabled)
   },
   window: {
     minimize: (): Promise<void> => ipcRenderer.invoke('window:minimize'),

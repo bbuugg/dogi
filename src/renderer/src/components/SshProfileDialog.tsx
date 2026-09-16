@@ -126,7 +126,7 @@ export function SshProfileDialog() {
 
   return (
     <Dialog open={sshDialog.open} onOpenChange={(open) => setSshDialog(open, null)}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent onOpenAutoFocus={(e) => e.preventDefault()} className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>{isEdit ? '编辑 SSH 连接' : '新建 SSH 连接'}</DialogTitle>
         </DialogHeader>

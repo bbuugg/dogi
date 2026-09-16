@@ -6,7 +6,7 @@ import { storage } from './services/storage'
 import { detectShells } from './services/shells'
 import { aiService } from './services/ai'
 import { mcpManager } from './services/mcp'
-import { registerShortcuts } from './shortcuts'
+import { registerShortcuts, unregisterShortcuts } from './shortcuts'
 import { app } from 'electron'
 import type {
   AiChatMessage,
@@ -226,6 +226,11 @@ export function registerIpc(win: () => BrowserWindow | null): void {
     // 立即重新注册系统级快捷键，使改动即时生效
     registerShortcuts(win, () => next)
     return next
+  })
+  // 录制模式：注销/恢复系统级快捷键，避免已注册快捷键抢先触发、干扰录制
+  ipcMain.handle('shortcuts:capture', (_e, enabled: boolean) => {
+    if (enabled) unregisterShortcuts()
+    else registerShortcuts(win, () => storage.getShortcuts())
   })
 
   // ---------- 窗口控制（自定义标题栏） ----------
