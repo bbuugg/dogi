@@ -28,7 +28,7 @@ function installMenu(): void {
             accelerator: 'CmdOrCtrl+R',
             // 仅在 DevTools 打开时允许刷新，避免误触刷新快捷键重载页面
             click: (_item, win) => {
-              if (win && !win.isDestroyed() && win.webContents.isDevToolsOpened()) {
+              if (win instanceof BrowserWindow && !win.isDestroyed() && win.webContents.isDevToolsOpened()) {
                 win.webContents.reload()
               }
             }
@@ -37,7 +37,7 @@ function installMenu(): void {
             label: 'Force Reload',
             accelerator: 'CmdOrCtrl+Shift+R',
             click: (_item, win) => {
-              if (win && !win.isDestroyed() && win.webContents.isDevToolsOpened()) {
+              if (win instanceof BrowserWindow && !win.isDestroyed() && win.webContents.isDevToolsOpened()) {
                 win.webContents.reloadIgnoringCache()
               }
             }
