@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Command as CommandIcon, ListPlus, Menu, Plus, Settings } from 'lucide-react'
+import { Boxes, Command as CommandIcon, ListPlus, Menu, Plus, Settings } from 'lucide-react'
 import { cn } from 'cn'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { useAppStore } from '@/stores/app-store'
@@ -100,6 +100,9 @@ function MenuButton() {
           </button>
           <button type="button" className={menuItem} onClick={run(() => setView('scripts'))}>
             <ListPlus className="size-3.5 text-muted-foreground" /> 管理脚本
+          </button>
+          <button type="button" className={menuItem} onClick={run(() => setView('plugins'))}>
+            <Boxes className="size-3.5 text-muted-foreground" /> 插件管理
           </button>
           <button
             type="button"

@@ -17,6 +17,7 @@ import {
   SelectValue
 } from '@/components/ui/select'
 import { useAppStore } from '@/stores/app-store'
+import { toast } from 'sonner'
 
 /** 保留当前选择；失效时用偏好值，再不行回退首项 */
 function pickId(current: string, ids: string[], preferred?: string): string {
@@ -80,11 +81,15 @@ export function RunScriptDialog() {
       const ok = await runScriptOnHost(profile, script)
       if (!ok) {
         setError('连接超时或主机未就绪，脚本未执行。')
+        toast.error('脚本未执行', { description: '连接超时或主机未就绪' })
         return
       }
       setRunScriptDialog(false)
+      toast.success(`已在「${profile.name}」执行「${script.name}」`)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(msg)
+      toast.error('运行失败', { description: msg })
     } finally {
       setRunning(false)
     }

@@ -19,6 +19,8 @@ import type {
   ThemeMode
 } from '@shared/types'
 import type { AppShortcutAction } from '@shared/types'
+import type { PluginInfo } from '@shared/plugin'
+import type { PluginViewInstance } from '@/plugins/host'
 import { DEFAULT_SHORTCUTS } from '@shared/shortcuts'
 import { clampTerminalFontSize } from '@/lib/terminal-font'
 import { scriptToTerminalInput } from '@/lib/script'
@@ -141,8 +143,10 @@ interface UiState {
   settingsTab: 'ai' | 'terminal' | 'prefs' | 'shortcuts'
   /** 是否打开命令面板（Ctrl+Shift+P：脚本、终端、主机、设置等命令入口） */
   commandPaletteOpen: boolean
-  /** 主区域视图：终端 / 脚本管理页 */
-  view: 'terminal' | 'scripts'
+  /** 主区域视图：终端 / 脚本管理页 / 插件视图 */
+  view: 'terminal' | 'scripts' | 'plugin' | 'plugins'
+  /** 当前激活的插件视图 id（view==='plugin' 时有效） */
+  pluginView: string | null
   /** 侧边栏宽度（px） */
   sidebarWidth: number
   /** AI 助手面板宽度（px） */
@@ -194,6 +198,14 @@ interface AppStore {
   // ---------- UI ----------
   ui: UiState
 
+  // ---------- 插件（运行时加载外部插件） ----------
+  /** 已加载插件的视图实例（侧边栏入口 + 主区域渲染组件） */
+  plugins: PluginViewInstance[]
+  /** 插件管理页列表（含启用状态/加载错误），与 plugins 分开以支撑管理操作 */
+  pluginList: PluginInfo[]
+  /** 插件通过宿主注册的命令面板命令 */
+  pluginCommands: Record<string, { pluginId: string; title: string; run: () => void }>
+
   // ---------- 服务器监控 ----------
   /** 各会话最新指标，key 为 sessionId；无该 key 表示取不到数据（不显示指标） */
   monitors: Record<string, ServerMetrics>
@@ -224,7 +236,25 @@ interface AppStore {
   setAiPanelOpen: (open: boolean) => void
   setSettingsOpen: (open: boolean, tab?: UiState['settingsTab']) => void
   setCommandPaletteOpen: (open: boolean) => void
-  setView: (view: 'terminal' | 'scripts') => void
+  setView: (view: 'terminal' | 'scripts' | 'plugin' | 'plugins') => void
+  setPluginView: (viewId: string | null) => void
+  /** 运行时加载插件（扫描 userData/plugins，收集视图注入 store） */
+  loadPlugins: () => Promise<void>
+  /** 刷新插件管理页列表（manifest + 启用状态 + 错误） */
+  refreshPluginList: () => Promise<void>
+  /** 启用/禁用插件并刷新视图与列表 */
+  togglePluginEnabled: (id: string, enabled: boolean) => Promise<void>
+  /** 卸载插件并刷新视图与列表 */
+  uninstallPlugin: (id: string) => Promise<void>
+  /** 从文件/目录安装插件并刷新视图与列表 */
+  installPlugin: (sourcePath: string) => Promise<void>
+  /** 重新加载插件（不传 id 表示全部）并刷新视图与列表，无需重启应用 */
+  reloadPlugins: (id?: string) => Promise<void>
+  /** 插件注册的命令面板命令 */
+  registerPluginCommand: (
+    pluginId: string,
+    cmd: { id: string; title: string; run: () => void }
+  ) => void
   setSidebarWidth: (width: number) => void
   setAiPanelWidth: (width: number) => void
   refreshScripts: () => Promise<void>
@@ -315,6 +345,10 @@ let shortcutWired = false
     aiError: null,
     pendingConfirm: null,
 
+    plugins: [],
+    pluginList: [],
+    pluginCommands: {},
+
     ui: {
       aiPanelOpen: false,
       settingsOpen: false,
@@ -323,6 +357,7 @@ let shortcutWired = false
       settingsTab: 'prefs',
       commandPaletteOpen: false,
       view: 'terminal',
+      pluginView: null,
       sidebarWidth: 240,
       aiPanelWidth: 350
     },
@@ -340,6 +375,19 @@ let shortcutWired = false
         window.api.shortcuts.get()
       ])
       set({ profiles, aiConfigs: configs, aiSettings: settings, preferences, shells, scripts, shortcuts })
+      // 运行时加载外部插件（扫描 userData/plugins 并收集视图）
+      const { loadPlugins } = await import('@/plugins/host')
+      const pluginViews = await loadPlugins()
+      const pluginList = await window.api.plugins.list()
+      set({ plugins: pluginViews, pluginList })
+      // 有插件加载失败时给出一次性提示（详情见插件管理页）
+      const failedPlugins = pluginList.filter((p) => p.error)
+      if (failedPlugins.length > 0) {
+        const { toast } = await import('sonner')
+        toast.error(`${failedPlugins.length} 个插件加载失败`, {
+          description: failedPlugins.map((p) => p.name).join('、')
+        })
+      }
       // 配色在偏好加载后立即应用（之前用默认中性配色）
       applyColorTheme(preferences.colorTheme)
 
@@ -619,6 +667,72 @@ let shortcutWired = false
 
     setView: (view) =>
       set((s) => ({ ui: { ...s.ui, view } })),
+
+    setPluginView: (viewId) =>
+      set((s) => ({ ui: { ...s.ui, pluginView: viewId } })),
+
+    loadPlugins: async () => {
+      const { loadPlugins } = await import('@/plugins/host')
+      const views = await loadPlugins()
+      set({ plugins: views })
+    },
+
+    refreshPluginList: async () => {
+      set({ pluginList: await window.api.plugins.list() })
+    },
+
+    togglePluginEnabled: async (id, enabled) => {
+      const list = await window.api.plugins.setEnabled(id, enabled)
+      const { loadPlugins } = await import('@/plugins/host')
+      const plugins = await loadPlugins()
+      // 若当前正在查看的插件视图因禁用而消失，清空选择
+      set((s) => ({
+        pluginList: list,
+        plugins,
+        ui: plugins.some((p) => p.viewId === s.ui.pluginView)
+          ? s.ui
+          : { ...s.ui, pluginView: null }
+      }))
+    },
+
+    uninstallPlugin: async (id) => {
+      const list = await window.api.plugins.uninstall(id)
+      const { loadPlugins } = await import('@/plugins/host')
+      const plugins = await loadPlugins()
+      set((s) => ({
+        pluginList: list,
+        plugins,
+        ui: plugins.some((p) => p.viewId === s.ui.pluginView)
+          ? s.ui
+          : { ...s.ui, pluginView: null }
+      }))
+    },
+
+    installPlugin: async (sourcePath) => {
+      const list = await window.api.plugins.install(sourcePath)
+      const { loadPlugins } = await import('@/plugins/host')
+      const plugins = await loadPlugins()
+      set({ pluginList: list, plugins })
+    },
+
+    reloadPlugins: async (id) => {
+      const list = await window.api.plugins.reload(id)
+      const { loadPlugins } = await import('@/plugins/host')
+      const plugins = await loadPlugins()
+      set((s) => ({
+        pluginList: list,
+        plugins,
+        // 当前查看的插件视图若因重载消失/变更，清空选择
+        ui: plugins.some((p) => p.viewId === s.ui.pluginView)
+          ? s.ui
+          : { ...s.ui, pluginView: null }
+      }))
+    },
+
+    registerPluginCommand: (pluginId, cmd) =>
+      set((s) => ({
+        pluginCommands: { ...s.pluginCommands, [cmd.id]: { pluginId, ...cmd } }
+      })),
 
     setSidebarWidth: (width) =>
       set((s) => ({ ui: { ...s.ui, sidebarWidth: width } })),

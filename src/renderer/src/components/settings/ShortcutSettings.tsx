@@ -8,6 +8,7 @@ import {
   shortcutLabel
 } from '@shared/shortcuts'
 import { useAppStore } from '@/stores/app-store'
+import { toast } from 'sonner'
 import { cn } from 'cn'
 import { Button } from '@/components/ui/button'
 
@@ -77,18 +78,24 @@ export function ShortcutSettings() {
       }
       if (e.code === 'Backspace' || e.code === 'Delete') {
         const cur = useAppStore.getState().shortcuts
-        void useAppStore.getState().saveShortcuts(
-          cur.map((s) => (s.action === recording ? { ...s, accelerator: '' } : s))
-        )
+        void useAppStore
+          .getState()
+          .saveShortcuts(cur.map((s) => (s.action === recording ? { ...s, accelerator: '' } : s)))
+          .then(() => toast(`已清除「${shortcutLabel(recording)}」快捷键`))
         setRecording(null)
         return
       }
       const acc = eventToAccelerator(e)
       if (acc) {
         const cur = useAppStore.getState().shortcuts
-        void useAppStore.getState().saveShortcuts(
-          cur.map((s) => (s.action === recording ? { ...s, accelerator: acc } : s))
-        )
+        void useAppStore
+          .getState()
+          .saveShortcuts(cur.map((s) => (s.action === recording ? { ...s, accelerator: acc } : s)))
+          .then(() =>
+            toast.success(
+              `「${shortcutLabel(recording)}」已设为 ${formatShortcutForPlatform(acc, window.api.app.platform)}`
+            )
+          )
         setRecording(null)
       }
     }
@@ -175,7 +182,7 @@ export function ShortcutSettings() {
           onClick={() =>
             void saveShortcuts(
               SHORTCUT_ACTIONS.map((a) => ({ action: a.action, accelerator: a.defaultAccelerator }))
-            )
+            ).then(() => toast.success('已恢复默认快捷键'))
           }
           className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-[12px] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
         >

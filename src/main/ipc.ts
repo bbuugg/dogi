@@ -7,6 +7,7 @@ import { detectShells } from './services/shells'
 import { aiService } from './services/ai'
 import { mcpManager } from './services/mcp'
 import { registerShortcuts, unregisterShortcuts } from './shortcuts'
+import { pluginHost } from './services/plugins'
 import { app } from 'electron'
 import type {
   AiChatMessage,
@@ -231,6 +232,35 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   ipcMain.handle('shortcuts:capture', (_e, enabled: boolean) => {
     if (enabled) unregisterShortcuts()
     else registerShortcuts(win, () => storage.getShortcuts())
+  })
+
+  // ---------- 插件（运行时加载外部插件） ----------
+  ipcMain.handle('plugins:list', () => pluginHost.listManifests())
+  // 启用/禁用（持久化）、卸载、从文件安装：均返回最新插件列表供渲染端刷新
+  ipcMain.handle('plugins:setEnabled', (_e, id: string, enabled: boolean) =>
+    pluginHost.setEnabled(id, enabled)
+  )
+  ipcMain.handle('plugins:uninstall', (_e, id: string) => pluginHost.uninstall(id))
+  ipcMain.handle('plugins:install', (_e, sourcePath: string) => pluginHost.install(sourcePath))
+  // 重新加载插件（不传 id 表示全部），返回最新插件列表
+  ipcMain.handle('plugins:reload', (_e, id?: string) => pluginHost.reload(id))
+  // 文件/目录选择对话框（用于「从文件安装」）
+  ipcMain.handle('dialog:open', (_e, options) => {
+    const browserWindow = win()
+    return browserWindow
+      ? dialog.showOpenDialog(browserWindow, options)
+      : dialog.showOpenDialog(options)
+  })
+  ipcMain.handle('plugin:rendererCode', (_e, id: string) => pluginHost.getRendererCode(id))
+  ipcMain.handle('plugin:invoke', (_e, pluginId: string, name: string, args: unknown[]) =>
+    pluginHost.invoke(pluginId, name, args ?? [])
+  )
+  ipcMain.handle('plugin:http', (_e, pluginId: string, req) => pluginHost.http(pluginId, req))
+  ipcMain.handle('plugin:storageGet', (_e, pluginId: string, key: string) =>
+    pluginHost.storageGet(pluginId, key)
+  )
+  ipcMain.handle('plugin:storageSet', (_e, pluginId: string, key: string, value) => {
+    pluginHost.storageSet(pluginId, key, value)
   })
 
   // ---------- 窗口控制（自定义标题栏） ----------

@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { app, BrowserWindow, Menu, nativeTheme, Tray } from 'electron'
 import { registerIpc, openExternalSafe } from './ipc'
 import { registerShortcuts } from './shortcuts'
+import { pluginHost } from './services/plugins'
 import { storage } from './services/storage'
 
 let mainWindow: BrowserWindow | null = null
@@ -178,12 +179,14 @@ function saveBounds(): void {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // 在创建窗口前应用主题偏好，renderer 的 prefers-color-scheme 随之生效
   nativeTheme.themeSource = storage.getPreferences().theme
   installMenu()
   registerIpc(() => mainWindow)
   createWindow()
+  // 插件需在 IPC 注册后加载，使插件主进程 handler 可被路由
+  await pluginHost.init()
   registerShortcuts(() => mainWindow, () => storage.getShortcuts())
   createTray()
 

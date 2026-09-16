@@ -3,7 +3,7 @@ import { ArrowLeft, Pencil, Plus, Play, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Textarea } from '@/components/ui/textarea'
+import MonacoEditor from '@/components/MonacoEditor'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -15,6 +15,7 @@ import {
   AlertDialogTitle
 } from '@/components/ui/alert-dialog'
 import { useAppStore } from '@/stores/app-store'
+import { toast } from 'sonner'
 import type { ScriptEntry } from '@shared/types'
 
 /** 脚本管理页：列出 / 新增 / 编辑 / 删除用户脚本（持久化到本地存储） */
@@ -63,6 +64,9 @@ export function ScriptsPage() {
       })
       await refreshScripts()
       setEditing(null)
+      toast.success('脚本已保存')
+    } catch (e) {
+      toast.error('保存失败', { description: e instanceof Error ? e.message : String(e) })
     } finally {
       setSaving(false)
     }
@@ -72,8 +76,13 @@ export function ScriptsPage() {
     const target = pendingDelete
     if (!target) return
     setPendingDelete(null)
-    await window.api.scripts.remove(target.id)
-    await refreshScripts()
+    try {
+      await window.api.scripts.remove(target.id)
+      await refreshScripts()
+      toast.success(`已删除「${target.name}」`)
+    } catch (e) {
+      toast.error('删除失败', { description: e instanceof Error ? e.message : String(e) })
+    }
   }
 
   return (
@@ -192,14 +201,17 @@ export function ScriptsPage() {
               />
             </div>
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="script-content">脚本内容</Label>
-              <Textarea
-                id="script-content"
-                value={content}
-                placeholder="可多行，选择后整体写入终端并执行"
-                className="h-56 font-mono text-xs"
-                onChange={(e) => setContent(e.target.value)}
-              />
+              <Label>脚本内容</Label>
+              <div className="h-64 overflow-hidden rounded-md border border-border">
+                <MonacoEditor
+                  value={content}
+                  onChange={setContent}
+                  language="shell"
+                  showLanguageSelector
+                  showLineNumbersToggle
+                  showWordWrapToggle
+                />
+              </div>
             </div>
             <div className="flex justify-end gap-2">
               <Button variant="ghost" onClick={cancel} disabled={saving}>

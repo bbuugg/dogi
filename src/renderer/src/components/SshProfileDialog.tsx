@@ -20,6 +20,7 @@ import {
   SelectValue
 } from '@/components/ui/select'
 import { Loader2 } from 'lucide-react'
+import { toast } from 'sonner'
 
 interface FormState {
   name: string
@@ -112,13 +113,20 @@ export function SshProfileDialog() {
       await window.api.ssh.save(payload)
       await refreshProfiles()
       setSshDialog(false, null)
+      toast.success(isEdit ? 'SSH 连接已更新' : 'SSH 连接已添加')
       if (connectAfter) {
         const profiles = await window.api.ssh.list()
         const saved = profiles.find((p) => p.name === payload.name && p.host === payload.host)
-        if (saved) void connectSsh(saved)
+        if (saved) {
+          void connectSsh(saved).catch((e) => {
+            toast.error('连接失败', { description: e instanceof Error ? e.message : String(e) })
+          })
+        }
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(msg)
+      toast.error('保存失败', { description: msg })
     } finally {
       setSaving(false)
     }

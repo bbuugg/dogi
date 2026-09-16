@@ -2,8 +2,10 @@ import { useState } from 'react'
 import type { SshProfile } from '@shared/types'
 import { Button } from '@/components/ui/button'
 import { useAppStore } from '@/stores/app-store'
+import { cn } from 'cn'
 import { Pencil, Plus, Server, Trash2 } from 'lucide-react'
 import { ChevronDown } from 'lucide-react'
+import { toast } from 'sonner'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -34,8 +36,22 @@ export function Sidebar() {
   const setSshDialog = useAppStore((s) => s.setSshDialog)
   const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth)
   const refreshProfiles = useAppStore((s) => s.refreshProfiles)
+  const plugins = useAppStore((s) => s.plugins)
+  const view = useAppStore((s) => s.ui.view)
+  const pluginView = useAppStore((s) => s.ui.pluginView)
+  const setView = useAppStore((s) => s.setView)
+  const setPluginView = useAppStore((s) => s.setPluginView)
   /** 待确认删除的 SSH 配置（非 null 时弹出确认框） */
   const [pendingDelete, setPendingDelete] = useState<SshProfile | null>(null)
+
+  /** 发起连接并在失败时用 toast 提示（连接本身会切回终端视图） */
+  const connect = (profile: SshProfile) => {
+    void connectSsh(profile).catch((e) => {
+      toast.error('连接失败', {
+        description: e instanceof Error ? e.message : String(e)
+      })
+    })
+  }
 
   const confirmDelete = async () => {
     const target = pendingDelete
@@ -52,20 +68,31 @@ export function Sidebar() {
     >
       <div className="flex-1 overflow-y-auto p-2">
         {/* 本地终端 */}
-        <div className="mb-1 flex items-center justify-between px-2 py-1">
+        <div
+          className="mb-1 flex cursor-pointer items-center justify-between rounded px-2 py-1 transition-colors hover:bg-sidebar-accent"
+          title="返回终端视图"
+          onClick={() => setView('terminal')}
+        >
           <span className="text-[11px] font-medium text-muted-foreground">本地终端</span>
         </div>
         <NewTerminalMenu />
 
         {/* SSH 连接 */}
-        <div className="mb-1 flex items-center justify-between px-2 py-1">
+        <div
+          className="mb-1 flex cursor-pointer items-center justify-between rounded px-2 py-1 transition-colors hover:bg-sidebar-accent"
+          title="返回终端视图"
+          onClick={() => setView('terminal')}
+        >
           <span className="text-[11px] font-medium text-muted-foreground">
             SSH 连接 ({profiles.length})
           </span>
           <button
             className="text-muted-foreground transition-colors hover:text-foreground"
             title="新建 SSH 连接"
-            onClick={() => setSshDialog(true, null)}
+            onClick={(e) => {
+              e.stopPropagation()
+              setSshDialog(true, null)
+            }}
           >
             <Plus className="size-3.5" />
           </button>
@@ -85,9 +112,10 @@ export function Sidebar() {
                 <ContextMenuTrigger asChild>
                   <div
                     className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-sidebar-accent"
-                    // 双击才连接，避免单击误触
-                    onDoubleClick={() => void connectSsh(profile)}
-                    title={`双击连接 ${profile.username}@${profile.host}`}
+                    // 单击切回终端视图（从脚本/插件管理页返回），双击才连接，避免误触
+                    onClick={() => setView('terminal')}
+                    onDoubleClick={() => connect(profile)}
+                    title={`单击返回终端 · 双击连接 ${profile.username}@${profile.host}`}
                   >
                     <Server className="size-4 shrink-0 text-muted-foreground" />
                     <div className="min-w-0 flex-1">
@@ -99,7 +127,7 @@ export function Sidebar() {
                   </div>
                 </ContextMenuTrigger>
                 <ContextMenuContent className="w-36">
-                  <ContextMenuItem onClick={() => void connectSsh(profile)}>
+                  <ContextMenuItem onClick={() => connect(profile)}>
                     <Server className="size-3.5" /> 连接
                   </ContextMenuItem>
                   <ContextMenuItem onClick={() => setSshDialog(true, profile)}>
@@ -114,6 +142,41 @@ export function Sidebar() {
             )
           })}
         </div>
+
+        {/* 插件（运行时从 userData/plugins 加载） */}
+        {plugins.length > 0 && (
+          <>
+            <div className="mb-1 flex items-center justify-between px-2 py-1">
+              <span className="text-[11px] font-medium text-muted-foreground">
+                插件 ({plugins.length})
+              </span>
+            </div>
+            <div className="space-y-0.5">
+              {plugins.map((p) => {
+                const active = view === 'plugin' && pluginView === p.viewId
+                return (
+                  <div
+                    key={p.viewId}
+                    className={cn(
+                      'flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-sidebar-accent',
+                      active && 'bg-sidebar-accent text-foreground'
+                    )}
+                    onClick={() => {
+                      setPluginView(p.viewId)
+                      setView('plugin')
+                    }}
+                    title={p.name}
+                  >
+                    <span className="size-4 shrink-0 text-center text-[13px] leading-4">
+                      {p.icon ?? '🔌'}
+                    </span>
+                    <div className="min-w-0 flex-1 truncate text-xs font-medium">{p.name}</div>
+                  </div>
+                )
+              })}
+            </div>
+          </>
+        )}
 
       </div>
 

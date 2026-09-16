@@ -286,6 +286,15 @@ class StorageService {
     )
     return this.listMcpServers()
   }
+
+  // ---------- 插件数据（按 pluginId 分区，键为 pluginId.key） ----------
+  getPluginData<T>(pluginId: string, key: string): T | undefined {
+    return this.store.get(`pluginData.${pluginId}.${key}`) as T | undefined
+  }
+
+  setPluginData<T>(pluginId: string, key: string, value: T): void {
+    this.store.set(`pluginData.${pluginId}.${key}`, value)
+  }
 }
 
 export const storage = new StorageService()

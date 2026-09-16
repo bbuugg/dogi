@@ -4,6 +4,9 @@
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/inter";
 
+/* 运行时插件的源码（含手写 Tailwind 类名）也纳入扫描，确保样式生成 */
+@source "../../../plugins/**";
+
 @custom-variant dark (&:is(.dark *));
 
 @layer base {

@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { TerminalSquare } from 'lucide-react'
 import { useAppStore } from '@/stores/app-store'
 import { TitleBar } from '@/components/TitleBar'
@@ -10,6 +11,8 @@ import { PaneLayout } from '@/components/PaneLayout'
 import { CommandPalette } from '@/components/CommandPalette'
 import { RunScriptDialog } from '@/components/RunScriptDialog'
 import { ScriptsPage } from '@/components/ScriptsPage'
+import { PluginsPage } from '@/components/PluginsPage'
+import { AppToaster } from '@/components/AppToaster'
 import { StatusBar } from '@/components/StatusBar'
 import { ResizeHandle } from '@/components/ResizeHandle'
 import { Button } from '@/components/ui/button'
@@ -38,10 +41,35 @@ export default function App() {
   const activeSessionId = useAppStore((s) => s.activeSessionId)
   const aiPanelOpen = useAppStore((s) => s.ui.aiPanelOpen)
   const view = useAppStore((s) => s.ui.view)
+  const pluginView = useAppStore((s) => s.ui.pluginView)
+  const plugins = useAppStore((s) => s.plugins)
   const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth)
   const aiPanelWidth = useAppStore((s) => s.ui.aiPanelWidth)
   const setSidebarWidth = useAppStore((s) => s.setSidebarWidth)
   const setAiPanelWidth = useAppStore((s) => s.setAiPanelWidth)
+
+  /**
+   * 已打开过的插件视图 id：保持挂载（非激活时用 hidden 隐藏），
+   * 这样切到终端/其它页再切回来，插件内部 state（表单、编辑器内容等）不会丢。
+   */
+  const [mountedPluginViews, setMountedPluginViews] = useState<string[]>([])
+
+  useEffect(() => {
+    const alive = new Set(plugins.map((p) => p.viewId))
+    setMountedPluginViews((prev) => {
+      let changed = false
+      const next = prev.filter((id) => {
+        const ok = alive.has(id)
+        if (!ok) changed = true
+        return ok
+      })
+      if (view === 'plugin' && pluginView && alive.has(pluginView) && !next.includes(pluginView)) {
+        next.push(pluginView)
+        changed = true
+      }
+      return changed ? next : prev
+    })
+  }, [plugins, view, pluginView])
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
@@ -61,6 +89,20 @@ export default function App() {
             {layout ? <PaneLayout layout={layout} /> : <EmptyState />}
           </div>
           {view === 'scripts' && <ScriptsPage />}
+          {view === 'plugins' && <PluginsPage />}
+          {/* 插件视图：已打开过的保持挂载，只有激活的那个可见（切去终端再切回不丢状态） */}
+          {plugins
+            .filter((p) => p.viewId === pluginView || mountedPluginViews.includes(p.viewId))
+            .map((p) => (
+              <div
+                key={p.viewId}
+                className={
+                  view === 'plugin' && pluginView === p.viewId ? 'min-h-0 flex-1' : 'hidden'
+                }
+              >
+                <p.Component />
+              </div>
+            ))}
           {/* 底部浮动监控图标：采集不到当前会话数据时自身不渲染 */}
           {view === 'terminal' && <MonitorBadge sessionId={activeSessionId} />}
         </main>
@@ -86,6 +128,9 @@ export default function App() {
       <SettingsDialog />
       <CommandPalette />
       <RunScriptDialog />
+
+      {/* 全局通知 */}
+      <AppToaster />
     </div>
   )
 }

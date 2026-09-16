@@ -17,6 +17,11 @@ import type {
   ShellDetectResult,
   SshProfile
 } from '@shared/types'
+import type {
+  PluginInfo,
+  PluginHttpRequest,
+  PluginHttpResponse
+} from '@shared/plugin'
 
 type Unsubscribe = () => void
 
@@ -159,6 +164,40 @@ const api = {
      */
     onData: (cb: (payload: { sessionId: string; metrics: ServerMetrics }) => void) =>
       subscribe('monitor:data', cb)
+  },
+  plugins: {
+    /** 列出已加载插件的 manifest（含启用状态与渲染端入口信息） */
+    list: (): Promise<PluginInfo[]> => ipcRenderer.invoke('plugins:list'),
+    /** 启用/禁用插件（持久化），返回最新插件列表 */
+    setEnabled: (id: string, enabled: boolean): Promise<PluginInfo[]> =>
+      ipcRenderer.invoke('plugins:setEnabled', id, enabled),
+    /** 卸载插件，返回最新插件列表 */
+    uninstall: (id: string): Promise<PluginInfo[]> => ipcRenderer.invoke('plugins:uninstall', id),
+    /** 从文件/目录安装插件，返回最新插件列表 */
+    install: (sourcePath: string): Promise<PluginInfo[]> =>
+      ipcRenderer.invoke('plugins:install', sourcePath),
+    /** 重新加载插件（不传 id 表示全部），返回最新插件列表 */
+    reload: (id?: string): Promise<PluginInfo[]> => ipcRenderer.invoke('plugins:reload', id),
+    /** 读取插件渲染端源码（供渲染端 blob import 运行） */
+    rendererCode: (id: string): Promise<string | null> =>
+      ipcRenderer.invoke('plugin:rendererCode', id),
+    /** 发起 HTTP 请求（需插件声明 http 权限） */
+    http: (pluginId: string, req: PluginHttpRequest): Promise<PluginHttpResponse> =>
+      ipcRenderer.invoke('plugin:http', pluginId, req),
+    /** 读取插件持久化数据（需 storage 权限） */
+    storageGet: (pluginId: string, key: string): Promise<unknown> =>
+      ipcRenderer.invoke('plugin:storageGet', pluginId, key),
+    /** 写入插件持久化数据（需 storage 权限） */
+    storageSet: (pluginId: string, key: string, value: unknown): Promise<void> =>
+      ipcRenderer.invoke('plugin:storageSet', pluginId, key, value),
+    /** 调用插件自有主进程 handler */
+    invoke: (pluginId: string, name: string, ...args: unknown[]): Promise<unknown> =>
+      ipcRenderer.invoke('plugin:invoke', pluginId, name, args)
+  },
+  /** 原生文件/目录选择对话框 */
+  dialog: {
+    open: (options: unknown): Promise<{ canceled: boolean; filePaths: string[] }> =>
+      ipcRenderer.invoke('dialog:open', options)
   }
 }
 
