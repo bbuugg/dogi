@@ -107,9 +107,29 @@ export function activate(api) {
     return HEADER_VALUE_SUGGESTIONS[k] || null
   }
 
-  /** 单元格内的扁平输入框：无边框无阴影，聚焦时以淡背景高亮，视觉上与表格浑然一体 */
+  /** 单元格内的扁平输入框：无边框无阴影、无聚焦/悬停背景变化，视觉上与表格浑然一体 */
   const HEADER_CELL_INPUT =
-    'h-8 w-full min-w-0 bg-transparent px-2.5 font-mono text-[11px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus:bg-accent/60'
+    'h-8 w-full min-w-0 bg-transparent px-2.5 font-mono text-[11px] text-foreground outline-none placeholder:text-muted-foreground/70'
+
+  /**
+   * 注入一次性样式：Chromium 在从 datalist 提示中选中值时会给输入框打上 :-webkit-autofill，
+   * 表现为浅蓝色背景。这里用背景色内阴影覆盖 + 超长 transition 将其抹平，保持透明观感。
+   */
+  if (typeof document !== 'undefined' && !document.getElementById('api-client-autofill-style')) {
+    const style = document.createElement('style')
+    style.id = 'api-client-autofill-style'
+    style.textContent = `
+.api-client-root input:-webkit-autofill,
+.api-client-root input:-webkit-autofill:hover,
+.api-client-root input:-webkit-autofill:focus,
+.api-client-root input:-webkit-autofill:active {
+  -webkit-box-shadow: 0 0 0 1000px var(--background, #fff) inset;
+  -webkit-text-fill-color: currentColor;
+  caret-color: currentColor;
+  transition: background-color 9999s ease-in-out 0s;
+}`
+    document.head.appendChild(style)
+  }
 
   const el = (tag, props, ...children) => h(tag, props, ...children)
 
@@ -363,7 +383,8 @@ export function activate(api) {
             const valueDatalistId = valueSuggestions ? HEADER_VALUE_DATALIST_PREFIX + i : undefined
             return h(
               TableRow,
-              { key: i, className: 'group' },
+              // hover:bg-transparent / transition-none 覆盖 shadcn TableRow 默认的悬停高亮
+              { key: i, className: 'group transition-none hover:bg-transparent' },
               h(
                 TableCell,
                 { className: 'p-0' },
@@ -570,7 +591,7 @@ export function activate(api) {
     return el(
       'div',
       {
-        className: 'flex h-full flex-col bg-background text-foreground',
+        className: 'api-client-root flex h-full flex-col bg-background text-foreground',
         // Ctrl/Cmd + Enter 发送请求（在插件区域内任意位置均可）
         onKeyDown: (e) => {
           if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
