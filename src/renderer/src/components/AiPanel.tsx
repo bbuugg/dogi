@@ -135,7 +135,7 @@ function MessageBubble({
         )
       )}
       {parts.length === 0 && streaming && (
-        <div className="flex items-center gap-2 rounded-lg bg-card px-3 py-2 text-xs text-muted-foreground">
+        <div className="flex items-center gap-2 rounded-lg px-3 py-2 text-xs text-muted-foreground">
           <Loader2 className="size-3.5 animate-spin" /> 思考中...
         </div>
       )}
