@@ -272,6 +272,8 @@ class AiService extends EventEmitter {
   private abortControllers = new Map<string, AbortController>()
   private pendingConfirms = new Map<string, PendingConfirm>()
   private confirmRequester: ConfirmRequester | null = null
+  /** 确认请求串行链：前一个确认被应答（或超时）后才弹出下一个 */
+  private confirmChain: Promise<unknown> = Promise.resolve()
 
   /** ipc 层注入确认请求的广播函数 */
   setConfirmRequester(fn: ConfirmRequester | null): void {
@@ -282,6 +284,21 @@ class AiService extends EventEmitter {
   requestConfirm(req: Omit<AiConfirmRequest, 'id'>): Promise<boolean> {
     const requester = this.confirmRequester
     if (!requester) return Promise.resolve(true)
+    // 串行化：模型可能在同一步并行发出多个工具调用（多个 run_in_terminal），
+    // 渲染端一次只显示一张确认卡，后到的确认事件会覆盖前一个，被覆盖的命令
+    // 将挂起直至超时。这里排队逐个弹出，保证同一时刻只有一个待确认请求。
+    const result = this.confirmChain.then(() => this.doRequestConfirm(req, requester))
+    this.confirmChain = result.then(
+      () => undefined,
+      () => undefined
+    )
+    return result
+  }
+
+  private doRequestConfirm(
+    req: Omit<AiConfirmRequest, 'id'>,
+    requester: ConfirmRequester
+  ): Promise<boolean> {
     const id = randomUUID()
     return new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
