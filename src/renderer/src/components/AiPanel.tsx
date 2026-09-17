@@ -11,6 +11,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { useAppStore } from '@/stores/app-store'
 import type { AiMessagePart, AiPermissionMode } from '@shared/types'
 import {
+  ArrowDown,
   Check,
   Copy,
   Eraser,
@@ -246,13 +247,32 @@ export function AiPanel() {
 
   const [input, setInput] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
-  // 是否贴近底部：用户上翻阅读历史时暂停自动跟随，避免被强制拉回底部
+  // 是否跟随底部：用户上翻阅读历史时暂停自动跟随，避免被强制拉回底部
   const nearBottomRef = useRef(true)
+  const prevScrollTopRef = useRef(0)
+  const [showJump, setShowJump] = useState(false)
 
   const handleListScroll = () => {
     const el = scrollRef.current
     if (!el) return
-    nearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight
+    // 只要发生向上的滚动即视为用户要阅读历史，立即暂停跟随；
+    // 滚回底部附近（48px 内）才恢复——避免流式输出和滚动互抢位置
+    if (el.scrollTop < prevScrollTopRef.current - 2) {
+      nearBottomRef.current = false
+    } else if (distance < 48) {
+      nearBottomRef.current = true
+    }
+    prevScrollTopRef.current = el.scrollTop
+    setShowJump(distance > 48)
+  }
+
+  const jumpToBottom = () => {
+    const el = scrollRef.current
+    if (!el) return
+    nearBottomRef.current = true
+    el.scrollTop = el.scrollHeight
+    setShowJump(false)
   }
 
   // Chromium 的滚动锚定（scroll anchoring）在流式内容增长/markdown 重排时会错误修正
@@ -320,12 +340,13 @@ export function AiPanel() {
       </div>
 
       {/* 消息区：AI 回复属于「内容」，保持可选中复制 */}
-      <div
-        ref={scrollRef}
-        onScroll={handleListScroll}
-        className="min-h-0 flex-1 overflow-y-auto select-text"
-        style={{ overflowAnchor: 'none' }}
-      >
+      <div className="relative min-h-0 flex-1">
+        <div
+          ref={scrollRef}
+          onScroll={handleListScroll}
+          className="h-full overflow-y-auto select-text"
+          style={{ overflowAnchor: 'none' }}
+        >
         <div className="space-y-3 p-3">
           {messages.length === 0 && (
             <div className="mt-16 flex flex-col items-center gap-3 text-center text-muted-foreground">
@@ -357,6 +378,18 @@ export function AiPanel() {
           ))}
           {aiError && <p className="text-xs text-destructive">{aiError}</p>}
         </div>
+        </div>
+        {/* 不在底部时显示：一键滚动到底部 */}
+        {showJump && (
+          <button
+            type="button"
+            onClick={jumpToBottom}
+            title="滚动到底部"
+            className="absolute bottom-3 right-3 flex size-8 items-center justify-center rounded-full border border-border bg-background text-muted-foreground shadow-md transition-colors hover:bg-secondary hover:text-foreground"
+          >
+            <ArrowDown className="size-4" />
+          </button>
+        )}
       </div>
 
       {/* 命令确认（确认模式） */}
