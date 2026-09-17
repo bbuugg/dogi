@@ -11,6 +11,8 @@ import { Textarea } from '@/components/ui/textarea'
 import { useAppStore } from '@/stores/app-store'
 import type { AiMessagePart, AiPermissionMode } from '@shared/types'
 import {
+  Check,
+  Copy,
   Eraser,
   Loader2,
   Send,
@@ -21,7 +23,7 @@ import {
   Terminal,
   Wrench
 } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 
 const TOOL_LABELS: Record<string, string> = {
   run_in_terminal: '执行终端命令',
@@ -107,6 +109,8 @@ function MessageBubble({
   parts: AiMessagePart[]
   streaming?: boolean
 }) {
+  const [copied, setCopied] = useState(false)
+
   if (role === 'user') {
     const text = parts
       .filter((p) => p.type === 'text')
@@ -120,6 +124,26 @@ function MessageBubble({
       </div>
     )
   }
+
+  // 复制原始 Markdown 文本（跳过工具卡片，文本段之间以空行衔接）
+  const copyRaw = async () => {
+    const raw = parts
+      .filter((p) => p.type === 'text')
+      .map((p) => (p.type === 'text' ? p.text : ''))
+      .join('\n\n')
+      .trim()
+    if (!raw) return
+    try {
+      await navigator.clipboard.writeText(raw)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // 忽略
+    }
+  }
+
+  const hasText = parts.some((p) => p.type === 'text')
+
   return (
     <div className="space-y-1">
       {parts.map((part, i) =>
@@ -137,6 +161,24 @@ function MessageBubble({
       {parts.length === 0 && streaming && (
         <div className="flex items-center gap-2 rounded-lg px-3 py-2 text-xs text-muted-foreground">
           <Loader2 className="size-3.5 animate-spin" /> 思考中...
+        </div>
+      )}
+      {/* 消息下方：复制原始 Markdown */}
+      {!streaming && hasText && (
+        <div className="px-3">
+          <button
+            type="button"
+            onClick={() => void copyRaw()}
+            title="复制原文（Markdown）"
+            className="inline-flex items-center gap-1 rounded p-1 text-[10px] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+          >
+            {copied ? (
+              <Check className="size-3 text-green-500" />
+            ) : (
+              <Copy className="size-3" />
+            )}
+            {copied ? '已复制' : '复制'}
+          </button>
         </div>
       )}
     </div>
@@ -204,10 +246,21 @@ export function AiPanel() {
 
   const [input, setInput] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
+  // 是否贴近底部：用户上翻阅读历史时暂停自动跟随，避免被强制拉回底部
+  const nearBottomRef = useRef(true)
 
-  useEffect(() => {
+  const handleListScroll = () => {
     const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
+    if (!el) return
+    nearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
+  }
+
+  // Chromium 的滚动锚定（scroll anchoring）在流式内容增长/markdown 重排时会错误修正
+  // 滚动位置，造成偶发跳顶、干扰手动滚动；容器上已用 overflow-anchor:none 关闭，
+  // 由这里显式管理。useLayoutEffect 在绘制前执行，避免「先画到中间再跳到底」的闪动。
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (el && nearBottomRef.current) el.scrollTop = el.scrollHeight
   }, [messages, aiStreaming])
 
   const hasConfig = Boolean(aiSettings.activeConfigId) && aiConfigs.length > 0
@@ -218,6 +271,8 @@ export function AiPanel() {
 
   const handleSend = () => {
     if (!input.trim() || aiStreaming) return
+    // 用户刚发出新消息：无论当前在哪个位置都跟随到底部
+    nearBottomRef.current = true
     void sendAiMessage(input)
     setInput('')
   }
@@ -265,7 +320,12 @@ export function AiPanel() {
       </div>
 
       {/* 消息区：AI 回复属于「内容」，保持可选中复制 */}
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto select-text">
+      <div
+        ref={scrollRef}
+        onScroll={handleListScroll}
+        className="min-h-0 flex-1 overflow-y-auto select-text"
+        style={{ overflowAnchor: 'none' }}
+      >
         <div className="space-y-3 p-3">
           {messages.length === 0 && (
             <div className="mt-16 flex flex-col items-center gap-3 text-center text-muted-foreground">
