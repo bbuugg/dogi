@@ -230,7 +230,7 @@ export function MonitorBadge({ sessionId }: { sessionId: string | null }) {
           type="button"
           aria-label="服务器指标"
           title="服务器指标"
-          className="absolute right-3 bottom-3 z-20 flex size-8 items-center justify-center rounded-full border border-border/60 bg-card/80 shadow-lg backdrop-blur transition-colors hover:bg-card"
+          className="absolute bottom-3 left-3 z-20 flex size-8 items-center justify-center rounded-full border border-border/60 bg-card/80 shadow-lg backdrop-blur transition-colors hover:bg-card"
         >
           <Activity className={cn('size-4', textColor(worst))} />
         </button>
@@ -240,7 +240,7 @@ export function MonitorBadge({ sessionId }: { sessionId: string | null }) {
       {open && (
         <PopoverContent
           side="top"
-          align="end"
+          align="start"
           // 负偏移让气泡下沿压到图标上，把图标完全盖住
           sideOffset={-36}
           className="w-[300px] gap-3 p-3"
