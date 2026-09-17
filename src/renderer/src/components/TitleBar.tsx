@@ -26,33 +26,40 @@ export function TitleBar() {
     return window.api.window.onMaximizedChange(setMaximized)
   }, [])
 
+  const sidebarToggle = (
+    <Button
+      variant="ghost"
+      size="icon"
+      className="size-8"
+      title={sidebarCollapsed ? '展开侧边栏' : '折叠侧边栏'}
+      onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+    >
+      {sidebarCollapsed ? (
+        <PanelLeftOpen className="size-4" />
+      ) : (
+        <PanelLeftClose className="size-4" />
+      )}
+    </Button>
+  )
+
   return (
     <header className="app-drag flex h-9 shrink-0 items-stretch bg-background">
       {isMac ? (
-        <div className="w-[76px] shrink-0" />
+        <>
+          <div className="w-[76px] shrink-0" />
+          <div className="app-no-drag flex shrink-0 items-center pl-1">{sidebarToggle}</div>
+        </>
       ) : (
-        <div className="flex w-36 shrink-0 items-center gap-2 pl-3">
+        <div className="app-no-drag flex w-36 shrink-0 items-center gap-2 pl-3">
           <img src={appIcon} alt="OpsDesk" className="size-5" draggable={false} />
           <span className="text-xs font-semibold">OpsDesk</span>
+          {sidebarToggle}
         </div>
       )}
 
       <div className="flex min-w-0 flex-1 items-end" />
 
       <div className="app-no-drag flex items-center gap-0.5 pr-1">
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-8"
-          title={sidebarCollapsed ? '展开侧边栏' : '折叠侧边栏'}
-          onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-        >
-          {sidebarCollapsed ? (
-            <PanelLeftOpen className="size-4" />
-          ) : (
-            <PanelLeftClose className="size-4" />
-          )}
-        </Button>
         <Button
           variant="ghost"
           size="icon"

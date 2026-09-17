@@ -138,8 +138,9 @@ export function activate(api) {
 .api-client-root input:-webkit-autofill:focus,
 .api-client-root input:-webkit-autofill:active {
   -webkit-box-shadow: 0 0 0 1000px var(--background, #fff) inset;
-  -webkit-text-fill-color: currentColor;
-  caret-color: currentColor;
+  -webkit-text-fill-color: var(--foreground, currentColor) !important;
+  color: var(--foreground, inherit) !important;
+  caret-color: var(--foreground, currentColor);
   transition: background-color 9999s ease-in-out 0s;
 }`
     document.head.appendChild(style)

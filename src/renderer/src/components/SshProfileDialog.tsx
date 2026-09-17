@@ -68,11 +68,15 @@ export function SshProfileDialog() {
   const [form, setForm] = useState<FormState>(EMPTY_FORM)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const editing = sshDialog.editing ?? null
+  // 关闭时 store 会把 editing 清空，但 Radix 关闭动画期间组件仍挂载；
+  // 沿用最近一次的 editing，避免 footer 在动画中闪现「保存并连接」按钮
+  const [lastEditing, setLastEditing] = useState<SshProfile | null>(null)
+  const editing = (sshDialog.open ? sshDialog.editing : lastEditing) ?? null
   const isEdit = Boolean(editing?.id)
 
   useEffect(() => {
     if (sshDialog.open) {
+      setLastEditing(sshDialog.editing ?? null)
       setForm(toForm(editing))
       setError(null)
     }

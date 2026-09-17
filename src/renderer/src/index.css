@@ -203,6 +203,9 @@
 }
 
 :root {
+  /* 声明同时支持明暗两种配色，让原生控件（autofill 填充/文字色、datalist 下拉、滚动条）
+     跟随 prefers-color-scheme（Electron 由 nativeTheme.themeSource 控制）自适应 */
+  color-scheme: light dark;
   --background:
       oklch(1 0 0);
   --foreground:
