@@ -12,6 +12,28 @@ let tray: Tray | null = null
 let isQuiting = false
 
 /**
+ * 单实例锁：已有一个 OpsDesk 在运行时，再次启动的进程直接退出，
+ * 并通过 second-instance 事件把已有实例的主窗口调到前台。
+ * 锁由 Electron 按应用 userData 目录互斥，打包与 dev 各自独立（userData 不同则互不影响）。
+ */
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      createWindow()
+      return
+    }
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    // 未最大化时闪一下任务栏图标以提醒；已最大化则直接聚焦
+    mainWindow.flashFrame(!mainWindow.isMaximized())
+    mainWindow.show()
+    mainWindow.focus()
+  })
+}
+
+/**
  * 自定义菜单：保留编辑 / 重载 / DevTools / 全屏，但**去掉 zoom 角色**。
  * 默认菜单的 Ctrl+加/减/0 会缩放整个页面，并抢在渲染端之前触发；
  * 去掉后才能把这些组合键交给终端自己处理（Ctrl+滚轮 / Ctrl +/- 缩放终端字号）。
