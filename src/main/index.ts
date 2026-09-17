@@ -47,8 +47,9 @@ function installMenu(): void {
         submenu: [
           {
             label: 'Reload',
-            accelerator: 'CmdOrCtrl+R',
-            // 仅在 DevTools 打开时允许刷新，避免误触刷新快捷键重载页面
+            // 不注册加速键：Ctrl+R 必须透传给终端（vim 的 redo / readline 反向搜索），
+            // 避免菜单在窗口层抢先拦截按键。需要刷新时点菜单项（仅 DevTools 打开时生效）
+            registerAccelerator: false,
             click: (_item, win) => {
               if (win instanceof BrowserWindow && !win.isDestroyed() && win.webContents.isDevToolsOpened()) {
                 win.webContents.reload()
@@ -57,7 +58,7 @@ function installMenu(): void {
           },
           {
             label: 'Force Reload',
-            accelerator: 'CmdOrCtrl+Shift+R',
+            registerAccelerator: false,
             click: (_item, win) => {
               if (win instanceof BrowserWindow && !win.isDestroyed() && win.webContents.isDevToolsOpened()) {
                 win.webContents.reloadIgnoringCache()
@@ -190,15 +191,13 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
-  // 未打开 DevTools 时，禁止刷新快捷键（F5 / Ctrl+R / Cmd+R / Ctrl+Shift+R）刷新页面。
-  // 菜单里的 Reload/Force Reload 加速键已同样按 DevTools 状态放行，这里再拦一道
-  // before-input-event，兜住 F5 及任何绕过菜单加速键的刷新按键。
+  // 禁止 F5 刷新页面（会毁掉终端会话）。Ctrl+R / Ctrl+Shift+R **不拦截**：
+  // 它们要透传给终端——shell 的反向搜索、vim 的 redo（撤销 u 的恢复）都依赖 ^R；
+  // 页面本身没有内置刷新快捷键，菜单 Reload 加速键已禁用，不会误触重载。
   mainWindow.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return
     if (mainWindow?.webContents.isDevToolsOpened()) return
-    const key = input.key.toLowerCase()
-    const isReload = key === 'f5' || ((input.control || input.meta) && key === 'r')
-    if (isReload) event.preventDefault()
+    if (input.key === 'F5') event.preventDefault()
   })
 
   mainWindow.on('resize', saveBounds)
