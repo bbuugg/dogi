@@ -481,7 +481,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             type="button"
             onClick={jumpToBottom}
             title="滚动到底部"
-            className="absolute bottom-3 right-3 flex size-8 items-center justify-center rounded-full border border-border bg-background text-muted-foreground shadow-md transition-colors hover:bg-secondary hover:text-foreground"
+            className="absolute bottom-3 left-1/2 flex size-8 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-background text-muted-foreground shadow-md transition-colors hover:bg-secondary hover:text-foreground"
           >
             <ArrowDown className="size-4" />
           </button>

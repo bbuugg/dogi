@@ -23,7 +23,7 @@ export function StatusBar({ children }: { children?: ReactNode }) {
   const exited = activeSessionId ? exitedSessions.has(activeSessionId) : false
 
   return (
-    <footer className="flex h-7 shrink-0 items-center gap-0.5 border-t border-border bg-sidebar px-1">
+    <footer className="flex h-7 shrink-0 items-center gap-0.5 bg-sidebar px-1">
       <MenuButton />
 
       {session ? (
