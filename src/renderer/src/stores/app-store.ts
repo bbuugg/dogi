@@ -42,6 +42,22 @@ let fontSizeSaveTimer: number | undefined
 /** 重连中的旧会话 ID：其 onClosed 事件不应从布局摘掉面板（会被新会话原地替换） */
 const reconnectingIds = new Set<string>()
 
+/** 单个终端会话独立的 AI 对话状态 */
+export interface AiChatState {
+  messages: AiChatMessage[]
+  streaming: boolean
+  /** 进行中的对话请求 id（用于事件路由与中止） */
+  requestId: string | null
+  error: string | null
+}
+
+function emptyAiChat(): AiChatState {
+  return { messages: [], streaming: false, requestId: null, error: null }
+}
+
+/** requestId -> sessionId：把流式事件路由到发起对话的那个会话 */
+const aiRequestSessions = new Map<string, string>()
+
 /** AI 回复生成中的占位 assistant 消息尾部追加 part */
 function appendAssistantPart(
   parts: AiMessagePart[],
@@ -106,7 +122,14 @@ function withoutSession(
 function applyTabClose(
   s: Pick<
     AppStore,
-    'sessions' | 'layout' | 'groups' | 'activeGroupId' | 'activeSessionId' | 'exitedSessions' | 'monitors'
+    | 'sessions'
+    | 'layout'
+    | 'groups'
+    | 'activeGroupId'
+    | 'activeSessionId'
+    | 'exitedSessions'
+    | 'monitors'
+    | 'aiChats'
   >,
   id: string
 ): Partial<AppStore> {
@@ -122,6 +145,9 @@ function applyTabClose(
   exited.delete(id)
   const monitors = { ...s.monitors }
   delete monitors[id]
+  // 会话关闭，其独立的 AI 对话随之清理
+  const aiChats = { ...s.aiChats }
+  delete aiChats[id]
   return {
     sessions,
     groups,
@@ -129,12 +155,14 @@ function applyTabClose(
     activeGroupId,
     activeSessionId,
     exitedSessions: exited,
-    monitors
+    monitors,
+    aiChats
   }
 }
 
 interface UiState {
-  aiPanelOpen: boolean
+  /** 各编辑器组是否打开其内置 AI 助手（key 为 groupId；AI 属于终端组而非全局） */
+  aiOpenGroups: Record<string, boolean>
   settingsOpen: boolean
   /** 编辑中的 SSH 配置（null=新建，undefined=关闭） */
   sshDialog: { open: boolean; editing?: SshProfile | null }
@@ -190,12 +218,10 @@ interface AppStore {
   // ---------- AI ----------
   aiConfigs: AiModelConfig[]
   aiSettings: AiSettings
-  messages: AiChatMessage[]
-  aiStreaming: boolean
-  activeRequestId: string | null
-  aiError: string | null
-  /** 确认模式下等待用户处理的命令执行请求 */
-  pendingConfirm: AiConfirmRequest | null
+  /** 每个终端会话独立的 AI 对话（key 为 sessionId，互不影响） */
+  aiChats: Record<string, AiChatState>
+  /** 确认模式下等待用户处理的命令执行请求（key 为确认 id；各会话实例独立弹卡） */
+  pendingConfirms: Record<string, AiConfirmRequest>
 
   // ---------- UI ----------
   ui: UiState
@@ -235,7 +261,7 @@ interface AppStore {
   resizeSplit: (splitId: string, sizes: number[]) => void
   refreshProfiles: () => Promise<void>
 
-  setAiPanelOpen: (open: boolean) => void
+  setGroupAiOpen: (groupId: string, open: boolean) => void
   setSettingsOpen: (open: boolean, tab?: UiState['settingsTab']) => void
   setCommandPaletteOpen: (open: boolean) => void
   setView: (view: 'terminal' | 'scripts' | 'plugin' | 'plugins') => void
@@ -268,7 +294,7 @@ interface AppStore {
   setActiveAiConfig: (id: string) => Promise<void>
   saveAiSettings: (patch: Partial<AiSettings>) => Promise<void>
   setAiPermissionMode: (mode: AiPermissionMode) => Promise<void>
-  resolveAiConfirm: (approved: boolean) => Promise<void>
+  resolveAiConfirm: (id: string, approved: boolean) => Promise<void>
   setTheme: (mode: ThemeMode) => Promise<void>
   /** 设置界面配色方案（强调色，立即生效并持久化） */
   setColorTheme: (name: ColorThemeName) => Promise<void>
@@ -286,8 +312,8 @@ interface AppStore {
   saveShortcuts: (shortcuts: ShortcutConfig[]) => Promise<void>
   setMonitorInterval: (ms: number) => Promise<void>
   sendAiMessage: (text: string, targetSessionId?: string | null) => Promise<void>
-  abortAi: () => Promise<void>
-  clearAiMessages: () => void
+  abortAi: (sessionId: string) => Promise<void>
+  clearAiMessages: (sessionId: string) => void
   handleAiEvent: (requestId: string, event: AiStreamEvent) => void
 }
 
@@ -314,8 +340,17 @@ let shortcutWired = false
       get().handleAiEvent(requestId, event)
     })
     window.api.ai.onConfirmRequest((req) => {
-      // 同一时刻只可能有一个待确认命令
-      set({ pendingConfirm: req })
+      // 每个会话的助手实例独立弹卡（同一实例内已由主进程串行化）
+      set((s) => ({ pendingConfirms: { ...s.pendingConfirms, [req.id]: req } }))
+    })
+    // 确认已有结论（超时 / 中止等非用户路径）：移除对应卡片
+    window.api.ai.onConfirmResolved(({ id }) => {
+      set((s) => {
+        if (!(id in s.pendingConfirms)) return {}
+        const next = { ...s.pendingConfirms }
+        delete next[id]
+        return { pendingConfirms: next }
+      })
     })
     window.api.monitor.onData(({ sessionId, metrics }) => {
       set((s) => ({ monitors: { ...s.monitors, [sessionId]: metrics } }))
@@ -342,18 +377,15 @@ let shortcutWired = false
 
     aiConfigs: [],
     aiSettings: { permissionMode: 'full' },
-    messages: [],
-    aiStreaming: false,
-    activeRequestId: null,
-    aiError: null,
-    pendingConfirm: null,
+    aiChats: {},
+    pendingConfirms: {},
 
     plugins: [],
     pluginList: [],
     pluginCommands: {},
 
     ui: {
-      aiPanelOpen: false,
+      aiOpenGroups: {},
       settingsOpen: false,
       sshDialog: { open: false, editing: null },
       runScriptDialog: { open: false },
@@ -403,7 +435,11 @@ let shortcutWired = false
           if (action === 'open-settings') s.setSettingsOpen(true)
           else if (action === 'new-session') void s.createLocalSession()
           else if (action === 'open-command-palette') s.setCommandPaletteOpen(true)
-          else if (action === 'toggle-ai-panel') s.setAiPanelOpen(!s.ui.aiPanelOpen)
+          else if (action === 'toggle-ai-panel') {
+            // AI 属于终端组：作用于当前激活组
+            const gid = s.activeGroupId
+            if (gid) s.setGroupAiOpen(gid, !s.ui.aiOpenGroups[gid])
+          }
           else if (action === 'open-scripts') s.setView('scripts')
         })
       }
@@ -516,9 +552,23 @@ let shortcutWired = false
         // 旧会话的指标随之作废（新会话的指标由主进程重新采集）
         const monitors = { ...s.monitors }
         delete monitors[id]
+        // 该会话的 AI 对话随重连迁移到新会话 ID（上下文保留）
+        const aiChats = { ...s.aiChats }
+        if (aiChats[id]) {
+          aiChats[info.id] = aiChats[id]
+          delete aiChats[id]
+        }
         const activeGroupId = targetGid ?? s.activeGroupId
         const activeSessionId = targetGid ? groups[targetGid].activeSessionId : s.activeSessionId
-        return { sessions, groups, activeGroupId, activeSessionId, exitedSessions: exited, monitors }
+        return {
+          sessions,
+          groups,
+          activeGroupId,
+          activeSessionId,
+          exitedSessions: exited,
+          monitors,
+          aiChats
+        }
       })
       reconnectingIds.delete(id)
     },
@@ -621,7 +671,10 @@ let shortcutWired = false
         const activeSessionId = activeGroupId
           ? (groups[activeGroupId]?.activeSessionId ?? null)
           : null
-        return { groups, layout, activeGroupId, activeSessionId }
+        // 组已移除：其 AI 面板开关状态一并清理
+        const aiOpenGroups = { ...s.ui.aiOpenGroups }
+        delete aiOpenGroups[groupId]
+        return { groups, layout, activeGroupId, activeSessionId, ui: { ...s.ui, aiOpenGroups } }
       })
     },
 
@@ -651,7 +704,8 @@ let shortcutWired = false
       set({ profiles: await window.api.ssh.list() })
     },
 
-    setAiPanelOpen: (open) => set((s) => ({ ui: { ...s.ui, aiPanelOpen: open } })),
+    setGroupAiOpen: (groupId, open) =>
+      set((s) => ({ ui: { ...s.ui, aiOpenGroups: { ...s.ui.aiOpenGroups, [groupId]: open } } })),
     setSettingsOpen: (open, tab) =>
       set((s) => ({
         ui: {
@@ -772,11 +826,15 @@ let shortcutWired = false
       set({ aiSettings: settings })
     },
 
-    resolveAiConfirm: async (approved) => {
-      const pending = get().pendingConfirm
-      if (!pending) return
-      set({ pendingConfirm: null })
-      await window.api.ai.resolveConfirm(pending.id, approved)
+    resolveAiConfirm: async (id, approved) => {
+      // 用户直接回复：本地先移除卡片，再通知主进程对应实例
+      set((s) => {
+        if (!(id in s.pendingConfirms)) return {}
+        const next = { ...s.pendingConfirms }
+        delete next[id]
+        return { pendingConfirms: next }
+      })
+      await window.api.ai.resolveConfirm(id, approved)
     },
 
     setTheme: async (mode) => {
@@ -855,7 +913,11 @@ let shortcutWired = false
 
     sendAiMessage: async (text, targetSessionId) => {
       const trimmed = text.trim()
-      if (!trimmed || get().aiStreaming) return
+      // 对话归属于一个终端会话（默认当前激活的），各会话的助手上下文互相独立
+      const sid = targetSessionId ?? get().activeSessionId
+      if (!sid) return
+      const chat = get().aiChats[sid] ?? emptyAiChat()
+      if (!trimmed || chat.streaming) return
       const now = Date.now()
       const userMsg: AiChatMessage = {
         id: `u-${now}`,
@@ -869,54 +931,90 @@ let shortcutWired = false
         parts: [],
         createdAt: now + 1
       }
-      const history = [...get().messages, userMsg]
-      set({ messages: [...history, assistantMsg], aiStreaming: true, aiError: null })
-
-      // 附加当前目标终端上下文，便于 AI 定位会话
-      const activeId = targetSessionId ?? get().activeSessionId
-      const contextNote = activeId
-        ? `\n\n（用户当前正在查看的终端会话 ID：${activeId}）`
-        : ''
-      const payload: AiChatMessage[] = [
-        ...history.slice(0, -1),
-        {
-          ...userMsg,
-          parts: [{ type: 'text', text: trimmed + contextNote }]
+      const history = [...chat.messages, userMsg]
+      set((s) => ({
+        aiChats: {
+          ...s.aiChats,
+          [sid]: { ...chat, messages: [...history, assistantMsg], streaming: true, error: null }
         }
-      ]
+      }))
 
       try {
-        const { requestId } = await window.api.ai.chat(payload)
-        set({ activeRequestId: requestId })
+        // 主进程把工具绑定到该会话：切换激活终端不影响这段对话的作用目标
+        const { requestId } = await window.api.ai.chat({ history, targetSessionId: sid })
+        aiRequestSessions.set(requestId, sid)
+        set((s) => {
+          const c = s.aiChats[sid]
+          if (!c) return {}
+          return { aiChats: { ...s.aiChats, [sid]: { ...c, requestId } } }
+        })
       } catch (err) {
-        set((s) => ({
-          aiStreaming: false,
-          aiError: err instanceof Error ? err.message : String(err)
-        }))
+        set((s) => {
+          const c = s.aiChats[sid]
+          if (!c) return {}
+          return {
+            aiChats: {
+              ...s.aiChats,
+              [sid]: {
+                ...c,
+                streaming: false,
+                requestId: null,
+                error: err instanceof Error ? err.message : String(err)
+              }
+            }
+          }
+        })
       }
     },
 
-    abortAi: async () => {
-      const requestId = get().activeRequestId
-      set({ pendingConfirm: null })
-      if (requestId) {
-        await window.api.ai.abort(requestId)
-        set({ aiStreaming: false, activeRequestId: null })
+    abortAi: async (sid) => {
+      if (!sid) return
+      const chat = get().aiChats[sid]
+      const requestId = chat?.requestId ?? null
+      if (!requestId) return
+      aiRequestSessions.delete(requestId)
+      // 只清属于本次请求的确认卡，不影响其他会话实例的对话
+      for (const c of Object.values(get().pendingConfirms)) {
+        if (c.requestId === requestId) void get().resolveAiConfirm(c.id, false)
       }
+      await window.api.ai.abort(requestId)
+      set((s) => ({
+        aiChats: s.aiChats[sid]
+          ? { ...s.aiChats, [sid]: { ...s.aiChats[sid], streaming: false, requestId: null } }
+          : s.aiChats
+      }))
     },
 
-    clearAiMessages: () => set({ messages: [], pendingConfirm: null }),
+    clearAiMessages: (sid) => {
+      if (!sid) return
+      const chat = get().aiChats[sid]
+      if (chat?.requestId) aiRequestSessions.delete(chat.requestId)
+      set((s) => ({ aiChats: { ...s.aiChats, [sid]: emptyAiChat() } }))
+    },
 
     handleAiEvent: (requestId, event) => {
-      if (requestId !== get().activeRequestId) return
+      // 路由到发起该对话的会话（不依赖当前激活终端）
+      const sid = aiRequestSessions.get(requestId)
+      if (!sid) return
       if (event.type === 'finish') {
-        set({ aiStreaming: false, activeRequestId: null })
-        // 兜底：对话已结束但仍有挂起确认时按取消处理，避免主进程工具悬挂
-        if (get().pendingConfirm) void get().resolveAiConfirm(false)
+        aiRequestSessions.delete(requestId)
+        set((s) => {
+          const chat = s.aiChats[sid]
+          if (!chat) return {}
+          return {
+            aiChats: { ...s.aiChats, [sid]: { ...chat, streaming: false, requestId: null } }
+          }
+        })
+        // 兜底：该对话已结束但仍有其挂起确认时按取消处理，避免主进程工具悬挂
+        for (const c of Object.values(get().pendingConfirms)) {
+          if (c.requestId === requestId) void get().resolveAiConfirm(c.id, false)
+        }
         return
       }
       set((s) => {
-        const messages = [...s.messages]
+        const chat = s.aiChats[sid]
+        if (!chat) return {}
+        const messages = [...chat.messages]
         const last = messages[messages.length - 1]
         if (last?.role === 'assistant') {
           messages[messages.length - 1] = {
@@ -924,7 +1022,7 @@ let shortcutWired = false
             parts: appendAssistantPart(last.parts, event)
           }
         }
-        return { messages }
+        return { aiChats: { ...s.aiChats, [sid]: { ...chat, messages } } }
       })
     }
   }

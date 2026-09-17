@@ -11,6 +11,7 @@ import {
   ArrowRight,
   ArrowUp,
   Plus,
+  Sparkles,
   TerminalSquare,
   X
 } from 'lucide-react'
@@ -18,6 +19,8 @@ import { cn } from 'cn'
 import type { SessionInfo } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import { TerminalView } from '@/components/TerminalView'
+import { AiPanel } from '@/components/AiPanel'
+import { ResizeHandle } from '@/components/ResizeHandle'
 import {
   ContextMenu,
   ContextMenuContent,
@@ -144,6 +147,11 @@ function GroupView({ groupId }: { groupId: string }) {
   const closeSession = useAppStore((s) => s.closeSession)
   const createLocalSession = useAppStore((s) => s.createLocalSession)
   const moveSessionToGroup = useAppStore((s) => s.moveSessionToGroup)
+  // 本组的 AI 助手（每个终端组内嵌一个，多组互不影响）
+  const aiOpen = useAppStore((s) => !!s.ui.aiOpenGroups[groupId])
+  const setGroupAiOpen = useAppStore((s) => s.setGroupAiOpen)
+  const aiPanelWidth = useAppStore((s) => s.ui.aiPanelWidth)
+  const setAiPanelWidth = useAppStore((s) => s.setAiPanelWidth)
 
   // 是否有标签正被拖到本组上方（用于高亮放置目标）；用模块变量排除来源组
   const [dragOver, setDragOver] = useState(false)
@@ -294,23 +302,49 @@ function GroupView({ groupId }: { groupId: string }) {
             )
           })}
         </div>
+        {/* AI 助手开关：AI 属于终端组，不作为全局功能 */}
+        <button
+          type="button"
+          title={aiOpen ? '隐藏 AI 助手' : '显示 AI 助手'}
+          onClick={() => setGroupAiOpen(groupId, !aiOpen)}
+          className={cn(
+            'flex w-8 shrink-0 items-center justify-center border-l border-border/60 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground',
+            aiOpen && 'text-primary'
+          )}
+        >
+          <Sparkles className="size-3.5" />
+        </button>
       </div>
 
-      {/* 当前激活终端（同组内其余标签保持挂载以保留输出） */}
-      <div className="min-h-0 flex-1">
-        {group.sessionIds.map((sid) => {
-          const session = sessions.find((x: SessionInfo) => x.id === sid)
-          if (!session) return null
-          const isActive = group.activeSessionId === sid
-          return (
-            <div
-              key={sid}
-              className={isActive ? 'h-full' : 'hidden'}
-            >
-              <TerminalView session={session} isActive={active && isActive} />
-            </div>
-          )
-        })}
+      {/* 终端 +（可选）本组的 AI 助手侧栏；同组内其余标签保持挂载以保留输出 */}
+      <div className="flex min-h-0 flex-1">
+        <div className="min-h-0 min-w-0 flex-1">
+          {group.sessionIds.map((sid) => {
+            const session = sessions.find((x: SessionInfo) => x.id === sid)
+            if (!session) return null
+            const isActive = group.activeSessionId === sid
+            return (
+              <div
+                key={sid}
+                className={isActive ? 'h-full' : 'hidden'}
+              >
+                <TerminalView session={session} isActive={active && isActive} />
+              </div>
+            )
+          })}
+        </div>
+        {aiOpen && group.activeSessionId && (
+          <>
+            <ResizeHandle
+              width={aiPanelWidth}
+              min={280}
+              max={720}
+              onResize={setAiPanelWidth}
+              invert
+            />
+            <AiPanel sessionId={group.activeSessionId} />
+          </>
+        )}
       </div>
     </div>
   )

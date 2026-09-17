@@ -9,7 +9,7 @@ import {
 } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { useAppStore } from '@/stores/app-store'
-import type { AiMessagePart, AiPermissionMode } from '@shared/types'
+import type { AiChatMessage, AiMessagePart, AiPermissionMode } from '@shared/types'
 import {
   ArrowDown,
   Check,
@@ -186,9 +186,14 @@ function MessageBubble({
   )
 }
 
-/** 确认模式下的命令执行确认卡片 */
-function CommandConfirmCard() {
-  const pendingConfirm = useAppStore((s) => s.pendingConfirm)
+/** 确认模式下的命令执行确认卡片：只显示本面板所属会话的待确认请求 */
+function CommandConfirmCard({ sessionId }: { sessionId: string | null }) {
+  const pendingConfirm = useAppStore((s) => {
+    for (const c of Object.values(s.pendingConfirms)) {
+      if (c.sessionId === sessionId) return c
+    }
+    return null
+  })
   const resolveAiConfirm = useAppStore((s) => s.resolveAiConfirm)
   const sessions = useAppStore((s) => s.sessions)
 
@@ -211,7 +216,7 @@ function CommandConfirmCard() {
         <Button
           size="sm"
           className="h-7 flex-1 text-xs"
-          onClick={() => void resolveAiConfirm(true)}
+          onClick={() => void resolveAiConfirm(pendingConfirm.id, true)}
         >
           执行
         </Button>
@@ -219,7 +224,7 @@ function CommandConfirmCard() {
           size="sm"
           variant="outline"
           className="h-7 flex-1 text-xs"
-          onClick={() => void resolveAiConfirm(false)}
+          onClick={() => void resolveAiConfirm(pendingConfirm.id, false)}
         >
           取消
         </Button>
@@ -228,15 +233,20 @@ function CommandConfirmCard() {
   )
 }
 
-export function AiPanel() {
-  const messages = useAppStore((s) => s.messages)
-  const aiStreaming = useAppStore((s) => s.aiStreaming)
+/** 稳定的空消息数组：避免每次渲染新引用导致滚动 effect 误触发 */
+const NO_MESSAGES: AiChatMessage[] = []
+
+/** 终端组内嵌的 AI 助手面板：展示并驱动 sessionId 所属会话的独立对话 */
+export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const aiConfigs = useAppStore((s) => s.aiConfigs)
   const aiSettings = useAppStore((s) => s.aiSettings)
-  const aiError = useAppStore((s) => s.aiError)
   const sessions = useAppStore((s) => s.sessions)
-  const activeSessionId = useAppStore((s) => s.activeSessionId)
-  const activeSession = sessions.find((s) => s.id === activeSessionId)
+  const activeSession = sessions.find((s) => s.id === sessionId)
+  // 每个终端会话一个独立的 AI 对话：面板展示所属会话的上下文
+  const chat = useAppStore((s) => (sessionId ? s.aiChats[sessionId] : undefined))
+  const messages = chat?.messages ?? NO_MESSAGES
+  const aiStreaming = chat?.streaming ?? false
+  const aiError = chat?.error ?? null
   const sendAiMessage = useAppStore((s) => s.sendAiMessage)
   const abortAi = useAppStore((s) => s.abortAi)
   const clearAiMessages = useAppStore((s) => s.clearAiMessages)
@@ -290,10 +300,10 @@ export function AiPanel() {
     PERMISSION_MODES.find((m) => m.value === permissionMode) ?? PERMISSION_MODES[0]
 
   const handleSend = () => {
-    if (!input.trim() || aiStreaming) return
+    if (!input.trim() || aiStreaming || !sessionId) return
     // 用户刚发出新消息：无论当前在哪个位置都跟随到底部
     nearBottomRef.current = true
-    void sendAiMessage(input)
+    void sendAiMessage(input, sessionId)
     setInput('')
   }
 
@@ -324,7 +334,7 @@ export function AiPanel() {
           size="icon"
           className="size-7 shrink-0 text-muted-foreground"
           title="清空对话"
-          onClick={clearAiMessages}
+          onClick={() => sessionId && clearAiMessages(sessionId)}
         >
           <Eraser className="size-3.5" />
         </Button>
@@ -351,11 +361,20 @@ export function AiPanel() {
           {messages.length === 0 && (
             <div className="mt-16 flex flex-col items-center gap-3 text-center text-muted-foreground">
               <Sparkles className="size-8 text-primary/40" />
-              <div className="text-sm">AI 可以帮你操作终端</div>
-              <div className="space-y-1 text-xs leading-5">
-                <p>试试：查看当前目录下占用空间最大的文件</p>
-                <p>试试：诊断 nginx 为什么启动失败</p>
-              </div>
+              {activeSession ? (
+                <>
+                  <div className="text-sm">这个终端拥有独立的 AI 助手</div>
+                  <div className="space-y-1 text-xs leading-5">
+                    <p>试试：查看当前目录下占用空间最大的文件</p>
+                    <p>试试：诊断 nginx 为什么启动失败</p>
+                  </div>
+                </>
+              ) : (
+                <div className="space-y-1 text-xs leading-5">
+                  <p>打开一个终端会话后开始对话</p>
+                  <p>每个终端都有独立、互不影响的 AI 上下文</p>
+                </div>
+              )}
               {!hasConfig && (
                 <Button
                   size="sm"
@@ -392,8 +411,8 @@ export function AiPanel() {
         )}
       </div>
 
-      {/* 命令确认（确认模式） */}
-      <CommandConfirmCard />
+      {/* 命令确认（确认模式）：只显示本会话的确认卡 */}
+      <CommandConfirmCard sessionId={sessionId} />
 
       {/* 输入区：圆角卡片，操作按钮集中在卡片底部（对齐 ChatInput 结构） */}
       <div className="shrink-0 p-3">
@@ -446,7 +465,7 @@ export function AiPanel() {
                 variant="destructive"
                 className="size-8 shrink-0 rounded-full"
                 title="停止"
-                onClick={() => void abortAi()}
+                onClick={() => sessionId && void abortAi(sessionId)}
               >
                 <Square className="size-4" />
               </Button>
@@ -454,7 +473,7 @@ export function AiPanel() {
               <Button
                 size="icon"
                 className="size-8 shrink-0 rounded-full"
-                disabled={!input.trim() || !hasConfig}
+                disabled={!input.trim() || !hasConfig || !sessionId}
                 title="发送"
                 onClick={handleSend}
               >
@@ -465,7 +484,7 @@ export function AiPanel() {
         </div>
         <div className="mt-1.5 truncate text-[10px] text-muted-foreground">
           {activeSession
-            ? `AI 将操作当前终端：${activeSession.title}`
+            ? `本对话绑定终端：${activeSession.title}（各终端对话互相独立）`
             : '提示：打开一个终端会话后，AI 才能执行命令'}
           {' · '}
           {modeMeta.hint}

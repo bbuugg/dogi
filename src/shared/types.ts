@@ -222,6 +222,13 @@ export interface AiChatMessage {
   createdAt: number
 }
 
+/** 发起 AI 对话的请求体：可绑定一个终端会话（该会话拥有独立的助手上下文） */
+export interface AiChatRequest {
+  history: AiChatMessage[]
+  /** 对话绑定的终端会话：工具默认作用于此会话，不随当前激活终端变化 */
+  targetSessionId?: string | null
+}
+
 export type AiMessagePart =
   | { type: 'text'; text: string }
   | {

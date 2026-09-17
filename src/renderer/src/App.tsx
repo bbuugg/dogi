@@ -4,7 +4,6 @@ import { useAppStore } from '@/stores/app-store'
 import { TitleBar } from '@/components/TitleBar'
 import { Sidebar } from '@/components/Sidebar'
 import { MonitorBadge } from '@/components/MonitorBadge'
-import { AiPanel } from '@/components/AiPanel'
 import { SshProfileDialog } from '@/components/SshProfileDialog'
 import { SettingsDialog } from '@/components/SettingsDialog'
 import { PaneLayout } from '@/components/PaneLayout'
@@ -39,15 +38,12 @@ function EmptyState() {
 export default function App() {
   const layout = useAppStore((s) => s.layout)
   const activeSessionId = useAppStore((s) => s.activeSessionId)
-  const aiPanelOpen = useAppStore((s) => s.ui.aiPanelOpen)
   const view = useAppStore((s) => s.ui.view)
   const pluginView = useAppStore((s) => s.ui.pluginView)
   const plugins = useAppStore((s) => s.plugins)
   const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth)
   const sidebarCollapsed = useAppStore((s) => s.ui.sidebarCollapsed)
-  const aiPanelWidth = useAppStore((s) => s.ui.aiPanelWidth)
   const setSidebarWidth = useAppStore((s) => s.setSidebarWidth)
-  const setAiPanelWidth = useAppStore((s) => s.setAiPanelWidth)
 
   /**
    * 已打开过的插件视图 id：保持挂载（非激活时用 hidden 隐藏），
@@ -116,19 +112,6 @@ export default function App() {
           {/* 底部浮动监控图标：采集不到当前会话数据时自身不渲染 */}
           {view === 'terminal' && <MonitorBadge sessionId={activeSessionId} />}
         </main>
-
-        {aiPanelOpen && (
-          <>
-            <ResizeHandle
-              width={aiPanelWidth}
-              min={280}
-              max={720}
-              onResize={setAiPanelWidth}
-              invert
-            />
-            <AiPanel />
-          </>
-        )}
       </div>
 
       {/* 底部功能条（类 VS Code 状态栏），整宽 */}

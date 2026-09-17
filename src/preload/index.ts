@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import type {
-  AiChatMessage,
+  AiChatRequest,
   AiConfirmRequest,
   AiModelConfig,
   AiSettings,
@@ -79,14 +79,17 @@ const api = {
     getSettings: (): Promise<AiSettings> => ipcRenderer.invoke('ai:settings:get'),
     saveSettings: (settings: Partial<AiSettings>): Promise<AiSettings> =>
       ipcRenderer.invoke('ai:settings:save', settings),
-    chat: (history: AiChatMessage[]): Promise<{ requestId: string }> =>
-      ipcRenderer.invoke('ai:chat', history),
+    chat: (req: AiChatRequest): Promise<{ requestId: string }> =>
+      ipcRenderer.invoke('ai:chat', req),
     abort: (requestId: string): Promise<void> =>
       ipcRenderer.invoke('ai:abort', requestId),
     onChatEvent: (cb: (payload: { requestId: string; event: AiStreamEvent }) => void) =>
       subscribe('ai:chat-event', cb),
     /** 确认模式下收到命令执行确认请求 */
     onConfirmRequest: (cb: (req: AiConfirmRequest) => void) => subscribe('ai:confirm', cb),
+    /** 确认已有结论（用户回复走本地移除；超时 / 中止由主进程通知移除卡片） */
+    onConfirmResolved: (cb: (payload: { id: string }) => void) =>
+      subscribe('ai:confirm-resolved', cb),
     /** 回复确认请求：approved=true 执行，false 取消 */
     resolveConfirm: (id: string, approved: boolean): Promise<void> =>
       ipcRenderer.invoke('ai:confirm:resolve', { id, approved })

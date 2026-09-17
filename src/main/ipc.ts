@@ -10,7 +10,6 @@ import { registerShortcuts, unregisterShortcuts } from './shortcuts'
 import { pluginHost } from './services/plugins'
 import { app } from 'electron'
 import type {
-  AiChatMessage,
   AiModelConfig,
   AiStreamEvent,
   McpServerConfig,
@@ -180,18 +179,28 @@ export function registerIpc(win: () => BrowserWindow | null): void {
     'ai:settings:save',
     (_e, settings: Partial<import('@shared/types').AiSettings>) => storage.saveAiSettings(settings)
   )
-  ipcMain.handle('ai:chat', async (_e, history: AiChatMessage[]) => aiService.chat(history))
+  ipcMain.handle('ai:chat', async (_e, req: import('@shared/types').AiChatRequest) =>
+    aiService.chat(req)
+  )
   ipcMain.handle('ai:abort', (_e, requestId: string) => aiService.abort(requestId))
   aiService.on('chat-event', (requestId: string, event: AiStreamEvent) =>
     broadcast(win, 'ai:chat-event', { requestId, event })
   )
 
   // ---------- AI 命令执行确认（确认模式） ----------
-  aiService.setConfirmRequester((req) => broadcast(win, 'ai:confirm', req))
+  aiService.setConfirmSink({
+    request: (req) => broadcast(win, 'ai:confirm', req),
+    // 确认已有结论（超时 / 中止等非用户路径），渲染端据此移除卡片
+    resolved: (id) => broadcast(win, 'ai:confirm-resolved', { id })
+  })
   ipcMain.handle(
     'ai:confirm:resolve',
     (_e, payload: { id: string; approved: boolean }) =>
       aiService.resolveConfirm(payload.id, payload.approved)
+  )
+  // 会话关闭：销毁其 AI 助手实例（每个终端会话一个独立实例）
+  sessionManager.on('closed', ({ sessionId }: { sessionId: string }) =>
+    aiService.disposeSession(sessionId)
   )
 
   // ---------- MCP ----------

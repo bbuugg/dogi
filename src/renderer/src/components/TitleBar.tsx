@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Copy, Minus, PanelLeftClose, PanelLeftOpen, Sparkles, Square, X } from 'lucide-react'
+import { Copy, Minus, PanelLeftClose, PanelLeftOpen, Square, X } from 'lucide-react'
 import { cn } from 'cn'
 import { useAppStore } from '@/stores/app-store'
 import { Button } from '@/components/ui/button'
@@ -16,8 +16,6 @@ export function TitleBar() {
   const platform = window.api.app.platform
   const isMac = platform === 'darwin'
   const [maximized, setMaximized] = useState(false)
-  const aiPanelOpen = useAppStore((s) => s.ui.aiPanelOpen)
-  const setAiPanelOpen = useAppStore((s) => s.setAiPanelOpen)
   const sidebarCollapsed = useAppStore((s) => s.ui.sidebarCollapsed)
   const setSidebarCollapsed = useAppStore((s) => s.setSidebarCollapsed)
 
@@ -58,18 +56,6 @@ export function TitleBar() {
       )}
 
       <div className="flex min-w-0 flex-1 items-end" />
-
-      <div className="app-no-drag flex items-center gap-0.5 pr-1">
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-8"
-          title={aiPanelOpen ? '隐藏 AI 助手' : '显示 AI 助手'}
-          onClick={() => setAiPanelOpen(!aiPanelOpen)}
-        >
-          <Sparkles className={cn('size-4', aiPanelOpen && 'text-primary')} />
-        </Button>
-      </div>
 
       {!isMac && (
         <div className="app-no-drag flex items-stretch">

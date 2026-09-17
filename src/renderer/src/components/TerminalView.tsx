@@ -647,8 +647,13 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
     })
   }, [isActive, session.id])
 
-  // AI 面板显隐会改变终端可用宽度，主动重新适配，避免关闭面板后终端仍停留在旧（较窄）宽度
-  const aiPanelOpen = useAppStore((s) => s.ui.aiPanelOpen)
+  // 所在组的 AI 面板显隐会改变终端可用宽度，主动重新适配，避免关闭面板后终端仍停留在旧（较窄）的宽度
+  const aiPanelOpen = useAppStore((s) => {
+    for (const g of Object.values(s.groups)) {
+      if (g.sessionIds.includes(session.id)) return !!s.ui.aiOpenGroups[g.id]
+    }
+    return false
+  })
   useEffect(() => {
     if (!isActive) return
     const raf = requestAnimationFrame(() => {

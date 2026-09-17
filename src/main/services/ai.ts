@@ -15,6 +15,7 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import { z } from 'zod'
 import type {
   AiChatMessage,
+  AiChatRequest,
   AiConfirmRequest,
   AiModelConfig,
   AiPermissionMode,
@@ -30,6 +31,7 @@ const DEFAULT_SYSTEM_PROMPT = [
   '执行命令前先简要说明要做什么；优先使用安全、无破坏性的命令。',
   '涉及删除文件、重启服务、修改配置等危险操作时，先简要说明影响再执行。',
   '使用 run_in_terminal 执行命令后，终端原始输出即为事实依据；失败时结合输出排查原因再尝试。',
+  '终端命令按队列串行执行：前一条命令执行完毕并读取到输出后，下一条才会开始，不会出现并发冲突。',
   '注意根据会话标题判断操作系统（PowerShell 与 bash 语法不同）。',
   '部分命令会启动交互式 / 前台程序（如 htop、top、vim、nano、less、man、watch、python、node 等），它们占据终端且不返回 shell 提示符。执行这类命令后，不要继续向该会话输入新命令，应先用 send_keys 工具发送退出指令（多数程序用 "q"，卡死用 "C-c"，个别用 "exit" / "C-d"），并用 read_terminal_output 确认已回到 shell 提示符后再继续。'
 ].join('\n')
@@ -39,8 +41,13 @@ const MAX_STEPS = 15
 /** 确认模式下等待用户响应的最长时间，超时按「取消」处理 */
 const CONFIRM_TIMEOUT_MS = 10 * 60 * 1000
 
-/** 由 ipc 层注入：把确认请求广播给渲染进程 */
-type ConfirmRequester = (req: AiConfirmRequest) => void
+/** 由 ipc 层注入：把确认请求与其最终结果（用户回复 / 超时 / 中止）广播给渲染进程 */
+export interface ConfirmSink {
+  /** 弹出一张确认卡 */
+  request(req: AiConfirmRequest): void
+  /** 确认已有结论（渲染端据此移除卡片） */
+  resolved(id: string): void
+}
 
 function describeError(err: unknown): string {
   if (err instanceof Error) return err.message
@@ -144,8 +151,20 @@ function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(-max)}\n…（输出已截断）` : text
 }
 
-/** 终端操作工具：AI 通过这些工具查看与驱动真实终端 */
-function buildTerminalTools(requestId: string): ToolSet {
+/** 终端操作工具：AI 通过这些工具查看与驱动真实终端。
+ * targetSessionId：对话绑定的终端会话，工具缺省作用于它（不随激活终端漂移）。
+ * queueExec：工具执行串行队列——模型可能在同一步并行发出多个工具调用，
+ * 排队保证前一条命令执行完毕、读取到结果后，下一条才开始执行。
+ * requestConfirm：确认模式下的请示入口（绑定所属助手实例）。 */
+function buildTerminalTools(
+  requestId: string,
+  targetSessionId: string | null | undefined,
+  queueExec: <T>(fn: () => Promise<T>) => Promise<T>,
+  requestConfirm: (req: Omit<AiConfirmRequest, 'id'>) => Promise<boolean>
+): ToolSet {
+  /** 工具会话解析：显式指定 > 对话绑定 > 当前活跃 */
+  const resolveTarget = (sessionId?: string) =>
+    sessionId ?? targetSessionId ?? sessionManager.getActiveId()
   const listSessions = tool({
     description: '列出当前打开的所有终端会话（本地终端与 SSH）',
     inputSchema: z.object({}),
@@ -154,6 +173,8 @@ function buildTerminalTools(requestId: string): ToolSet {
       const activeId = sessionManager.getActiveId()
       return {
         activeSessionId: activeId,
+        /** 本次对话绑定的会话：工具缺省作用于它 */
+        boundSessionId: targetSessionId ?? null,
         sessions: sessions.map((s) => ({
           sessionId: s.id,
           type: s.type,
@@ -166,55 +187,56 @@ function buildTerminalTools(requestId: string): ToolSet {
 
   const runInTerminal = tool({
     description:
-      '在指定终端会话中执行命令（等同于用户在键盘输入并回车），等待片刻后返回终端最近输出。未指定会话时使用最近活跃的会话。',
+      '在指定终端会话中执行命令（等同于用户在键盘输入并回车），等待片刻后返回终端最近输出。未指定会话时使用本次对话绑定的会话。命令串行执行：前一条完成并读取结果后才开始下一条。',
     inputSchema: z.object({
       command: z.string().describe('要执行的命令，无需附加换行符'),
-      sessionId: z.string().optional().describe('目标会话 ID，缺省为最近活跃会话'),
+      sessionId: z.string().optional().describe('目标会话 ID，缺省为本次对话绑定的会话'),
       waitMs: z.number().optional().describe('执行后等待毫秒数，默认 3000')
     }),
-    execute: async ({ command, sessionId, waitMs }, { toolCallId }) => {
-      const id = sessionId ?? sessionManager.getActiveId()
-      if (!id) throw new Error('当前没有打开的终端会话')
-      const session = sessionManager.get(id)
-      if (!session) throw new Error(`会话不存在: ${id}`)
+    execute: ({ command, sessionId, waitMs }, { toolCallId }) =>
+      queueExec(async () => {
+        const id = resolveTarget(sessionId)
+        if (!id) throw new Error('当前没有打开的终端会话')
+        const session = sessionManager.get(id)
+        if (!session) throw new Error(`会话不存在: ${id}`)
 
-      // 确认模式：先请示用户，被拒绝则不执行
-      if (currentPermissionMode() === 'confirm') {
-        const approved = await aiService.requestConfirm({
-          requestId,
-          toolCallId,
-          toolName: 'run_in_terminal',
-          command,
-          sessionId: id,
-          sessionTitle: session.info.title
-        })
-        if (!approved) {
-          return '用户取消了本次命令执行（命令未运行）。请询问用户接下来希望怎么做，不要擅自重试。'
+        // 确认模式：先请示用户，被拒绝则不执行
+        if (currentPermissionMode() === 'confirm') {
+          const approved = await requestConfirm({
+            requestId,
+            toolCallId,
+            toolName: 'run_in_terminal',
+            command,
+            sessionId: id,
+            sessionTitle: session.info.title
+          })
+          if (!approved) {
+            return '用户取消了本次命令执行（命令未运行）。请询问用户接下来希望怎么做，不要擅自重试。'
+          }
         }
-      }
 
-      sessionManager.write(id, command.endsWith('\n') ? command : `${command}\r`)
-      const waited = Math.min(waitMs ?? 3000, 15000)
-      await new Promise((resolve) => setTimeout(resolve, waited))
-      const raw = sessionManager.recentOutput(id, TOOL_OUTPUT_LIMIT) ?? ''
+        sessionManager.write(id, command.endsWith('\n') ? command : `${command}\r`)
+        const waited = Math.min(waitMs ?? 3000, 15000)
+        await new Promise((resolve) => setTimeout(resolve, waited))
+        const raw = sessionManager.recentOutput(id, TOOL_OUTPUT_LIMIT) ?? ''
 
-      // 交互式 / 前台程序（htop、vim、less、watch、python 等）不会返回 shell 提示符，
-      // 若把后续命令直接写进去会被程序吞掉导致异常。主动提示 AI 先退出。
-      if (INTERACTIVE_PROGRAM_RE.test(command) && !hasShellPrompt(raw)) {
-        return [
-          `命令「${command.trim()}」已启动一个交互式 / 前台程序（htop、top、vim、less、watch、python 等），它当前占据终端、尚未返回 shell 提示符。`,
-          '请勿继续向该会话输入新命令（会被该程序吞掉，造成异常）。如需继续，请先用 send_keys 工具发送退出指令：',
-          "  · 多数程序按 'q' 即可退出；",
-          "  · 卡死或无法退出时发送 Ctrl-C（send_keys 传入 'C-c'）；",
-          "  · 个别程序用 'exit' / 'quit' / Ctrl-D（'C-d'）。",
-          "发送退出键后，可用 read_terminal_output 确认已回到 shell 提示符，再执行后续命令。",
-          '',
-          '（附：当前终端最近输出，供判断程序是否已退出）',
-          truncate(raw, 2000)
-        ].join('\n')
-      }
-      return raw
-    }
+        // 交互式 / 前台程序（htop、vim、less、watch、python 等）不会返回 shell 提示符，
+        // 若把后续命令直接写进去会被程序吞掉导致异常。主动提示 AI 先退出。
+        if (INTERACTIVE_PROGRAM_RE.test(command) && !hasShellPrompt(raw)) {
+          return [
+            `命令「${command.trim()}」已启动一个交互式 / 前台程序（htop、top、vim、less、watch、python 等），它当前占据终端、尚未返回 shell 提示符。`,
+            '请勿继续向该会话输入新命令（会被该程序吞掉，造成异常）。如需继续，请先用 send_keys 工具发送退出指令：',
+            "  · 多数程序按 'q' 即可退出；",
+            "  · 卡死或无法退出时发送 Ctrl-C（send_keys 传入 'C-c'）；",
+            "  · 个别程序用 'exit' / 'quit' / Ctrl-D（'C-d'）。",
+            "发送退出键后，可用 read_terminal_output 确认已回到 shell 提示符，再执行后续命令。",
+            '',
+            '（附：当前终端最近输出，供判断程序是否已退出）',
+            truncate(raw, 2000)
+          ].join('\n')
+        }
+        return raw
+      })
   })
 
   const sendKeys = tool({
@@ -226,29 +248,31 @@ function buildTerminalTools(requestId: string): ToolSet {
         .describe(
           "要发送的按键序列。普通字符直接写，如 'q'、'exit'；控制键写法 'C-c'、'C-d'、'C-z'、'Escape'；换行 / 回车用 'Enter' 或 '\\n'。"
         ),
-      sessionId: z.string().optional().describe('目标会话 ID，缺省为最近活跃会话')
+      sessionId: z.string().optional().describe('目标会话 ID，缺省为本次对话绑定的会话')
     }),
-    execute: async ({ keys, sessionId }) => {
-      const id = sessionId ?? sessionManager.getActiveId()
-      if (!id) throw new Error('当前没有打开的终端会话')
-      if (!sessionManager.get(id)) throw new Error(`会话不存在: ${id}`)
-      sessionManager.write(id, translateKeys(keys))
-      await new Promise((resolve) => setTimeout(resolve, 300))
-      return sessionManager.recentOutput(id, 2000) ?? ''
-    }
+    execute: ({ keys, sessionId }) =>
+      queueExec(async () => {
+        const id = resolveTarget(sessionId)
+        if (!id) throw new Error('当前没有打开的终端会话')
+        if (!sessionManager.get(id)) throw new Error(`会话不存在: ${id}`)
+        sessionManager.write(id, translateKeys(keys))
+        await new Promise((resolve) => setTimeout(resolve, 300))
+        return sessionManager.recentOutput(id, 2000) ?? ''
+      })
   })
 
   const readOutput = tool({
     description: '读取指定终端会话的最近输出（不执行任何命令）',
     inputSchema: z.object({
-      sessionId: z.string().optional().describe('目标会话 ID，缺省为最近活跃会话'),
+      sessionId: z.string().optional().describe('目标会话 ID，缺省为本次对话绑定的会话'),
       maxChars: z.number().optional().describe('最多返回字符数，默认 4000')
     }),
-    execute: async ({ sessionId, maxChars }) => {
-      const id = sessionId ?? sessionManager.getActiveId()
-      if (!id) throw new Error('当前没有打开的终端会话')
-      return sessionManager.recentOutput(id, maxChars ?? 4000) ?? ''
-    }
+    execute: ({ sessionId, maxChars }) =>
+      queueExec(async () => {
+        const id = resolveTarget(sessionId)
+        if (!id) throw new Error('当前没有打开的终端会话')
+        return sessionManager.recentOutput(id, maxChars ?? 4000) ?? ''
+      })
   })
 
   return {
@@ -259,35 +283,38 @@ function buildTerminalTools(requestId: string): ToolSet {
   }
 }
 
-/**
- * AI 服务：多 provider 模型调用、MCP 工具合并、终端工具、流式事件转发
- */
 interface PendingConfirm {
   requestId: string
   resolve: (approved: boolean) => void
   timer: ReturnType<typeof setTimeout>
 }
 
-class AiService extends EventEmitter {
+/**
+ * 单个终端会话的 AI 助手实例：持有自己的确认队列、工具执行串行链与请求管理，
+ * 各终端会话的实例互不共享、互不影响（确认卡、命令队列、中止均独立）。
+ */
+class AiAssistant extends EventEmitter {
+  private readonly getSink: () => ConfirmSink | null
   private abortControllers = new Map<string, AbortController>()
   private pendingConfirms = new Map<string, PendingConfirm>()
-  private confirmRequester: ConfirmRequester | null = null
   /** 确认请求串行链：前一个确认被应答（或超时）后才弹出下一个 */
   private confirmChain: Promise<unknown> = Promise.resolve()
+  /** 每次对话的工具执行串行链：模型并行发出的命令逐条排队执行 */
+  private toolQueues = new Map<string, { chain: Promise<unknown>; aborted: boolean }>()
 
-  /** ipc 层注入确认请求的广播函数 */
-  setConfirmRequester(fn: ConfirmRequester | null): void {
-    this.confirmRequester = fn
+  constructor(getSink: () => ConfirmSink | null) {
+    super()
+    this.getSink = getSink
   }
 
   /** 等待用户确认；无 UI 接入时放行，避免流程卡死 */
   requestConfirm(req: Omit<AiConfirmRequest, 'id'>): Promise<boolean> {
-    const requester = this.confirmRequester
-    if (!requester) return Promise.resolve(true)
+    const sink = this.getSink()
+    if (!sink) return Promise.resolve(true)
     // 串行化：模型可能在同一步并行发出多个工具调用（多个 run_in_terminal），
-    // 渲染端一次只显示一张确认卡，后到的确认事件会覆盖前一个，被覆盖的命令
-    // 将挂起直至超时。这里排队逐个弹出，保证同一时刻只有一个待确认请求。
-    const result = this.confirmChain.then(() => this.doRequestConfirm(req, requester))
+    // 渲染端每张确认卡一次只显示一个待确认请求。这里排队逐个弹出，
+    // 保证该实例同一时刻只有一个待确认请求。
+    const result = this.confirmChain.then(() => this.doRequestConfirm(req, sink))
     this.confirmChain = result.then(
       () => undefined,
       () => undefined
@@ -297,16 +324,19 @@ class AiService extends EventEmitter {
 
   private doRequestConfirm(
     req: Omit<AiConfirmRequest, 'id'>,
-    requester: ConfirmRequester
+    sink: ConfirmSink
   ): Promise<boolean> {
     const id = randomUUID()
     return new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => {
+      // 无论以何种方式得出结论（用户回复 / 超时 / 中止），都先通知渲染端移除卡片
+      const settle = (approved: boolean) => {
         this.pendingConfirms.delete(id)
-        resolve(false)
-      }, CONFIRM_TIMEOUT_MS)
-      this.pendingConfirms.set(id, { requestId: req.requestId, resolve, timer })
-      requester({ ...req, id })
+        sink.resolved(id)
+        resolve(approved)
+      }
+      const timer = setTimeout(() => settle(false), CONFIRM_TIMEOUT_MS)
+      this.pendingConfirms.set(id, { requestId: req.requestId, resolve: settle, timer })
+      sink.request({ ...req, id })
     })
   }
 
@@ -315,21 +345,43 @@ class AiService extends EventEmitter {
     const pending = this.pendingConfirms.get(id)
     if (!pending) return
     clearTimeout(pending.timer)
-    this.pendingConfirms.delete(id)
     pending.resolve(approved)
   }
 
   /** 结束挂起的确认（中止对话 / 超时兜底），按「取消」处理 */
   private clearPendingConfirms(requestId?: string): void {
-    for (const [id, pending] of this.pendingConfirms) {
+    for (const pending of this.pendingConfirms.values()) {
       if (requestId && pending.requestId !== requestId) continue
       clearTimeout(pending.timer)
-      this.pendingConfirms.delete(id)
       pending.resolve(false)
     }
   }
 
-  async chat(history: AiChatMessage[]): Promise<{ requestId: string }> {
+  /**
+   * 终端工具执行排队：同一对话内串行——前一个工具完成（含确认等待、命令执行、
+   * 输出读取）后，下一个才开始。模型在同一步并行发出多条命令时由此保证顺序。
+   * 中止对话时队列中尚未开始执行的工具直接拒绝，不再写入终端。
+   */
+  queueToolExecution<T>(requestId: string, fn: () => Promise<T>): Promise<T> {
+    let queue = this.toolQueues.get(requestId)
+    if (!queue) {
+      queue = { chain: Promise.resolve(), aborted: false }
+      this.toolQueues.set(requestId, queue)
+    }
+    // aborted 标志由闭包持有：流结束后 Map 清理，排队中的项仍能感知中止
+    const q = queue
+    const run = q.chain.then(() =>
+      q.aborted ? Promise.reject(new Error('对话已中止，命令未执行')) : fn()
+    )
+    q.chain = run.then(
+      () => undefined,
+      () => undefined
+    )
+    return run
+  }
+
+  async chat(req: AiChatRequest): Promise<{ requestId: string }> {
+    const { history, targetSessionId = null } = req
     const requestId = randomUUID()
     const settings = storage.getAiSettings()
     const config = settings.activeConfigId
@@ -337,7 +389,7 @@ class AiService extends EventEmitter {
       : undefined
 
     if (!config) {
-      // 延迟到 invoke 返回 requestId 之后再发事件，避免渲染端因 activeRequestId 未设置而丢弃
+      // 延迟到 invoke 返回 requestId 之后再发事件，避免渲染端因 requestId 未设置而丢弃
       setTimeout(() => {
         this.emitEvent(requestId, {
           type: 'error',
@@ -352,7 +404,17 @@ class AiService extends EventEmitter {
     this.abortControllers.set(requestId, controller)
 
     const mcp = await mcpManager.buildToolset()
-    const tools: ToolSet = { ...buildTerminalTools(requestId), ...mcp.tools }
+    const tools: ToolSet = {
+      ...buildTerminalTools(
+        requestId,
+        targetSessionId,
+        // 终端命令串行队列：绑定本次对话，与其他实例互不影响
+        (fn) => this.queueToolExecution(requestId, fn),
+        // 确认请示走本实例（多实例各自的确认卡独立弹出）
+        (confirmReq) => this.requestConfirm(confirmReq)
+      ),
+      ...mcp.tools
+    }
 
     const model = resolveModel(config)
     const historyLimit = config.contextMessages ?? 20
@@ -364,9 +426,16 @@ class AiService extends EventEmitter {
         ? '\n当前处于「确认模式」：执行任何终端命令都会先请求用户确认，用户可能拒绝。被拒绝时不要反复重试同一条命令，先询问用户的意见。'
         : ''
 
+    // 终端绑定提示：本段对话固定作用于绑定的会话
+    const boundSession = targetSessionId ? sessionManager.get(targetSessionId) : undefined
+    const boundHint = boundSession
+      ? `\n本次对话绑定了一个终端会话（${boundSession.info.title}）。除非用户明确要求操作其他会话，终端工具一律作用于该会话，不要切换。`
+      : ''
+
     const systemPrompt = [
       settings.systemPrompt?.trim() || DEFAULT_SYSTEM_PROMPT,
       modeHint,
+      boundHint,
       mcp.errors.length ? `\n注意，以下 MCP 服务当前不可用：\n${mcp.errors.join('\n')}` : ''
     ].join('\n')
 
@@ -401,6 +470,8 @@ class AiService extends EventEmitter {
     } finally {
       this.clearPendingConfirms(requestId)
       this.abortControllers.delete(requestId)
+      // 队列对象由排队中的闭包持有，清理 Map 不影响已中止标志的感知
+      this.toolQueues.delete(requestId)
     }
   }
 
@@ -444,10 +515,76 @@ class AiService extends EventEmitter {
     this.emit('chat-event', requestId, event)
   }
 
+  /** 只中止属于自己的请求（其余实例不受影响） */
   abort(requestId: string): void {
+    // 标记队列中止：尚未开始执行的排队命令直接跳过，不再写入终端
+    const queue = this.toolQueues.get(requestId)
+    if (queue) queue.aborted = true
     // 先释放可能正在等待用户确认的工具，避免执行流悬挂
     this.clearPendingConfirms(requestId)
     this.abortControllers.get(requestId)?.abort()
+  }
+
+  /** 会话关闭时销毁实例：中止一切进行中的请求与挂起的确认 */
+  dispose(): void {
+    this.clearPendingConfirms()
+    for (const controller of this.abortControllers.values()) controller.abort()
+    // 排队中尚未开始的工具直接拒绝
+    for (const q of this.toolQueues.values()) q.aborted = true
+    this.toolQueues.clear()
+    this.removeAllListeners()
+  }
+}
+
+/**
+ * AI 服务注册中心：每个终端会话一个独立的 AiAssistant 实例（多实例互不共享），
+ * 对 ipc 层统一收口事件广播与确认转发；会话关闭时销毁其实例。
+ */
+class AiService extends EventEmitter {
+  /** sessionId -> 助手实例（'__no_session__' 为未绑定会话时的共享兜底） */
+  private assistants = new Map<string, AiAssistant>()
+  private confirmSink: ConfirmSink | null = null
+
+  /** ipc 层注入确认广播（request + resolved） */
+  setConfirmSink(sink: ConfirmSink | null): void {
+    this.confirmSink = sink
+  }
+
+  private assistantFor(sessionId: string): AiAssistant {
+    let assistant = this.assistants.get(sessionId)
+    if (!assistant) {
+      assistant = new AiAssistant(() => this.confirmSink)
+      // 实例事件聚合到注册中心统一转发，ipc 层无需感知多实例
+      assistant.on('chat-event', (requestId: string, event: AiStreamEvent) =>
+        this.emit('chat-event', requestId, event)
+      )
+      this.assistants.set(sessionId, assistant)
+    }
+    return assistant
+  }
+
+  async chat(req: AiChatRequest): Promise<{ requestId: string }> {
+    // 每个终端会话独立实例：对话固定路由到所属会话的助手
+    const key = req.targetSessionId ?? sessionManager.getActiveId() ?? '__no_session__'
+    return this.assistantFor(key).chat(req)
+  }
+
+  /** 渲染进程回复确认结果：转发给持有该确认的实例 */
+  resolveConfirm(id: string, approved: boolean): void {
+    for (const assistant of this.assistants.values()) assistant.resolveConfirm(id, approved)
+  }
+
+  /** 中止某次对话请求：只作用于所属实例 */
+  abort(requestId: string): void {
+    for (const assistant of this.assistants.values()) assistant.abort(requestId)
+  }
+
+  /** 会话关闭：销毁其助手实例（中止进行中的对话与挂起的确认） */
+  disposeSession(sessionId: string): void {
+    const assistant = this.assistants.get(sessionId)
+    if (!assistant) return
+    this.assistants.delete(sessionId)
+    assistant.dispose()
   }
 
   isReady(): boolean {

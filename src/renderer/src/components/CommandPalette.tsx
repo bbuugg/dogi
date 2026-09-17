@@ -69,8 +69,12 @@ export function CommandPalette() {
   const setView = useAppStore((s) => s.setView)
   const setSshDialog = useAppStore((s) => s.setSshDialog)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
-  const setAiPanelOpen = useAppStore((s) => s.setAiPanelOpen)
-  const aiPanelOpen = useAppStore((s) => s.ui.aiPanelOpen)
+  // AI 助手属于终端组：开关作用于当前激活组
+  const setGroupAiOpen = useAppStore((s) => s.setGroupAiOpen)
+  const activeGroupId = useAppStore((s) => s.activeGroupId)
+  const groupAiOpen = useAppStore((s) =>
+    s.activeGroupId ? !!s.ui.aiOpenGroups[s.activeGroupId] : false
+  )
   const setRunScriptDialog = useAppStore((s) => s.setRunScriptDialog)
 
   const [mode, setMode] = useState<PaletteMode>('root')
@@ -171,12 +175,12 @@ export function CommandPalette() {
     {
       id: 'ai.toggle',
       group: '界面',
-      title: aiPanelOpen ? '隐藏 AI 助手' : '显示 AI 助手',
+      title: groupAiOpen ? '隐藏 AI 助手' : '显示 AI 助手',
       keywords: 'ai assistant panel 助手 面板',
       icon: Sparkles,
       run: () => {
         close()
-        setAiPanelOpen(!aiPanelOpen)
+        if (activeGroupId) setGroupAiOpen(activeGroupId, !groupAiOpen)
       }
     },
     {
