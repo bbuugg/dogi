@@ -9,9 +9,16 @@ import {
 } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { useAppStore } from '@/stores/app-store'
-import type { AiChatMessage, AiMessagePart, AiPermissionMode } from '@shared/types'
+import { cn } from 'cn'
+import type {
+  AiChatMessage,
+  AiConfirmRequest,
+  AiMessagePart,
+  AiPermissionMode
+} from '@shared/types'
 import {
   ArrowDown,
+  Ban,
   Check,
   Copy,
   Eraser,
@@ -22,12 +29,13 @@ import {
   Sparkles,
   Square,
   Terminal,
-  Wrench
+  X
 } from 'lucide-react'
 import { useLayoutEffect, useRef, useState } from 'react'
 
 const TOOL_LABELS: Record<string, string> = {
   run_in_terminal: '执行终端命令',
+  send_keys: '发送按键',
   read_terminal_output: '读取终端输出',
   list_terminal_sessions: '查看终端列表'
 }
@@ -52,30 +60,108 @@ const PERMISSION_MODES: Array<{
     }
   ]
 
-function ToolPartCard({ part }: { part: AiMessagePart }) {
-  const isCall = part.type === 'tool-call'
-  const input = isCall ? part.input : null
-  const output = part.type === 'tool-result' ? part.output : null
-  const toolName =
-    part.type === 'tool-call' || part.type === 'tool-result' ? part.toolName : ''
-  const label = TOOL_LABELS[toolName] ?? toolName
-  const inputText = input ? JSON.stringify(input, null, 1) : ''
+type ToolCallPart = Extract<AiMessagePart, { type: 'tool-call' }>
+type ToolResultPart = Extract<AiMessagePart, { type: 'tool-result' }>
+
+/** 工具渲染单元：一次调用及其结果合为一处展示 */
+interface ToolUnit {
+  kind: 'tool'
+  call: ToolCallPart
+  result?: ToolResultPart
+}
+
+type RenderUnit = ToolUnit | { kind: 'text'; text: string }
+
+/** 把消息 parts 整理为渲染单元：文本独立成块；tool-call 与对应 tool-result 按 toolCallId 合并 */
+function buildRenderUnits(parts: AiMessagePart[]): RenderUnit[] {
+  const units: RenderUnit[] = []
+  const toolsById = new Map<string, ToolUnit>()
+  for (const part of parts) {
+    if (part.type === 'text') {
+      units.push({ kind: 'text', text: part.text })
+    } else if (part.type === 'tool-call') {
+      const unit: ToolUnit = { kind: 'tool', call: part }
+      toolsById.set(part.toolCallId, unit)
+      units.push(unit)
+    } else if (part.type === 'tool-result') {
+      const unit = toolsById.get(part.toolCallId)
+      if (unit) {
+        unit.result = part
+      } else {
+        // 无对应调用的孤儿结果：兜底成完整工具单元，保证结果不丢
+        units.push({
+          kind: 'tool',
+          call: {
+            type: 'tool-call',
+            toolCallId: part.toolCallId,
+            toolName: part.toolName,
+            input: null
+          },
+          result: part
+        })
+      }
+    }
+  }
+  return units
+}
+
+/** 工具调用状态：待批准（确认模式等待用户）/ 调用中 / 已完成 / 失败 / 已取消 */
+type ToolStatus = 'pending' | 'running' | 'done' | 'error' | 'cancelled'
+
+const TOOL_STATUS_META: Record<
+  ToolStatus,
+  { label: string; icon: typeof Loader2; cls: string; spin?: boolean }
+> = {
+  pending: { label: '待批准', icon: ShieldCheck, cls: 'text-amber-500' },
+  running: { label: '调用中', icon: Loader2, cls: 'text-muted-foreground', spin: true },
+  done: { label: '已完成', icon: Check, cls: 'text-green-500' },
+  error: { label: '失败', icon: X, cls: 'text-destructive' },
+  cancelled: { label: '已取消', icon: Ban, cls: 'text-muted-foreground' }
+}
+
+/** 工具调用卡片：参数与结果同卡展示，头部带状态；待批准时确认按钮就在卡内 */
+function ToolPartCard({
+  unit,
+  streaming,
+  pendingConfirm
+}: {
+  unit: ToolUnit
+  streaming: boolean
+  pendingConfirm: AiConfirmRequest | null
+}) {
+  const resolveAiConfirm = useAppStore((s) => s.resolveAiConfirm)
+  const { call, result } = unit
+  // 本工具对应的待批准确认（确认模式下）
+  const confirm = pendingConfirm?.toolCallId === call.toolCallId ? pendingConfirm : null
+  const status: ToolStatus = confirm
+    ? 'pending'
+    : result
+      ? result.isError
+        ? 'error'
+        : 'done'
+      : streaming
+        ? 'running'
+        : 'cancelled'
+  const meta = TOOL_STATUS_META[status]
+  const StatusIcon = meta.icon
+  const label = TOOL_LABELS[call.toolName] ?? call.toolName
+  const inputText = call.input ? JSON.stringify(call.input, null, 1) : ''
   const outputText =
-    typeof output === 'string'
-      ? output.slice(0, 1500)
-      : output
-        ? JSON.stringify(output).slice(0, 1500)
+    typeof result?.output === 'string'
+      ? result.output.slice(0, 1500)
+      : result?.output
+        ? JSON.stringify(result.output).slice(0, 1500)
         : ''
 
   return (
-    <details className="my-1.5 rounded-md text-xs">
+    <details className="my-1.5 rounded-md text-xs" open={!!confirm}>
       <summary className="flex cursor-pointer items-center gap-1.5 px-2 py-1.5 text-muted-foreground hover:text-foreground">
-        {part.type === 'tool-result' && part.isError ? (
-          <span className="text-destructive">✕</span>
-        ) : (
-          <Wrench className="size-3 shrink-0" />
-        )}
-        <span className="font-medium">{label}</span>
+        <StatusIcon
+          className={cn('size-3.5 shrink-0', meta.cls, meta.spin && 'animate-spin')}
+        />
+        <span className={cn('shrink-0 font-medium', meta.cls)}>{meta.label}</span>
+        <span className="shrink-0 text-muted-foreground/50">·</span>
+        <span className="shrink-0 font-medium">{label}</span>
         {inputText && (
           <span className="min-w-0 flex-1 truncate font-mono text-[10px]">
             {inputText.replace(/\s+/g, ' ').slice(0, 80)}
@@ -90,11 +176,32 @@ function ToolPartCard({ part }: { part: AiMessagePart }) {
         )}
         {outputText && (
           <pre
-            className={`max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[10px] ${part.type === 'tool-result' && part.isError ? 'text-destructive' : ''
-              }`}
+            className={cn(
+              'max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[10px]',
+              result?.isError && 'text-destructive'
+            )}
           >
             {outputText}
           </pre>
+        )}
+        {confirm && (
+          <div className="mt-2 flex gap-2">
+            <Button
+              size="sm"
+              className="h-7 flex-1 text-xs"
+              onClick={() => void resolveAiConfirm(confirm.id, true)}
+            >
+              执行
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 flex-1 text-xs"
+              onClick={() => void resolveAiConfirm(confirm.id, false)}
+            >
+              取消
+            </Button>
+          </div>
         )}
       </div>
     </details>
@@ -104,11 +211,13 @@ function ToolPartCard({ part }: { part: AiMessagePart }) {
 function MessageBubble({
   role,
   parts,
-  streaming
+  streaming,
+  pendingConfirm
 }: {
   role: 'user' | 'assistant'
   parts: AiMessagePart[]
   streaming?: boolean
+  pendingConfirm: AiConfirmRequest | null
 }) {
   const [copied, setCopied] = useState(false)
 
@@ -144,22 +253,29 @@ function MessageBubble({
   }
 
   const hasText = parts.some((p) => p.type === 'text')
+  // 工具调用与结果合并成单张卡片展示
+  const units = buildRenderUnits(parts)
 
   return (
     <div className="space-y-1">
-      {parts.map((part, i) =>
-        part.type === 'text' ? (
+      {units.map((unit, i) =>
+        unit.kind === 'text' ? (
           <div key={i} className="px-3 py-2">
-            <AiMarkdown content={part.text} />
-            {streaming && i === parts.length - 1 && (
+            <AiMarkdown content={unit.text} />
+            {streaming && i === units.length - 1 && (
               <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-primary align-middle" />
             )}
           </div>
         ) : (
-          <ToolPartCard key={i} part={part} />
+          <ToolPartCard
+            key={i}
+            unit={unit}
+            streaming={!!streaming}
+            pendingConfirm={pendingConfirm}
+          />
         )
       )}
-      {parts.length === 0 && streaming && (
+      {units.length === 0 && streaming && (
         <div className="flex items-center gap-2 rounded-lg px-3 py-2 text-xs text-muted-foreground">
           <Loader2 className="size-3.5 animate-spin" /> 思考中...
         </div>
@@ -186,53 +302,6 @@ function MessageBubble({
   )
 }
 
-/** 确认模式下的命令执行确认卡片：只显示本面板所属会话的待确认请求 */
-function CommandConfirmCard({ sessionId }: { sessionId: string | null }) {
-  const pendingConfirm = useAppStore((s) => {
-    for (const c of Object.values(s.pendingConfirms)) {
-      if (c.sessionId === sessionId) return c
-    }
-    return null
-  })
-  const resolveAiConfirm = useAppStore((s) => s.resolveAiConfirm)
-  const sessions = useAppStore((s) => s.sessions)
-
-  if (!pendingConfirm) return null
-  const target = sessions.find((s) => s.id === pendingConfirm.sessionId)
-
-  return (
-    <div className="mx-3 mb-2 rounded-md border border-amber-500/60 bg-amber-500/10 p-2.5 select-text">
-      <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-amber-600 dark:text-amber-400">
-        <ShieldCheck className="size-3.5 shrink-0" />
-        允许 AI 执行这条命令？
-      </div>
-      <pre className="mb-1.5 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-background/70 px-2 py-1.5 font-mono text-[11px] leading-4">
-        {pendingConfirm.command}
-      </pre>
-      <div className="mb-2 truncate text-[10px] text-muted-foreground">
-        目标会话：{target?.title ?? pendingConfirm.sessionId ?? '最近活跃会话'}
-      </div>
-      <div className="flex gap-2">
-        <Button
-          size="sm"
-          className="h-7 flex-1 text-xs"
-          onClick={() => void resolveAiConfirm(pendingConfirm.id, true)}
-        >
-          执行
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-7 flex-1 text-xs"
-          onClick={() => void resolveAiConfirm(pendingConfirm.id, false)}
-        >
-          取消
-        </Button>
-      </div>
-    </div>
-  )
-}
-
 /** 稳定的空消息数组：避免每次渲染新引用导致滚动 effect 误触发 */
 const NO_MESSAGES: AiChatMessage[] = []
 
@@ -247,6 +316,13 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const messages = chat?.messages ?? NO_MESSAGES
   const aiStreaming = chat?.streaming ?? false
   const aiError = chat?.error ?? null
+  // 本会话待批准的确认请求：多实例下各会话独立，显示在对应工具卡内
+  const pendingConfirm = useAppStore((s) => {
+    for (const c of Object.values(s.pendingConfirms)) {
+      if (c.sessionId === sessionId) return c
+    }
+    return null
+  })
   const sendAiMessage = useAppStore((s) => s.sendAiMessage)
   const abortAi = useAppStore((s) => s.abortAi)
   const clearAiMessages = useAppStore((s) => s.clearAiMessages)
@@ -393,6 +469,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               role={msg.role}
               parts={msg.parts}
               streaming={aiStreaming && i === messages.length - 1 && msg.role === 'assistant'}
+              pendingConfirm={pendingConfirm}
             />
           ))}
           {aiError && <p className="text-xs text-destructive">{aiError}</p>}
@@ -410,9 +487,6 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           </button>
         )}
       </div>
-
-      {/* 命令确认（确认模式）：只显示本会话的确认卡 */}
-      <CommandConfirmCard sessionId={sessionId} />
 
       {/* 输入区：圆角卡片，操作按钮集中在卡片底部（对齐 ChatInput 结构） */}
       <div className="shrink-0 p-3">

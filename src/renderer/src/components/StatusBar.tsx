@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Boxes, Command as CommandIcon, ListPlus, Menu, Plus, Settings } from 'lucide-react'
 import { cn } from 'cn'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -9,9 +9,10 @@ const ITEM_CLASS =
 
 /**
  * 应用底部功能条（类 VS Code 状态栏）：
- * 左侧是全局菜单 + 当前会话状态，右侧是常用入口。后续功能项往里加即可。
+ * 左侧是全局菜单 + 当前会话状态，右侧是常用入口。
+ * 通用容器：接收 children 直接渲染，追加在原有功能项之后、右侧入口之前。
  */
-export function StatusBar() {
+export function StatusBar({ children }: { children?: ReactNode }) {
   const sessions = useAppStore((s) => s.sessions)
   const activeSessionId = useAppStore((s) => s.activeSessionId)
   const exitedSessions = useAppStore((s) => s.exitedSessions)
@@ -46,6 +47,9 @@ export function StatusBar() {
       ) : (
         <span className="px-1.5 text-[11px] text-muted-foreground/70">没有打开的终端</span>
       )}
+
+      {/* 追加的功能项（如服务器指标条）直接渲染在原有功能后面 */}
+      {children}
 
       <div className="ml-auto flex items-center gap-0.5">
         <button

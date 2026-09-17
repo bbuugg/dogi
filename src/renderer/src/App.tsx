@@ -109,13 +109,11 @@ export default function App() {
                 <p.Component />
               </div>
             ))}
-          {/* 底部浮动监控图标：采集不到当前会话数据时自身不渲染 */}
-          {view === 'terminal' && <MonitorBadge sessionId={activeSessionId} />}
         </main>
       </div>
 
-      {/* 底部功能条（类 VS Code 状态栏），整宽 */}
-      <StatusBar />
+      {/* 底部功能条（类 VS Code 状态栏），整宽；监控指标条常驻左侧 */}
+      <StatusBar>{view === 'terminal' && <MonitorBadge sessionId={activeSessionId} />}</StatusBar>
 
       <SshProfileDialog />
       <SettingsDialog />

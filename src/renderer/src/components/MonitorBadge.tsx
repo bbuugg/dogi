@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Activity, ChevronLeft, ChevronRight, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, Cpu, MemoryStick, X } from 'lucide-react'
 import { cn } from 'cn'
 import { useAppStore } from '@/stores/app-store'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -186,10 +186,10 @@ function MetricsDetail({
 }
 
 /**
- * 终端底部的浮动服务器指标图标：
- * - 仅在能采集到当前会话数据时显示（取不到数据或数据已陈旧则完全不渲染）
- * - 点击图标展开气泡（popover）：气泡贴在图标上方并**盖住图标本身**，
- *   只能通过气泡内的关闭按钮收起（点击外部 / ESC 均不关闭）；气泡内可切换采集间隔
+ * 状态栏中的服务器指标条（渲染在 StatusBar 内）：
+ * - 常显 CPU / 内存 / 网速概览，仅在能采集到当前会话数据时出现（数据陈旧则消失）
+ * - 点击指标条在上方展开详情气泡：只能通过气泡内的关闭按钮收起
+ *   （点击外部 / ESC 均不关闭）；气泡内可切换采集间隔
  */
 export function MonitorBadge({ sessionId }: { sessionId: string | null }) {
   const metrics = useAppStore((s) => (sessionId ? s.monitors[sessionId] : undefined))
@@ -214,9 +214,6 @@ export function MonitorBadge({ sessionId }: { sessionId: string | null }) {
 
   if (!visible || !metrics) return null
 
-  const root = metrics.disk.find((d) => d.mount === '/') ?? metrics.disk[0]
-  const worst = Math.max(metrics.cpuPercent ?? 0, metrics.memPercent, root?.percent ?? 0)
-
   return (
     <Popover
       open={open}
@@ -228,11 +225,36 @@ export function MonitorBadge({ sessionId }: { sessionId: string | null }) {
       <PopoverTrigger asChild>
         <button
           type="button"
-          aria-label="服务器指标"
+          aria-label="服务器指标详情"
           title="服务器指标"
-          className="absolute bottom-3 left-3 z-20 flex size-8 items-center justify-center rounded-full border border-border/60 bg-card/80 shadow-lg backdrop-blur transition-colors hover:bg-card"
+          className="flex h-6 items-center gap-3 rounded px-1.5 text-[11px] whitespace-nowrap text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
         >
-          <Activity className={cn('size-4', textColor(worst))} />
+          <span
+            className={cn(
+              'flex items-center gap-1 font-medium tabular-nums',
+              textColor(metrics.cpuPercent ?? 0)
+            )}
+          >
+            <Cpu className="size-3" />
+            {metrics.cpuPercent === null ? '—' : `${metrics.cpuPercent.toFixed(0)}%`}
+          </span>
+          <span
+            className={cn(
+              'flex items-center gap-1 font-medium tabular-nums',
+              textColor(metrics.memPercent)
+            )}
+          >
+            <MemoryStick className="size-3" />
+            {metrics.memPercent.toFixed(0)}%
+          </span>
+          <span className="flex items-center gap-1 tabular-nums text-emerald-500">
+            <ArrowDown className="size-3" />
+            {formatRate(metrics.netRxRate)}
+          </span>
+          <span className="flex items-center gap-1 tabular-nums text-sky-500">
+            <ArrowUp className="size-3" />
+            {formatRate(metrics.netTxRate)}
+          </span>
         </button>
       </PopoverTrigger>
       {/* 关闭时直接卸载：不依赖 Radix 的退出动画（与 tw-animate-css 的 exit 动画配合时
@@ -241,8 +263,7 @@ export function MonitorBadge({ sessionId }: { sessionId: string | null }) {
         <PopoverContent
           side="top"
           align="start"
-          // 负偏移让气泡下沿压到图标上，把图标完全盖住
-          sideOffset={-36}
+          sideOffset={6}
           className="w-[300px] gap-3 p-3"
           // 打开/关闭都不接管焦点，避免打断终端输入
           onOpenAutoFocus={(e) => e.preventDefault()}
