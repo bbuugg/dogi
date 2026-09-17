@@ -76,17 +76,21 @@ export default function App() {
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
       <TitleBar />
       <div className="flex min-h-0 flex-1">
-        {/* 侧边栏可折叠：折叠时不渲染侧边栏与拖拽条（展开入口在标题栏） */}
+        {/* 侧边栏可折叠：外层容器宽度过渡实现展开/收起动画（内部保持固定宽度不回流，
+            折叠时拖拽条隐藏，展开入口在标题栏） */}
+        <div
+          className="shrink-0 overflow-hidden transition-[width] duration-200 ease-out"
+          style={{ width: sidebarCollapsed ? 0 : sidebarWidth }}
+        >
+          <Sidebar />
+        </div>
         {!sidebarCollapsed && (
-          <>
-            <Sidebar />
-            <ResizeHandle
-              width={sidebarWidth}
-              min={180}
-              max={480}
-              onResize={setSidebarWidth}
-            />
-          </>
+          <ResizeHandle
+            width={sidebarWidth}
+            min={180}
+            max={480}
+            onResize={setSidebarWidth}
+          />
         )}
 
         <main className="relative flex min-w-0 flex-1 flex-col">

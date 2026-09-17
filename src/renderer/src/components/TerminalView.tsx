@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { X } from 'lucide-react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -77,6 +78,14 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
   // ZMODEM 传输会话（rz/sz）与状态提示
   const zsessionRef = useRef<any>(null)
   const [zmodem, setZmodem] = useState<ZmodemState | null>(null)
+  // 下载：当前 offer（取消时优先 skip，库推荐的干净跳过）
+  const currentOfferRef = useRef<any>(null)
+  // 上传：发送循环的停止标志（取消后停止 send）
+  const uploadCancelRef = useRef(false)
+  // 传输已取消：后续到达的 offer 一律 skip，accept 后的结果不再保存
+  const zmodemCancelledRef = useRef(false)
+  // 取消动作回调（effect 内定义，浮层按钮调用）
+  const zmodemCancelRef = useRef<(() => void) | null>(null)
   // 命令预测（历史 / 常见命令补全）相关状态
   const commandPrediction = useAppStore((s) => s.preferences.commandPrediction)
   const commandPredictionRef = useRef(commandPrediction)
@@ -232,8 +241,29 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
     // ZMODEM 传输结束时的清理（终止会话引用、收起提示）
     const endSession = () => {
       zsessionRef.current = null
+      currentOfferRef.current = null
       setZmodem(null)
     }
+    // 取消传输：下载走 offer.skip()（干净跳过当前文件，会话继续到自然结束，无乱码）；
+    // 上传无 skip 可用（Transfer 只有 send/end），置停止标志 + zsession.abort() 发 CAN 序列中止远端
+    const cancelZmodem = () => {
+      uploadCancelRef.current = true
+      zmodemCancelledRef.current = true
+      const zs = zsessionRef.current
+      const offer = currentOfferRef.current
+      try {
+        if (offer) offer.skip()
+        else if (zs) zs.abort()
+      } catch {
+        try {
+          if (zs) zs.abort()
+        } catch {
+          // 忽略
+        }
+      }
+      endSession()
+    }
+    zmodemCancelRef.current = cancelZmodem
     // 上传（远端执行了 rz）：弹出文件选择，逐文件发送，并实时上报进度
     const handleUpload = async (zsession: any) => {
       try {
@@ -261,6 +291,8 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
           let sent = 0
           let last = 0
           for (let off = 0; off < total; off += CHUNK) {
+            // 已取消：停止发送，由 cancelZmodem 的 abort 通知远端
+            if (uploadCancelRef.current) return
             const chunk = f.data.subarray(off, Math.min(off + CHUNK, total))
             xfer.send(chunk)
             sent += chunk.length
@@ -301,6 +333,10 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
           return
         }
         zsessionRef.current = zsession
+        // 新会话：清除上一轮的取消状态
+        uploadCancelRef.current = false
+        zmodemCancelledRef.current = false
+        currentOfferRef.current = null
         setZmodem({
           direction: zsession.type === 'send' ? 'upload' : 'download',
           name: '',
@@ -314,6 +350,16 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
           void handleUpload(zsession)
         } else {
           zsession.on('offer', async (offer: any) => {
+            // 已取消：批量场景下后续到达的文件一律跳过，直至会话自然结束
+            if (zmodemCancelledRef.current) {
+              try {
+                offer.skip()
+              } catch {
+                // 忽略
+              }
+              return
+            }
+            currentOfferRef.current = offer
             const details = (offer.get_details && offer.get_details()) || {}
             const rawName: string = details.name || 'file'
             const size: number = typeof details.size === 'number' ? details.size : 0
@@ -323,18 +369,31 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
             setZmodem({ direction: 'download', name: rawName, text: `下载中：${rawName}`, progress: 0 })
             // 先选保存位置，再开始下载
             const filePath = await window.api.zmodem.askSavePath(safeName)
+            // 等待对话框期间取消了（skip 已由 cancelZmodem 调用过则忽略重复抛错）
+            if (zmodemCancelledRef.current) {
+              try {
+                offer.skip()
+              } catch {
+                // 忽略
+              }
+              currentOfferRef.current = null
+              return
+            }
             if (!filePath) {
               try {
                 offer.skip()
               } catch {
                 // 忽略
               }
+              currentOfferRef.current = null
               return
             }
             let downloaded = 0
             let last = 0
-            offer.on('input', (payload: Uint8Array) => {
-              downloaded += payload.byteLength
+            // 注意：zmodem.js 的 input 事件回传普通 number[]（非 Uint8Array），
+            // 只有 .length 可用；用 byteLength 会得到 undefined，进度变 NaN
+            offer.on('input', (payload: number[]) => {
+              downloaded += payload.length
               if (!size) return
               const now = performance.now()
               if (downloaded >= size || now - last > 120) {
@@ -346,6 +405,8 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
             })
             try {
               const spool = (await offer.accept()) as Uint8Array[]
+              // 传输过程中取消了：丢弃已收数据，不保存
+              if (zmodemCancelledRef.current) return
               const total = spool.reduce((a: number, p: Uint8Array) => a + p.byteLength, 0)
               const merged = new Uint8Array(total)
               let off = 0
@@ -357,6 +418,8 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
               setZmodem((p) => (p ? { ...p, progress: 100, text: `已保存：${filePath}` } : p))
             } catch (e) {
               console.error('zmodem receive failed', e)
+            } finally {
+              currentOfferRef.current = null
             }
           })
           zsession.on('session_end', () => endSession())
@@ -535,6 +598,7 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
       container.removeEventListener('wheel', handleWheelCapture, { capture: true })
       container.removeEventListener('contextmenu', handleContextMenu)
       unsubscribeData()
+      zmodemCancelRef.current = null
       zsessionRef.current = null
       term.dispose()
       termRef.current = null
@@ -661,6 +725,14 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
             <span className="shrink-0 tabular-nums text-muted-foreground">
               {Math.round(zmodem.progress)}%
             </span>
+            <button
+              type="button"
+              title="取消传输"
+              onClick={() => zmodemCancelRef.current?.()}
+              className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+            >
+              <X className="size-3" />
+            </button>
           </div>
           <div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary">
             <div
@@ -695,7 +767,7 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
                   acceptSuggestion()
                 }}
                 className={cn(
-                  'flex w-full items-center gap-1 rounded px-2 py-1 text-left',
+                  'flex w-full items-center rounded px-2 py-1 text-left',
                   i === suggestions.index
                     ? 'bg-primary/15 text-foreground'
                     : 'text-muted-foreground hover:bg-secondary'

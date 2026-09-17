@@ -35,30 +35,36 @@ let draggingSessionId: string | null = null
 
 /** 递归渲染分屏布局树 */
 export function PaneLayout({ layout }: { layout: PaneNode }) {
-  if (layout.type === 'leaf') {
-    return <GroupView groupId={layout.groupId} />
-  }
+  // 叶子与分隔节点渲染同构结构（同类型根 div + 按 pane id 的 Fragment key）：
+  // leaf -> split 结构切换时 React 按 key 命中原有子树，既有组/终端不会卸载，
+  // 组件内状态（xterm 滚动缓冲、ZMODEM 传输会话等）得以保留
+  const split = layout.type === 'split' ? layout : null
+  const children: PaneNode[] = layout.type === 'split' ? layout.children : [layout]
   return (
     <div
       className={cn(
         'flex h-full w-full min-h-0',
-        layout.direction === 'row' ? 'flex-row' : 'flex-col'
+        split ? (split.direction === 'row' ? 'flex-row' : 'flex-col') : 'flex-col'
       )}
     >
-      {layout.children.map((child, i) => (
+      {children.map((child, i) => (
         <Fragment key={child.id}>
           <div
             className="min-h-0 min-w-0"
-            style={{ flexGrow: layout.sizes[i] ?? 1, flexBasis: 0 }}
+            style={{ flexGrow: split ? split.sizes[i] ?? 1 : 1, flexBasis: 0 }}
           >
-            <PaneLayout layout={child} />
+            {child.type === 'leaf' ? (
+              <GroupView groupId={child.groupId} />
+            ) : (
+              <PaneLayout layout={child} />
+            )}
           </div>
-          {i < layout.children.length - 1 && (
+          {split && i < children.length - 1 && (
             <Splitter
-              splitId={layout.id}
+              splitId={split.id}
               index={i}
-              direction={layout.direction}
-              sizes={layout.sizes}
+              direction={split.direction}
+              sizes={split.sizes}
             />
           )}
         </Fragment>
