@@ -324,10 +324,10 @@ export function CommandPalette() {
       // 不需要右上角关闭按钮，Esc / 点击遮罩关闭即可
       closable={false}
       centered
-      width={620}
+      width={480}
       destroyOnHidden
       // 弹窗自带内边距会让内部分隔线贴不到边，这里收掉由内容自己控制
-      styles={{ body: { padding: 0 } }}
+      styles={{ container: { padding: 10 }, body: { padding: 0 } }}
     >
       <div className="flex flex-col gap-3 p-3">
         <div className="flex items-center gap-2 rounded-md border border-border bg-background px-2.5">
