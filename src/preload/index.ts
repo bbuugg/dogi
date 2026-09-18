@@ -15,6 +15,7 @@ import type {
   ServerMetrics,
   SessionInfo,
   ShellDetectResult,
+  SshConnectProgress,
   SshGroup,
   SshProfile
 } from '@shared/types'
@@ -62,6 +63,9 @@ const api = {
       subscribe('terminal:data', cb),
     onExit: (cb: (payload: { sessionId: string; exitCode: number }) => void) =>
       subscribe('terminal:exit', cb),
+    /** SSH 连接阶段进度（解析/握手/认证/打开 shell/重试） */
+    onStatus: (cb: (payload: SshConnectProgress) => void) =>
+      subscribe('terminal:status', cb),
     onClosed: (cb: (payload: { sessionId: string }) => void) =>
       subscribe('terminal:closed', cb)
   },

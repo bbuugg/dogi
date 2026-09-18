@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Spin } from 'antd'
 import { X } from 'lucide-react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -6,7 +7,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 import Zmodem from 'zmodem.js'
 import { cn } from 'cn'
-import type { SessionInfo } from '@shared/types'
+import type { SessionInfo, SshConnectStage } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import { useIsDarkTheme } from '@/lib/theme'
 import { resolveTerminalTheme } from '@/lib/terminal-themes'
@@ -53,6 +54,16 @@ interface ZmodemState {
   text: string
   /** 进度百分比 0-100 */
   progress: number
+}
+
+/** SSH 连接阶段文案（连接进度浮层） */
+const CONNECT_STAGE_TEXT: Record<SshConnectStage, string> = {
+  resolving: '正在解析主机并建立 TCP 连接…',
+  handshake: '已建立连接，正在握手（密钥交换）…',
+  authenticating: '握手完成，正在认证…',
+  'opening-shell': '认证通过，正在打开 shell…',
+  retrying: '连接失败，正在重试…',
+  ready: '连接就绪'
 }
 
 export function TerminalView({ session, isActive }: TerminalViewProps) {
@@ -698,6 +709,25 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
   }, [isActive, session.id])
 
   const exited = useAppStore((s) => s.exitedSessions.has(session.id))
+  // SSH 连接进度：连接阶段由主进程按真实事件推送，就绪/失败后条目被移除
+  const connectStage = useAppStore((s) => s.connectStages[session.id])
+  const connecting = Boolean(connectStage)
+  // 连接很快时不闪一下浮层：延迟 250ms 才显示；一旦连接完成立刻收起
+  const [showConnect, setShowConnect] = useState(false)
+  useEffect(() => {
+    if (!connecting) {
+      setShowConnect(false)
+      return
+    }
+    const timer = window.setTimeout(() => setShowConnect(true), 250)
+    return () => window.clearTimeout(timer)
+  }, [connecting])
+  const connectText =
+    connectStage?.stage === 'retrying'
+      ? `${CONNECT_STAGE_TEXT.retrying}（第 ${connectStage.attempt ?? 1}/${connectStage.maxAttempts ?? 1} 次）`
+      : connectStage
+        ? CONNECT_STAGE_TEXT[connectStage.stage]
+        : ''
   // 镜像最新“已结束”状态，供 onData 回调（创建时只绑定一次）读取
   const exitedRef = useRef(exited)
   exitedRef.current = exited
@@ -721,6 +751,20 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
   return (
     <div className="relative h-full w-full" style={{ backgroundColor: theme.background }}>
       <div ref={containerRef} className="h-full w-full" />
+      {showConnect && connectStage && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 text-muted-foreground"
+          style={{ backgroundColor: theme.background }}
+        >
+          <Spin size="small" />
+          <div className="text-center">
+            <div className="text-sm text-foreground">{session.title}</div>
+            <div className="mt-1 text-xs">{connectText}</div>
+          </div>
+        </div>
+      )}
       {zmodem && (
         <div className="absolute left-1/2 top-3 z-10 w-72 -translate-x-1/2 rounded-md border border-border bg-card px-3 py-2 text-xs text-foreground shadow">
           <div className="mb-1 flex items-center justify-between gap-2">

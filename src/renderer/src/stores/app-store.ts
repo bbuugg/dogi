@@ -14,6 +14,7 @@ import type {
   ShellDetectResult,
   ScriptEntry,
   ShortcutConfig,
+  SshConnectProgress,
   SshGroup,
   SshProfile,
   TerminalThemeName,
@@ -148,6 +149,7 @@ function applyTabClose(
     | 'exitedSessions'
     | 'monitors'
     | 'aiChats'
+    | 'connectStages'
   >,
   id: string
 ): Partial<AppStore> {
@@ -166,6 +168,9 @@ function applyTabClose(
   // 会话关闭，其独立的 AI 对话随之清理
   const aiChats = { ...s.aiChats }
   delete aiChats[id]
+  // 连接进度也随之清理
+  const connectStages = { ...s.connectStages }
+  delete connectStages[id]
   return {
     sessions,
     groups,
@@ -174,7 +179,8 @@ function applyTabClose(
     activeSessionId,
     exitedSessions: exited,
     monitors,
-    aiChats
+    aiChats,
+    connectStages
   }
 }
 
@@ -215,6 +221,8 @@ interface AppStore {
   sessions: SessionInfo[]
   activeSessionId: string | null
   exitedSessions: Set<string>
+  /** SSH 连接中的会话阶段（key 为 sessionId；连接就绪/失败/关闭后移除） */
+  connectStages: Record<string, SshConnectProgress>
   /** 分屏布局树：每个叶子承载一个编辑器组；null 表示尚无任何会话 */
   layout: PaneNode | null
   /** 所有编辑器组，key 为组 ID */
@@ -362,7 +370,19 @@ let shortcutWired = false
       set((s) => {
         const exited = new Set(s.exitedSessions)
         exited.add(sessionId)
-        return { exitedSessions: exited }
+        // 连接失败/中断：清掉进度，让终端里的失败提示露出来
+        const connectStages = { ...s.connectStages }
+        delete connectStages[sessionId]
+        return { exitedSessions: exited, connectStages }
+      })
+    })
+    // SSH 连接阶段：就绪即移除（渲染端据此收起进度提示）
+    window.api.terminal.onStatus((payload) => {
+      set((s) => {
+        const connectStages = { ...s.connectStages }
+        if (payload.stage === 'ready') delete connectStages[payload.sessionId]
+        else connectStages[payload.sessionId] = payload
+        return { connectStages }
       })
     })
     window.api.terminal.onClosed(({ sessionId }) => {
@@ -394,6 +414,7 @@ let shortcutWired = false
     sessions: [],
     activeSessionId: null,
     exitedSessions: new Set(),
+    connectStages: {},
     layout: null,
     groups: {},
     activeGroupId: null,

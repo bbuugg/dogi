@@ -89,6 +89,34 @@ export interface SessionInfo {
   exited: boolean
 }
 
+/**
+ * SSH 连接阶段（连接过程中推送，供渲染端展示进度）：
+ * resolving → handshake → authenticating → opening-shell → ready；
+ * 握手阶段失败自动重连时插入 retrying。
+ */
+export type SshConnectStage =
+  /** 解析主机并建立 TCP 连接 */
+  | 'resolving'
+  /** TCP 已连通，正在握手（密钥交换） */
+  | 'handshake'
+  /** 握手完成，正在认证 */
+  | 'authenticating'
+  /** 认证通过，正在打开 shell */
+  | 'opening-shell'
+  /** 连接失败，正在自动重试 */
+  | 'retrying'
+  /** 就绪（渲染端据此收起进度提示） */
+  | 'ready'
+
+export interface SshConnectProgress {
+  sessionId: string
+  stage: SshConnectStage
+  /** 仅 retrying：当前是第几次尝试 */
+  attempt?: number
+  /** 仅 retrying：最大尝试次数 */
+  maxAttempts?: number
+}
+
 export type SshAuthType = 'password' | 'privateKey'
 
 /** SSH 连接分组：仅用于侧边栏归类；删除分组时组内连接回到「未分组」 */

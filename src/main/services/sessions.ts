@@ -3,7 +3,13 @@ import { exec as cpExec } from 'node:child_process'
 import * as os from 'node:os'
 import * as pty from 'node-pty'
 import { Client, type ClientChannel, type ConnectConfig } from 'ssh2'
-import type { SessionInfo, SessionType, SshProfile } from '@shared/types'
+import type {
+  SessionInfo,
+  SessionType,
+  SshConnectProgress,
+  SshConnectStage,
+  SshProfile
+} from '@shared/types'
 import { resolveLocalShell } from './shells'
 
 /** 每个会话保留的输出缓冲上限，供 AI 读取 */
@@ -137,13 +143,19 @@ class SshSession implements InternalSession {
   private desiredRows: number
   private onData: (data: Buffer) => void
   private onExit: (exitCode: number) => void
+  /** 连接阶段上报（渲染端据此显示「握手中」等进度提示） */
+  private onStatus: (progress: Omit<SshConnectProgress, 'sessionId'>) => void
 
   constructor(
     id: string,
     profile: SshProfile,
     cols: number,
     rows: number,
-    handlers: { onData: (data: Buffer) => void; onExit: (code: number) => void }
+    handlers: {
+      onData: (data: Buffer) => void
+      onExit: (code: number) => void
+      onStatus: (progress: Omit<SshConnectProgress, 'sessionId'>) => void
+    }
   ) {
     this.info = {
       id,
@@ -157,7 +169,16 @@ class SshSession implements InternalSession {
     this.desiredRows = Math.max(2, rows)
     this.onData = handlers.onData
     this.onExit = handlers.onExit
+    this.onStatus = handlers.onStatus
     this.connect(profile)
+  }
+
+  private emitStatus(
+    stage: SshConnectStage,
+    extra?: Pick<SshConnectProgress, 'attempt' | 'maxAttempts'>
+  ): void {
+    if (this.killed) return
+    this.onStatus({ stage, ...extra })
   }
 
   private fail(message: string): void {
@@ -176,6 +197,14 @@ class SshSession implements InternalSession {
   private connect(profile: SshProfile): void {
     if (this.killed) return
     this.connectAttempt++
+    if (this.connectAttempt === 1) {
+      this.emitStatus('resolving')
+    } else {
+      this.emitStatus('retrying', {
+        attempt: this.connectAttempt,
+        maxAttempts: this.maxConnectAttempts
+      })
+    }
     const config: ConnectConfig = {
       host: profile.host,
       port: profile.port || 22,
@@ -195,8 +224,13 @@ class SshSession implements InternalSession {
     const conn = new Client()
     this.conn = conn
     conn
+      // TCP 已连通，进入 SSH 协议握手（密钥交换）
+      .on('connect', () => this.emitStatus('handshake'))
+      // 密钥交换完成，开始认证（密码 / 密钥）
+      .on('handshake', () => this.emitStatus('authenticating'))
       .on('ready', () => {
         if (this.killed) return
+        this.emitStatus('opening-shell')
         conn.shell(
           // 用最新目标尺寸打开 shell（握手期间可能已收到渲染端下发的 resize）
           { term: TERM_TYPE, cols: this.desiredCols, rows: this.desiredRows },
@@ -209,6 +243,7 @@ class SshSession implements InternalSession {
             this.stream = stream
             // shell 流建立后才算就绪：此时写入的输入不会被丢弃（isReady 也用于脚本投递）
             this.ready = true
+            this.emitStatus('ready')
             // 握手期间收到的 resize 在此补应用，避免远端 PTY 停在创建时的初始尺寸
             this.applySize()
             stream.on('data', (data: Buffer | string) => {
@@ -368,7 +403,8 @@ class SessionManager extends EventEmitter {
     const id = crypto.randomUUID()
     const session = new SshSession(id, profile, cols, rows, {
       onData: (data) => this.handleData(id, data),
-      onExit: (code) => this.handleExit(id, code)
+      onExit: (code) => this.handleExit(id, code),
+      onStatus: (progress) => this.handleStatus(id, progress)
     })
     this.attach(id, session)
     return { ...session.info }
@@ -386,6 +422,10 @@ class SessionManager extends EventEmitter {
 
   private handleExit(id: string, exitCode: number): void {
     this.emit('exit', { sessionId: id, exitCode })
+  }
+
+  private handleStatus(id: string, progress: Omit<SshConnectProgress, 'sessionId'>): void {
+    this.emit('status', { sessionId: id, ...progress })
   }
 
   write(id: string, data: string | Uint8Array): boolean {

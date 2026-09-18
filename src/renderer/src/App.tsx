@@ -27,10 +27,10 @@ function EmptyState() {
       <TerminalSquare className="size-12 opacity-30" />
       <div className="text-sm">从左侧新建本地终端或连接 SSH</div>
       <div className="flex gap-2">
-        <Button variant="filled" size="small" onClick={() => void createLocalSession()}>
+        <Button variant="filled" onClick={() => void createLocalSession()}>
           新建本地终端
         </Button>
-        <Button type="text" size="small" onClick={() => setSshDialog(true, null)}>
+        <Button type="text" onClick={() => setSshDialog(true, null)}>
           添加 SSH 连接
         </Button>
       </div>

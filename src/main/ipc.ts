@@ -17,6 +17,7 @@ import type {
   ServerMetrics,
   ScriptEntry,
   SessionInfo,
+  SshConnectProgress,
   SshProfile
 } from '@shared/types'
 
@@ -46,6 +47,10 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   )
   sessionManager.on('exit', (payload: { sessionId: string; exitCode: number }) =>
     broadcast(win, 'terminal:exit', payload)
+  )
+  // SSH 连接阶段（解析/握手/认证/打开 shell/重试），渲染端据此显示连接进度
+  sessionManager.on('status', (payload: SshConnectProgress) =>
+    broadcast(win, 'terminal:status', payload)
   )
   sessionManager.on('created', (info: SessionInfo) => {
     broadcast(win, 'terminal:created', info)

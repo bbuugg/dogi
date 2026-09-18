@@ -98,7 +98,7 @@ function MetricsDetail({
   return (
     <>
       <div className="flex items-center gap-2">
-        <span className="text-xs font-semibold">服务器指标</span>
+        <span className="text-sm font-semibold">服务器指标</span>
         <div className="ml-auto">
           <IntervalStepper />
         </div>
@@ -225,7 +225,7 @@ export function MonitorBadge({ sessionId }: { sessionId: string | null }) {
       placement="topLeft"
       arrow={false}
       destroyOnHidden
-      styles={{ content: { padding: 12 } }}
+      styles={{ content: { padding: 0 } }}
       content={
         <div className="w-[300px]">
           <MetricsDetail metrics={metrics} intervalMs={interval} onClose={() => setOpen(false)} />
