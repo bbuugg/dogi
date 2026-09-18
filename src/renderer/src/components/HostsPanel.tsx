@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { SshGroup, SshProfile } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
-import { ChevronDown, Folder, FolderPlus, Pencil, Plus, Server, Trash2 } from 'lucide-react'
+import { ChevronDown, ChevronRight, FolderPlus, Pencil, Plus, Server, Trash2 } from 'lucide-react'
 import { cn } from 'cn'
 import { DndProvider, useDrag, useDrop } from 'react-dnd'
 import { HTML5Backend } from 'react-dnd-html5-backend'
@@ -377,6 +377,7 @@ export function HostsPanel() {
         key: groupKey(group.id),
         title: (
           <GroupRow
+            expanded={expandedKeys.includes(groupKey(group.id))}
             group={group}
             count={b.items.length}
             onToggle={() => toggleKey(groupKey(group.id))}
@@ -404,6 +405,7 @@ export function HostsPanel() {
       key: UNGROUPED_KEY,
       title: (
         <UngroupedRow
+          expanded={expandedKeys.includes(UNGROUPED_KEY)}
           count={ungrouped.length}
           onToggle={() => toggleKey(UNGROUPED_KEY)}
           onDropProfile={dropProfile}
@@ -563,6 +565,7 @@ type DropGroup = (dragId: string, targetGroupId: string, after: boolean) => void
 
 /** 分组行：可拖动排序，也可接收连接（追加进组）；右键可重命名 / 删除 */
 function GroupRow({
+  expanded,
   group,
   count,
   onToggle,
@@ -573,6 +576,8 @@ function GroupRow({
   onColor,
   onDelete
 }: {
+  /** 当前是否为展开状态（决定箭头方向） */
+  expanded: boolean
   group: SshGroup
   count: number
   /** 点击整行切换展开/折叠 */
@@ -639,10 +644,17 @@ function GroupRow({
         }}
       >
         <div className="flex min-w-0 flex-1 items-center gap-1.5">
-          <Folder
-            className="size-3.5 shrink-0 text-muted-foreground"
-            style={group.color ? { color: group.color } : undefined}
-          />
+          {expanded ? (
+            <ChevronDown
+              className="size-3.5 shrink-0 text-muted-foreground"
+              style={group.color ? { color: group.color } : undefined}
+            />
+          ) : (
+            <ChevronRight
+              className="size-3.5 shrink-0 text-muted-foreground"
+              style={group.color ? { color: group.color } : undefined}
+            />
+          )}
           <span
             className="truncate text-sm font-medium text-muted-foreground"
             style={group.color ? { color: tintText(group.color) } : undefined}
@@ -676,11 +688,14 @@ function GroupRow({
 
 /** 「未分组」行：固定最顶部、不接受分组拖入；连接拖到这里表示移出分组 */
 function UngroupedRow({
+  expanded,
   count,
   onToggle,
   onDropProfile,
   onNew
 }: {
+  /** 当前是否为展开状态（决定箭头方向） */
+  expanded: boolean
   count: number
   /** 点击整行切换展开/折叠 */
   onToggle: () => void
