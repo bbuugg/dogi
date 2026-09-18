@@ -12,9 +12,8 @@ import {
   TerminalSquare,
   Trash2
 } from 'lucide-react'
+import { useDrag, useDrop } from 'react-dnd'
 import { cn } from 'cn'
-import { DndProvider, useDrag, useDrop } from 'react-dnd'
-import { HTML5Backend } from 'react-dnd-html5-backend'
 import {
   Button,
   Checkbox,
@@ -421,9 +420,8 @@ export function HostsPanel() {
   treeData.push(...ungrouped.map((p) => profileNode(p, false)))
 
   return (
-    <DndProvider backend={HTML5Backend}>
-      <div className="flex-1 overflow-y-auto p-2">
-        {/* 主机 */}
+    <div className="flex-1 overflow-y-auto p-2">
+      {/* 主机 */}
         <div className="mb-1 flex items-center justify-between gap-1 rounded py-1">
           <span className="text-sm font-medium text-muted-foreground">
            主机 ({profiles.length})
@@ -464,9 +462,8 @@ export function HostsPanel() {
             onExpand={(keys) => setExpandedKeys(keys.map(String))}
           />
         )}
-      </div>
 
-      {/* 新建 / 重命名分组 */}
+        {/* 新建 / 重命名分组 */}
       <Modal
         open={groupEdit !== null}
         onCancel={() => setGroupEdit(null)}
@@ -542,7 +539,7 @@ export function HostsPanel() {
           将从列表中移除，该操作不可撤销。
         </p>
       </Modal>
-    </DndProvider>
+    </div>
   )
 }
 

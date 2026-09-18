@@ -17,6 +17,8 @@ import { PluginsPage } from '@/components/PluginsPage'
 import { StatusBar } from '@/components/StatusBar'
 import { ResizeHandle } from '@/components/ResizeHandle'
 import { AntdProvider } from '@/components/AntdProvider'
+import { DndProvider } from 'react-dnd'
+import { HTML5Backend } from 'react-dnd-html5-backend'
 import { Button } from 'antd'
 
 function EmptyState() {
@@ -70,10 +72,12 @@ export default function App() {
 
   return (
     <AntdProvider>
-      {/* overflow-clip（而非 hidden）：clip 不构成滚动容器，Chrome 无法因焦点元素
-          （如终端输入法组合期间被拉宽的 textarea）越界而对应用根节点做横向 scrollIntoView，
-          杜绝「整个页面被推左」 */}
-      <div className="flex h-screen w-screen flex-col overflow-clip bg-background text-foreground">
+      {/* 单一 DndProvider：HostsPanel 与 PaneLayout 的拖拽共享同一 backend（react-dnd 禁止两个 HTML5 backend） */}
+      <DndProvider backend={HTML5Backend}>
+        {/* overflow-clip（而非 hidden）：clip 不构成滚动容器，Chrome 无法因焦点元素
+            （如终端输入法组合期间被拉宽的 textarea）越界而对应用根节点做横向 scrollIntoView，
+            杜绝「整个页面被推左」 */}
+        <div className="flex h-screen w-screen flex-col overflow-clip bg-background text-foreground">
         <TitleBar />
         <div className="flex min-h-0 flex-1">
           {/* 活动栏常驻（不随侧边栏折叠消失），用于切换左侧功能区 */}
@@ -125,7 +129,8 @@ export default function App() {
         <SettingsDialog />
         <CommandPalette />
         <RunScriptDialog />
-      </div>
+        </div>
+      </DndProvider>
     </AntdProvider>
   )
 }

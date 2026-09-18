@@ -290,6 +290,8 @@ interface AppStore {
   splitActivePane: (direction: SplitDirectionInput) => Promise<void>
   /** 将某个会话（标签）移动到目标组；源组若因此变空则从布局中移除 */
   moveSessionToGroup: (sessionId: string, targetGroupId: string) => void
+  /** 组内重排：把 sessionId 移到组内 toIndex（相对重排前）位置 */
+  reorderSessions: (groupId: string, sessionId: string, toIndex: number) => void
   /** 关闭整个组（含其全部会话） */
   closeGroup: (groupId: string) => Promise<void>
   /** 拖拽分隔条时更新某分隔节点的权重 */
@@ -731,6 +733,21 @@ let shortcutWired = false
         }
         const layout = removedGroupId ? removeLeaf(s.layout, removedGroupId) : s.layout
         return { groups, layout, activeGroupId: targetGroupId, activeSessionId: sessionId }
+      }),
+
+    // 组内重排：toIndex 指重排前数组中的目标位，先取出后按移除偏移校正
+    reorderSessions: (groupId, sessionId, toIndex) =>
+      set((s) => {
+        const g = s.groups[groupId]
+        if (!g) return {}
+        const arr = [...g.sessionIds]
+        const from = arr.indexOf(sessionId)
+        if (from === -1) return {}
+        arr.splice(from, 1)
+        let idx = from < toIndex ? toIndex - 1 : toIndex
+        idx = Math.max(0, Math.min(arr.length, idx))
+        arr.splice(idx, 0, sessionId)
+        return { groups: { ...s.groups, [groupId]: { ...g, sessionIds: arr } } }
       }),
 
     closeGroup: async (groupId) => {
