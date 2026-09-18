@@ -716,7 +716,14 @@ function UngroupedRow({
       title="点击展开/折叠；连接拖到这里表示移出分组"
     >
       {over && <DropLine after={after} />}
-      <span className="truncate text-sm text-muted-foreground">未分组 ({count})</span>
+      <div className="flex min-w-0 flex-1 items-center gap-1.5">
+        {expanded ? (
+          <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+        ) : (
+          <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+        )}
+        <span className="truncate text-sm text-muted-foreground">未分组 ({count})</span>
+      </div>
       <Button
         type="text"
         size="small"
