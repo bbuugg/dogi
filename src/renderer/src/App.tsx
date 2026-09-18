@@ -20,20 +20,15 @@ import { AntdProvider } from '@/components/AntdProvider'
 import { Button } from 'antd'
 
 function EmptyState() {
-  const createLocalSession = useAppStore((s) => s.createLocalSession)
   const setSshDialog = useAppStore((s) => s.setSshDialog)
   return (
     <div className="flex h-full flex-col items-center justify-center gap-4 text-muted-foreground">
       <TerminalSquare className="size-12 opacity-30" />
-      <div className="text-sm">从左侧新建本地终端或连接 SSH</div>
-      <div className="flex gap-2">
-        <Button variant="filled" onClick={() => void createLocalSession()}>
-          新建本地终端
-        </Button>
-        <Button type="text" onClick={() => setSshDialog(true, null)}>
-          添加主机
-        </Button>
-      </div>
+      <div className="text-sm">还没有打开的终端</div>
+      <div className="text-xs">添加主机即可连接远程 SSH 或本地终端</div>
+      <Button type="primary" icon={<TerminalSquare className="size-4" />} onClick={() => setSshDialog(true, null)}>
+        添加主机
+      </Button>
     </div>
   )
 }

@@ -162,10 +162,12 @@ export interface SshProfile {
   hasPassword?: boolean
   hasPrivateKey?: boolean
   hasPassphrase?: boolean
-  /** 仅 local：要启动的命令（可执行文件，PATH 可解析） */
+  /** 仅 local：启动环境（可执行文件，PATH 可解析） */
   command?: string
   /** 仅 local：启动参数 */
   args?: string[]
+  /** 仅 local：终端启动后自动执行的命令 */
+  autoCommand?: string
   keepaliveInterval?: number
   createdAt: number
   updatedAt: number

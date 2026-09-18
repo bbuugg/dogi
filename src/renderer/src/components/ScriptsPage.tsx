@@ -111,7 +111,7 @@ export function ScriptsPage() {
               <div
                 key={s.id}
                 onDoubleClick={() => setRunScriptDialog(true, s.id)}
-                className="group flex min-w-0 flex-col gap-1 rounded-md border border-border/60 px-3 py-2.5 hover:bg-secondary cursor-pointer"
+                className="group flex min-w-0 flex-col gap-1 rounded-md border border-border/60 px-3 py-2.5 hover:bg-secondary cursor-pointer select-none"
               >
                 <div className="flex items-start gap-2">
                   <div className="min-w-0 flex-1">

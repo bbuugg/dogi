@@ -55,7 +55,9 @@ class LocalSession implements InternalSession {
     rows: number,
     handlers: { onData: (data: Buffer) => void; onExit: (exitCode: number) => void },
     shell: { command: string; args?: string[]; title: string },
-    profileId?: string
+    profileId?: string,
+    /** 终端启动后自动执行的命令 */
+    autoCommand?: string
   ) {
     this.proc = pty.spawn(shell.command, shell.args ?? [], {
       name: TERM_TYPE,
@@ -84,6 +86,10 @@ class LocalSession implements InternalSession {
       this.info.exited = true
       handlers.onExit(exitCode)
     })
+    // 终端启动后自动执行命令：PTY 输入带缓冲，spawn 后立即写入不会丢
+    if (autoCommand) {
+      this.proc.write(autoCommand + '\r')
+    }
   }
 
   private appendOutput(data: string): void {
@@ -401,10 +407,10 @@ class SessionManager extends EventEmitter {
     return { ...session.info }
   }
 
-  /** 按本地主机配置启动会话（命令来自保存的主机，绑定其 profileId） */
+  /** 按本地主机配置启动会话（环境为保存的 shell，启动后可自动执行命令） */
   createLocalHost(profile: SshProfile, cols = 80, rows = 24): SessionInfo {
     const command = profile.command?.trim()
-    if (!command) throw new Error('本地终端未配置启动命令')
+    if (!command) throw new Error('本地终端未配置启动环境')
     const id = crypto.randomUUID()
     const session = new LocalSession(
       id,
@@ -415,7 +421,8 @@ class SessionManager extends EventEmitter {
         onExit: (code) => this.handleExit(id, code)
       },
       { command, args: profile.args, title: profile.name || command },
-      profile.id
+      profile.id,
+      profile.autoCommand?.trim()
     )
     this.attach(id, session)
     return { ...session.info }

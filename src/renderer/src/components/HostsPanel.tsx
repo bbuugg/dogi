@@ -180,7 +180,7 @@ function ColorDot({
         title={title}
         className={cn(
           'flex size-5 shrink-0 items-center justify-center rounded transition-opacity',
-          !value && `opacity-0 ${hoverGroupClass}`
+          `opacity-0 ${hoverGroupClass}`
         )}
         onClick={(e) => e.stopPropagation()}
         onDoubleClick={(e) => e.stopPropagation()}

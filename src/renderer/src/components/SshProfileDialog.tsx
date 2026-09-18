@@ -9,9 +9,6 @@ const AUTH_TYPE_OPTIONS = [
   { value: 'privateKey', label: '私钥' }
 ]
 
-/** 启动环境下拉里的「自定义命令」选项 key */
-const CUSTOM_SHELL = '__custom__'
-
 interface FormState {
   name: string
   /** 所属分组 id；空串 = 未分组 */
@@ -26,10 +23,10 @@ interface FormState {
   privateKey: string
   passphrase: string
   // ---- 仅 local ----
-  /** 实际启动命令（检测到的 shell 的 command，或手动输入的） */
-  command: string
-  /** 启动参数（空格分隔，手动输入用） */
-  argsText: string
+  /** 选中的启动环境（检测到的 shell 的 id） */
+  shellId: string
+  /** 终端启动后自动执行的命令 */
+  autoCommand: string
 }
 
 const EMPTY_FORM: FormState = {
@@ -43,8 +40,8 @@ const EMPTY_FORM: FormState = {
   password: '',
   privateKey: '',
   passphrase: '',
-  command: '',
-  argsText: ''
+  shellId: '',
+  autoCommand: ''
 }
 
 function toForm(profile: SshProfile | null | undefined): FormState {
@@ -61,8 +58,8 @@ function toForm(profile: SshProfile | null | undefined): FormState {
     password: '',
     privateKey: '',
     passphrase: '',
-    command: profile.command ?? '',
-    argsText: (profile.args ?? []).join(' ')
+    shellId: '',
+    autoCommand: profile.autoCommand ?? ''
   }
 }
 
@@ -92,16 +89,23 @@ export function SshProfileDialog() {
       if (!next.name && sshDialog.groupId) next.groupId = sshDialog.groupId
       setForm(next)
       setError(null)
-      // 按需刷新本地 shell 列表（供「选择检测到的环境」下拉）
-      void window.api.terminal.listShells().then((r) => setShells(r.shells))
+      // 按需刷新本地 shell 列表（供「选择检测到的环境」下拉），并回填 / 预选启动环境
+      void window.api.terminal.listShells().then((r) => {
+        setShells(r.shells)
+        setForm((f) => {
+          // 编辑：按保存的命令回填匹配的 shell；新建：默认平台 shell
+          const matched = editing?.kind === 'local'
+            ? r.shells.find((s) => s.command === editing.command)
+            : undefined
+          if (matched) return { ...f, shellId: matched.id }
+          if (!isEdit && f.kind === 'local') return { ...f, shellId: r.defaultId }
+          return f
+        })
+      })
     }
   }, [sshDialog.open, sshDialog.groupId, editing])
 
   const patch = (partial: Partial<FormState>) => setForm((f) => ({ ...f, ...partial }))
-
-  /** 当前启动环境：命令命中某个检测到的 shell 时选中它，否则视为「自定义」 */
-  const launchEnv =
-    shells.find((s) => s.command === form.command)?.id ?? (form.command ? CUSTOM_SHELL : '')
 
   const handleSave = async (connectAfter: boolean) => {
     if (!form.name.trim()) {
@@ -118,8 +122,8 @@ export function SshProfileDialog() {
         return
       }
     } else {
-      if (launchEnv === '' || (launchEnv === CUSTOM_SHELL && !form.command.trim())) {
-        setError('请选择检测到的环境，或手动输入启动命令')
+      if (!shells.some((s) => s.id === form.shellId)) {
+        setError('请选择启动环境')
         return
       }
     }
@@ -127,15 +131,12 @@ export function SshProfileDialog() {
     setError(null)
     try {
       const now = Date.now()
-      // 本地启动命令：选择检测到的 shell 时直接用其 command/args；自定义时取手动输入
-      const command =
-        launchEnv !== CUSTOM_SHELL
-          ? (shells.find((s) => s.id === launchEnv)?.command ?? form.command.trim())
-          : form.command.trim()
-      const args =
-        launchEnv !== CUSTOM_SHELL
-          ? (shells.find((s) => s.id === launchEnv)?.args ?? undefined)
-          : form.argsText.split(/\s+/).filter(Boolean)
+      // 本地启动环境：由选中的检测 shell 决定可执行文件与参数
+      const localShell = shells.find((s) => s.id === form.shellId)
+      const localCommand = localShell?.command
+      const localArgs = localShell?.args
+      const autoCommand =
+        form.kind === 'local' ? form.autoCommand.trim() || undefined : undefined
 
       const payload: SshProfile = {
         id: editing?.id ?? '',
@@ -168,8 +169,9 @@ export function SshProfileDialog() {
             : form.kind === 'ssh'
               ? form.passphrase
               : undefined,
-        command: form.kind === 'local' ? command : undefined,
-        args: form.kind === 'local' ? args : undefined,
+        command: form.kind === 'local' ? localCommand : undefined,
+        args: form.kind === 'local' ? localArgs : undefined,
+        autoCommand: form.kind === 'local' ? autoCommand : undefined,
         createdAt: editing?.createdAt ?? now,
         updatedAt: now
       }
@@ -195,10 +197,7 @@ export function SshProfileDialog() {
     }
   }
 
-  const launchOptions = [
-    ...shells.map((s) => ({ value: s.id, label: s.name })),
-    { value: CUSTOM_SHELL, label: '自定义命令…' }
-  ]
+  const launchOptions = shells.map((s) => ({ value: s.id, label: s.name }))
 
   return (
     <Modal
@@ -357,49 +356,24 @@ export function SshProfileDialog() {
             <div className="grid gap-1.5">
               <span className="text-xs font-medium text-foreground">启动环境</span>
               <Select
-                value={launchEnv || undefined}
-                placeholder="选择检测到的 Shell，或手动输入"
-                onChange={(v) => {
-                  if (v === CUSTOM_SHELL) {
-                    patch({ command: '', argsText: '' })
-                  } else {
-                    const sh = shells.find((s) => s.id === v)
-                    patch({
-                      command: sh?.command ?? '',
-                      argsText: (sh?.args ?? []).join(' ')
-                    })
-                  }
-                }}
+                value={form.shellId || undefined}
+                placeholder="选择启动环境"
+                onChange={(v) => patch({ shellId: v })}
                 options={launchOptions}
                 style={{ width: '100%' }}
               />
             </div>
-            {launchEnv === CUSTOM_SHELL && (
-              <>
-                <div className="grid gap-1.5">
-                  <label htmlFor="local-command" className="text-xs font-medium text-foreground">
-                    启动命令
-                  </label>
-                  <Input
-                    id="local-command"
-                    placeholder="可执行文件或完整路径，如 git-bash 或 C:\Program Files\Git\bin\bash.exe"
-                    value={form.command}
-                    onChange={(e) => patch({ command: e.target.value })}
-                  />
-                </div>
-                <div className="grid gap-1.5">
-                  <label htmlFor="local-args" className="text-xs font-medium text-foreground">
-                    启动参数（可选，空格分隔）
-                  </label>
-                  <Input
-                    id="local-args"
-                    placeholder="如 --login -i"
-                    value={form.argsText}
-                    onChange={(e) => patch({ argsText: e.target.value })}
-                  />
-                </div>
-              </>
-            )}
+            <div className="grid gap-1.5">
+              <label htmlFor="local-auto-command" className="text-xs font-medium text-foreground">
+                自动执行命令（可选）
+              </label>
+              <Input
+                id="local-auto-command"
+                placeholder="终端启动后自动执行的命令，如 cd ~/project && ls"
+                value={form.autoCommand}
+                onChange={(e) => patch({ autoCommand: e.target.value })}
+              />
+            </div>
           </>
         )}
 
