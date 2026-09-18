@@ -115,7 +115,7 @@ export function SshProfileDialog() {
       await window.api.ssh.save(payload)
       await refreshProfiles()
       setSshDialog(false, null)
-      message.success(isEdit ? 'SSH 连接已更新' : 'SSH 连接已添加')
+      message.success(isEdit ? '主机已更新' : '主机已添加')
       if (connectAfter) {
         const profiles = await window.api.ssh.list()
         const saved = profiles.find((p) => p.name === payload.name && p.host === payload.host)
@@ -138,7 +138,7 @@ export function SshProfileDialog() {
     <Modal
       open={sshDialog.open}
       onCancel={() => setSshDialog(false, null)}
-      title={isEdit ? '编辑 SSH 连接' : '新建 SSH 连接'}
+      title={isEdit ? '编辑主机' : '新建主机'}
       centered
       width={520}
       destroyOnHidden

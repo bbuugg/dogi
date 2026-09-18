@@ -148,7 +148,7 @@ export function CommandPalette() {
       id: 'host.connect',
       group: '终端',
       title: '连接主机',
-      description: '选择已保存的 SSH 连接',
+      description: '选择已保存的主机',
       keywords: 'ssh connect host 主机 连接',
       icon: Server,
       run: () => goMode('hosts')
@@ -156,7 +156,7 @@ export function CommandPalette() {
     {
       id: 'host.add',
       group: '终端',
-      title: '添加 SSH 连接',
+      title: '添加主机',
       keywords: 'ssh add new host 添加 新建 主机',
       icon: Plug,
       run: () => {
@@ -293,7 +293,7 @@ export function CommandPalette() {
           ? '还没有脚本，先去「管理脚本」添加。'
           : '没有匹配的脚本。'
         : profiles.length === 0
-          ? '还没有保存的主机，先在侧边栏添加 SSH 连接。'
+          ? '还没有保存的主机，先在侧边栏添加主机。'
           : '没有匹配的主机。'
 
   return (

@@ -97,7 +97,7 @@ export interface SessionInfo {
 }
 
 /**
- * SSH 连接阶段（连接过程中推送，供渲染端展示进度）：
+ *主机阶段（连接过程中推送，供渲染端展示进度）：
  * resolving → handshake → authenticating → opening-shell → ready；
  * 握手阶段失败自动重连时插入 retrying。
  */
@@ -126,7 +126,7 @@ export interface SshConnectProgress {
 
 export type SshAuthType = 'password' | 'privateKey'
 
-/** SSH 连接分组：仅用于侧边栏归类；删除分组时组内连接回到「未分组」 */
+/**主机分组：仅用于侧边栏归类；删除分组时组内连接回到「未分组」 */
 export interface SshGroup {
   id: string
   name: string

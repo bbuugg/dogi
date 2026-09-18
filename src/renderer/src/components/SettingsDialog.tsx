@@ -44,7 +44,7 @@ export function SettingsDialog() {
     >
       <div className="flex h-full min-h-0">
         {/* 左侧菜单 */}
-        <nav className="no-scrollbar w-44 shrink-0 space-y-1 overflow-y-auto border-r border-border py-3">
+        <nav className="no-scrollbar w-44 shrink-0 space-y-1 overflow-y-auto py-3">
           {MENU.map(({ value, label, desc, icon: Icon }) => {
             const active = settingsTab === value
             return (

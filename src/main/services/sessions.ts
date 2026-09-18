@@ -182,7 +182,7 @@ class SshSession implements InternalSession {
   }
 
   private fail(message: string): void {
-    const line = `\r\n\x1b[31m[SSH 连接失败] ${message}\x1b[0m\r\n`
+    const line = `\r\n\x1b[31m[主机连接失败] ${message}\x1b[0m\r\n`
     this.appendOutput(line)
     this.onData(Buffer.from(line))
     this.ready = false
@@ -337,7 +337,7 @@ class SshSession implements InternalSession {
   exec(command: string): Promise<string> {
     return new Promise((resolve, reject) => {
       if (this.killed || !this.ready) {
-        reject(new Error('SSH 连接未就绪'))
+        reject(new Error('主机未就绪'))
         return
       }
       this.conn.exec(command, (err, stream: ClientChannel) => {

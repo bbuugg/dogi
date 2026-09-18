@@ -118,7 +118,6 @@ function SshConnectCard({
       className="w-full max-w-sm rounded-lg border border-border bg-card p-4 text-foreground shadow-lg"
     >
       <div className="flex items-start gap-3">
-        <Spin size="small" />
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-medium">{CONNECT_STAGE_TEXT[progress.stage]}</div>
           <div className="mt-0.5 truncate text-xs text-muted-foreground">{target}</div>

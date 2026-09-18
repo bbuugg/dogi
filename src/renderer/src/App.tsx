@@ -31,7 +31,7 @@ function EmptyState() {
           新建本地终端
         </Button>
         <Button type="text" onClick={() => setSshDialog(true, null)}>
-          添加 SSH 连接
+          添加主机
         </Button>
       </div>
     </div>

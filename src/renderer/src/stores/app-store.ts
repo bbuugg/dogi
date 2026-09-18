@@ -221,7 +221,7 @@ interface AppStore {
   sessions: SessionInfo[]
   activeSessionId: string | null
   exitedSessions: Set<string>
-  /** SSH 连接中的会话阶段（key 为 sessionId；连接就绪/失败/关闭后移除） */
+  /**主机中的会话阶段（key 为 sessionId；连接就绪/失败/关闭后移除） */
   connectStages: Record<string, SshConnectProgress>
   /** 分屏布局树：每个叶子承载一个编辑器组；null 表示尚无任何会话 */
   layout: PaneNode | null
@@ -232,7 +232,7 @@ interface AppStore {
 
   // ---------- SSH ----------
   profiles: SshProfile[]
-  /** SSH 连接分组（侧边栏归类用） */
+  /**主机分组（侧边栏归类用） */
   sshGroups: SshGroup[]
 
   // ---------- 用户脚本 ----------
@@ -378,7 +378,7 @@ let shortcutWired = false
         return { exitedSessions: exited, connectStages }
       })
     })
-    // SSH 连接阶段：就绪即移除（渲染端据此收起进度提示）
+    //主机阶段：就绪即移除（渲染端据此收起进度提示）
     window.api.terminal.onStatus((payload) => {
       set((s) => {
         const connectStages = { ...s.connectStages }

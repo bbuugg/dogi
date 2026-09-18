@@ -62,7 +62,7 @@
 }
 
 /*
- * SSH 连接树（侧边栏里的 antd Tree）：antd 默认按「页面级树」排版（14px 字号、
+ *主机树（侧边栏里的 antd Tree）：antd 默认按「页面级树」排版（14px 字号、
  * 宽行高、大缩进），这里压到侧边栏密度，并让节点标题铺满整行以便右侧悬浮按钮靠右。
  */
 .ssh-tree .ant-tree-list-holder-inner {

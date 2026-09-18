@@ -23,6 +23,7 @@ import { AiPanel } from '@/components/AiPanel'
 import { ResizeHandle } from '@/components/ResizeHandle'
 import { Dropdown } from 'antd'
 import type { PaneNode, SplitDirection, SplitDirectionInput } from '@/lib/pane-layout'
+import { resolveSshColor, tintText } from '@/lib/ssh-color'
 
 /** 拖拽标签时用于跨组传递的 dataTransfer 类型标识 */
 const SESSION_DRAG_TYPE = 'application/x-session-id'
@@ -131,6 +132,8 @@ function Splitter({
 function GroupView({ groupId }: { groupId: string }) {
   const group = useAppStore((s) => s.groups[groupId])
   const sessions = useAppStore((s) => s.sessions)
+  const profiles = useAppStore((s) => s.profiles)
+  const sshGroups = useAppStore((s) => s.sshGroups)
   const exited = useAppStore((s) => s.exitedSessions)
   const active = useAppStore((s) => s.activeGroupId === groupId)
   const setActiveGroup = useAppStore((s) => s.setActiveGroup)
@@ -208,6 +211,11 @@ function GroupView({ groupId }: { groupId: string }) {
             const session = sessions.find((x: SessionInfo) => x.id === sid)
             const isActiveTab = group.activeSessionId === sid
             const isExited = exited.has(sid)
+            // SSH 会话沿用其主机（或所属分组）的颜色，本地终端无颜色
+            const profile = session?.profileId
+              ? profiles.find((p) => p.id === session.profileId)
+              : undefined
+            const tabColor = profile ? resolveSshColor(profile, sshGroups) : undefined
             return (
               <Dropdown
                 key={sid}
@@ -278,8 +286,15 @@ function GroupView({ groupId }: { groupId: string }) {
                       : 'text-muted-foreground hover:text-foreground'
                   )}
                 >
-                  <TerminalSquare className="size-3.5 shrink-0" />
-                  <span className="truncate" title={session?.title}>
+                  <TerminalSquare
+                    className="size-3.5 shrink-0"
+                    style={tabColor ? { color: tabColor } : undefined}
+                  />
+                  <span
+                    className="truncate"
+                    title={session?.title}
+                    style={tabColor ? { color: tintText(tabColor) } : undefined}
+                  >
                     {session?.title ?? '终端'}
                   </span>
                   {isExited && (

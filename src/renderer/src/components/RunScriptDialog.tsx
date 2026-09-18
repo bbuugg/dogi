@@ -123,7 +123,7 @@ export function RunScriptDialog() {
           <span className="text-xs font-medium text-foreground">主机</span>
           {profiles.length === 0 ? (
             <div className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
-              还没有主机，请先添加 SSH 连接。
+              还没有主机，请先添加主机。
               <div className="mt-2">
                 <Button
                   variant="filled"
@@ -133,7 +133,7 @@ export function RunScriptDialog() {
                     setSshDialog(true, null)
                   }}
                 >
-                  <Plus className="size-4" /> 添加 SSH 连接
+                  <Plus className="size-4" /> 添加主机
                 </Button>
               </div>
             </div>

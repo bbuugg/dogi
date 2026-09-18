@@ -20,6 +20,7 @@ import {
   type TreeDataNode
 } from 'antd'
 import { HOSTS_ACTIVITY_ID } from '@/activity-ids'
+import { resolveSshColor, tintText } from '@/lib/ssh-color'
 
 /** 树节点 key 前缀：g: 分组（g: 空 id 表示「未分组」伪分组）、p: 连接 */
 const GROUP_KEY_PREFIX = 'g:'
@@ -136,15 +137,6 @@ const COLOR_PRESETS = [
 ]
 
 /**
- * 行标签的着色：把用户选的颜色与主题前景色按 oklab 混合。
- * 直接用原色写文字时，浅色（如亮黄）在浅色主题下几乎看不清；混入前景色后
- * 既保留明显色相，又能在明暗两种主题下都保证可读性。
- */
-function tintText(color: string): string {
-  return `color-mix(in oklab, ${color} 70%, var(--foreground))`
-}
-
-/**
  * 行内悬浮色点：点击直接弹出 antd 取色面板（含快捷色板）。
  * 未设置颜色时默认隐藏，悬浮行才出现；已设置则常驻显示，方便一眼看出配色。
  * 传入 onClear 时面板里出现「清除」，用于连接回到继承分组色。
@@ -199,7 +191,7 @@ function ColorDot({
 }
 
 /**
- * 「主机」功能区面板：本地终端入口 + SSH 连接列表。
+ * 「主机」功能区面板：本地终端入口 +主机列表。
  * 结构用 antd Tree（分组可折叠），拖拽用 react-dnd：
  * 连接可跨组拖动并调整顺序，分组可拖动排序，「未分组」固定在首位。
  */
@@ -254,10 +246,8 @@ export function HostsPanel() {
   /** 有分组时才显示「未分组」这一层 */
   const showUngrouped = sshGroups.length > 0
 
-  const groupById = new Map(sshGroups.map((g) => [g.id, g]))
   /** 连接的生效颜色：自身设置优先，否则继承所属分组的颜色 */
-  const effectiveColor = (p: SshProfile): string | undefined =>
-    p.color ?? (p.groupId ? groupById.get(p.groupId)?.color : undefined)
+  const effectiveColor = (p: SshProfile): string | undefined => resolveSshColor(p, sshGroups)
 
   const locate = (list: Block[], id: string): { b: number; i: number } | null => {
     for (let b = 0; b < list.length; b++) {
@@ -442,10 +432,10 @@ export function HostsPanel() {
         </div>
         <NewTerminalMenu />
 
-        {/* SSH 连接 */}
+        {/*主机 */}
         <div className="mb-1 flex items-center justify-between gap-1 rounded py-1">
           <span className="text-sm font-medium text-muted-foreground">
-            SSH 连接 ({profiles.length})
+           主机 ({profiles.length})
           </span>
           <div className="flex items-center gap-1">
             <Button
@@ -460,7 +450,7 @@ export function HostsPanel() {
               type="text"
               size="small"
               className="px-0.5 text-muted-foreground"
-              title="新建 SSH 连接"
+              title="新建主机"
               icon={<Plus className="size-3.5" />}
               onClick={() => setSshDialog(true, null)}
             />
@@ -469,7 +459,7 @@ export function HostsPanel() {
 
         {profiles.length === 0 && sshGroups.length === 0 ? (
           <div className="px-2 py-3 text-center text-xs text-muted-foreground">
-            还没有 SSH 连接
+            还没有主机
             <br />
             点击右上角 + 添加
           </div>
@@ -544,7 +534,7 @@ export function HostsPanel() {
       <Modal
         open={pendingDelete !== null}
         onCancel={() => setPendingDelete(null)}
-        title="删除 SSH 连接？"
+        title="删除主机？"
         okText="删除"
         cancelText="取消"
         okButtonProps={{ danger: true }}
@@ -716,7 +706,7 @@ function UngroupedRow({
         type="text"
         size="small"
         className="ml-auto px-1 text-muted-foreground"
-        title="新建 SSH 连接"
+        title="新建主机"
         icon={<Plus className="size-3.5" />}
         onClick={(e) => {
           e.stopPropagation()

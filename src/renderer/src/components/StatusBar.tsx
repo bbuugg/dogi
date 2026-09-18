@@ -119,7 +119,7 @@ function MenuButton() {
             className={menuItem}
             onClick={run(() => setSshDialog(true, null))}
           >
-            <Plus className="size-3.5 text-muted-foreground" /> 添加 SSH 连接
+            <Plus className="size-3.5 text-muted-foreground" /> 添加主机
           </button>
           <button type="button" className={menuItem} onClick={run(() => setSettingsOpen(true))}>
             <Settings className="size-3.5 text-muted-foreground" /> 设置
