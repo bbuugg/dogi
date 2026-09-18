@@ -4,6 +4,7 @@ import { useAppStore } from '@/stores/app-store'
 import {
   ChevronDown,
   ChevronRight,
+  ChevronsLeft,
   FolderPlus,
   Pencil,
   Plus,
@@ -33,8 +34,6 @@ import { resolveSshColor, tintText } from '@/lib/ssh-color'
 /** 树节点 key 前缀：g: 分组（g: 空 id 表示「未分组」伪分组）、p: 连接 */
 const GROUP_KEY_PREFIX = 'g:'
 const PROFILE_KEY_PREFIX = 'p:'
-/** 「未分组」伪分组：固定在列表最顶部 */
-const UNGROUPED_KEY = GROUP_KEY_PREFIX
 
 /** react-dnd 拖拽类型：连接与分组各一种，落点按类型分别处理 */
 const DND_PROFILE = 'ssh-profile'
@@ -250,8 +249,6 @@ export function HostsPanel() {
   // 「未分组」块恒在首位
   blocks.push({ group: undefined, items: ungrouped })
   for (const g of sshGroups) blocks.push({ group: g, items: byGroup.get(g.id) ?? [] })
-  /** 有分组时才显示「未分组」这一层 */
-  const showUngrouped = sshGroups.length > 0
 
   /** 连接的生效颜色：自身设置优先，否则继承所属分组的颜色 */
   const effectiveColor = (p: SshProfile): string | undefined => resolveSshColor(p, sshGroups)
@@ -359,6 +356,17 @@ export function HostsPanel() {
     )
   }
 
+  /** 把一个主机移出到「未分组」：只改该主机的分组归属，保持其它顺序不变 */
+  const moveToUngrouped = (profile: SshProfile) => {
+    void arrangeSsh({
+      groupIds: sshGroups.map((g) => g.id),
+      profiles: profiles.map((x) => ({
+        id: x.id,
+        groupId: x.id === profile.id ? undefined : x.groupId
+      }))
+    })
+  }
+
   const profileNode = (p: SshProfile, hasGroup: boolean): TreeDataNode => ({
     key: profileKey(p.id),
     title: (
@@ -368,6 +376,7 @@ export function HostsPanel() {
         color={effectiveColor(p)}
         onConnect={() => connect(p)}
         onEdit={() => setSshDialog(true, p)}
+        onMoveOut={() => moveToUngrouped(p)}
         onDelete={() => setPendingDelete(p)}
         onColor={(color) => void setSshProfileColor(p.id, color)}
         onDropProfile={dropProfile}
@@ -380,14 +389,16 @@ export function HostsPanel() {
     .filter((b) => b.group)
     .map((b) => {
       const group = b.group!
+      // 空分组不参与展开/折叠：不挂子节点、点击无效，避免空展开触发布局抖动
+      const isEmpty = b.items.length === 0
       return {
         key: groupKey(group.id),
         title: (
           <GroupRow
-            expanded={expandedKeys.includes(groupKey(group.id))}
+            expanded={isEmpty ? false : expandedKeys.includes(groupKey(group.id))}
             group={group}
             count={b.items.length}
-            onToggle={() => toggleKey(groupKey(group.id))}
+            onToggle={isEmpty ? () => {} : () => toggleKey(groupKey(group.id))}
             onDropProfile={dropProfile}
             onDropGroup={dropGroup}
             onNew={() => setSshDialog(true, null, group.id)}
@@ -401,30 +412,13 @@ export function HostsPanel() {
             }}
           />
         ),
-        children: b.items.map((p) => profileNode(p, true))
+        children: isEmpty ? undefined : b.items.map((p) => profileNode(p, true))
       }
     })
 
-  const treeData: TreeDataNode[] = []
-  if (showUngrouped) {
-    // 「未分组」固定在最顶部
-    treeData.push({
-      key: UNGROUPED_KEY,
-      title: (
-        <UngroupedRow
-          expanded={expandedKeys.includes(UNGROUPED_KEY)}
-          count={ungrouped.length}
-          onToggle={() => toggleKey(UNGROUPED_KEY)}
-          onDropProfile={dropProfile}
-          onNew={() => setSshDialog(true, null)}
-        />
-      ),
-      children: ungrouped.map((p) => profileNode(p, false))
-    })
-    treeData.push(...groupNodes)
-  } else {
-    treeData.push(...ungrouped.map((p) => profileNode(p, false)))
-  }
+  // 分组在前，未分组的主机平铺在最后（不另设「未分组」折叠组）
+  const treeData: TreeDataNode[] = [...groupNodes]
+  treeData.push(...ungrouped.map((p) => profileNode(p, false)))
 
   return (
     <DndProvider backend={HTML5Backend}>
@@ -684,59 +678,6 @@ function GroupRow({
   )
 }
 
-/** 「未分组」行：固定最顶部、不接受分组拖入；连接拖到这里表示移出分组 */
-function UngroupedRow({
-  expanded,
-  count,
-  onToggle,
-  onDropProfile,
-  onNew
-}: {
-  /** 当前是否为展开状态（决定箭头方向） */
-  expanded: boolean
-  count: number
-  /** 点击整行切换展开/折叠 */
-  onToggle: () => void
-  onDropProfile: DropProfile
-  onNew: () => void
-}) {
-  const { ref, over, after } = useRowDrop<HTMLDivElement>({
-    appendWhenProfileDrag: true,
-    canDrop: (_item, type) => type === DND_PROFILE,
-    drop: (item) => onDropProfile(item.id, null, undefined, true)
-  })
-
-  return (
-    <div
-      ref={ref}
-      className="relative flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded pr-1"
-      onClick={onToggle}
-      title="点击展开/折叠；连接拖到这里表示移出分组"
-    >
-      {over && <DropLine after={after} />}
-      <div className="flex min-w-0 flex-1 items-center gap-1.5">
-        {expanded ? (
-          <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-        ) : (
-          <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
-        )}
-        <span className="truncate text-sm text-muted-foreground">未分组 ({count})</span>
-      </div>
-      <Button
-        type="text"
-        size="small"
-        className="ml-auto px-1 text-muted-foreground"
-        title="新建主机"
-        icon={<Plus className="size-3.5" />}
-        onClick={(e) => {
-          e.stopPropagation()
-          onNew()
-        }}
-      />
-    </div>
-  )
-}
-
 /** 连接行：可拖动排序 / 跨组；双击连接，右键连接 / 编辑 / 删除 */
 function ProfileRow({
   profile,
@@ -744,6 +685,7 @@ function ProfileRow({
   color,
   onConnect,
   onEdit,
+  onMoveOut,
   onDelete,
   onColor,
   onDropProfile,
@@ -756,6 +698,8 @@ function ProfileRow({
   color?: string
   onConnect: () => void
   onEdit: () => void
+  /** 移出到「未分组」（仅分组内主机显示） */
+  onMoveOut: () => void
   onDelete: () => void
   /** 设置连接自身颜色（null 清除，回到继承分组） */
   onColor: (color: string | null) => void
@@ -795,6 +739,10 @@ function ProfileRow({
       label: '连接'
     },
     { key: 'edit', icon: <Pencil className="size-3.5" />, label: '编辑' },
+    // 分组内主机才提供「移到未分组」，作为移出分组的入口
+    ...(profile.groupId
+      ? [{ key: 'moveout', icon: <ChevronsLeft className="size-3.5" />, label: '移出分组' }]
+      : []),
     { type: 'divider' },
     { key: 'delete', icon: <Trash2 className="size-3.5" />, label: '删除', danger: true }
   ]
@@ -817,6 +765,7 @@ function ProfileRow({
           onClick: ({ key }) => {
             if (key === 'connect') onConnect()
             else if (key === 'edit') onEdit()
+            else if (key === 'moveout') onMoveOut()
             else onDelete()
           }
         }}
