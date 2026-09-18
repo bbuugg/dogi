@@ -1,10 +1,8 @@
 import { useState } from 'react'
 import { ArrowLeft, Pencil, Plus, Play, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
 import MonacoEditor from '@/components/MonacoEditor'
-import { Modal } from 'antd'
+import { Form, Input, Modal } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import { toast } from 'sonner'
 import type { ScriptEntry } from '@shared/types'
@@ -107,117 +105,115 @@ export function ScriptsPage() {
 
       {/* 脚本内容属于「内容」，保持可选中复制 */}
       <div className="min-h-0 flex-1 overflow-y-auto p-5 select-text">
-        {editing === null ? (
-          scripts.length === 0 ? (
-            <div className="mx-auto mt-16 max-w-md rounded-md border border-dashed border-border px-3 py-10 text-center text-sm text-muted-foreground">
-              还没有脚本。
-              <br />
-              把常用命令保存下来，之后选择主机执行；也可在终端按 Ctrl+Shift+P
-              打开命令面板，选择「运行脚本」。
-              <div className="mt-4">
-                <Button size="sm" onClick={startAdd}>
-                  <Plus className="size-4" /> 新增脚本
-                </Button>
-              </div>
-            </div>
-          ) : (
-            // 每行 3 个脚本卡片
-            <div className="mx-auto grid max-w-6xl grid-cols-3 gap-2">
-              {scripts.map((s) => (
-                <div
-                  key={s.id}
-                  className="group flex min-w-0 flex-col gap-1 rounded-md border border-border/60 px-3 py-2.5 hover:bg-secondary"
-                >
-                  <div className="flex items-start gap-2">
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-medium">{s.name}</div>
-                      {s.description && (
-                        <div className="truncate text-xs text-muted-foreground">
-                          {s.description}
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex shrink-0 items-center gap-0.5">
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        title="选择主机运行"
-                        onClick={() => setRunScriptDialog(true, s.id)}
-                      >
-                        <Play className="size-4" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        title="编辑"
-                        onClick={() => startEdit(s)}
-                      >
-                        <Pencil className="size-4" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        title="删除"
-                        onClick={() => setPendingDelete(s)}
-                      >
-                        <Trash2 className="size-4 text-destructive" />
-                      </Button>
-                    </div>
-                  </div>
-                  <div className="truncate font-mono text-[11px] text-muted-foreground/80">
-                    {s.content.split('\n')[0] || ''}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )
-        ) : (
-          <div className="mx-auto flex max-w-2xl flex-col gap-4">
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="script-name">名称</Label>
-              <Input
-                id="script-name"
-                value={name}
-                placeholder="例如：查看磁盘占用"
-                onChange={(e) => setName(e.target.value)}
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="script-desc">描述（可选，用于搜索）</Label>
-              <Input
-                id="script-desc"
-                value={description}
-                placeholder="例如：按大小列出当前目录前 10 个文件"
-                onChange={(e) => setDescription(e.target.value)}
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label>脚本内容</Label>
-              <div className="h-64 overflow-hidden rounded-md border border-border">
-                <MonacoEditor
-                  value={content}
-                  onChange={setContent}
-                  language="shell"
-                  showLanguageSelector
-                  showLineNumbersToggle
-                  showWordWrapToggle
-                />
-              </div>
-            </div>
-            <div className="flex justify-end gap-2">
-              <Button variant="ghost" onClick={cancel} disabled={saving}>
-                取消
-              </Button>
-              <Button
-                onClick={() => void save()}
-                disabled={saving || !name.trim() || !content.trim()}
-              >
-                保存
+        {scripts.length === 0 ? (
+          <div className="mx-auto mt-16 max-w-md rounded-md border border-dashed border-border px-3 py-10 text-center text-sm text-muted-foreground">
+            还没有脚本。
+            <br />
+            把常用命令保存下来，之后选择主机执行；也可在终端按 Ctrl+Shift+P
+            打开命令面板，选择「运行脚本」。
+            <div className="mt-4">
+              <Button size="sm" onClick={startAdd}>
+                <Plus className="size-4" /> 新增脚本
               </Button>
             </div>
           </div>
+        ) : (
+          // 每行 3 个脚本卡片
+          <div className="mx-auto grid max-w-6xl grid-cols-3 gap-2">
+            {scripts.map((s) => (
+              <div
+                key={s.id}
+                className="group flex min-w-0 flex-col gap-1 rounded-md border border-border/60 px-3 py-2.5 hover:bg-secondary"
+              >
+                <div className="flex items-start gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium">{s.name}</div>
+                    {s.description && (
+                      <div className="truncate text-xs text-muted-foreground">
+                        {s.description}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex shrink-0 items-center gap-0.5">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      title="选择主机运行"
+                      onClick={() => setRunScriptDialog(true, s.id)}
+                    >
+                      <Play className="size-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      title="编辑"
+                      onClick={() => startEdit(s)}
+                    >
+                      <Pencil className="size-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      title="删除"
+                      onClick={() => setPendingDelete(s)}
+                    >
+                      <Trash2 className="size-4 text-destructive" />
+                    </Button>
+                  </div>
+                </div>
+                <div className="truncate font-mono text-[11px] text-muted-foreground/80">
+                  {s.content.split('\n')[0] || ''}
+                </div>
+              </div>
+            ))}
+          </div>
         )}
       </div>
+
+      {/* 新增 / 编辑脚本 */}
+      <Modal
+        open={editing !== null}
+        onCancel={cancel}
+        title={editing?.id ? '编辑脚本' : '新增脚本'}
+        okText="保存"
+        cancelText="取消"
+        onOk={() => void save()}
+        confirmLoading={saving}
+        okButtonProps={{ disabled: !name.trim() || !content.trim() }}
+        cancelButtonProps={{ disabled: saving }}
+        centered
+        width={640}
+        destroyOnHidden
+      >
+        <Form layout="vertical" requiredMark={false}>
+          <Form.Item label="名称" required>
+            <Input
+              value={name}
+              placeholder="例如：查看磁盘占用"
+              onChange={(e) => setName(e.target.value)}
+            />
+          </Form.Item>
+          <Form.Item label="描述（可选，用于搜索）">
+            <Input
+              value={description}
+              placeholder="例如：按大小列出当前目录前 10 个文件"
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </Form.Item>
+          <Form.Item label="脚本内容" required style={{ marginBottom: 0 }}>
+            <div className="h-64 overflow-hidden rounded-md border border-border">
+              <MonacoEditor
+                value={content}
+                onChange={setContent}
+                language="shell"
+                showLanguageSelector
+                showLineNumbersToggle
+                showWordWrapToggle
+              />
+            </div>
+          </Form.Item>
+        </Form>
+      </Modal>
 
       {/* 删除确认 */}
       <Modal
