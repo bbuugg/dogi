@@ -53,7 +53,7 @@ src/
       ai.ts             # AI SDK v7 多模型 + 终端工具
       mcp.ts            # MCP 客户端管理（stdio）
   preload/index.ts      # contextBridge API（全量类型化）
-  renderer/             # React + Tailwind v4 + shadcn/ui + zustand
+  renderer/             # React + Tailwind v4 + antd + zustand
     src/components/     # Sidebar / TerminalTabs / TerminalView / AiPanel / 设置
 ```
 

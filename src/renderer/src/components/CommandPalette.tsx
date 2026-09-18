@@ -8,14 +8,11 @@ import {
   Search,
   Server,
   Settings,
-  Sparkles,
   SquareTerminal,
   TerminalSquare
 } from 'lucide-react'
 import { cn } from 'cn'
-import { Modal } from 'antd'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
+import { Button, Input, Modal, type InputRef } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import { scriptToTerminalInput } from '@/lib/script'
 import type { ScriptEntry } from '@shared/types'
@@ -70,18 +67,12 @@ export function CommandPalette() {
   const selectActivity = useAppStore((s) => s.selectActivity)
   const setSshDialog = useAppStore((s) => s.setSshDialog)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
-  // AI 助手属于终端组：开关作用于当前激活组
-  const setGroupAiOpen = useAppStore((s) => s.setGroupAiOpen)
-  const activeGroupId = useAppStore((s) => s.activeGroupId)
-  const groupAiOpen = useAppStore((s) =>
-    s.activeGroupId ? !!s.ui.aiOpenGroups[s.activeGroupId] : false
-  )
   const setRunScriptDialog = useAppStore((s) => s.setRunScriptDialog)
 
   const [mode, setMode] = useState<PaletteMode>('root')
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
-  const inputRef = useRef<HTMLInputElement>(null)
+  const inputRef = useRef<InputRef>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
   // 打开时回到命令列表并刷新数据（脚本/主机可能在管理页中被改动过）
@@ -171,17 +162,6 @@ export function CommandPalette() {
       run: () => {
         close()
         setSshDialog(true, null)
-      }
-    },
-    {
-      id: 'ai.toggle',
-      group: '界面',
-      title: groupAiOpen ? '隐藏 AI 助手' : '显示 AI 助手',
-      keywords: 'ai assistant panel 助手 面板',
-      icon: Sparkles,
-      run: () => {
-        close()
-        if (activeGroupId) setGroupAiOpen(activeGroupId, !groupAiOpen)
       }
     },
     {
@@ -330,7 +310,7 @@ export function CommandPalette() {
       styles={{ container: { padding: 10 }, body: { padding: 0 } }}
     >
       <div className="flex flex-col gap-3 p-3">
-        <div className="flex items-center gap-2 rounded-md border border-border bg-background px-2.5">
+        <div className="flex items-center gap-2 rounded-md border border-border bg-background px-2.5 transition-colors focus-within:border-primary">
           {mode === 'root' ? (
             <Search className="size-4 shrink-0 text-muted-foreground" />
           ) : (
@@ -346,9 +326,14 @@ export function CommandPalette() {
           )}
           <Input
             ref={inputRef}
+            variant="borderless"
             value={query}
             placeholder={MODE_PLACEHOLDER[mode]}
-            className="h-9 border-0 bg-transparent px-0 shadow-none focus-visible:ring-0"
+            className="h-9 px-0"
+            // antd 6 的 borderless 变体在 :focus-visible 时会给输入框自己画一圈 outline
+            // （文本输入框点击即命中 focus-visible），看起来像内层小框单独长了边框。
+            // 这里的视觉容器是外层圆角框，聚焦反馈交给外层的 focus-within，内层去掉 outline。
+            style={{ outline: 'none' }}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onKeyDown}
           />
@@ -406,14 +391,14 @@ export function CommandPalette() {
           )}
         </div>
 
-        <div className="flex items-center justify-between border-t border-border pt-2 text-xs text-muted-foreground">
+        <div className="flex items-center justify-between border-t border-border pt-2 px-2 text-xs text-muted-foreground">
           <span>
             {mode === 'root' ? '↑↓ 选择 · Enter 执行 · Esc 关闭' : '↑↓ 选择 · Enter 执行 · Esc 返回'}
           </span>
           {mode === 'scripts' && (
             <Button
-              variant="ghost"
-              size="sm"
+              type="text"
+              size="small"
               className="h-7"
               onClick={() => {
                 close()

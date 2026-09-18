@@ -1,11 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { SshAuthType, SshProfile } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
-import { Button as AntButton, Modal, Select } from 'antd'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Textarea } from '@/components/ui/textarea'
-import { toast } from 'sonner'
+import { Button, Input, Modal, Select, message } from 'antd'
 
 /** 认证方式下拉项 */
 const AUTH_TYPE_OPTIONS = [
@@ -64,7 +60,7 @@ export function SshProfileDialog() {
   const [form, setForm] = useState<FormState>(EMPTY_FORM)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // 关闭时 store 会把 editing 清空，但 Radix 关闭动画期间组件仍挂载；
+  // 关闭时 store 会把 editing 清空，但弹窗关闭动画期间组件仍挂载；
   // 沿用最近一次的 editing，避免 footer 在动画中闪现「保存并连接」按钮
   const [lastEditing, setLastEditing] = useState<SshProfile | null>(null)
   const editing = (sshDialog.open ? sshDialog.editing : lastEditing) ?? null
@@ -117,20 +113,20 @@ export function SshProfileDialog() {
       await window.api.ssh.save(payload)
       await refreshProfiles()
       setSshDialog(false, null)
-      toast.success(isEdit ? 'SSH 连接已更新' : 'SSH 连接已添加')
+      message.success(isEdit ? 'SSH 连接已更新' : 'SSH 连接已添加')
       if (connectAfter) {
         const profiles = await window.api.ssh.list()
         const saved = profiles.find((p) => p.name === payload.name && p.host === payload.host)
         if (saved) {
           void connectSsh(saved).catch((e) => {
-            toast.error('连接失败', { description: e instanceof Error ? e.message : String(e) })
+            message.error(`连接失败：${e instanceof Error ? e.message : String(e)}`)
           })
         }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       setError(msg)
-      toast.error('保存失败', { description: msg })
+      message.error(`保存失败：${msg}`)
     } finally {
       setSaving(false)
     }
@@ -146,14 +142,14 @@ export function SshProfileDialog() {
       destroyOnHidden
       footer={
         <div className="flex justify-end gap-2">
-          <AntButton onClick={() => setSshDialog(false, null)}>取消</AntButton>
-          <AntButton loading={saving} onClick={() => void handleSave(false)}>
+          <Button onClick={() => setSshDialog(false, null)}>取消</Button>
+          <Button loading={saving} onClick={() => void handleSave(false)}>
             保存
-          </AntButton>
+          </Button>
           {!isEdit && (
-            <AntButton type="primary" loading={saving} onClick={() => void handleSave(true)}>
+            <Button type="primary" loading={saving} onClick={() => void handleSave(true)}>
               保存并连接
-            </AntButton>
+            </Button>
           )}
         </div>
       }
@@ -161,7 +157,7 @@ export function SshProfileDialog() {
       <div className="grid gap-3 py-1">
         <div className="grid grid-cols-3 gap-3">
           <div className="col-span-3 grid gap-1.5">
-            <Label htmlFor="ssh-name">名称</Label>
+            <label htmlFor="ssh-name" className="text-xs font-medium text-foreground">名称</label>
             <Input
               id="ssh-name"
               placeholder="如：生产环境 Web 服务器"
@@ -170,7 +166,7 @@ export function SshProfileDialog() {
             />
           </div>
           <div className="col-span-2 grid gap-1.5">
-            <Label htmlFor="ssh-host">主机地址</Label>
+            <label htmlFor="ssh-host" className="text-xs font-medium text-foreground">主机地址</label>
             <Input
               id="ssh-host"
               placeholder="ip 或域名"
@@ -179,7 +175,7 @@ export function SshProfileDialog() {
             />
           </div>
           <div className="grid gap-1.5">
-            <Label htmlFor="ssh-port">端口</Label>
+            <label htmlFor="ssh-port" className="text-xs font-medium text-foreground">端口</label>
             <Input
               id="ssh-port"
               type="number"
@@ -191,7 +187,7 @@ export function SshProfileDialog() {
 
         <div className="grid grid-cols-3 gap-3">
           <div className="col-span-1 grid gap-1.5">
-            <Label htmlFor="ssh-user">用户名</Label>
+            <label htmlFor="ssh-user" className="text-xs font-medium text-foreground">用户名</label>
             <Input
               id="ssh-user"
               value={form.username}
@@ -199,7 +195,7 @@ export function SshProfileDialog() {
             />
           </div>
           <div className="col-span-1 grid gap-1.5">
-            <Label>认证方式</Label>
+            <span className="text-xs font-medium text-foreground">认证方式</span>
             <Select
               value={form.authType}
               onChange={(v) => patch({ authType: v as SshAuthType })}
@@ -208,7 +204,7 @@ export function SshProfileDialog() {
             />
           </div>
           <div className="col-span-1 grid gap-1.5">
-            <Label>分组</Label>
+            <span className="text-xs font-medium text-foreground">分组</span>
             <Select
               value={form.groupId}
               onChange={(v) => patch({ groupId: v })}
@@ -224,7 +220,7 @@ export function SshProfileDialog() {
 
         {form.authType === 'password' ? (
           <div className="grid gap-1.5">
-            <Label htmlFor="ssh-password">密码</Label>
+            <label htmlFor="ssh-password" className="text-xs font-medium text-foreground">密码</label>
             <Input
               id="ssh-password"
               type="password"
@@ -238,8 +234,10 @@ export function SshProfileDialog() {
         ) : (
           <>
             <div className="grid gap-1.5">
-              <Label htmlFor="ssh-key">私钥（PEM / OpenSSH 格式）</Label>
-              <Textarea
+              <label htmlFor="ssh-key" className="text-xs font-medium text-foreground">
+                私钥（PEM / OpenSSH 格式）
+              </label>
+              <Input.TextArea
                 id="ssh-key"
                 rows={5}
                 className="no-scrollbar font-mono text-xs"
@@ -253,7 +251,9 @@ export function SshProfileDialog() {
               />
             </div>
             <div className="grid gap-1.5">
-              <Label htmlFor="ssh-passphrase">私钥口令（可选）</Label>
+              <label htmlFor="ssh-passphrase" className="text-xs font-medium text-foreground">
+                私钥口令（可选）
+              </label>
               <Input
                 id="ssh-passphrase"
                 type="password"

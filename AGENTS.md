@@ -47,11 +47,12 @@
 - **触发信号**：`error TS5102: Option 'baseUrl' has been removed`。
 - **正确做法**：paths 直接写相对 tsconfig 的路径（`"./src/shared/*"`），三个 tsconfig 均已如此。
 
-### 8. shadcn CLI 依赖根 tsconfig 的 paths
+### 8. UI 组件统一用 antd，不要再引入 shadcn
 
-- **触发信号**：`npx shadcn add ...` 把组件生成到字面 `@/` 目录。
-- **根因**：CLI 读根 `tsconfig.json` 解析别名；根 tsconfig 没配 paths 时按字面路径建目录。
-- **正确做法**：根 tsconfig 已补 paths；新装组件后若再生成 `@/` 目录，把文件移到 `src/renderer/src/components/ui/` 即可。另外新版组件 `import { cn } from "cn"`（cn 包），与旧版 `@/lib/utils` 不同，两种都可用。
+- **约束**：项目已彻底移除 shadcn/ui（`src/renderer/src/components/ui/**` 与 `@radix-ui/*`、`radix-ui`、`vaul`、`sonner`、`class-variance-authority`、`clsx`、`tailwind-merge`、`shadcn`、`tw-animate-css` 依赖全部删除），组件一律用 antd 6。
+- **正确做法**：新增界面直接 `import { Button, Input, Modal, ... } from 'antd'`。全局通知用 `message` / `notification`（主题与中文由 `AntdProvider.tsx` 的 `holderRender` 接管）；`Select` 用 `options` + `onChange`（不是 `onValueChange`）；`Switch` 用 `onChange`（不是 `onCheckedChange`）；`Textarea` 用 `Input.TextArea`；`ContextMenu` 用 `<Dropdown trigger={['contextMenu']}>`。
+- **保留项**：`index.css` 里的 shadcn 语义变量（`--background/--foreground/--primary/--muted/--border/--sidebar*` 等）必须留着——它们既被全项目的 Tailwind 类名使用，也是 `AntdProvider` 映射 antd token 的来源。
+- **插件侧**：宿主通过 `activate(api)` 注入 `api.antd`（antd 全量模块）与 `api.cn`、`api.icons`、`api.MonacoEditor`，插件不得自行 import 依赖。
 
 ## 依赖 API 版本差异（升级时必看）
 

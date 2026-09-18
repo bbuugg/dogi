@@ -1,27 +1,10 @@
 import React from 'react'
 import type { ComponentType } from 'react'
 import type { PluginHttpRequest, PluginHttpResponse } from '@shared/plugin'
-import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 import MonacoEditor from '@/components/MonacoEditor'
 import * as Icons from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Textarea } from '@/components/ui/textarea'
-import { Label } from '@/components/ui/label'
-import { Badge } from '@/components/ui/badge'
-import { Switch } from '@/components/ui/switch'
-import { Separator } from '@/components/ui/separator'
-import { ScrollArea } from '@/components/ui/scroll-area'
-import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
-import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
-import { Dialog, DialogTrigger, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
-import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
-import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator } from '@/components/ui/dropdown-menu'
-import { AlertDialog, AlertDialogTrigger, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel } from '@/components/ui/alert-dialog'
-import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuLabel, ContextMenuSeparator } from '@/components/ui/context-menu'
-import { Table, TableHeader, TableBody, TableFooter, TableHead, TableRow, TableCell, TableCaption } from '@/components/ui/table'
-import { Drawer, DrawerTrigger, DrawerClose, DrawerContent, DrawerHeader, DrawerFooter, DrawerTitle, DrawerDescription } from '@/components/ui/drawer'
+import * as antd from 'antd'
 
 /** 插件向宿主注册的一个视图（侧边栏入口 + 主区域渲染组件） */
 export interface PluginViewInstance {
@@ -56,78 +39,12 @@ export interface RendererHostApi {
   invoke: (name: string, ...args: unknown[]) => Promise<unknown>
   /** 注册一个命令面板命令（可选） */
   registerCommand: (cmd: { id: string; title: string; run: () => void }) => void
-  /** 注入的 shadcn 组件与工具：插件无需自带依赖即可使用一致 UI（避免裸导入） */
-  ui: {
-    cn: typeof cn
-    Button: typeof Button
-    Input: typeof Input
-    Textarea: typeof Textarea
-    Label: typeof Label
-    Badge: typeof Badge
-    Switch: typeof Switch
-    Separator: typeof Separator
-    ScrollArea: typeof ScrollArea
-    Select: typeof Select
-    SelectTrigger: typeof SelectTrigger
-    SelectValue: typeof SelectValue
-    SelectContent: typeof SelectContent
-    SelectItem: typeof SelectItem
-    Tabs: typeof Tabs
-    TabsList: typeof TabsList
-    TabsTrigger: typeof TabsTrigger
-    TabsContent: typeof TabsContent
-    Dialog: typeof Dialog
-    DialogTrigger: typeof DialogTrigger
-    DialogContent: typeof DialogContent
-    DialogHeader: typeof DialogHeader
-    DialogTitle: typeof DialogTitle
-    DialogDescription: typeof DialogDescription
-    DialogFooter: typeof DialogFooter
-    Popover: typeof Popover
-    PopoverTrigger: typeof PopoverTrigger
-    PopoverContent: typeof PopoverContent
-    DropdownMenu: typeof DropdownMenu
-    DropdownMenuTrigger: typeof DropdownMenuTrigger
-    DropdownMenuContent: typeof DropdownMenuContent
-    DropdownMenuItem: typeof DropdownMenuItem
-    DropdownMenuLabel: typeof DropdownMenuLabel
-    DropdownMenuSeparator: typeof DropdownMenuSeparator
-    AlertDialog: typeof AlertDialog
-    AlertDialogTrigger: typeof AlertDialogTrigger
-    AlertDialogContent: typeof AlertDialogContent
-    AlertDialogHeader: typeof AlertDialogHeader
-    AlertDialogTitle: typeof AlertDialogTitle
-    AlertDialogDescription: typeof AlertDialogDescription
-    AlertDialogFooter: typeof AlertDialogFooter
-    AlertDialogAction: typeof AlertDialogAction
-    AlertDialogCancel: typeof AlertDialogCancel
-    ContextMenu: typeof ContextMenu
-    ContextMenuTrigger: typeof ContextMenuTrigger
-    ContextMenuContent: typeof ContextMenuContent
-    ContextMenuItem: typeof ContextMenuItem
-    ContextMenuLabel: typeof ContextMenuLabel
-    ContextMenuSeparator: typeof ContextMenuSeparator
-    Table: typeof Table
-    TableHeader: typeof TableHeader
-    TableBody: typeof TableBody
-    TableFooter: typeof TableFooter
-    TableHead: typeof TableHead
-    TableRow: typeof TableRow
-    TableCell: typeof TableCell
-    TableCaption: typeof TableCaption
-    Drawer: typeof Drawer
-    DrawerTrigger: typeof DrawerTrigger
-    DrawerClose: typeof DrawerClose
-    DrawerContent: typeof DrawerContent
-    DrawerHeader: typeof DrawerHeader
-    DrawerFooter: typeof DrawerFooter
-    DrawerTitle: typeof DrawerTitle
-    DrawerDescription: typeof DrawerDescription
-  }
+  /** 注入 antd 全量模块：插件用 api.antd.Button / Modal / message 等，无需自带依赖 */
+  antd: typeof antd
+  /** 类名合并工具（clsx + tailwind-merge） */
+  cn: typeof cn
   /** 注入的 lucide 图标集合，按名取用：api.icons.Play */
   icons: typeof Icons
-  /** 全局通知（与主应用同一 Toaster）：api.toast.success('...') */
-  toast: typeof toast
   /** 注入 Monaco 编辑器组件（已配置本地化加载）：api.MonacoEditor */
   MonacoEditor: typeof MonacoEditor
 }
@@ -152,77 +69,10 @@ function buildRendererHostApi(manifest: {
         useAppStore.getState().registerPluginCommand?.(id, cmd)
       })
     },
-    // 注入 shadcn 组件与图标，插件通过 api.ui / api.icons 取用，无需自带依赖
-    ui: {
-      cn,
-      Button,
-      Input,
-      Textarea,
-      Label,
-      Badge,
-      Switch,
-      Separator,
-      ScrollArea,
-      Select,
-      SelectTrigger,
-      SelectValue,
-      SelectContent,
-      SelectItem,
-      Tabs,
-      TabsList,
-      TabsTrigger,
-      TabsContent,
-      Dialog,
-      DialogTrigger,
-      DialogContent,
-      DialogHeader,
-      DialogTitle,
-      DialogDescription,
-      DialogFooter,
-      Popover,
-      PopoverTrigger,
-      PopoverContent,
-      DropdownMenu,
-      DropdownMenuTrigger,
-      DropdownMenuContent,
-      DropdownMenuItem,
-      DropdownMenuLabel,
-      DropdownMenuSeparator,
-      AlertDialog,
-      AlertDialogTrigger,
-      AlertDialogContent,
-      AlertDialogHeader,
-      AlertDialogTitle,
-      AlertDialogDescription,
-      AlertDialogFooter,
-      AlertDialogAction,
-      AlertDialogCancel,
-      ContextMenu,
-      ContextMenuTrigger,
-      ContextMenuContent,
-      ContextMenuItem,
-      ContextMenuLabel,
-      ContextMenuSeparator,
-      Table,
-      TableHeader,
-      TableBody,
-      TableFooter,
-      TableHead,
-      TableRow,
-      TableCell,
-      TableCaption,
-      Drawer,
-      DrawerTrigger,
-      DrawerClose,
-      DrawerContent,
-      DrawerHeader,
-      DrawerFooter,
-      DrawerTitle,
-      DrawerDescription
-    },
+    // 注入 antd 全量模块与图标/工具，插件通过 api.antd / api.cn / api.icons 取用，无需自带依赖
+    antd,
+    cn,
     icons: Icons,
-    // 注入全局通知，插件可直接 api.toast.success / error / info ...
-    toast,
     // 注入 Monaco 编辑器组件
     MonacoEditor
   }

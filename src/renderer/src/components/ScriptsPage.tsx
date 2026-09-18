@@ -1,10 +1,8 @@
 import { useState } from 'react'
 import { Pencil, Plus, Play, Trash2 } from 'lucide-react'
-import { Button } from '@/components/ui/button'
 import MonacoEditor from '@/components/MonacoEditor'
-import { Form, Input, Modal } from 'antd'
+import { Button, Form, Input, Modal, message } from 'antd'
 import { useAppStore } from '@/stores/app-store'
-import { toast } from 'sonner'
 import type { ScriptEntry } from '@shared/types'
 
 /** 脚本管理页：列出 / 新增 / 编辑 / 删除用户脚本（持久化到本地存储） */
@@ -52,9 +50,9 @@ export function ScriptsPage() {
       })
       await refreshScripts()
       setEditing(null)
-      toast.success('脚本已保存')
+      message.success('脚本已保存')
     } catch (e) {
-      toast.error('保存失败', { description: e instanceof Error ? e.message : String(e) })
+      message.error(`保存失败：${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setSaving(false)
     }
@@ -67,27 +65,26 @@ export function ScriptsPage() {
     try {
       await window.api.scripts.remove(target.id)
       await refreshScripts()
-      toast.success(`已删除「${target.name}」`)
+      message.success(`已删除「${target.name}」`)
     } catch (e) {
-      toast.error('删除失败', { description: e instanceof Error ? e.message : String(e) })
+      message.error(`删除失败：${e instanceof Error ? e.message : String(e)}`)
     }
   }
 
   return (
     <div className="flex h-full flex-col bg-background">
       <div className="flex items-center gap-3 border-b border-border px-5 py-3">
-        <h1 className="text-sm font-semibold">脚本管理</h1>
+        <h1 className="text-base font-semibold">脚本管理</h1>
         <span className="text-xs text-muted-foreground">共 {scripts.length} 个脚本</span>
         <div className="ml-auto flex gap-2">
           <Button
-            variant="secondary"
-            size="sm"
+            variant="filled"
             onClick={() => setRunScriptDialog(true)}
             title="选择主机并运行脚本"
           >
             <Play className="size-4" /> 运行脚本
           </Button>
-          <Button size="sm" onClick={startAdd}>
+          <Button type="primary" onClick={startAdd}>
             <Plus className="size-4" /> 新增脚本
           </Button>
         </div>
@@ -102,7 +99,7 @@ export function ScriptsPage() {
             把常用命令保存下来，之后选择主机执行；也可在终端按 Ctrl+Shift+P
             打开命令面板，选择「运行脚本」。
             <div className="mt-4">
-              <Button size="sm" onClick={startAdd}>
+              <Button type="primary" onClick={startAdd}>
                 <Plus className="size-4" /> 新增脚本
               </Button>
             </div>
@@ -126,24 +123,27 @@ export function ScriptsPage() {
                   </div>
                   <div className="flex shrink-0 items-center gap-0.5">
                     <Button
-                      variant="ghost"
-                      size="icon-sm"
+                      type="text"
+                      size="small"
+                      className="w-7 p-0"
                       title="选择主机运行"
                       onClick={() => setRunScriptDialog(true, s.id)}
                     >
                       <Play className="size-4" />
                     </Button>
                     <Button
-                      variant="ghost"
-                      size="icon-sm"
+                      type="text"
+                      size="small"
+                      className="w-7 p-0"
                       title="编辑"
                       onClick={() => startEdit(s)}
                     >
                       <Pencil className="size-4" />
                     </Button>
                     <Button
-                      variant="ghost"
-                      size="icon-sm"
+                      type="text"
+                      size="small"
+                      className="w-7 p-0"
                       title="删除"
                       onClick={() => setPendingDelete(s)}
                     >

@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, Cpu, MemoryStick, X } from 'lucide-react'
 import { cn } from 'cn'
 import { useAppStore } from '@/stores/app-store'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Popover } from 'antd'
 import { formatBytes, formatDuration, formatRate } from '@/lib/format'
 import type { ServerMetrics } from '@shared/types'
 
@@ -221,57 +221,50 @@ export function MonitorBadge({ sessionId }: { sessionId: string | null }) {
       onOpenChange={(next) => {
         if (next) setOpen(true)
       }}
-    >
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          aria-label="服务器指标详情"
-          title="服务器指标"
-          className="flex h-6 items-center gap-3 rounded px-1.5 text-[11px] whitespace-nowrap text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
-        >
-          <span
-            className={cn(
-              'flex items-center gap-1 font-medium tabular-nums',
-              textColor(metrics.cpuPercent ?? 0)
-            )}
-          >
-            <Cpu className="size-3" />
-            {metrics.cpuPercent === null ? '—' : `${metrics.cpuPercent.toFixed(0)}%`}
-          </span>
-          <span
-            className={cn(
-              'flex items-center gap-1 font-medium tabular-nums',
-              textColor(metrics.memPercent)
-            )}
-          >
-            <MemoryStick className="size-3" />
-            {metrics.memPercent.toFixed(0)}%
-          </span>
-          <span className="flex items-center gap-1 tabular-nums text-emerald-500">
-            <ArrowDown className="size-3" />
-            {formatRate(metrics.netRxRate)}
-          </span>
-          <span className="flex items-center gap-1 tabular-nums text-sky-500">
-            <ArrowUp className="size-3" />
-            {formatRate(metrics.netTxRate)}
-          </span>
-        </button>
-      </PopoverTrigger>
-      {/* 关闭时直接卸载：不依赖 Radix 的退出动画（与 tw-animate-css 的 exit 动画配合时
-          存在节点卡在退出态、面板关不掉的缺陷），入场动画仍保留 */}
-      {open && (
-        <PopoverContent
-          side="top"
-          align="start"
-          sideOffset={6}
-          className="w-[300px] gap-3 p-3"
-          // 打开/关闭都不接管焦点，避免打断终端输入
-          onOpenAutoFocus={(e) => e.preventDefault()}
-          onCloseAutoFocus={(e) => e.preventDefault()}
-        >
+      trigger="click"
+      placement="topLeft"
+      arrow={false}
+      destroyOnHidden
+      styles={{ content: { padding: 12 } }}
+      content={
+        <div className="w-[300px]">
           <MetricsDetail metrics={metrics} intervalMs={interval} onClose={() => setOpen(false)} />
-        </PopoverContent>
-      )}
+        </div>
+      }
+    >
+      <button
+        type="button"
+        aria-label="服务器指标详情"
+        title="服务器指标"
+        className="flex h-6 items-center gap-3 rounded px-1.5 text-[11px] whitespace-nowrap text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
+      >
+        <span
+          className={cn(
+            'flex items-center gap-1 font-medium tabular-nums',
+            textColor(metrics.cpuPercent ?? 0)
+          )}
+        >
+          <Cpu className="size-3" />
+          {metrics.cpuPercent === null ? '—' : `${metrics.cpuPercent.toFixed(0)}%`}
+        </span>
+        <span
+          className={cn(
+            'flex items-center gap-1 font-medium tabular-nums',
+            textColor(metrics.memPercent)
+          )}
+        >
+          <MemoryStick className="size-3" />
+          {metrics.memPercent.toFixed(0)}%
+        </span>
+        <span className="flex items-center gap-1 tabular-nums text-emerald-500">
+          <ArrowDown className="size-3" />
+          {formatRate(metrics.netRxRate)}
+        </span>
+        <span className="flex items-center gap-1 tabular-nums text-sky-500">
+          <ArrowUp className="size-3" />
+          {formatRate(metrics.netTxRate)}
+        </span>
+      </button>
     </Popover>
   )
 }

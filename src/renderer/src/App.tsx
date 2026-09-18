@@ -14,11 +14,10 @@ import { CommandPalette } from '@/components/CommandPalette'
 import { RunScriptDialog } from '@/components/RunScriptDialog'
 import { ScriptsPage } from '@/components/ScriptsPage'
 import { PluginsPage } from '@/components/PluginsPage'
-import { AppToaster } from '@/components/AppToaster'
 import { StatusBar } from '@/components/StatusBar'
 import { ResizeHandle } from '@/components/ResizeHandle'
 import { AntdProvider } from '@/components/AntdProvider'
-import { Button } from '@/components/ui/button'
+import { Button } from 'antd'
 
 function EmptyState() {
   const createLocalSession = useAppStore((s) => s.createLocalSession)
@@ -28,10 +27,10 @@ function EmptyState() {
       <TerminalSquare className="size-12 opacity-30" />
       <div className="text-sm">从左侧新建本地终端或连接 SSH</div>
       <div className="flex gap-2">
-        <Button variant="secondary" size="sm" onClick={() => void createLocalSession()}>
+        <Button variant="filled" size="small" onClick={() => void createLocalSession()}>
           新建本地终端
         </Button>
-        <Button variant="ghost" size="sm" onClick={() => setSshDialog(true, null)}>
+        <Button type="text" size="small" onClick={() => setSshDialog(true, null)}>
           添加 SSH 连接
         </Button>
       </div>
@@ -128,9 +127,6 @@ export default function App() {
         <SettingsDialog />
         <CommandPalette />
         <RunScriptDialog />
-
-        {/* 全局通知 */}
-        <AppToaster />
       </div>
     </AntdProvider>
   )

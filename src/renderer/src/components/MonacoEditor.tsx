@@ -2,9 +2,7 @@ import Editor, { loader } from '@monaco-editor/react'
 import { Braces, Check, Code, Copy, Download, Hash, Lock, WrapText } from 'lucide-react'
 import type { FC, ReactNode } from 'react'
 import { useEffect, useRef, useState } from 'react'
-import { Select } from 'antd'
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
+import { Button, Select, Tag } from 'antd'
 import { cn } from '@/lib/utils'
 import { useIsDarkTheme } from '@/lib/theme'
 
@@ -149,9 +147,9 @@ const MonacoEditor: FC<MonacoEditorProps> = ({
           {/* Built-in toggles */}
           {showLineNumbersToggle && (
             <Button
-              variant="ghost"
-              size="icon-xs"
-              className={cn('text-muted-foreground', !showLineNumbers && 'opacity-40')}
+              type="text"
+              size="small"
+              className={cn('w-6 p-0 text-muted-foreground', !showLineNumbers && 'opacity-40')}
               onClick={() => setShowLineNumbers((v) => !v)}
               title="切换行号"
             >
@@ -160,9 +158,9 @@ const MonacoEditor: FC<MonacoEditorProps> = ({
           )}
           {showWordWrapToggle && (
             <Button
-              variant="ghost"
-              size="icon-xs"
-              className={cn('text-muted-foreground', wordWrap === 'off' && 'opacity-40')}
+              type="text"
+              size="small"
+              className={cn('w-6 p-0 text-muted-foreground', wordWrap === 'off' && 'opacity-40')}
               onClick={() => setWordWrap((w) => (w === 'on' ? 'off' : 'on'))}
               title="切换自动换行"
             >
@@ -177,9 +175,9 @@ const MonacoEditor: FC<MonacoEditorProps> = ({
 
           {!readOnly && mounted && (
             <Button
-              variant="ghost"
-              size="icon-xs"
-              className="text-muted-foreground"
+              type="text"
+              size="small"
+              className="w-6 p-0 text-muted-foreground"
               onClick={handleFormat}
               title="格式化"
             >
@@ -189,9 +187,9 @@ const MonacoEditor: FC<MonacoEditorProps> = ({
 
           {showCopyButton && (
             <Button
-              variant="ghost"
-              size="icon-xs"
-              className="text-muted-foreground"
+              type="text"
+              size="small"
+              className="w-6 p-0 text-muted-foreground"
               onClick={handleCopy}
               disabled={!value}
               title="复制"
@@ -201,9 +199,9 @@ const MonacoEditor: FC<MonacoEditorProps> = ({
           )}
           {showDownloadButton && (
             <Button
-              variant="ghost"
-              size="icon-xs"
-              className="text-muted-foreground"
+              type="text"
+              size="small"
+              className="w-6 p-0 text-muted-foreground"
               onClick={onDownload}
               disabled={!value}
               title="下载"
@@ -213,13 +211,13 @@ const MonacoEditor: FC<MonacoEditorProps> = ({
           )}
 
           {readOnly && (
-            <Badge
-              variant="secondary"
-              className="gap-1 bg-emerald-500/15 text-[10px] font-medium text-emerald-600 dark:text-emerald-400"
+            <Tag
+              color="green"
+              className="m-0 gap-1 border-0 bg-emerald-500/15 text-[10px] font-medium text-emerald-600 dark:text-emerald-400"
             >
               <Lock className="size-2.5" />
               只读
-            </Badge>
+            </Tag>
           )}
         </div>
       </div>

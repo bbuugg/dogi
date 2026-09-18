@@ -2,8 +2,7 @@ import { Check, Monitor, Moon, Sun } from 'lucide-react'
 import type { ThemeMode } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import { COLOR_THEMES } from '@/lib/color-themes'
-import { Label } from '@/components/ui/label'
-import { Switch } from '@/components/ui/switch'
+import { Switch } from 'antd'
 import { cn } from 'cn'
 
 const THEME_OPTIONS: Array<{ value: ThemeMode; label: string; icon: typeof Sun }> = [
@@ -23,7 +22,9 @@ export function PrefSettings() {
     <div className="space-y-5">
       <div className="flex items-start justify-between gap-4 rounded-md">
         <div>
-          <Label htmlFor="minimize-to-tray">关闭时最小化到系统托盘</Label>
+          <label htmlFor="minimize-to-tray" className="text-xs font-medium text-foreground">
+            关闭时最小化到系统托盘
+          </label>
           <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
             关闭主窗口时隐藏到系统托盘继续运行，从托盘图标右键菜单中选择「退出」才真正关闭程序。
           </p>
@@ -31,7 +32,7 @@ export function PrefSettings() {
         <Switch
           id="minimize-to-tray"
           checked={minimizeToTray}
-          onCheckedChange={(v) => void setMinimizeToTray(v)}
+          onChange={(v) => void setMinimizeToTray(v)}
         />
       </div>
 

@@ -465,10 +465,10 @@ let shortcutWired = false
       // 有插件加载失败时给出一次性提示（详情见插件管理页）
       const failedPlugins = pluginList.filter((p) => p.error)
       if (failedPlugins.length > 0) {
-        const { toast } = await import('sonner')
-        toast.error(`${failedPlugins.length} 个插件加载失败`, {
-          description: failedPlugins.map((p) => p.name).join('、')
-        })
+        const { message } = await import('antd')
+        message.error(
+          `${failedPlugins.length} 个插件加载失败：${failedPlugins.map((p) => p.name).join('、')}`
+        )
       }
       // 全局快捷键：主进程触发后在此分发到具体 UI 动作
       if (!shortcutWired) {

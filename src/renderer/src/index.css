@@ -1,7 +1,4 @@
 @import 'tailwindcss';
-@import 'tw-animate-css';
-@import "tw-animate-css";
-@import "shadcn/tailwind.css";
 @import "@fontsource-variable/inter";
 
 /* 运行时插件的源码（含手写 Tailwind 类名）也纳入扫描，确保样式生成 */
@@ -29,7 +26,7 @@
 
     /* 桌面应用：界面默认不可选中，避免像网页一样拖出蓝色选区 / 双击选中按钮文字。
        需要复制的内容用 select-text 显式开放（见下），这样规则集中在两处而不是散落在各组件里。
-       注意：Radix 的 dialog / menu / popover 都 portal 到 body，所以规则必须挂在 html/body 上，
+       注意：antd 的 dialog / menu / popover 都 portal 到 body，所以规则必须挂在 html/body 上，
        挂在 App 根节点上的 class 覆盖不到它们。 */
     user-select: none;
     -webkit-user-select: none;
@@ -138,16 +135,6 @@
 /* xterm 终端容器 */
 .xterm {
   padding: 8px;
-}
-
-/* antd 弹窗层级取自 zIndexPopupBase（默认 1000），而 Radix 浮层只有 z-50，弹窗内的下拉
-   （如「新建 SSH 连接」的认证方式）会被遮罩压住而点不到。
-   Radix 浮层容器有两种形态：popper 包装层（Popover / DropdownMenu / ContextMenu / Tooltip）
-   与 Select 自带的定位层（无 class、行内 z-index: 50，只能用 :has 选中）。
-   两者都会形成层叠上下文，所以必须抬容器本身而不是里面的 content。 */
-[data-radix-popper-content-wrapper],
-div:has(> [data-slot='select-content']) {
-  z-index: 1100 !important;
 }
 
 .xterm-viewport {

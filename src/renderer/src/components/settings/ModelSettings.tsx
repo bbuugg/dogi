@@ -2,17 +2,7 @@ import { useState } from 'react'
 import { Pencil, Plus, Star, Trash2 } from 'lucide-react'
 import type { AiApiStyle, AiModelConfig, AiProviderKind } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Badge } from '@/components/ui/badge'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from '@/components/ui/select'
+import { Button, Input, Select, Tag } from 'antd'
 
 const KIND_LABELS: Record<AiProviderKind, string> = {
   openai: 'OpenAI',
@@ -53,7 +43,7 @@ interface FormState {
   apiKey: string
   baseURL: string
   model: string
-  /** 'default' = 跟随 kind 默认（Radix Select 不支持空 value） */
+  /** 'default' = 跟随 kind 默认 */
   apiStyle: AiApiStyle | 'default'
   temperature: string
   maxTokens: string
@@ -146,7 +136,7 @@ export function ModelSettings() {
       <div className="space-y-3">
         <div className="grid grid-cols-2 gap-3">
           <div className="grid gap-1.5">
-            <Label>配置名称</Label>
+            <span className="text-xs font-medium text-foreground">配置名称</span>
             <Input
               placeholder="如：DeepSeek 生产 Key"
               value={editing.name}
@@ -154,27 +144,21 @@ export function ModelSettings() {
             />
           </div>
           <div className="grid gap-1.5">
-            <Label>服务商</Label>
+            <span className="text-xs font-medium text-foreground">服务商</span>
             <Select
               value={editing.kind}
-              onValueChange={(v) => patch({ kind: v as AiProviderKind })}
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {(Object.keys(KIND_LABELS) as AiProviderKind[]).map((k) => (
-                  <SelectItem key={k} value={k}>
-                    {KIND_LABELS[k]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+              onChange={(v) => patch({ kind: v as AiProviderKind })}
+              style={{ width: '100%' }}
+              options={(Object.keys(KIND_LABELS) as AiProviderKind[]).map((k) => ({
+                value: k,
+                label: KIND_LABELS[k]
+              }))}
+            />
           </div>
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div className="grid gap-1.5">
-            <Label>API Key</Label>
+            <span className="text-xs font-medium text-foreground">API Key</span>
             <Input
               type="password"
               placeholder={editing.id ? '已保存（留空保持不变）' : 'sk-...'}
@@ -183,7 +167,7 @@ export function ModelSettings() {
             />
           </div>
           <div className="grid gap-1.5">
-            <Label>Base URL（可选）</Label>
+            <span className="text-xs font-medium text-foreground">Base URL（可选）</span>
             <Input
               placeholder="https://api.example.com/v1"
               value={editing.baseURL}
@@ -192,7 +176,7 @@ export function ModelSettings() {
           </div>
         </div>
         <div className="grid gap-1.5">
-          <Label>模型 ID</Label>
+          <span className="text-xs font-medium text-foreground">模型 ID</span>
           <Input
             placeholder={MODEL_HINTS[editing.kind]}
             value={editing.model}
@@ -201,24 +185,20 @@ export function ModelSettings() {
         </div>
         {hasApiStyleChoice(editing.kind) && (
           <div className="grid gap-1.5">
-            <Label>接口风格</Label>
+            <span className="text-xs font-medium text-foreground">接口风格</span>
             <Select
               value={editing.apiStyle}
-              onValueChange={(v) => patch({ apiStyle: v as AiApiStyle | 'default' })}
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="default">
-                  默认（{API_STYLE_LABELS[API_STYLE_DEFAULT[editing.kind] ?? 'responses']}）
-                </SelectItem>
-                <SelectItem value="chat-completions">
-                  {API_STYLE_LABELS['chat-completions']}
-                </SelectItem>
-                <SelectItem value="responses">{API_STYLE_LABELS['responses']}</SelectItem>
-              </SelectContent>
-            </Select>
+              onChange={(v) => patch({ apiStyle: v as AiApiStyle | 'default' })}
+              style={{ width: '100%' }}
+              options={[
+                {
+                  value: 'default',
+                  label: `默认（${API_STYLE_LABELS[API_STYLE_DEFAULT[editing.kind] ?? 'responses']}）`
+                },
+                { value: 'chat-completions', label: API_STYLE_LABELS['chat-completions'] },
+                { value: 'responses', label: API_STYLE_LABELS['responses'] }
+              ]}
+            />
             <p className="text-[10px] text-muted-foreground">
               第三方兼容接口（Ollama / vLLM / 中转网关）若调用 /responses 报 404，请选 Chat Completions。
             </p>
@@ -226,7 +206,7 @@ export function ModelSettings() {
         )}
         <div className="grid grid-cols-3 gap-3">
           <div className="grid gap-1.5">
-            <Label>Temperature</Label>
+            <span className="text-xs font-medium text-foreground">Temperature</span>
             <Input
               type="number"
               step="0.1"
@@ -238,7 +218,7 @@ export function ModelSettings() {
             />
           </div>
           <div className="grid gap-1.5">
-            <Label>最大输出 Tokens</Label>
+            <span className="text-xs font-medium text-foreground">最大输出 Tokens</span>
             <Input
               type="number"
               placeholder="默认"
@@ -247,7 +227,7 @@ export function ModelSettings() {
             />
           </div>
           <div className="grid gap-1.5">
-            <Label>历史消息条数</Label>
+            <span className="text-xs font-medium text-foreground">历史消息条数</span>
             <Input
               type="number"
               value={editing.contextMessages}
@@ -257,10 +237,10 @@ export function ModelSettings() {
         </div>
         {error && <p className="text-xs text-destructive">{error}</p>}
         <div className="flex justify-end gap-2">
-          <Button variant="ghost" onClick={() => setEditing(null)}>
+          <Button type="text" onClick={() => setEditing(null)}>
             取消
           </Button>
-          <Button disabled={saving} onClick={() => void handleSave()}>
+          <Button type="primary" loading={saving} onClick={() => void handleSave()}>
             保存
           </Button>
         </div>
@@ -275,7 +255,7 @@ export function ModelSettings() {
         <p className="text-xs text-muted-foreground">
           可添加多套模型配置，随时在 AI 面板顶部切换。
         </p>
-        <Button size="sm" variant="secondary" onClick={() => setEditing({ ...EMPTY })}>
+        <Button size="small" variant="filled" onClick={() => setEditing({ ...EMPTY })}>
           <Plus className="size-4" /> 新建配置
         </Button>
       </div>
@@ -293,9 +273,9 @@ export function ModelSettings() {
             <div className="flex items-center gap-1.5">
               <span className="truncate text-xs font-medium">{config.name}</span>
               {config.id === activeConfigId && (
-                <Badge variant="secondary" className="h-4 px-1.5 text-[9px]">
+                <Tag color="default" className="m-0 h-4 border-0 bg-secondary px-1.5 text-[9px] leading-4">
                   使用中
-                </Badge>
+                </Tag>
               )}
             </div>
             <div className="truncate text-[10px] text-muted-foreground">
@@ -309,9 +289,9 @@ export function ModelSettings() {
           </div>
           {config.id !== activeConfigId && (
             <Button
-              size="icon"
-              variant="ghost"
-              className="size-7"
+              size="small"
+              type="text"
+              className="w-7 p-0"
               title="设为当前使用"
               onClick={() => void setActiveAiConfig(config.id)}
             >
@@ -319,18 +299,18 @@ export function ModelSettings() {
             </Button>
           )}
           <Button
-            size="icon"
-            variant="ghost"
-            className="size-7"
+            size="small"
+            type="text"
+            className="w-7 p-0"
             title="编辑"
             onClick={() => setEditing(toForm(config))}
           >
             <Pencil className="size-3.5" />
           </Button>
           <Button
-            size="icon"
-            variant="ghost"
-            className="size-7"
+            size="small"
+            type="text"
+            className="w-7 p-0"
             title="删除"
             onClick={() => void handleDelete(config)}
           >

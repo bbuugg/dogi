@@ -8,9 +8,8 @@ import {
   shortcutLabel
 } from '@shared/shortcuts'
 import { useAppStore } from '@/stores/app-store'
-import { toast } from 'sonner'
+import { Button, message } from 'antd'
 import { cn } from 'cn'
-import { Button } from '@/components/ui/button'
 
 /** 把一次键盘事件转成 Electron accelerator（跨平台用 CommandOrControl） */
 function eventToAccelerator(e: KeyboardEvent): string | null {
@@ -81,7 +80,7 @@ export function ShortcutSettings() {
         void useAppStore
           .getState()
           .saveShortcuts(cur.map((s) => (s.action === recording ? { ...s, accelerator: '' } : s)))
-          .then(() => toast(`已清除「${shortcutLabel(recording)}」快捷键`))
+          .then(() => message.info(`已清除「${shortcutLabel(recording)}」快捷键`))
         setRecording(null)
         return
       }
@@ -92,7 +91,7 @@ export function ShortcutSettings() {
           .getState()
           .saveShortcuts(cur.map((s) => (s.action === recording ? { ...s, accelerator: acc } : s)))
           .then(() =>
-            toast.success(
+            message.success(
               `「${shortcutLabel(recording)}」已设为 ${formatShortcutForPlatform(acc, window.api.app.platform)}`
             )
           )
@@ -156,18 +155,11 @@ export function ShortcutSettings() {
                 </div>
               </div>
               <Button
-                type="button"
-                variant="ghost"
                 onClick={() => setRecording(isRecording ? null : meta.action)}
                 title={accelerator || undefined}
-                className={cn(
-                  'shrink-0 rounded-md border px-3 py-1.5 text-[12px] font-medium tabular-nums transition-colors',
-                  isRecording
-                    ? 'bg-primary/10 text-primary'
-                    : isConflict
-                      ? 'text-destructive'
-                      : 'text-foreground hover:bg-secondary'
-                )}
+                color={isRecording ? 'primary' : isConflict ? 'danger' : 'default'}
+                variant={isRecording ? 'filled' : 'outlined'}
+                className="shrink-0 px-3 text-[12px] font-medium tabular-nums"
               >
                 {isRecording ? '按下按键组合…（Esc 取消）' : display || '点击设置'}
               </Button>
@@ -177,18 +169,17 @@ export function ShortcutSettings() {
       </div>
 
       <div className="flex justify-end">
-        <button
-          type="button"
+        <Button
+          size="small"
+          icon={<RotateCcw className="size-3.5" />}
           onClick={() =>
             void saveShortcuts(
               SHORTCUT_ACTIONS.map((a) => ({ action: a.action, accelerator: a.defaultAccelerator }))
-            ).then(() => toast.success('已恢复默认快捷键'))
+            ).then(() => message.success('已恢复默认快捷键'))
           }
-          className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-[12px] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
         >
-          <RotateCcw className="size-3.5" />
           恢复默认
-        </button>
+        </Button>
       </div>
     </div>
   )

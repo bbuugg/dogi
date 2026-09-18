@@ -1,13 +1,5 @@
 import { AiMarkdown } from '@/components/AiMarkdown'
-import { Button } from '@/components/ui/button'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from '@/components/ui/select'
-import { Textarea } from '@/components/ui/textarea'
+import { Button, Input, Select } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'
 import type {
@@ -187,15 +179,15 @@ function ToolPartCard({
         {confirm && (
           <div className="mt-2 flex gap-2">
             <Button
-              size="sm"
+              size="small"
+              type="primary"
               className="h-7 flex-1 text-xs"
               onClick={() => void resolveAiConfirm(confirm.id, true)}
             >
               执行
             </Button>
             <Button
-              size="sm"
-              variant="outline"
+              size="small"
               className="h-7 flex-1 text-xs"
               onClick={() => void resolveAiConfirm(confirm.id, false)}
             >
@@ -391,33 +383,28 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         <span className="text-sm font-semibold">AI 助手</span>
         <div className="flex-1" />
         <Select
+          size="small"
+          variant="borderless"
+          className="min-w-0 flex-1"
           value={aiSettings.activeConfigId ?? ''}
-          onValueChange={(v) => void setActiveAiConfig(v)}
-        >
-          <SelectTrigger className="border-none h-7 min-w-0 flex-1 text-xs" title="切换模型">
-            <SelectValue placeholder="选择模型" />
-          </SelectTrigger>
-          <SelectContent>
-            {aiConfigs.map((c) => (
-              <SelectItem key={c.id} value={c.id} className="text-xs">
-                {c.name}（{c.model}）
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+          onChange={(v) => void setActiveAiConfig(v)}
+          placeholder="选择模型"
+          popupMatchSelectWidth={false}
+          options={aiConfigs.map((c) => ({ value: c.id, label: `${c.name}（${c.model}）` }))}
+        />
         <Button
-          variant="ghost"
-          size="icon"
-          className="size-7 shrink-0 text-muted-foreground"
+          type="text"
+          size="small"
+          className="h-7 w-7 shrink-0 p-0 text-muted-foreground"
           title="清空对话"
           onClick={() => sessionId && clearAiMessages(sessionId)}
         >
           <Eraser className="size-3.5" />
         </Button>
         <Button
-          variant="ghost"
-          size="icon"
-          className="size-7 shrink-0 text-muted-foreground"
+          type="text"
+          size="small"
+          className="h-7 w-7 shrink-0 p-0 text-muted-foreground"
           title="AI 设置"
           onClick={() => setSettingsOpen(true, 'ai')}
         >
@@ -453,8 +440,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               )}
               {!hasConfig && (
                 <Button
-                  size="sm"
-                  variant="secondary"
+                  size="small"
+                  variant="filled"
                   className="mt-2"
                   onClick={() => setSettingsOpen(true, 'ai')}
                 >
@@ -491,7 +478,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
       {/* 输入区：圆角卡片，操作按钮集中在卡片底部（对齐 ChatInput 结构） */}
       <div className="shrink-0 p-3">
         <div className="rounded-lg border border-border bg-card transition-colors focus-within:border-primary">
-          <Textarea
+          <Input.TextArea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
@@ -504,40 +491,34 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               hasConfig ? '描述你想做的事…（Enter 发送，Shift+Enter 换行）' : '请先在设置中配置模型'
             }
             rows={2}
-            className="min-h-14 max-h-40 resize-none overflow-y-auto border-0 bg-transparent px-2.5 pt-2.5 text-[13px] shadow-none outline-none focus-visible:border-0 focus-visible:ring-0 dark:bg-transparent"
+            autoSize={{ minRows: 2, maxRows: 6 }}
+            className="min-h-14 max-h-40 overflow-y-auto border-0 bg-transparent px-2.5 pt-2.5 text-[13px] shadow-none outline-none focus:ring-0 focus-visible:ring-0 no-scrollbar"
+            variant="borderless"
           />
           <div className="flex items-center justify-between gap-2 px-2 pb-2">
             <div className="flex min-w-0 items-center gap-1">
               <Select
+                size="small"
+                variant="borderless"
+                className="w-28 shrink-0"
                 value={permissionMode}
-                onValueChange={(v) => void setAiPermissionMode(v as AiPermissionMode)}
-              >
-                <SelectTrigger
-                  className="border-none w-28 shrink-0 gap-1 px-2 text-xs"
-                  title="AI 终端执行权限（可实时切换）"
-                >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {PERMISSION_MODES.map((m) => {
-                    const Icon = m.icon
-                    return (
-                      <SelectItem key={m.value} value={m.value} className="text-xs">
-                        <span className="flex items-center gap-1.5">
-                          <Icon className="size-3" />
-                          {m.label}
-                        </span>
-                      </SelectItem>
-                    )
-                  })}
-                </SelectContent>
-              </Select>
+                onChange={(v) => void setAiPermissionMode(v as AiPermissionMode)}
+                popupMatchSelectWidth={false}
+                options={PERMISSION_MODES.map((m) => ({
+                  value: m.value,
+                  label: (
+                    <span className="flex items-center gap-1.5">
+                      <m.icon className="size-3" />
+                      {m.label}
+                    </span>
+                  )
+                }))}
+              />
             </div>
             {aiStreaming ? (
               <Button
-                size="icon"
-                variant="destructive"
-                className="size-8 shrink-0 rounded-full"
+                type="text"
+                className="size-8 shrink-0 rounded-full text-destructive"
                 title="停止"
                 onClick={() => sessionId && void abortAi(sessionId)}
               >
@@ -545,7 +526,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               </Button>
             ) : (
               <Button
-                size="icon"
+                type="primary"
                 className="size-8 shrink-0 rounded-full"
                 disabled={!input.trim() || !hasConfig || !sessionId}
                 title="发送"

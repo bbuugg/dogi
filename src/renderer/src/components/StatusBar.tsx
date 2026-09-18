@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import { Boxes, Command as CommandIcon, ListPlus, Menu, Plus, Settings } from 'lucide-react'
 import { cn } from 'cn'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Popover } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import {
   HOSTS_ACTIVITY_ID,
@@ -90,15 +90,16 @@ function MenuButton() {
   }
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button type="button" title="菜单" className={cn(ITEM_CLASS, 'px-1')}>
-          <Menu className="size-4" />
-        </button>
-      </PopoverTrigger>
-      {/* 关闭即卸载：不依赖 Radix 退出动画（与 tw-animate-css 配合时可能残留） */}
-      {open && (
-        <PopoverContent side="top" align="start" sideOffset={6} className="w-52 gap-0.5 p-1">
+    <Popover
+      open={open}
+      onOpenChange={setOpen}
+      trigger="click"
+      placement="topLeft"
+      arrow={false}
+      destroyOnHidden
+      styles={{ container: { padding: 0 }, content: { padding: 4 } }}
+      content={
+        <div className="flex w-46 flex-col gap-0.5">
           <button
             type="button"
             className={menuItem}
@@ -124,8 +125,12 @@ function MenuButton() {
             <Settings className="size-3.5 text-muted-foreground" /> 设置
             <span className={hint}>Ctrl+Alt+S</span>
           </button>
-        </PopoverContent>
-      )}
+        </div>
+      }
+    >
+      <button type="button" title="菜单" className={cn(ITEM_CLASS, 'px-1')}>
+        <Menu className="size-4" />
+      </button>
     </Popover>
   )
 }

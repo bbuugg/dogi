@@ -1,12 +1,8 @@
 import { useState } from 'react'
 import { useAppStore } from '@/stores/app-store'
-import { Button } from '@/components/ui/button'
-import { Switch } from '@/components/ui/switch'
-import { Badge } from '@/components/ui/badge'
-import { Modal } from 'antd'
+import { Button, Modal, Switch, Tag, message } from 'antd'
 import { cn } from '@/lib/utils'
 import { Boxes, ExternalLink, Package, RefreshCw, RotateCw, Trash2, Upload } from 'lucide-react'
-import { toast } from 'sonner'
 import type { PluginInfo } from '@shared/plugin'
 import { pluginActivityId } from '@/activity-ids'
 
@@ -48,12 +44,12 @@ export function PluginsPage() {
       await installPlugin(res.filePaths[0])
       const added = useAppStore.getState().pluginList.find((p) => !before.has(p.id))
       if (added) {
-        toast.success(`插件「${added.name}」安装成功`, { description: added.id })
+        message.success(`插件「${added.name}」安装成功（${added.id}）`)
       } else {
-        toast.success('插件安装成功')
+        message.success('插件安装成功')
       }
     } catch (e) {
-      toast.error('安装失败', { description: errText(e) })
+      message.error(`安装失败：${errText(e)}`)
     } finally {
       setInstalling(false)
     }
@@ -68,9 +64,9 @@ export function PluginsPage() {
   const reloadOne = async (info: PluginInfo) => {
     try {
       await reloadPlugins(info.id)
-      toast.success(`已重新加载「${info.name}」`)
+      message.success(`已重新加载「${info.name}」`)
     } catch (e) {
-      toast.error('重新加载失败', { description: errText(e) })
+      message.error(`重新加载失败：${errText(e)}`)
     }
   }
 
@@ -78,9 +74,9 @@ export function PluginsPage() {
     setReloading(true)
     try {
       await reloadPlugins()
-      toast.success('已重新加载全部插件')
+      message.success('已重新加载全部插件')
     } catch (e) {
-      toast.error('重新加载失败', { description: errText(e) })
+      message.error(`重新加载失败：${errText(e)}`)
     } finally {
       setReloading(false)
     }
@@ -89,9 +85,9 @@ export function PluginsPage() {
   const toggleEnabled = async (info: PluginInfo, enabled: boolean) => {
     try {
       await togglePluginEnabled(info.id, enabled)
-      toast.success(enabled ? `已启用「${info.name}」` : `已禁用「${info.name}」`)
+      message.success(enabled ? `已启用「${info.name}」` : `已禁用「${info.name}」`)
     } catch (e) {
-      toast.error('操作失败', { description: errText(e) })
+      message.error(`操作失败：${errText(e)}`)
     }
   }
 
@@ -101,9 +97,9 @@ export function PluginsPage() {
     if (!target) return
     try {
       await uninstallPlugin(target.id)
-      toast.success(`已卸载「${target.name}」`)
+      message.success(`已卸载「${target.name}」`)
     } catch (e) {
-      toast.error('卸载失败', { description: errText(e) })
+      message.error(`卸载失败：${errText(e)}`)
     }
   }
 
@@ -112,21 +108,21 @@ export function PluginsPage() {
       {/* 顶部工具条 */}
       <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
         <div>
-          <h2 className="text-sm font-semibold">插件管理</h2>
+          <h2 className="text-base font-semibold">插件管理</h2>
           <p className="text-[11px] text-muted-foreground">
             已安装 {pluginList.length} 个插件 · 启用 {pluginList.filter((p) => p.enabled).length} 个
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="ghost" size="sm" onClick={() => void refreshPluginList()} disabled={installing || reloading}>
-            <RefreshCw className="size-4" />
-            刷新
-          </Button>
-          <Button variant="ghost" size="sm" onClick={() => void reloadAll()} disabled={reloading}>
+           <Button loading={reloading} type="text" onClick={() => void reloadAll()} disabled={reloading}>
             <RotateCw className={reloading ? 'size-4 animate-spin' : 'size-4'} />
             {reloading ? '重载中…' : '重新加载'}
           </Button>
-          <Button variant="secondary" size="sm" onClick={() => void installFromFile()} disabled={installing}>
+           <Button type="text" onClick={() => void refreshPluginList()} disabled={installing || reloading}>
+            <RefreshCw className="size-4" />
+            刷新
+          </Button>
+           <Button variant="filled" onClick={() => void installFromFile()} disabled={installing}>
             <Upload className="size-4" />
             {installing ? '安装中…' : '从文件安装'}
           </Button>
@@ -139,7 +135,7 @@ export function PluginsPage() {
           <div className="flex h-full flex-col items-center justify-center gap-3 text-muted-foreground">
             <Boxes className="size-12 opacity-30" />
             <div className="text-sm">还没有安装插件</div>
-            <Button variant="secondary" size="sm" onClick={() => void installFromFile()} disabled={installing}>
+            <Button variant="filled" size="small" onClick={() => void installFromFile()} disabled={installing}>
               <Upload className="size-4" />
               从文件安装
             </Button>
@@ -165,13 +161,13 @@ export function PluginsPage() {
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <span className="truncate text-sm font-medium">{info.name}</span>
-                        <Badge variant="outline" className="text-[10px] font-normal">
+                        <Tag className="m-0 text-[10px] font-normal" variant="outlined">
                           v{info.version}
-                        </Badge>
+                        </Tag>
                         {!info.enabled && (
-                          <Badge variant="secondary" className="text-[10px] font-normal">
+                          <Tag className="m-0 border-0 text-[10px] font-normal" color="default">
                             已禁用
-                          </Badge>
+                          </Tag>
                         )}
                       </div>
                       {info.author && (
@@ -180,7 +176,7 @@ export function PluginsPage() {
                     </div>
                     <Switch
                       checked={info.enabled}
-                      onCheckedChange={(v) => void toggleEnabled(info, v)}
+                      onChange={(v) => void toggleEnabled(info, v)}
                       aria-label="启用/禁用"
                     />
                   </div>
@@ -198,9 +194,9 @@ export function PluginsPage() {
                       <span className="text-[10px] text-muted-foreground">无</span>
                     ) : (
                       info.permissions!.map((perm) => (
-                        <Badge key={perm} variant="secondary" className="text-[10px] font-normal">
+                        <Tag key={perm} className="m-0 border-0 text-[10px] font-normal" color="default">
                           {PERMISSION_LABEL[perm] ?? perm}
-                        </Badge>
+                        </Tag>
                       ))
                     )}
                   </div>
@@ -209,8 +205,8 @@ export function PluginsPage() {
                   {/* 底部操作栏 */}
                   <div className="mt-auto flex items-center gap-1 border-t border-border pt-2">
                     <Button
-                      variant="ghost"
-                      size="sm"
+                      type="text"
+                      size="small"
                       className="h-7 px-2 text-[11px]"
                       onClick={() => openPlugin(info)}
                       disabled={!canOpen}
@@ -219,18 +215,19 @@ export function PluginsPage() {
                       打开
                     </Button>
                     <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      className="h-7 text-muted-foreground"
+                      type="text"
+                      size="small"
+                      className="h-7 w-7 p-0 text-muted-foreground"
                       title="重新加载该插件（改动后无需重启）"
                       onClick={() => void reloadOne(info)}
                     >
                       <RotateCw className="size-3.5" />
                     </Button>
                     <Button
-                      variant="ghost"
-                      size="sm"
-                      className="ml-auto h-7 px-2 text-[11px] text-destructive hover:bg-destructive/10"
+                      type="text"
+                      size="small"
+                      danger
+                      className="ml-auto h-7 px-2 text-[11px]"
                       onClick={() => setPendingUninstall(info)}
                     >
                       <Trash2 className="size-3.5" />

@@ -3,7 +3,6 @@ import type { SshGroup, SshProfile } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import { ChevronDown, Folder, FolderPlus, Pencil, Plus, Server, Trash2 } from 'lucide-react'
 import { cn } from 'cn'
-import { toast } from 'sonner'
 import { DndProvider, useDrag, useDrop } from 'react-dnd'
 import { HTML5Backend } from 'react-dnd-html5-backend'
 import {
@@ -15,6 +14,7 @@ import {
   Space,
   Tooltip,
   Tree,
+  message,
   type MenuProps,
   type TreeDataNode
 } from 'antd'
@@ -198,12 +198,10 @@ export function HostsPanel() {
     })
   }
 
-  /** 发起连接并在失败时用 toast 提示（连接本身会切回终端视图） */
+  /** 发起连接并在失败时提示（连接本身会切回终端视图） */
   const connect = (profile: SshProfile) => {
     void connectSsh(profile).catch((e) => {
-      toast.error('连接失败', {
-        description: e instanceof Error ? e.message : String(e)
-      })
+      message.error(`连接失败：${e instanceof Error ? e.message : String(e)}`)
     })
   }
 
@@ -282,9 +280,9 @@ export function HostsPanel() {
     setPendingGroupDelete(null)
     setDeleteGroupHosts(false)
     await deleteSshGroup(target.id, alsoHosts)
-    toast.success(`已删除分组「${target.name}」`, {
-      description: alsoHosts ? '组内主机已一并删除' : '组内主机已移到「未分组」'
-    })
+    message.success(
+      `已删除分组「${target.name}」：${alsoHosts ? '组内主机已一并删除' : '组内主机已移到「未分组」'}`
+    )
   }
 
   const profileNode = (p: SshProfile, hasGroup: boolean): TreeDataNode => ({
@@ -351,7 +349,7 @@ export function HostsPanel() {
     <DndProvider backend={HTML5Backend}>
       <div className="flex-1 overflow-y-auto p-2">
         {/* 本地终端 */}
-        <div className="mb-1 flex items-center justify-between rounded px-2 py-1">
+        <div className="mb-1 flex items-center justify-between rounded py-1">
           <span
             className="cursor-pointer text-sm font-medium text-muted-foreground"
             title="返回终端视图"
@@ -363,7 +361,7 @@ export function HostsPanel() {
         <NewTerminalMenu />
 
         {/* SSH 连接 */}
-        <div className="mb-1 flex items-center justify-between gap-1 rounded px-2 py-1">
+        <div className="mb-1 flex items-center justify-between gap-1 rounded py-1">
           <span className="text-sm font-medium text-muted-foreground">
             SSH 连接 ({profiles.length})
           </span>
@@ -724,7 +722,7 @@ function NewTerminalMenu() {
 
   return (
     <Space.Compact className="mb-4 w-full">
-      <Button className="flex-1" size="small" onClick={() => void createLocalSession()}>
+      <Button className="flex-1" onClick={() => void createLocalSession()}>
         <Plus className="size-4" /> 新建本地终端
       </Button>
       <Dropdown
@@ -738,7 +736,7 @@ function NewTerminalMenu() {
           onClick: ({ key }) => void createLocalSession(key)
         }}
       >
-        <Button size="small" icon={<ChevronDown className="size-3.5" />} />
+        <Button icon={<ChevronDown className="size-3.5" />} />
       </Dropdown>
     </Space.Compact>
   )

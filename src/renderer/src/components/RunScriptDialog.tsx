@@ -1,10 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Plus } from 'lucide-react'
-import { Modal, Select } from 'antd'
-import { Button } from '@/components/ui/button'
-import { Label } from '@/components/ui/label'
+import { Button, Modal, Select, message } from 'antd'
 import { useAppStore } from '@/stores/app-store'
-import { toast } from 'sonner'
 
 /** 保留当前选择；失效时用偏好值，再不行回退首项 */
 function pickId(current: string, ids: string[], preferred?: string): string {
@@ -68,15 +65,15 @@ export function RunScriptDialog() {
       const ok = await runScriptOnHost(profile, script)
       if (!ok) {
         setError('连接超时或主机未就绪，脚本未执行。')
-        toast.error('脚本未执行', { description: '连接超时或主机未就绪' })
+        message.error('脚本未执行：连接超时或主机未就绪')
         return
       }
       setRunScriptDialog(false)
-      toast.success(`已在「${profile.name}」执行「${script.name}」`)
+      message.success(`已在「${profile.name}」执行「${script.name}」`)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       setError(msg)
-      toast.error('运行失败', { description: msg })
+      message.error(`运行失败：${msg}`)
     } finally {
       setRunning(false)
     }
@@ -100,14 +97,14 @@ export function RunScriptDialog() {
       <div className="grid gap-3 py-1">
         {hasPreset ? (
           <div className="grid gap-1.5">
-            <Label>脚本</Label>
+            <span className="text-xs font-medium text-foreground">脚本</span>
             <div className="rounded-md border border-border/60 bg-secondary/40 px-3 py-2 text-sm text-foreground">
               {script ? script.name : '（脚本不存在）'}
             </div>
           </div>
         ) : (
           <div className="grid gap-1.5">
-            <Label>脚本</Label>
+            <span className="text-xs font-medium text-foreground">脚本</span>
             {scripts.length === 0 ? (
               <p className="text-xs text-muted-foreground">还没有脚本，请先在脚本管理页新增。</p>
             ) : (
@@ -123,14 +120,14 @@ export function RunScriptDialog() {
         )}
 
         <div className="grid gap-1.5">
-          <Label>主机</Label>
+          <span className="text-xs font-medium text-foreground">主机</span>
           {profiles.length === 0 ? (
             <div className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
               还没有主机，请先添加 SSH 连接。
               <div className="mt-2">
                 <Button
-                  variant="secondary"
-                  size="sm"
+                  variant="filled"
+                  size="small"
                   onClick={() => {
                     onOpenChange(false)
                     setSshDialog(true, null)
@@ -156,7 +153,7 @@ export function RunScriptDialog() {
 
         {script && (
           <div className="grid gap-1.5">
-            <Label>将执行</Label>
+            <span className="text-xs font-medium text-foreground">将执行</span>
             <pre className="no-scrollbar max-h-32 overflow-auto rounded-md border border-border/60 bg-secondary/40 p-2 font-mono text-[11px] whitespace-pre-wrap text-muted-foreground select-text">
               {script.content}
             </pre>

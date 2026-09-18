@@ -3,15 +3,7 @@ import type { TerminalThemeName } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import { useIsDarkTheme } from '@/lib/theme'
 import { TERMINAL_THEMES, resolveTerminalTheme } from '@/lib/terminal-themes'
-import { Label } from '@/components/ui/label'
-import { Switch } from '@/components/ui/switch'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from '@/components/ui/select'
+import { Select, Switch } from 'antd'
 import { cn } from 'cn'
 
 export function TerminalSettings() {
@@ -40,20 +32,14 @@ export function TerminalSettings() {
         </p>
         <Select
           value={localShell || 'default'}
-          onValueChange={(v) => void setLocalShell(v)}
-        >
-          <SelectTrigger className="w-56" aria-label="默认本地终端">
-            <SelectValue placeholder="选择 shell" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="default">系统默认（{defaultShellName}）</SelectItem>
-            {shells?.shells.map((shell) => (
-              <SelectItem key={shell.id} value={shell.id}>
-                {shell.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+          onChange={(v) => void setLocalShell(v)}
+          aria-label="默认本地终端"
+          style={{ width: 224 }}
+          options={[
+            { value: 'default', label: `系统默认（${defaultShellName}）` },
+            ...(shells?.shells ?? []).map((shell) => ({ value: shell.id, label: shell.name }))
+          ]}
+        />
       </div>
 
       <div className="rounded-md">
@@ -106,7 +92,9 @@ export function TerminalSettings() {
 
       <div className="flex items-start justify-between gap-4 rounded-md">
         <div>
-          <Label htmlFor="copy-on-select">选中文本即复制</Label>
+          <label htmlFor="copy-on-select" className="text-xs font-medium text-foreground">
+            选中文本即复制
+          </label>
           <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
             在终端里选中文本后自动复制到剪贴板，无需手动 Ctrl+C。
           </p>
@@ -114,13 +102,15 @@ export function TerminalSettings() {
         <Switch
           id="copy-on-select"
           checked={copyOnSelect}
-          onCheckedChange={(v) => void setCopyOnSelect(v)}
+          onChange={(v) => void setCopyOnSelect(v)}
         />
       </div>
 
       <div className="flex items-start justify-between gap-4 rounded-md">
         <div>
-          <Label htmlFor="right-click-paste">右键粘贴</Label>
+          <label htmlFor="right-click-paste" className="text-xs font-medium text-foreground">
+            右键粘贴
+          </label>
           <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
             在终端内点击鼠标右键，将剪贴板内容直接粘贴到终端（开启后不再弹出浏览器右键菜单）。
           </p>
@@ -128,13 +118,15 @@ export function TerminalSettings() {
         <Switch
           id="right-click-paste"
           checked={rightClickPaste}
-          onCheckedChange={(v) => void setRightClickPaste(v)}
+          onChange={(v) => void setRightClickPaste(v)}
         />
       </div>
 
       <div className="flex items-start justify-between gap-4 rounded-md">
         <div>
-          <Label htmlFor="command-prediction">命令预测补全</Label>
+          <label htmlFor="command-prediction" className="text-xs font-medium text-foreground">
+            命令预测补全
+          </label>
           <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
             根据命令历史与常见命令，在输入时给出补全建议，按 Tab 或 → 接受，↑/↓ 切换。
           </p>
@@ -142,7 +134,7 @@ export function TerminalSettings() {
         <Switch
           id="command-prediction"
           checked={commandPrediction}
-          onCheckedChange={(v) => void setCommandPrediction(v)}
+          onChange={(v) => void setCommandPrediction(v)}
         />
       </div>
     </div>

@@ -2,49 +2,16 @@
  * api-client 插件渲染端（类 Postman 的 HTTP 调试工具）。
  *
  * 以「运行时加载」方式由宿主经 blob import 执行：不打包进主应用，
- * 通过 activate(api) 拿到宿主注入的 React 实例、shadcn 组件（api.ui）、
- * lucide 图标（api.icons）、全局通知（api.toast）以及 http/storage 能力。
+ * 通过 activate(api) 拿到宿主注入的 React 实例、antd 组件（api.antd）、
+ * lucide 图标（api.icons）、消息提示（api.antd.message）以及 http/storage 能力。
  */
 export function activate(api) {
   const { useState, useEffect } = api.react
   const h = api.h
-  const {
-    Button,
-    Input,
-    Badge,
-    Textarea,
-    Select,
-    SelectTrigger,
-    SelectValue,
-    SelectContent,
-    SelectItem,
-    Tabs,
-    TabsList,
-    TabsTrigger,
-    TabsContent,
-    Table,
-    TableHeader,
-    TableBody,
-    TableHead,
-    TableRow,
-    TableCell,
-    Drawer,
-    DrawerClose,
-    DrawerContent,
-    DrawerHeader,
-    DrawerFooter,
-    DrawerTitle,
-    DrawerDescription,
-    Dialog,
-    DialogContent,
-    DialogHeader,
-    DialogTitle,
-    DialogDescription,
-    DialogFooter
-  } = api.ui
+  const { Button, Input, Select, Tabs, Table, Drawer, Modal, Tag } = api.antd
   const { Send, Save, Trash2, Plus, History, X, Terminal, ChevronUp, ChevronDown } = api.icons
-  const cn = api.ui.cn
-  const toast = api.toast
+  const cn = api.cn
+  const message = api.antd.message
   const MonacoEditor = api.MonacoEditor
 
   const METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS']
@@ -142,6 +109,24 @@ export function activate(api) {
   color: var(--foreground, inherit) !important;
   caret-color: var(--foreground, currentColor);
   transition: background-color 9999s ease-in-out 0s;
+}
+
+/* 请求头表格：硬性要求表头与数据行都不出现背景色变化（含浅蓝色预存值底与鼠标悬停变色） */
+.api-client-root .api-client-flat-table .ant-table,
+.api-client-root .api-client-flat-table .ant-table-container,
+.api-client-root .api-client-flat-table .ant-table-thead > tr > th,
+.api-client-root .api-client-flat-table .ant-table-tbody > tr > td,
+.api-client-root .api-client-flat-table .ant-table-tbody > tr:hover > td,
+.api-client-root .api-client-flat-table .ant-table-tbody > tr.ant-table-row-hover > td {
+  background: transparent !important;
+}
+
+/* 行分隔线还原：shadcn 表格每行有下边框、末行不加 */
+.api-client-root .api-client-flat-table .ant-table-tbody > tr > td {
+  border-bottom: 1px solid var(--border);
+}
+.api-client-root .api-client-flat-table .ant-table-tbody > tr:last-child > td {
+  border-bottom: 0;
 }`
     document.head.appendChild(style)
   }
@@ -482,11 +467,11 @@ export function activate(api) {
           timeoutMs: 30000
         })
         updateActive({ response: res })
-        if (res.error) toast.error('请求失败', { description: res.error })
+        if (res.error) message.error('请求失败：' + res.error)
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
         updateActive({ error: msg })
-        toast.error('请求失败', { description: msg })
+        message.error('请求失败：' + msg)
       } finally {
         updateActive({ sending: false })
         pushHistory(req, res)
@@ -511,7 +496,7 @@ export function activate(api) {
           at: Date.now()
         }
       ])
-      toast.success('已保存请求')
+      message.success('已保存请求')
     }
 
     /** 把保存的请求载入到当前激活标签 */
@@ -540,9 +525,9 @@ export function activate(api) {
         setActiveId(t.id)
         setCurlOpen(false)
         setCurlText('')
-        toast.success('已导入 cURL 命令')
+        message.success('已导入 cURL 命令')
       } catch (e) {
-        toast.error('导入失败', { description: e instanceof Error ? e.message : String(e) })
+        message.error('导入失败：' + (e instanceof Error ? e.message : String(e)))
       }
     }
 
@@ -561,7 +546,7 @@ export function activate(api) {
     const clearHistory = () => {
       setHistory([])
       api.storage.set(HISTORY_KEY, [])
-      toast('已清空请求历史')
+      message.success('已清空请求历史')
     }
 
     const response = activeTab.response
@@ -569,12 +554,10 @@ export function activate(api) {
     const statusOk = response && response.status > 0 && response.status < 400
     const statusPill = response
       ? h(
-          Badge,
+          Tag,
           {
-            className: cn(
-              'font-medium',
-              statusOk ? 'bg-emerald-500/15 text-emerald-500' : 'bg-destructive/15 text-destructive'
-            )
+            color: statusOk ? 'success' : 'error',
+            className: 'font-medium'
           },
           response.status + ' ' + response.statusText
         )
@@ -583,56 +566,45 @@ export function activate(api) {
     const contentType = response?.headers?.['content-type'] || ''
     const respHeaders = response ? Object.entries(response.headers || {}) : []
 
-    // 请求头表格（shadcn Table：单一容器 + 分隔线，单元格输入框扁平无边框）
+    // 请求头表格（antd Table：showHeader=false 规避默认表头背景色，rowHoverable=false 关闭行悬停变色，
+    // 单元格内保留原生 input + datalist 的扁平自动补全输入框）
     const headerRows = el(
       'div',
       { className: 'overflow-hidden rounded-md border border-border' },
-      h(
-        Table,
-        { className: 'text-[11px]' },
-        h(
-          TableHeader,
-          { className: 'bg-muted/50' },
-          h(
-            TableRow,
-            { className: 'hover:bg-transparent' },
-            h(
-              TableHead,
-              { className: 'h-8 w-[176px] px-2.5 text-[10px] font-medium text-muted-foreground' },
-              '名称'
-            ),
-            h(
-              TableHead,
-              { className: 'h-8 px-2.5 text-[10px] font-medium text-muted-foreground' },
-              '值'
-            ),
-            h(TableHead, { className: 'h-8 w-8 px-0' })
-          )
-        ),
-        h(
-          TableBody,
-          null,
-          ...activeTab.headers.map((p, i) => {
-            const valueSuggestions = headerValueSuggestions(p.key)
-            const valueDatalistId = valueSuggestions ? HEADER_VALUE_DATALIST_PREFIX + i : undefined
-            return h(
-              TableRow,
-              // hover:bg-transparent / transition-none 覆盖 shadcn TableRow 默认的悬停高亮
-              { key: i, className: 'group transition-none hover:bg-transparent' },
-              h(
-                TableCell,
-                { className: 'p-0' },
-                el('input', {
-                  value: p.key,
-                  list: HEADER_DATALIST_ID,
-                  placeholder: '名称，如 Content-Type',
-                  onChange: (e) => updateHeader(i, 'key', e.target.value),
-                  className: HEADER_CELL_INPUT
-                })
-              ),
-              h(
-                TableCell,
-                { className: 'p-0' },
+      // 自绘表头行：不使用 antd 表头，避免其默认背景色，同时保留「名称 / 值」列标题
+      el(
+        'div',
+        { className: 'flex h-8 items-center border-b border-border' },
+        el('div', { className: 'w-[176px] shrink-0 px-2.5 text-[10px] font-medium text-muted-foreground' }, '名称'),
+        el('div', { className: 'min-w-0 flex-1 px-2.5 text-[10px] font-medium text-muted-foreground' }, '值'),
+        el('div', { className: 'w-8 shrink-0' })
+      ),
+      h(Table, {
+        className: 'api-client-flat-table text-[11px]',
+        columns: [
+          {
+            key: 'name',
+            width: 176,
+            onCell: () => ({ style: { padding: 0 } }),
+            render: (_, __, i) =>
+              el('input', {
+                value: activeTab.headers[i].key,
+                list: HEADER_DATALIST_ID,
+                placeholder: '名称，如 Content-Type',
+                onChange: (e) => updateHeader(i, 'key', e.target.value),
+                className: HEADER_CELL_INPUT
+              })
+          },
+          {
+            key: 'value',
+            onCell: () => ({ style: { padding: 0 } }),
+            render: (_, __, i) => {
+              const p = activeTab.headers[i]
+              const valueSuggestions = headerValueSuggestions(p.key)
+              const valueDatalistId = valueSuggestions ? HEADER_VALUE_DATALIST_PREFIX + i : undefined
+              return el(
+                'div',
+                null,
                 el('input', {
                   value: p.value,
                   list: valueDatalistId,
@@ -647,33 +619,43 @@ export function activate(api) {
                       ...valueSuggestions.map((v) => el('option', { key: v, value: v }))
                     )
                   : null
-              ),
-              h(
-                TableCell,
-                { className: 'p-0 text-center' },
-                h(
-                  Button,
-                  {
-                    variant: 'ghost',
-                    size: 'icon-sm',
-                    className: 'size-7 text-muted-foreground opacity-50 transition-opacity hover:text-destructive group-hover:opacity-100 focus-visible:opacity-100',
-                    title: '删除该请求头',
-                    onClick: () => removeHeader(i)
-                  },
-                  h(Trash2, { className: 'size-3.5' })
-                )
               )
-            )
-          })
-        )
-      ),
+            }
+          },
+          {
+            key: 'action',
+            width: 32,
+            onCell: () => ({ style: { padding: 0, textAlign: 'center' } }),
+            render: (_, __, i) =>
+              h(
+                Button,
+                {
+                  type: 'text',
+                  size: 'small',
+                  className: 'size-7 text-muted-foreground opacity-50 transition-opacity hover:text-destructive group-hover:opacity-100 focus-visible:opacity-100',
+                  title: '删除该请求头',
+                  onClick: () => removeHeader(i)
+                },
+                h(Trash2, { className: 'size-3.5' })
+              )
+          }
+        ],
+        dataSource: activeTab.headers,
+        rowKey: (_, i) => 'h' + i,
+        pagination: false,
+        showHeader: false,
+        rowHoverable: false,
+        tableLayout: 'fixed',
+        // group 供删除按钮的 group-hover 显隐使用
+        rowClassName: () => 'group api-client-flat-row'
+      }),
       // 底部：添加按钮 + 提示
       el(
         'div',
         { className: 'flex items-center gap-2 border-t border-border bg-muted/30 px-2 py-1.5' },
         h(
           Button,
-          { variant: 'ghost', size: 'sm', className: 'h-7 px-2 text-[11px]', onClick: addHeader },
+          { type: 'text', size: 'small', className: 'h-7 px-2 text-[11px]', onClick: addHeader },
           h(Plus, { className: 'size-3.5' }),
           '添加请求头'
         ),
@@ -708,7 +690,7 @@ export function activate(api) {
                   key: entry.id || idx,
                   className: 'flex items-center gap-2 rounded-md border border-border/60 px-2 py-1.5'
                 },
-                h(Badge, { variant: 'secondary', className: 'shrink-0 font-mono text-[10px]' }, entry.method || 'GET'),
+                h(Tag, { className: 'm-0 shrink-0 font-mono text-[10px]' }, entry.method || 'GET'),
                 el(
                   'span',
                   {
@@ -722,8 +704,8 @@ export function activate(api) {
                 h(
                   Button,
                   {
-                    variant: 'ghost',
-                    size: 'sm',
+                    type: 'text',
+                    size: 'small',
                     className: 'h-6 shrink-0 px-2 text-[11px]',
                     onClick: () => {
                       applyRequest(entry)
@@ -735,8 +717,8 @@ export function activate(api) {
                 h(
                   Button,
                   {
-                    variant: 'ghost',
-                    size: 'icon-xs',
+                    type: 'text',
+                    size: 'small',
                     className: 'shrink-0 text-muted-foreground',
                     title: '删除记录',
                     onClick: () => deleteHistory(idx)
@@ -764,13 +746,13 @@ export function activate(api) {
                   title: (req.method || 'GET') + ' ' + req.url,
                   onClick: () => applyRequest(req)
                 },
-                h(Badge, { variant: 'secondary', className: 'shrink-0 font-mono text-[10px]' }, req.method || 'GET'),
+                h(Tag, { className: 'm-0 shrink-0 font-mono text-[10px]' }, req.method || 'GET'),
                 el('span', { className: 'min-w-0 flex-1 truncate text-xs' }, req.url),
                 h(
                   Button,
                   {
-                    variant: 'ghost',
-                    size: 'icon-xs',
+                    type: 'text',
+                    size: 'small',
                     className: 'shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100',
                     title: '删除',
                     onClick: (e) => {
@@ -795,7 +777,7 @@ export function activate(api) {
             { className: 'flex items-center gap-2' },
             h(
               Button,
-              { variant: 'ghost', size: 'sm', className: 'h-7 px-2 text-[11px]', onClick: () => updateActive({ format: !activeTab.format }) },
+              { type: 'text', size: 'small', className: 'h-7 px-2 text-[11px]', onClick: () => updateActive({ format: !activeTab.format }) },
               activeTab.format ? '已格式化' : '格式化'
             ),
             el(
@@ -849,7 +831,7 @@ export function activate(api) {
       // 左侧栏：保存的请求（点击行即载入到右侧编辑区）
       el(
         'aside',
-        { className: 'flex w-52 shrink-0 flex-col border-r border-border bg-sidebar' },
+        { className: 'flex w-52 shrink-0 flex-col bg-sidebar' },
         el(
           'div',
           { className: 'border-b border-border px-3 py-2' },
@@ -881,7 +863,7 @@ export function activate(api) {
                     active ? 'bg-background text-foreground' : 'text-muted-foreground hover:text-foreground'
                   )
                 },
-                h(Badge, { variant: 'secondary', className: 'shrink-0 font-mono text-[10px]' }, t.method),
+                h(Tag, { className: 'm-0 shrink-0 font-mono text-[10px]' }, t.method),
                 el('span', { className: 'min-w-0 truncate' }, t.url || '未命名'),
                 el('button', {
                   className:
@@ -917,12 +899,12 @@ export function activate(api) {
         el(
           'div',
           { className: 'flex items-center gap-2 border-b border-border px-3 py-2' },
-          h(
-            Select,
-            { value: activeTab.method, onValueChange: (m) => updateActive({ method: m }) },
-            h(SelectTrigger, { className: 'w-28' }, h(SelectValue, { placeholder: '方法' })),
-            h(SelectContent, null, ...METHODS.map((m) => h(SelectItem, { key: m, value: m }, m)))
-          ),
+          h(Select, {
+            value: activeTab.method,
+            onChange: (m) => updateActive({ method: m }),
+            options: METHODS.map((m) => ({ label: m, value: m })),
+            className: 'w-28 shrink-0'
+          }),
           h(Input, {
             value: activeTab.url,
             onChange: (e) => updateActive({ url: e.target.value }),
@@ -931,59 +913,65 @@ export function activate(api) {
           }),
           h(
             Button,
-            { type: 'button', onClick: send, disabled: activeTab.sending, title: '发送（Ctrl+Enter）' },
+            { type: 'primary', onClick: send, disabled: activeTab.sending, title: '发送（Ctrl+Enter）' },
             h(Send, { className: 'size-4' }),
             activeTab.sending ? '发送中…' : '发送'
           )
         ),
-        // 请求构造区（Tab）：历史入口改为右侧抽屉，由工具栏按钮唤起
-        h(
-          Tabs,
-          { value: activeTab.tab, onValueChange: (v) => updateActive({ tab: v }), className: 'flex min-h-0 flex-1 flex-col' },
-          el(
-            'div',
-            { className: 'flex items-center border-b border-border' },
-            h(
-              TabsList,
-              { className: 'w-full justify-start gap-1 rounded-none border-b-0 bg-transparent px-3' },
-              h(TabsTrigger, { value: 'headers' }, '请求头'),
-              h(TabsTrigger, { value: 'body' }, '请求体')
-            ),
-            h(
-              Button,
-              {
-                variant: 'ghost',
-                size: 'sm',
-                className: 'mr-2 shrink-0 gap-1.5 text-[11px] text-muted-foreground',
-                title: '查看请求历史',
-                onClick: () => setHistoryOpen(true)
-              },
-              h(History, { className: 'size-3.5' }),
-              '历史 (' + history.length + ')'
-            )
+        // 请求构造区（antd Tabs）：历史入口作为导航右侧附加内容，由抽屉展示
+        h(Tabs, {
+          activeKey: activeTab.tab,
+          onChange: (v) => updateActive({ tab: v }),
+          className: 'flex min-h-0 flex-1 flex-col',
+          // 去掉 antd 导航默认下外边距，并让内容区撑满高度（antd 的 body / tabpane 默认不拉伸）
+          tabBarStyle: { margin: 0 },
+          styles: { body: { height: '100%' }, content: { height: '100%' } },
+          tabBarExtraContent: h(
+            Button,
+            {
+              type: 'text',
+              size: 'small',
+              className: 'mr-2 shrink-0 gap-1.5 text-[11px] text-muted-foreground',
+              title: '查看请求历史',
+              onClick: () => setHistoryOpen(true)
+            },
+            h(History, { className: 'size-3.5' }),
+            '历史 (' + history.length + ')'
           ),
-          h(TabsContent, { value: 'headers', className: 'min-h-0 flex-1 overflow-auto p-3' }, headerRows),
-          h(TabsContent, { value: 'body', className: 'min-h-0 flex-1 overflow-auto p-3' },
-            el(
-              'div',
-              { className: 'h-64 overflow-hidden rounded-md border border-border' },
-              h(MonacoEditor, {
-                value: activeTab.body,
-                onChange: (v) => updateActive({ body: v || '' }),
-                language: activeTab.bodyLang,
-                onLanguageChange: (l) => updateActive({ bodyLang: l }),
-                showLanguageSelector: true,
-                showLineNumbersToggle: true,
-                showWordWrapToggle: true
-              })
-            )
-          )
-        ),
+          items: [
+            {
+              key: 'headers',
+              label: '请求头',
+              children: el('div', { className: 'h-full overflow-auto p-3' }, headerRows)
+            },
+            {
+              key: 'body',
+              label: '请求体',
+              children: el(
+                'div',
+                { className: 'h-full overflow-auto p-3' },
+                el(
+                  'div',
+                  { className: 'h-64 overflow-hidden rounded-md border border-border' },
+                  h(MonacoEditor, {
+                    value: activeTab.body,
+                    onChange: (v) => updateActive({ body: v || '' }),
+                    language: activeTab.bodyLang,
+                    onLanguageChange: (l) => updateActive({ bodyLang: l }),
+                    showLanguageSelector: true,
+                    showLineNumbersToggle: true,
+                    showWordWrapToggle: true
+                  })
+                )
+              )
+            }
+          ]
+        }),
       // 保存当前请求
       el(
         'div',
         { className: 'flex items-center justify-end gap-2 border-t border-border px-3 py-1.5' },
-        h(Button, { variant: 'outline', size: 'sm', onClick: saveCurrent }, h(Save, { className: 'size-3.5' }), '保存当前请求')
+        h(Button, { variant: 'outlined', color: 'default', size: 'small', onClick: saveCurrent }, h(Save, { className: 'size-3.5' }), '保存当前请求')
       ),
       // 拖拽条：上下拖动调整响应面板高度（与项目内 ResizeHandle 同款的视觉与热区处理；响应折叠时隐藏）
       !activeTab.respCollapsed &&
@@ -1045,101 +1033,102 @@ export function activate(api) {
           }, h(activeTab.respCollapsed ? ChevronUp : ChevronDown, { className: 'size-3.5' }))
         ),
         !activeTab.respCollapsed &&
-        h(
-          Tabs,
-          { value: activeTab.resTab, onValueChange: (v) => updateActive({ resTab: v }), className: 'flex min-h-0 flex-1 flex-col' },
-          h(
-            TabsList,
-            { className: 'w-full justify-start gap-1 rounded-none border-b border-border bg-transparent px-3' },
-            h(TabsTrigger, { value: 'body' }, '响应体'),
-            h(TabsTrigger, { value: 'headers' }, '响应头' + (respHeaders.length ? ' (' + respHeaders.length + ')' : ''))
-          ),
-          h(TabsContent, { value: 'body', className: 'min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2' }, responseBody),
-          h(TabsContent, { value: 'headers', className: 'min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2' }, responseHeaders)
-        )
+        h(Tabs, {
+          activeKey: activeTab.resTab,
+          onChange: (v) => updateActive({ resTab: v }),
+          className: 'flex min-h-0 flex-1 flex-col',
+          tabBarStyle: { margin: 0 },
+          styles: { body: { height: '100%' }, content: { height: '100%' } },
+          items: [
+            {
+              key: 'body',
+              label: '响应体',
+              children: el('div', { className: 'h-full overflow-auto px-3 pb-3 pt-2' }, responseBody)
+            },
+            {
+              key: 'headers',
+              label: '响应头' + (respHeaders.length ? ' (' + respHeaders.length + ')' : ''),
+              children: el('div', { className: 'h-full overflow-auto px-3 pb-3 pt-2' }, responseHeaders)
+            }
+          ]
+        })
       )
       ),
       // 请求历史抽屉（右侧滑出）
       h(
         Drawer,
-        { open: historyOpen, onOpenChange: setHistoryOpen, direction: 'right' },
-        h(
-          DrawerContent,
-          { className: 'sm:max-w-md' },
-          h(
-            DrawerHeader,
-            { className: 'flex-row items-center justify-between gap-2 border-b border-border px-4 py-3' },
+        {
+          open: historyOpen,
+          onClose: () => setHistoryOpen(false),
+          placement: 'right',
+          width: 448,
+          title: el(
+            'div',
+            { className: 'min-w-0' },
+            el('div', { className: 'text-sm' }, '请求历史'),
             el(
               'div',
-              { className: 'min-w-0' },
-              h(DrawerTitle, { className: 'text-sm' }, '请求历史'),
-              h(
-                DrawerDescription,
-                { className: 'text-[11px]' },
-                '发送请求后自动记录，最多保留 ' + HISTORY_LIMIT + ' 条'
-              )
-            ),
-            h(
-              Button,
-              {
-                variant: 'ghost',
-                size: 'sm',
-                className: 'h-7 shrink-0 gap-1.5 px-2 text-[11px] text-destructive',
-                disabled: history.length === 0,
-                onClick: clearHistory
-              },
-              h(Trash2, { className: 'size-3.5' }),
-              '清空'
+              { className: 'text-[11px] text-muted-foreground' },
+              '发送请求后自动记录，最多保留 ' + HISTORY_LIMIT + ' 条'
             )
           ),
-          el('div', { className: 'min-h-0 flex-1 overflow-auto p-4' }, historyList),
-          h(
-            DrawerFooter,
-            { className: 'flex-row justify-end border-t border-border px-4 py-3' },
-            h(
-              DrawerClose,
-              null,
-              h(Button, { variant: 'outline', size: 'sm' }, '关闭')
-            )
+          extra: h(
+            Button,
+            {
+              type: 'text',
+              size: 'small',
+              danger: true,
+              className: 'h-7 shrink-0 gap-1.5 px-2 text-[11px]',
+              disabled: history.length === 0,
+              onClick: clearHistory
+            },
+            h(Trash2, { className: 'size-3.5' }),
+            '清空'
+          ),
+          footer: el(
+            'div',
+            { className: 'flex justify-end' },
+            h(Button, { variant: 'outlined', color: 'default', size: 'small', onClick: () => setHistoryOpen(false) }, '关闭')
           )
-        )
+        },
+        el('div', { className: 'min-h-0 flex-1 overflow-auto p-4' }, historyList)
       ),
       // cURL 导入弹窗
       h(
-        Dialog,
-        { open: curlOpen, onOpenChange: setCurlOpen },
-        h(
-          DialogContent,
-          { className: 'sm:max-w-xl' },
-          h(
-            DialogHeader,
+        Modal,
+        {
+          open: curlOpen,
+          onCancel: () => setCurlOpen(false),
+          width: 576,
+          title: el(
+            'div',
             null,
-            h(DialogTitle, { className: 'text-sm' }, '导入 cURL 命令'),
-            h(DialogDescription, { className: 'text-[11px]' }, '粘贴 curl 命令，解析后载入为新的请求标签')
+            el('div', { className: 'text-sm' }, '导入 cURL 命令'),
+            el('div', { className: 'text-[11px] text-muted-foreground' }, '粘贴 curl 命令，解析后载入为新的请求标签')
           ),
-          el(Textarea, {
-            value: curlText,
-            onChange: (e) => setCurlText(e.target.value),
-            placeholder:
-              'curl -X POST https://api.example.com/users \\\n  -H "Content-Type: application/json" \\\n  -d \'{"name":"foo"}\'',
-            className: 'min-h-32 max-h-64 font-mono text-xs',
-            spellCheck: false,
-            autoFocus: true,
-            // Ctrl/Cmd + Enter 直接导入
-            onKeyDown: (e) => {
-              if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-                e.preventDefault()
-                importCurl()
-              }
-            }
-          }),
-          h(
-            DialogFooter,
-            null,
-            h(Button, { variant: 'outline', size: 'sm', onClick: () => setCurlOpen(false) }, '取消'),
-            h(Button, { size: 'sm', disabled: !curlText.trim(), onClick: importCurl }, '导入')
+          footer: el(
+            'div',
+            { className: 'flex justify-end gap-2' },
+            h(Button, { variant: 'outlined', color: 'default', size: 'small', onClick: () => setCurlOpen(false) }, '取消'),
+            h(Button, { type: 'primary', size: 'small', disabled: !curlText.trim(), onClick: importCurl }, '导入')
           )
-        )
+        },
+        el(Input.TextArea, {
+          value: curlText,
+          onChange: (e) => setCurlText(e.target.value),
+          placeholder:
+            'curl -X POST https://api.example.com/users \\\n  -H "Content-Type: application/json" \\\n  -d \'{"name":"foo"}\'',
+          className: 'min-h-32 max-h-64 font-mono text-xs',
+          spellCheck: false,
+          autoFocus: true,
+          // Ctrl/Cmd + Enter 直接导入
+          onKeyDown: (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+              e.preventDefault()
+              importCurl()
+            }
+          }
+        })
       )
     )
   }

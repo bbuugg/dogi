@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useAppStore } from '@/stores/app-store'
-import { Label } from '@/components/ui/label'
-import { Textarea } from '@/components/ui/textarea'
+import { Input } from 'antd'
 import { ModelSettings } from './ModelSettings'
 import { McpSettings } from './McpSettings'
 
@@ -18,12 +17,14 @@ function SystemPromptSection() {
   return (
     <section className="space-y-2">
       <div>
-        <Label>系统提示词（留空使用默认）</Label>
+        <label htmlFor="system-prompt" className="text-xs font-medium text-foreground">
+          系统提示词（留空使用默认）
+        </label>
         <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
           自定义 AI 助手的角色与约束，例如运维安全操作规范。
         </p>
       </div>
-      <Textarea
+      <Input.TextArea
         id="system-prompt"
         rows={7}
         className="text-xs"
@@ -45,7 +46,7 @@ export function AiConfigSettings() {
     <div className="space-y-6">
       <section className="space-y-3">
         <div>
-          <Label className="text-sm">模型配置</Label>
+          <span className="text-sm font-medium text-foreground">模型配置</span>
           <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
             可添加多套模型配置，在 AI 面板顶部切换当前使用。
           </p>
@@ -57,7 +58,7 @@ export function AiConfigSettings() {
 
       <section className="space-y-3">
         <div>
-          <Label className="text-sm">MCP 服务</Label>
+          <span className="text-sm font-medium text-foreground">MCP 服务</span>
           <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
             接入外部工具（stdio 类型），自动提供给 AI 使用。
           </p>

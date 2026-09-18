@@ -1,12 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import type { McpServerConfig } from '@shared/types'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Textarea } from '@/components/ui/textarea'
-import { Switch } from '@/components/ui/switch'
-import { Badge } from '@/components/ui/badge'
+import { Button, Input, Switch, Tag } from 'antd'
 
 interface McpStatus extends McpServerConfig {
   error?: string
@@ -107,7 +102,7 @@ export function McpSettings() {
       <div className="space-y-3">
         <div className="grid grid-cols-2 gap-3">
           <div className="grid gap-1.5">
-            <Label>服务名称</Label>
+            <span className="text-xs font-medium text-foreground">服务名称</span>
             <Input
               placeholder="如：filesystem"
               value={editing.name}
@@ -117,14 +112,16 @@ export function McpSettings() {
           <div className="flex items-center gap-2 pt-5">
             <Switch
               checked={editing.enabled}
-              onCheckedChange={(v) => patch({ enabled: v })}
+              onChange={(v) => patch({ enabled: v })}
               id="mcp-enabled"
             />
-            <Label htmlFor="mcp-enabled">启用</Label>
+            <label htmlFor="mcp-enabled" className="text-xs font-medium text-foreground">
+              启用
+            </label>
           </div>
         </div>
         <div className="grid gap-1.5">
-          <Label>启动命令</Label>
+          <span className="text-xs font-medium text-foreground">启动命令</span>
           <Input
             placeholder="如：npx 或 node 或 D:\tools\server.exe"
             value={editing.command}
@@ -132,7 +129,7 @@ export function McpSettings() {
           />
         </div>
         <div className="grid gap-1.5">
-          <Label>参数（空格分隔）</Label>
+          <span className="text-xs font-medium text-foreground">参数（空格分隔）</span>
           <Input
             placeholder="如：-y @modelcontextprotocol/server-filesystem D:\data"
             value={editing.args}
@@ -140,8 +137,8 @@ export function McpSettings() {
           />
         </div>
         <div className="grid gap-1.5">
-          <Label>环境变量（每行 KEY=VALUE）</Label>
-          <Textarea
+          <span className="text-xs font-medium text-foreground">环境变量（每行 KEY=VALUE）</span>
+          <Input.TextArea
             rows={3}
             className="font-mono text-xs"
             placeholder={'API_TOKEN=xxx\nDEBUG=1'}
@@ -151,10 +148,12 @@ export function McpSettings() {
         </div>
         {error && <p className="text-xs text-destructive">{error}</p>}
         <div className="flex justify-end gap-2">
-          <Button variant="ghost" onClick={() => setEditing(null)}>
+          <Button type="text" onClick={() => setEditing(null)}>
             取消
           </Button>
-          <Button onClick={() => void handleSave()}>保存</Button>
+          <Button type="primary" onClick={() => void handleSave()}>
+            保存
+          </Button>
         </div>
       </div>
     )
@@ -167,10 +166,10 @@ export function McpSettings() {
           MCP 工具将自动提供给 AI 使用（stdio 类型）
         </p>
         <div className="flex gap-2">
-          <Button size="sm" variant="ghost" onClick={() => void handleListTools()}>
+          <Button size="small" type="text" onClick={() => void handleListTools()}>
             <RefreshCw className="size-4" /> 检查工具
           </Button>
-          <Button size="sm" variant="secondary" onClick={() => setEditing({ ...EMPTY })}>
+          <Button size="small" variant="filled" onClick={() => setEditing({ ...EMPTY })}>
             <Plus className="size-4" /> 新建
           </Button>
         </div>
@@ -190,13 +189,13 @@ export function McpSettings() {
             <div className="flex items-center gap-1.5">
               <span className="truncate text-xs font-medium">{server.name}</span>
               {server.enabled ? (
-                <Badge variant="secondary" className="h-4 px-1.5 text-[9px]">
+                <Tag color="default" className="m-0 h-4 border-0 bg-secondary px-1.5 text-[9px] leading-4">
                   启用
-                </Badge>
+                </Tag>
               ) : (
-                <Badge variant="outline" className="h-4 px-1.5 text-[9px]">
+                <Tag variant="outlined" className="m-0 h-4 px-1.5 text-[9px] leading-4">
                   停用
-                </Badge>
+                </Tag>
               )}
             </div>
             <div className="truncate font-mono text-[10px] text-muted-foreground">
@@ -206,21 +205,21 @@ export function McpSettings() {
           </div>
           <Switch
             checked={server.enabled}
-            onCheckedChange={(v) => void handleToggle(server, v)}
+            onChange={(v) => void handleToggle(server, v)}
           />
           <Button
-            size="icon"
-            variant="ghost"
-            className="size-7"
+            size="small"
+            type="text"
+            className="w-7 p-0"
             title="编辑"
             onClick={() => setEditing(toForm(server))}
           >
             <Pencil className="size-3.5" />
           </Button>
           <Button
-            size="icon"
-            variant="ghost"
-            className="size-7"
+            size="small"
+            type="text"
+            className="w-7 p-0"
             title="删除"
             onClick={() => void handleDelete(server)}
           >

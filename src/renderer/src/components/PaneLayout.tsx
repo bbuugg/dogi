@@ -21,14 +21,7 @@ import { useAppStore } from '@/stores/app-store'
 import { TerminalView } from '@/components/TerminalView'
 import { AiPanel } from '@/components/AiPanel'
 import { ResizeHandle } from '@/components/ResizeHandle'
-import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuLabel,
-  ContextMenuSeparator,
-  ContextMenuTrigger
-} from '@/components/ui/context-menu'
+import { Dropdown } from 'antd'
 import type { PaneNode, SplitDirection, SplitDirectionInput } from '@/lib/pane-layout'
 
 /** 拖拽标签时用于跨组传递的 dataTransfer 类型标识 */
@@ -216,8 +209,9 @@ function GroupView({ groupId }: { groupId: string }) {
             const isActiveTab = group.activeSessionId === sid
             const isExited = exited.has(sid)
             return (
-              <ContextMenu
+              <Dropdown
                 key={sid}
+                trigger={['contextMenu']}
                 onOpenChange={(o) => {
                   // 右键菜单打开时，先让所在组/该标签成为激活目标，拆分才作用在正确的组上
                   if (o) {
@@ -225,80 +219,84 @@ function GroupView({ groupId }: { groupId: string }) {
                     setActiveSession(sid)
                   }
                 }}
+                menu={{
+                  items: [
+                    { key: 'title', label: session?.title ?? '终端', disabled: true },
+                    { type: 'divider' },
+                    { key: 'split-up', icon: <ArrowUp className="size-3.5" />, label: '向上拆分' },
+                    { key: 'split-down', icon: <ArrowDown className="size-3.5" />, label: '向下拆分' },
+                    { key: 'split-left', icon: <ArrowLeft className="size-3.5" />, label: '向左拆分' },
+                    { key: 'split-right', icon: <ArrowRight className="size-3.5" />, label: '向右拆分' },
+                    { type: 'divider' },
+                    {
+                      key: 'new-in-group',
+                      icon: <Plus className="size-3.5" />,
+                      label: '在本组新建终端'
+                    },
+                    { type: 'divider' },
+                    {
+                      key: 'close-tab',
+                      icon: <X className="size-3.5" />,
+                      label: '关闭标签',
+                      danger: true
+                    },
+                    {
+                      key: 'close-group',
+                      icon: <X className="size-3.5" />,
+                      label: '关闭整个组',
+                      danger: true
+                    }
+                  ],
+                  onClick: ({ key }) => {
+                    if (key === 'split-up') doSplit('up')
+                    else if (key === 'split-down') doSplit('down')
+                    else if (key === 'split-left') doSplit('left')
+                    else if (key === 'split-right') doSplit('right')
+                    else if (key === 'new-in-group') newInGroup()
+                    else if (key === 'close-tab') void closeSession(sid)
+                    else if (key === 'close-group') void closeGroup(groupId)
+                  }
+                }}
               >
-                <ContextMenuTrigger asChild>
-                  <div
-                    draggable
-                    onDragStart={(e) => {
-                      draggingSessionId = sid
-                      e.dataTransfer.setData(SESSION_DRAG_TYPE, sid)
-                      e.dataTransfer.effectAllowed = 'move'
-                    }}
-                    onDragEnd={() => {
-                      draggingSessionId = null
-                      setDragOver(false)
-                    }}
-                    onClick={() => setActiveSession(sid)}
-                    title="拖拽到其它面板可分屏放置"
-                    className={cn(
-                      'group/tab flex max-w-52 shrink-0 cursor-pointer items-center gap-1.5 border-r border-border/60 px-2.5 text-xs transition-colors',
-                      isActiveTab
-                        ? 'bg-background text-foreground'
-                        : 'text-muted-foreground hover:text-foreground'
-                    )}
-                  >
-                    <TerminalSquare className="size-3.5 shrink-0" />
-                    <span className="truncate" title={session?.title}>
-                      {session?.title ?? '终端'}
-                    </span>
-                    {isExited && (
-                      <span className="shrink-0 text-[10px] text-destructive">已退出</span>
-                    )}
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        void closeSession(sid)
-                      }}
-                      className="ml-0.5 rounded p-0.5 opacity-0 transition-opacity hover:bg-secondary group-hover/tab:opacity-100"
-                      title="关闭标签"
-                    >
-                      <X className="size-3" />
-                    </button>
-                  </div>
-                </ContextMenuTrigger>
-                <ContextMenuContent>
-                  <ContextMenuLabel className="truncate">
+                <div
+                  draggable
+                  onDragStart={(e) => {
+                    draggingSessionId = sid
+                    e.dataTransfer.setData(SESSION_DRAG_TYPE, sid)
+                    e.dataTransfer.effectAllowed = 'move'
+                  }}
+                  onDragEnd={() => {
+                    draggingSessionId = null
+                    setDragOver(false)
+                  }}
+                  onClick={() => setActiveSession(sid)}
+                  title="拖拽到其它面板可分屏放置"
+                  className={cn(
+                    'group/tab flex max-w-52 shrink-0 cursor-pointer items-center gap-1.5 border-r border-border/60 px-2.5 text-xs transition-colors',
+                    isActiveTab
+                      ? 'bg-background text-foreground'
+                      : 'text-muted-foreground hover:text-foreground'
+                  )}
+                >
+                  <TerminalSquare className="size-3.5 shrink-0" />
+                  <span className="truncate" title={session?.title}>
                     {session?.title ?? '终端'}
-                  </ContextMenuLabel>
-                  <ContextMenuSeparator />
-                  <ContextMenuItem onSelect={() => doSplit('up')}>
-                    <ArrowUp /> 向上拆分
-                  </ContextMenuItem>
-                  <ContextMenuItem onSelect={() => doSplit('down')}>
-                    <ArrowDown /> 向下拆分
-                  </ContextMenuItem>
-                  <ContextMenuItem onSelect={() => doSplit('left')}>
-                    <ArrowLeft /> 向左拆分
-                  </ContextMenuItem>
-                  <ContextMenuItem onSelect={() => doSplit('right')}>
-                    <ArrowRight /> 向右拆分
-                  </ContextMenuItem>
-                  <ContextMenuSeparator />
-                  <ContextMenuItem onSelect={newInGroup}>
-                    <Plus /> 在本组新建终端
-                  </ContextMenuItem>
-                  <ContextMenuSeparator />
-                  <ContextMenuItem variant="destructive" onSelect={() => void closeSession(sid)}>
-                    <X /> 关闭标签
-                  </ContextMenuItem>
-                  <ContextMenuItem
-                    variant="destructive"
-                    onSelect={() => void closeGroup(groupId)}
+                  </span>
+                  {isExited && (
+                    <span className="shrink-0 text-[10px] text-destructive">已退出</span>
+                  )}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      void closeSession(sid)
+                    }}
+                    className="ml-0.5 rounded p-0.5 opacity-0 transition-opacity hover:bg-secondary group-hover/tab:opacity-100"
+                    title="关闭标签"
                   >
-                    <X /> 关闭整个组
-                  </ContextMenuItem>
-                </ContextMenuContent>
-              </ContextMenu>
+                    <X className="size-3" />
+                  </button>
+                </div>
+              </Dropdown>
             )
           })}
         </div>
