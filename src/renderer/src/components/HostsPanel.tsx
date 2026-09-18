@@ -1,7 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { SshGroup, SshProfile } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
-import { ChevronDown, ChevronRight, FolderPlus, Pencil, Plus, Server, Trash2 } from 'lucide-react'
+import {
+  ChevronDown,
+  ChevronRight,
+  FolderPlus,
+  Pencil,
+  Plus,
+  Server,
+  TerminalSquare,
+  Trash2
+} from 'lucide-react'
 import { cn } from 'cn'
 import { DndProvider, useDrag, useDrop } from 'react-dnd'
 import { HTML5Backend } from 'react-dnd-html5-backend'
@@ -12,15 +21,14 @@ import {
   Dropdown,
   Input,
   Modal,
-  Space,
   Tooltip,
   Tree,
   message,
   type MenuProps,
   type TreeDataNode
 } from 'antd'
-import { HOSTS_ACTIVITY_ID } from '@/activity-ids'
 import { resolveSshColor, tintText } from '@/lib/ssh-color'
+
 
 /** 树节点 key 前缀：g: 分组（g: 空 id 表示「未分组」伪分组）、p: 连接 */
 const GROUP_KEY_PREFIX = 'g:'
@@ -198,10 +206,9 @@ function ColorDot({
 export function HostsPanel() {
   const profiles = useAppStore((s) => s.profiles)
   const sshGroups = useAppStore((s) => s.sshGroups)
-  const connectSsh = useAppStore((s) => s.connectSsh)
+  const connectHost = useAppStore((s) => s.connectHost)
   const setSshDialog = useAppStore((s) => s.setSshDialog)
   const refreshProfiles = useAppStore((s) => s.refreshProfiles)
-  const selectActivity = useAppStore((s) => s.selectActivity)
   const saveSshGroup = useAppStore((s) => s.saveSshGroup)
   const setSshProfileColor = useAppStore((s) => s.setSshProfileColor)
   const deleteSshGroup = useAppStore((s) => s.deleteSshGroup)
@@ -267,7 +274,7 @@ export function HostsPanel() {
 
   /** 发起连接并在失败时提示（连接本身会切回终端视图） */
   const connect = (profile: SshProfile) => {
-    void connectSsh(profile).catch((e) => {
+    void connectHost(profile).catch((e) => {
       message.error(`连接失败：${e instanceof Error ? e.message : String(e)}`)
     })
   }
@@ -422,19 +429,7 @@ export function HostsPanel() {
   return (
     <DndProvider backend={HTML5Backend}>
       <div className="flex-1 overflow-y-auto p-2">
-        {/* 本地终端 */}
-        <div className="mb-1 flex items-center justify-between rounded py-1">
-          <span
-            className="cursor-pointer text-sm font-medium text-muted-foreground"
-            title="返回终端视图"
-            onClick={() => selectActivity(HOSTS_ACTIVITY_ID)}
-          >
-            本地终端
-          </span>
-        </div>
-        <NewTerminalMenu />
-
-        {/*主机 */}
+        {/* 主机 */}
         <div className="mb-1 flex items-center justify-between gap-1 rounded py-1">
           <span className="text-sm font-medium text-muted-foreground">
            主机 ({profiles.length})
@@ -546,8 +541,11 @@ export function HostsPanel() {
         destroyOnHidden
       >
         <p className="text-sm text-muted-foreground">
-          「{pendingDelete?.name}」（{pendingDelete?.username}@{pendingDelete?.host}:
-          {pendingDelete?.port}）将从列表中移除，该操作不可撤销。
+          「{pendingDelete?.name}」
+          {pendingDelete?.kind === 'local'
+            ? '（本地终端）'
+            : `（${pendingDelete?.username}@${pendingDelete?.host}:${pendingDelete?.port}）`}
+          将从列表中移除，该操作不可撤销。
         </p>
       </Modal>
     </DndProvider>
@@ -786,7 +784,16 @@ function ProfileRow({
   const ref = useMemo(() => mergeRefs(dropRef, dragRef), [dropRef, dragRef])
 
   const items: MenuProps['items'] = [
-    { key: 'connect', icon: <Server className="size-3.5" />, label: '连接' },
+    {
+      key: 'connect',
+      icon:
+        profile.kind === 'local' ? (
+          <TerminalSquare className="size-3.5" />
+        ) : (
+          <Server className="size-3.5" />
+        ),
+      label: '连接'
+    },
     { key: 'edit', icon: <Pencil className="size-3.5" />, label: '编辑' },
     { type: 'divider' },
     { key: 'delete', icon: <Trash2 className="size-3.5" />, label: '删除', danger: true }
@@ -814,16 +821,27 @@ function ProfileRow({
           }
         }}
       >
-        {/* 行内只显示名称，连接信息（账号/地址/端口）悬浮时才提示 */}
+        {/* 行内只显示名称，连接信息（账号/地址/端口 或 启动命令）悬浮时才提示 */}
         <Tooltip
-          title={`${profile.username}@${profile.host}:${profile.port}`}
+          title={
+            profile.kind === 'local'
+              ? profile.command ?? '本地终端'
+              : `${profile.username}@${profile.host}:${profile.port}`
+          }
           mouseEnterDelay={0.4}
         >
           <div className="flex min-w-0 flex-1 items-center gap-2">
-            <Server
-              className="size-4 shrink-0 text-muted-foreground"
-              style={color ? { color } : undefined}
-            />
+            {profile.kind === 'local' ? (
+              <TerminalSquare
+                className="size-4 shrink-0 text-muted-foreground"
+                style={color ? { color } : undefined}
+              />
+            ) : (
+              <Server
+                className="size-4 shrink-0 text-muted-foreground"
+                style={color ? { color } : undefined}
+              />
+            )}
             <div
               className="min-w-0 flex-1 truncate text-sm font-medium"
               style={color ? { color: tintText(color) } : undefined}
@@ -844,34 +862,5 @@ function ProfileRow({
         onClear={() => onColor(null)}
       />
     </div>
-  )
-}
-
-/** 新建终端：默认 shell 直接新建，下拉可选择具体 shell（在当前激活组开标签） */
-function NewTerminalMenu() {
-  const createLocalSession = useAppStore((s) => s.createLocalSession)
-  const shells = useAppStore((s) => s.shells)
-  const localShell = useAppStore((s) => s.preferences.localShell)
-  const effectiveShellId = localShell || 'default'
-
-  return (
-    <Space.Compact className="mb-4 w-full">
-      <Button className="flex-1" onClick={() => void createLocalSession()}>
-        <Plus className="size-4" /> 新建本地终端
-      </Button>
-      <Dropdown
-        trigger={['click']}
-        menu={{
-          items: (shells?.shells ?? []).map((shell) => ({
-            key: shell.id,
-            label: shell.name,
-            extra: shell.id === effectiveShellId ? '默认' : undefined
-          })),
-          onClick: ({ key }) => void createLocalSession(key)
-        }}
-      >
-        <Button icon={<ChevronDown className="size-3.5" />} />
-      </Dropdown>
-    </Space.Compact>
   )
 }

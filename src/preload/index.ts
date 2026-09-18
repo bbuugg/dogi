@@ -45,6 +45,9 @@ const api = {
       ipcRenderer.invoke('terminal:createLocal', cols, rows, shellId),
     createSsh: (profileId: string, cols?: number, rows?: number): Promise<SessionInfo> =>
       ipcRenderer.invoke('terminal:createSsh', profileId, cols, rows),
+    /** 按主机配置创建会话：主进程根据主机类型（ssh/local）决定启动方式 */
+    createFromProfile: (profileId: string, cols?: number, rows?: number): Promise<SessionInfo> =>
+      ipcRenderer.invoke('terminal:createFromProfile', profileId, cols, rows),
     write: (sessionId: string, data: string | Uint8Array): Promise<boolean> =>
       ipcRenderer.invoke('terminal:write', sessionId, data),
     resize: (sessionId: string, cols: number, rows: number): Promise<void> =>

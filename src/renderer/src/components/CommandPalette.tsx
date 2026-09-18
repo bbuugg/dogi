@@ -63,7 +63,7 @@ export function CommandPalette() {
   const refreshProfiles = useAppStore((s) => s.refreshProfiles)
   const activeSessionId = useAppStore((s) => s.activeSessionId)
   const createLocalSession = useAppStore((s) => s.createLocalSession)
-  const connectSsh = useAppStore((s) => s.connectSsh)
+  const connectHost = useAppStore((s) => s.connectHost)
   const selectActivity = useAppStore((s) => s.selectActivity)
   const setSshDialog = useAppStore((s) => s.setSshDialog)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
@@ -237,12 +237,13 @@ export function CommandPalette() {
     id: `host.${p.id}`,
     group: '主机',
     title: p.name,
-    description: `${p.username}@${p.host}:${p.port}`,
-    keywords: `${p.host} ${p.username}`,
-    icon: Server,
+    description:
+      p.kind === 'local' ? p.command ?? '本地终端' : `${p.username}@${p.host}:${p.port}`,
+    keywords: p.kind === 'local' ? p.command ?? '' : `${p.host} ${p.username}`,
+    icon: p.kind === 'local' ? TerminalSquare : Server,
     run: () => {
       close()
-      void connectSsh(p)
+      void connectHost(p)
     }
   }))
 

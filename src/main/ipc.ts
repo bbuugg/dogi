@@ -94,6 +94,17 @@ export function registerIpc(win: () => BrowserWindow | null): void {
     if (!profile) throw new Error(`SSH 配置不存在: ${profileId}`)
     return sessionManager.createSsh(profile, cols, rows)
   })
+  // 按主机类型创建会话：local 启动本地命令，ssh 建立远程连接（统一入口）
+  ipcMain.handle(
+    'terminal:createFromProfile',
+    (_e, profileId: string, cols?: number, rows?: number) => {
+      const profile = storage.getSshProfile(profileId)
+      if (!profile) throw new Error(`主机配置不存在: ${profileId}`)
+      return profile.kind === 'local'
+        ? sessionManager.createLocalHost(profile, cols, rows)
+        : sessionManager.createSsh(profile, cols, rows)
+    }
+  )
   ipcMain.handle('terminal:write', (_e, sessionId: string, data: string) =>
     sessionManager.write(sessionId, data)
   )

@@ -126,6 +126,9 @@ export interface SshConnectProgress {
 
 export type SshAuthType = 'password' | 'privateKey'
 
+/** 主机类型：远程 SSH / 本地终端 */
+export type HostKind = 'ssh' | 'local'
+
 /**主机分组：仅用于侧边栏归类；删除分组时组内连接回到「未分组」 */
 export interface SshGroup {
   id: string
@@ -137,13 +140,18 @@ export interface SshGroup {
 
 export interface SshProfile {
   id: string
+  /** 主机类型：ssh 远程连接 / local 本地终端 */
+  kind: HostKind
   /** 所属分组 id；缺省表示未分组 */
   groupId?: string
   /** 连接自身的强调色；缺省表示继承所属分组的颜色 */
   color?: string
   name: string
+  /** 仅 ssh：主机地址 */
   host: string
+  /** 仅 ssh：端口 */
   port: number
+  /** 仅 ssh：登录用户名 */
   username: string
   authType: SshAuthType
   /** 仅用于传输，存储时主进程会用 safeStorage 加密，读取列表时不返回 */
@@ -154,6 +162,10 @@ export interface SshProfile {
   hasPassword?: boolean
   hasPrivateKey?: boolean
   hasPassphrase?: boolean
+  /** 仅 local：要启动的命令（可执行文件，PATH 可解析） */
+  command?: string
+  /** 仅 local：启动参数 */
+  args?: string[]
   keepaliveInterval?: number
   createdAt: number
   updatedAt: number

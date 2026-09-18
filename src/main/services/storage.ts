@@ -103,6 +103,7 @@ class StorageService {
   listSshProfiles(): SshProfile[] {
     return this.store.get('sshProfiles').map((p) => ({
       ...p,
+      kind: p.kind ?? 'ssh',
       password: undefined,
       passphrase: undefined,
       privateKey: undefined,
@@ -118,6 +119,7 @@ class StorageService {
     if (!profile) return undefined
     return {
       ...profile,
+      kind: profile.kind ?? 'ssh',
       password: this.decrypt(profile.password),
       passphrase: this.decrypt(profile.passphrase)
     }
@@ -131,6 +133,7 @@ class StorageService {
     const profile: SshProfile = {
       ...input,
       id: input.id || crypto.randomUUID(),
+      kind: input.kind ?? 'ssh',
       password: input.password !== undefined ? this.encrypt(input.password) : prev?.password,
       privateKey:
         input.privateKey !== undefined ? input.privateKey : prev?.privateKey,

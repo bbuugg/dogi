@@ -54,9 +54,9 @@ class LocalSession implements InternalSession {
     cols: number,
     rows: number,
     handlers: { onData: (data: Buffer) => void; onExit: (exitCode: number) => void },
-    shellId?: string
+    shell: { command: string; args?: string[]; title: string },
+    profileId?: string
   ) {
-    const shell = resolveLocalShell(shellId)
     this.proc = pty.spawn(shell.command, shell.args ?? [], {
       name: TERM_TYPE,
       cols,
@@ -70,6 +70,7 @@ class LocalSession implements InternalSession {
       id,
       type: 'local',
       title: shell.title,
+      profileId,
       pid: this.proc.pid,
       createdAt: Date.now(),
       exited: false
@@ -385,6 +386,7 @@ class SessionManager extends EventEmitter {
 
   createLocal(cols = 80, rows = 24, shellId?: string): SessionInfo {
     const id = crypto.randomUUID()
+    const shell = resolveLocalShell(shellId)
     const session = new LocalSession(
       id,
       cols,
@@ -393,7 +395,27 @@ class SessionManager extends EventEmitter {
         onData: (data) => this.handleData(id, data),
         onExit: (code) => this.handleExit(id, code)
       },
-      shellId
+      { command: shell.command, args: shell.args, title: shell.title }
+    )
+    this.attach(id, session)
+    return { ...session.info }
+  }
+
+  /** 按本地主机配置启动会话（命令来自保存的主机，绑定其 profileId） */
+  createLocalHost(profile: SshProfile, cols = 80, rows = 24): SessionInfo {
+    const command = profile.command?.trim()
+    if (!command) throw new Error('本地终端未配置启动命令')
+    const id = crypto.randomUUID()
+    const session = new LocalSession(
+      id,
+      cols,
+      rows,
+      {
+        onData: (data) => this.handleData(id, data),
+        onExit: (code) => this.handleExit(id, code)
+      },
+      { command, args: profile.args, title: profile.name || command },
+      profile.id
     )
     this.attach(id, session)
     return { ...session.info }

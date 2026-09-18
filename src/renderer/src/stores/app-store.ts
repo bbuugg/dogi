@@ -43,6 +43,11 @@ import {
   type SplitDirectionInput
 } from '@/lib/pane-layout'
 
+/** 打开一个已保存的主机会话：主进程按主机类型（ssh / local）决定启动方式 */
+function openSession(profileId: string, cols = 80, rows = 24): Promise<SessionInfo> {
+  return window.api.terminal.createFromProfile(profileId, cols, rows)
+}
+
 /** 终端字号持久化写入的防抖句柄（Ctrl+滚轮会触发连续调整） */
 let fontSizeSaveTimer: number | undefined
 
@@ -271,8 +276,8 @@ interface AppStore {
   bootstrap: () => Promise<void>
   /** 创建本地终端：不传 shellId 时使用偏好设置的默认本地终端 */
   createLocalSession: (shellId?: string) => Promise<void>
-  /** 连接 SSH 主机，返回新会话信息（供后续在该会话上执行脚本等） */
-  connectSsh: (profile: SshProfile) => Promise<SessionInfo>
+  /** 连接一个已保存的主机（ssh 远程 / local 本地），返回新会话信息 */
+  connectHost: (profile: SshProfile) => Promise<SessionInfo>
   /** 连接指定主机并在其上执行脚本：连接就绪后把脚本写入该会话，返回是否执行成功 */
   runScriptOnHost: (profile: SshProfile, script: ScriptEntry) => Promise<boolean>
   closeSession: (id: string) => Promise<void>
@@ -541,8 +546,8 @@ let shortcutWired = false
       get().selectActivity(HOSTS_ACTIVITY_ID)
     },
 
-    connectSsh: async (profile) => {
-      const info = await window.api.terminal.createSsh(profile.id, 80, 24)
+    connectHost: async (profile) => {
+      const info = await openSession(profile.id)
       set((s) => {
         const groups = { ...s.groups }
         let activeGroupId = s.activeGroupId ?? firstGroupId(s.layout)
@@ -571,8 +576,8 @@ let shortcutWired = false
     },
 
     runScriptOnHost: async (profile, script) => {
-      // connectSsh 内部已切回终端功能区
-      const info = await get().connectSsh(profile)
+      // connectHost 内部已切回终端功能区
+      const info = await get().connectHost(profile)
       return window.api.terminal.runScript(info.id, scriptToTerminalInput(script.content))
     },
 
@@ -586,11 +591,18 @@ let shortcutWired = false
       const old = get().sessions.find((x) => x.id === id)
       if (!old) return
       reconnectingIds.add(id)
-      // 按原会话类型创建新会话：SSH 沿用原 profileId，本地则新建本地 Shell
-      const info: SessionInfo =
-        old.type === 'ssh' && old.profileId
-          ? await window.api.terminal.createSsh(old.profileId, 80, 24)
-          : await window.api.terminal.createLocal(80, 24)
+      // 按原会话重建：绑定了主机的（ssh 或 local 主机）沿用它，纯本地会话新建默认 shell
+      let info: SessionInfo
+      if (old.profileId) {
+        try {
+          info = await openSession(old.profileId)
+        } catch {
+          // 主机配置可能已删除：退化为普通本地终端
+          info = await window.api.terminal.createLocal(80, 24)
+        }
+      } else {
+        info = await window.api.terminal.createLocal(80, 24)
+      }
       // 关闭已退出的旧会话（onClosed 已被 reconnectingIds 屏蔽，不会摘掉组）
       await window.api.terminal.kill(id)
       set((s) => {
@@ -672,11 +684,10 @@ let shortcutWired = false
       const src =
         s.sessions.find((x) => x.id === g.activeSessionId) ??
         s.sessions.find((x) => g.sessionIds.includes(x.id))
-      // 镜像当前组激活会话的类型：SSH 沿用原 profileId，本地则新建本地 Shell
-      const info: SessionInfo =
-        src?.type === 'ssh' && src.profileId
-          ? await window.api.terminal.createSsh(src.profileId, 80, 24)
-          : await window.api.terminal.createLocal(80, 24)
+      // 镜像当前组激活会话：绑定了主机（ssh / local 主机）的沿用其配置，纯本地会话新建默认 shell
+      const info: SessionInfo = src?.profileId
+        ? await openSession(src.profileId)
+        : await window.api.terminal.createLocal(80, 24)
       set((st) => {
         const gid = genPaneId()
         const groups = {
