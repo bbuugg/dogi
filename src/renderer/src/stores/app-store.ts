@@ -8,6 +8,7 @@ import type {
   AiSettings,
   AiStreamEvent,
   ColorThemeName,
+  NoteEntry,
   Preferences,
   ServerMetrics,
   SessionInfo,
@@ -208,6 +209,8 @@ interface UiState {
   activeActivity: string
   /** 各功能区的侧边栏是否折叠（key 为功能区 id；侧边栏属于功能区，互不影响） */
   collapsedActivities: Record<string, boolean>
+  /** 笔记功能：当前正在编辑的笔记 id（null = 未选中） */
+  activeNoteId: string | null
   /** 侧边栏宽度（px） */
   sidebarWidth: number
   /** AI 助手面板宽度（px） */
@@ -242,6 +245,9 @@ interface AppStore {
 
   // ---------- 用户脚本 ----------
   scripts: ScriptEntry[]
+
+  // ---------- 笔记 ----------
+  notes: NoteEntry[]
 
   // ---------- 偏好 ----------
   preferences: Preferences
@@ -336,6 +342,16 @@ interface AppStore {
   setSidebarCollapsed: (collapsed: boolean) => void
   setAiPanelWidth: (width: number) => void
   refreshScripts: () => Promise<void>
+  /** 刷新笔记列表到 store */
+  refreshNotes: () => Promise<void>
+  /** 新建一篇空笔记并进入编辑（默认语言 markdown） */
+  createNote: () => Promise<string>
+  /** 保存笔记（upsert）：新增时返回新 id，已有笔记原地更新 */
+  saveNote: (note: NoteEntry) => Promise<void>
+  /** 删除笔记，若正被编辑则清空选中 */
+  deleteNote: (id: string) => Promise<void>
+  /** 选择要编辑的笔记（null 表示取消选择） */
+  selectNote: (id: string | null) => void
   /** 打开/关闭 SSH 配置弹窗（editing=null 为新建；groupId 预设新建时的分组） */
   setSshDialog: (open: boolean, editing?: SshProfile | null, groupId?: string) => void
   /** 打开/关闭「运行脚本」对话框（可预设要运行的脚本） */
@@ -432,6 +448,7 @@ let shortcutWired = false
     sshGroups: [],
 
     scripts: [],
+    notes: [],
 
     preferences: { theme: 'system', colorTheme: 'neutral', customColor: '#3b82f6', terminalTheme: 'auto', copyOnSelect: true, rightClickPaste: true, commandPrediction: true, terminalFontSize: 13, localShell: 'default', minimizeToTray: true, monitorInterval: 2000 },
 
@@ -457,6 +474,7 @@ let shortcutWired = false
       commandPaletteOpen: false,
       activeActivity: HOSTS_ACTIVITY_ID,
       collapsedActivities: {},
+      activeNoteId: null,
       sidebarWidth: 240,
       aiPanelWidth: 350
     },
@@ -464,7 +482,7 @@ let shortcutWired = false
     monitors: {},
 
     bootstrap: async () => {
-      const [profiles, sshGroups, configs, settings, preferences, shells, scripts, shortcuts] = await Promise.all([
+      const [profiles, sshGroups, configs, settings, preferences, shells, scripts, notes, shortcuts] = await Promise.all([
         window.api.ssh.list(),
         window.api.ssh.listGroups(),
         window.api.ai.listConfigs(),
@@ -472,6 +490,7 @@ let shortcutWired = false
         window.api.prefs.get(),
         window.api.terminal.listShells(),
         window.api.scripts.list(),
+        window.api.notes.list(),
         window.api.shortcuts.get()
       ])
       // 配色必须在偏好写进 store 之前落到 html 上：antd 的 token 是在 store 更新引发的那次
@@ -485,6 +504,7 @@ let shortcutWired = false
         preferences,
         shells,
         scripts,
+        notes,
         shortcuts
       })
       // 运行时加载外部插件（扫描 userData/plugins 并收集视图）
@@ -906,6 +926,52 @@ let shortcutWired = false
 
     refreshScripts: async () => {
       set({ scripts: await window.api.scripts.list() })
+    },
+
+    refreshNotes: async () => {
+      set({ notes: await window.api.notes.list() })
+    },
+
+    createNote: async () => {
+      const prevIds = new Set(get().notes.map((n) => n.id))
+      const list = await window.api.notes.save({
+        id: '',
+        title: '未命名笔记',
+        content: '',
+        language: 'markdown',
+        createdAt: 0,
+        updatedAt: 0
+      })
+      const created = list.find((n) => !prevIds.has(n.id))
+      const id = created?.id ?? null
+      set({
+        notes: list,
+        ui: { ...get().ui, activeNoteId: id }
+      })
+      return id ?? ''
+    },
+
+    saveNote: async (note) => {
+      const list = await window.api.notes.save(note)
+      set({
+        notes: list,
+        ui: { ...get().ui, activeNoteId: note.id || get().ui.activeNoteId }
+      })
+    },
+
+    deleteNote: async (id) => {
+      const list = await window.api.notes.remove(id)
+      set({
+        notes: list,
+        ui: {
+          ...get().ui,
+          activeNoteId: get().ui.activeNoteId === id ? null : get().ui.activeNoteId
+        }
+      })
+    },
+
+    selectNote: (id) => {
+      set((s) => ({ ui: { ...s.ui, activeNoteId: id } }))
     },
 
     refreshAiConfigs: async () => {

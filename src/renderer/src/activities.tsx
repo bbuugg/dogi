@@ -1,17 +1,19 @@
 import { useMemo } from 'react'
 import type { ComponentType } from 'react'
-import { FileCode2, Puzzle, Server } from 'lucide-react'
+import { FileCode2, Puzzle, Server, StickyNote } from 'lucide-react'
 import { HostsPanel } from '@/components/HostsPanel'
+import { NotesPanel } from '@/components/NotesPanel'
 import { useAppStore } from '@/stores/app-store'
 import {
   HOSTS_ACTIVITY_ID,
+  NOTES_ACTIVITY_ID,
   PLUGINS_ACTIVITY_ID,
   SCRIPTS_ACTIVITY_ID,
   pluginActivityId
 } from '@/activity-ids'
 
 /** 主区域内容标识（活动栏是唯一导航真源，主区域显示什么由当前功能区决定） */
-export type ActivityView = 'terminal' | 'scripts' | 'plugin' | 'plugins'
+export type ActivityView = 'terminal' | 'scripts' | 'plugin' | 'plugins' | 'notes'
 
 /**
  * 功能区（活动栏条目）= 一个 tab。
@@ -49,6 +51,13 @@ export const BUILTIN_ACTIVITIES: Activity[] = [
     label: '脚本管理',
     icon: FileCode2,
     view: 'scripts'
+  },
+  {
+    id: NOTES_ACTIVITY_ID,
+    label: '笔记',
+    icon: StickyNote,
+    panel: NotesPanel,
+    view: 'notes'
   },
   {
     id: PLUGINS_ACTIVITY_ID,

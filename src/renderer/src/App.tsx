@@ -13,6 +13,7 @@ import { PaneLayout } from '@/components/PaneLayout'
 import { CommandPalette } from '@/components/CommandPalette'
 import { RunScriptDialog } from '@/components/RunScriptDialog'
 import { ScriptsPage } from '@/components/ScriptsPage'
+import { NotesPage } from '@/components/NotesPage'
 import { PluginsPage } from '@/components/PluginsPage'
 import { StatusBar } from '@/components/StatusBar'
 import { ResizeHandle } from '@/components/ResizeHandle'
@@ -105,6 +106,7 @@ export default function App() {
               {layout ? <PaneLayout layout={layout} /> : <EmptyState />}
             </div>
             {view === 'scripts' && <ScriptsPage />}
+            {view === 'notes' && <NotesPage />}
             {view === 'plugins' && <PluginsPage />}
             {/* 插件视图：已打开过的保持挂载，只有激活的那个可见（切去终端再切回不丢状态） */}
             {plugins

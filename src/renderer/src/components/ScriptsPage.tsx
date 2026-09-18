@@ -1,9 +1,9 @@
-import { useState } from 'react'
-import { Pencil, Plus, Play, Trash2 } from 'lucide-react'
 import MonacoEditor from '@/components/MonacoEditor'
-import { Button, Form, Input, Modal, message } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import type { ScriptEntry } from '@shared/types'
+import { Button, Form, Input, Modal, message } from 'antd'
+import { Pencil, Play, Plus, Trash2 } from 'lucide-react'
+import { useState } from 'react'
 
 /** 脚本管理页：列出 / 新增 / 编辑 / 删除用户脚本（持久化到本地存储） */
 export function ScriptsPage() {
@@ -78,14 +78,18 @@ export function ScriptsPage() {
         <span className="text-xs text-muted-foreground">共 {scripts.length} 个脚本</span>
         <div className="ml-auto flex gap-2">
           <Button
+            icon={<Play className="size-4" />}
             variant="filled"
             onClick={() => setRunScriptDialog(true)}
             title="选择主机并运行脚本"
           >
-            <Play className="size-4" /> 运行脚本
+            运行脚本
           </Button>
-          <Button type="primary" onClick={startAdd}>
-            <Plus className="size-4" /> 新增脚本
+          <Button icon={<Plus className="size-4" />}
+            type="primary"
+            onClick={startAdd}
+          >
+            新增脚本
           </Button>
         </div>
       </div>
@@ -99,8 +103,8 @@ export function ScriptsPage() {
             把常用命令保存下来，之后选择主机执行；也可在终端按 Ctrl+Shift+P
             打开命令面板，选择「运行脚本」。
             <div className="mt-4">
-              <Button type="primary" onClick={startAdd}>
-                <Plus className="size-4" /> 新增脚本
+              <Button icon={<Plus className="size-4" />} type="primary" onClick={startAdd}>
+                新增脚本
               </Button>
             </div>
           </div>
@@ -133,22 +137,24 @@ export function ScriptsPage() {
                       <Play className="size-4" />
                     </Button>
                     <Button
+                      icon={<Pencil className="size-4" />}
                       type="text"
                       size="small"
                       className="w-7 p-0"
                       title="编辑"
                       onClick={() => startEdit(s)}
                     >
-                      <Pencil className="size-4" />
+                      编辑
                     </Button>
                     <Button
                       type="text"
+                      icon={<Trash2 className="size-4 text-destructive" />}
                       size="small"
                       className="w-7 p-0"
                       title="删除"
                       onClick={() => setPendingDelete(s)}
                     >
-                      <Trash2 className="size-4 text-destructive" />
+                      删除
                     </Button>
                   </div>
                 </div>

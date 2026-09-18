@@ -204,6 +204,19 @@ export interface ScriptEntry {
   updatedAt: number
 }
 
+/** 用户笔记：右侧 Monaco 编辑器承载正文，可任意指定语言 */
+export interface NoteEntry {
+  id: string
+  /** 笔记标题，兼作列表展示与搜索 */
+  title: string
+  /** 笔记正文 */
+  content: string
+  /** Monaco 语言（见 MONACO_LANGUAGES），缺省按创建时指定，默认 markdown */
+  language: string
+  createdAt: number
+  updatedAt: number
+}
+
 export type AiProviderKind =
   | 'openai'
   | 'anthropic'

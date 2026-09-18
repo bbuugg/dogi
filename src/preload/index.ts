@@ -10,6 +10,7 @@ import type {
   AppShortcutAction,
   McpServerConfig,
   McpToolInfo,
+  NoteEntry,
   Preferences,
   ScriptEntry,
   ServerMetrics,
@@ -127,6 +128,11 @@ const api = {
     save: (entry: ScriptEntry): Promise<ScriptEntry[]> =>
       ipcRenderer.invoke('scripts:save', entry),
     remove: (id: string): Promise<ScriptEntry[]> => ipcRenderer.invoke('scripts:delete', id)
+  },
+  notes: {
+    list: (): Promise<NoteEntry[]> => ipcRenderer.invoke('notes:list'),
+    save: (note: NoteEntry): Promise<NoteEntry[]> => ipcRenderer.invoke('notes:save', note),
+    remove: (id: string): Promise<NoteEntry[]> => ipcRenderer.invoke('notes:delete', id)
   },
   prefs: {
     get: (): Promise<Preferences> => ipcRenderer.invoke('prefs:get'),

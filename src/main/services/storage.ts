@@ -5,6 +5,7 @@ import type {
   AiPermissionMode,
   AiSettings,
   McpServerConfig,
+  NoteEntry,
   Preferences,
   ScriptEntry,
   ShortcutConfig,
@@ -21,6 +22,7 @@ interface StoreSchema {
   aiSettings: AiSettings
   preferences: Preferences
   scripts: ScriptEntry[]
+  notes: NoteEntry[]
   shortcuts: ShortcutConfig[]
   windowBounds?: { x?: number; y?: number; width: number; height: number }
 }
@@ -53,6 +55,7 @@ class StorageService {
       aiSettings: DEFAULT_AI_SETTINGS,
       preferences: DEFAULT_PREFERENCES,
       scripts: [],
+      notes: [],
       shortcuts: DEFAULT_SHORTCUTS
     }
   })
@@ -270,6 +273,38 @@ class StorageService {
       this.store.get('scripts').filter((s) => s.id !== id)
     )
     return this.listScripts()
+  }
+
+  // ---------- 笔记 ----------
+  listNotes (): NoteEntry[] {
+    return this.store.get('notes')
+  }
+
+  /** 保存笔记（upsert）：不传 id 视为新增，默认语言 markdown */
+  saveNote(input: NoteEntry): NoteEntry[] {
+    const notes = this.store.get('notes')
+    const now = Date.now()
+    const prev = input.id ? notes.find((n) => n.id === input.id) : undefined
+    const entry: NoteEntry = {
+      ...input,
+      id: input.id || crypto.randomUUID(),
+      language: input.language || prev?.language || 'markdown',
+      createdAt: prev?.createdAt ?? now,
+      updatedAt: now
+    }
+    const next = prev
+      ? notes.map((n) => (n.id === entry.id ? entry : n))
+      : [...notes, entry]
+    this.store.set('notes', next)
+    return next
+  }
+
+  deleteNote(id: string): NoteEntry[] {
+    this.store.set(
+      'notes',
+      this.store.get('notes').filter((n) => n.id !== id)
+    )
+    return this.listNotes()
   }
 
   // ---------- 快捷键（全局，系统级） ----------

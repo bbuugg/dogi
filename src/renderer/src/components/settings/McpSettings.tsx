@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
-import { Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import type { McpServerConfig } from '@shared/types'
 import { Button, Input, Switch, Tag } from 'antd'
+import { Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { useEffect, useState } from 'react'
 
 interface McpStatus extends McpServerConfig {
   error?: string
@@ -166,11 +166,13 @@ export function McpSettings() {
           MCP 工具将自动提供给 AI 使用（stdio 类型）
         </p>
         <div className="flex gap-2">
-          <Button size="small" type="text" onClick={() => void handleListTools()}>
-            <RefreshCw className="size-4" /> 检查工具
+          <Button
+            icon={<RefreshCw className="size-4" />}
+            size="small" type="text" onClick={() => void handleListTools()}>
+            检查工具
           </Button>
-          <Button size="small" variant="filled" onClick={() => setEditing({ ...EMPTY })}>
-            <Plus className="size-4" /> 新建
+          <Button icon={<Plus className="size-4" />} size="small" variant="filled" onClick={() => setEditing({ ...EMPTY })}>
+            新建
           </Button>
         </div>
       </div>
@@ -210,20 +212,22 @@ export function McpSettings() {
           <Button
             size="small"
             type="text"
+            icon={<Pencil className="size-3.5" />}
             className="w-7 p-0"
             title="编辑"
             onClick={() => setEditing(toForm(server))}
           >
-            <Pencil className="size-3.5" />
+            编辑
           </Button>
           <Button
             size="small"
             type="text"
             className="w-7 p-0"
+            icon={<Trash2 className="size-3.5" />}
             title="删除"
             onClick={() => void handleDelete(server)}
           >
-            <Trash2 className="size-3.5" />
+            删除
           </Button>
         </div>
       ))}

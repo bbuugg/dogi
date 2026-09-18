@@ -9,6 +9,7 @@ import {
   Server,
   Settings,
   SquareTerminal,
+  StickyNote,
   TerminalSquare
 } from 'lucide-react'
 import { cn } from 'cn'
@@ -16,7 +17,7 @@ import { Button, Input, Modal, type InputRef } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import { scriptToTerminalInput } from '@/lib/script'
 import type { ScriptEntry } from '@shared/types'
-import { PLUGINS_ACTIVITY_ID, SCRIPTS_ACTIVITY_ID } from '@/activity-ids'
+import { NOTES_ACTIVITY_ID, PLUGINS_ACTIVITY_ID, SCRIPTS_ACTIVITY_ID } from '@/activity-ids'
 
 /**
  * 命令面板层级：命令列表（根）/ 脚本列表 / 主机列表。
@@ -174,6 +175,18 @@ export function CommandPalette() {
       run: () => {
         close()
         selectActivity(PLUGINS_ACTIVITY_ID)
+      }
+    },
+    {
+      id: 'notes.open',
+      group: '界面',
+      title: '打开笔记',
+      description: '浏览 / 编辑本地笔记',
+      keywords: 'note notes markdown 笔记 便签',
+      icon: StickyNote,
+      run: () => {
+        close()
+        selectActivity(NOTES_ACTIVITY_ID)
       }
     },
     {
@@ -400,13 +413,14 @@ export function CommandPalette() {
             <Button
               type="text"
               size="small"
+              icon={<ListPlus className="size-4" />}
               className="h-7"
               onClick={() => {
                 close()
                 selectActivity(SCRIPTS_ACTIVITY_ID)
               }}
             >
-              <ListPlus className="size-4" /> 管理脚本
+              管理脚本
             </Button>
           )}
         </div>

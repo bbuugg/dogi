@@ -149,23 +149,21 @@ const MonacoEditor: FC<MonacoEditorProps> = ({
             <Button
               type="text"
               size="small"
+              icon={<Hash className="size-3" />}
               className={cn('w-6 p-0 text-muted-foreground', !showLineNumbers && 'opacity-40')}
               onClick={() => setShowLineNumbers((v) => !v)}
               title="切换行号"
-            >
-              <Hash className="size-3" />
-            </Button>
+          />
           )}
           {showWordWrapToggle && (
             <Button
               type="text"
               size="small"
+              icon={<WrapText className="size-3" />}
               className={cn('w-6 p-0 text-muted-foreground', wordWrap === 'off' && 'opacity-40')}
               onClick={() => setWordWrap((w) => (w === 'on' ? 'off' : 'on'))}
               title="切换自动换行"
-            >
-              <WrapText className="size-3" />
-            </Button>
+            />
           )}
         </div>
 
@@ -177,37 +175,34 @@ const MonacoEditor: FC<MonacoEditorProps> = ({
             <Button
               type="text"
               size="small"
+              icon={<Code className="size-3" />}
               className="w-6 p-0 text-muted-foreground"
               onClick={handleFormat}
               title="格式化"
-            >
-              <Code className="size-3" />
-            </Button>
+            />
           )}
 
           {showCopyButton && (
             <Button
               type="text"
               size="small"
+              icon={copied ? <Check className="size-3" /> : <Copy className="size-3" />}
               className="w-6 p-0 text-muted-foreground"
               onClick={handleCopy}
               disabled={!value}
               title="复制"
-            >
-              {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
-            </Button>
+            />
           )}
           {showDownloadButton && (
             <Button
               type="text"
               size="small"
+              icon={<Download className="size-3" />}
               className="w-6 p-0 text-muted-foreground"
               onClick={onDownload}
               disabled={!value}
               title="下载"
-            >
-              <Download className="size-3" />
-            </Button>
+            />
           )}
 
           {readOnly && (

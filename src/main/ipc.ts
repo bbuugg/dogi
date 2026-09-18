@@ -13,6 +13,7 @@ import type {
   AiModelConfig,
   AiStreamEvent,
   McpServerConfig,
+  NoteEntry,
   Preferences,
   ServerMetrics,
   ScriptEntry,
@@ -199,6 +200,11 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   ipcMain.handle('scripts:list', () => storage.listScripts())
   ipcMain.handle('scripts:save', (_e, entry: ScriptEntry) => storage.saveScript(entry))
   ipcMain.handle('scripts:delete', (_e, id: string) => storage.deleteScript(id))
+
+  // ---------- 笔记 CRUD ----------
+  ipcMain.handle('notes:list', () => storage.listNotes())
+  ipcMain.handle('notes:save', (_e, note: NoteEntry) => storage.saveNote(note))
+  ipcMain.handle('notes:delete', (_e, id: string) => storage.deleteNote(id))
 
   // ---------- AI 模型配置 ----------
   ipcMain.handle('ai:config:list', () => storage.listAiConfigs())

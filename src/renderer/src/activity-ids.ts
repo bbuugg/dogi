@@ -10,6 +10,7 @@
 export const HOSTS_ACTIVITY_ID = 'hosts'
 export const SCRIPTS_ACTIVITY_ID = 'scripts'
 export const PLUGINS_ACTIVITY_ID = 'plugins'
+export const NOTES_ACTIVITY_ID = 'notes'
 
 /** 插件贡献的功能区 id 前缀：plugin:<viewId> */
 export const PLUGIN_ACTIVITY_PREFIX = 'plugin:'

@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
-import { Plus } from 'lucide-react'
-import { Button, Modal, Select, message } from 'antd'
 import { useAppStore } from '@/stores/app-store'
+import { Button, Modal, Select, message } from 'antd'
+import { Plus } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 
 /** 保留当前选择；失效时用偏好值，再不行回退首项 */
 function pickId(current: string, ids: string[], preferred?: string): string {
@@ -126,6 +126,7 @@ export function RunScriptDialog() {
               还没有主机，请先添加主机。
               <div className="mt-2">
                 <Button
+                  icon={<Plus className="size-4" />}
                   variant="filled"
                   size="small"
                   onClick={() => {
@@ -133,7 +134,7 @@ export function RunScriptDialog() {
                     setSshDialog(true, null)
                   }}
                 >
-                  <Plus className="size-4" /> 添加主机
+                  添加主机
                 </Button>
               </div>
             </div>

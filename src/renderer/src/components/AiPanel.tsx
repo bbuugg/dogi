@@ -394,22 +394,18 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         />
         <Button
           type="text"
-          size="small"
+          icon={<Eraser className="size-3.5" />}
           className="h-7 w-7 shrink-0 p-0 text-muted-foreground"
           title="清空对话"
           onClick={() => sessionId && clearAiMessages(sessionId)}
-        >
-          <Eraser className="size-3.5" />
-        </Button>
+        />
         <Button
           type="text"
-          size="small"
+          icon={<Settings2 className="size-3.5" />}
           className="h-7 w-7 shrink-0 p-0 text-muted-foreground"
           title="AI 设置"
           onClick={() => setSettingsOpen(true, 'ai')}
-        >
-          <Settings2 className="size-3.5" />
-        </Button>
+        />
       </div>
 
       {/* 消息区：AI 回复属于「内容」，保持可选中复制 */}
@@ -521,12 +517,11 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             {aiStreaming ? (
               <Button
                 type="text"
+                icon={<Square className="size-4" />}
                 className="size-8 shrink-0 rounded-full text-destructive"
                 title="停止"
                 onClick={() => sessionId && void abortAi(sessionId)}
-              >
-                <Square className="size-4" />
-              </Button>
+              />
             ) : (
               <Button
                 type="primary"

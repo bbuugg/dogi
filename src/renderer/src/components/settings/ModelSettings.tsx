@@ -255,8 +255,8 @@ export function ModelSettings() {
         <p className="text-xs text-muted-foreground">
           可添加多套模型配置，随时在 AI 面板顶部切换。
         </p>
-        <Button size="small" variant="filled" onClick={() => setEditing({ ...EMPTY })}>
-          <Plus className="size-4" /> 新建配置
+        <Button icon={<Plus className="size-4" />} size="small" variant="filled" onClick={() => setEditing({ ...EMPTY })}>
+          新建配置
         </Button>
       </div>
       {aiConfigs.length === 0 && (
@@ -289,33 +289,30 @@ export function ModelSettings() {
           </div>
           {config.id !== activeConfigId && (
             <Button
+              icon={<Star className="size-3.5" />}
               size="small"
               type="text"
               className="w-7 p-0"
               title="设为当前使用"
               onClick={() => void setActiveAiConfig(config.id)}
-            >
-              <Star className="size-3.5" />
-            </Button>
+            />
           )}
           <Button
+            icon={<Pencil className="size-3.5" />}
             size="small"
             type="text"
             className="w-7 p-0"
             title="编辑"
             onClick={() => setEditing(toForm(config))}
-          >
-            <Pencil className="size-3.5" />
-          </Button>
+          />
           <Button
+            icon={<Trash2 className="size-3.5" />}
             size="small"
             type="text"
             className="w-7 p-0"
             title="删除"
             onClick={() => void handleDelete(config)}
-          >
-            <Trash2 className="size-3.5" />
-          </Button>
+          />
         </div>
       ))}
     </div>

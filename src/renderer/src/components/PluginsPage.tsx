@@ -114,16 +114,24 @@ export function PluginsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-           <Button loading={reloading} type="text" onClick={() => void reloadAll()} disabled={reloading}>
-            <RotateCw className={reloading ? 'size-4 animate-spin' : 'size-4'} />
+          <Button
+            icon={<RotateCw className={reloading ? 'size-4 animate-spin' : 'size-4'} />}
+            loading={reloading} type="text" onClick={() => void reloadAll()} disabled={reloading}>
             {reloading ? '重载中…' : '重新加载'}
           </Button>
-           <Button type="text" onClick={() => void refreshPluginList()} disabled={installing || reloading}>
-            <RefreshCw className="size-4" />
+          <Button
+            icon={<RefreshCw className="size-4" />}
+            type="text"
+            onClick={() => void refreshPluginList()}
+            disabled={installing || reloading}
+          >
             刷新
           </Button>
-           <Button variant="filled" onClick={() => void installFromFile()} disabled={installing}>
-            <Upload className="size-4" />
+          <Button
+            icon={<Upload className="size-4" />}
+            variant="filled"
+            onClick={() => void installFromFile()}
+            disabled={installing}>
             {installing ? '安装中…' : '从文件安装'}
           </Button>
         </div>
