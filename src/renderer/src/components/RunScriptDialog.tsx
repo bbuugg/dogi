@@ -1,14 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { Loader2, Play, Plus } from 'lucide-react'
+import { Plus } from 'lucide-react'
+import { Modal } from 'antd'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle
-} from '@/components/ui/dialog'
 import {
   Select,
   SelectContent,
@@ -96,98 +90,95 @@ export function RunScriptDialog() {
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>运行脚本</DialogTitle>
-        </DialogHeader>
-
-        <div className="grid gap-3 py-2">
-          {hasPreset ? (
-            <div className="grid gap-1.5">
-              <Label>脚本</Label>
-              <div className="rounded-md border border-border/60 bg-secondary/40 px-3 py-2 text-sm text-foreground">
-                {script ? script.name : '（脚本不存在）'}
-              </div>
-            </div>
-          ) : (
-            <div className="grid gap-1.5">
-              <Label>脚本</Label>
-              {scripts.length === 0 ? (
-                <p className="text-xs text-muted-foreground">还没有脚本，请先在脚本管理页新增。</p>
-              ) : (
-                <Select value={selectedScript} onValueChange={setSelectedScript}>
-                  <SelectTrigger className="w-full">
-                    <SelectValue placeholder="选择脚本" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {scripts.map((s) => (
-                      <SelectItem key={s.id} value={s.id}>
-                        {s.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              )}
-            </div>
-          )}
-
+    <Modal
+      open={open}
+      onCancel={() => onOpenChange(false)}
+      title="运行脚本"
+      centered
+      width={480}
+      destroyOnHidden
+      okText="连接并运行"
+      cancelText="取消"
+      onOk={() => void handleRun()}
+      confirmLoading={running}
+      okButtonProps={{ disabled: !canRun }}
+      cancelButtonProps={{ disabled: running }}
+    >
+      <div className="grid gap-3 py-1">
+        {hasPreset ? (
           <div className="grid gap-1.5">
-            <Label>主机</Label>
-            {profiles.length === 0 ? (
-              <div className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
-                还没有主机，请先添加 SSH 连接。
-                <div className="mt-2">
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => {
-                      onOpenChange(false)
-                      setSshDialog(true, null)
-                    }}
-                  >
-                    <Plus className="size-4" /> 添加 SSH 连接
-                  </Button>
-                </div>
-              </div>
+            <Label>脚本</Label>
+            <div className="rounded-md border border-border/60 bg-secondary/40 px-3 py-2 text-sm text-foreground">
+              {script ? script.name : '（脚本不存在）'}
+            </div>
+          </div>
+        ) : (
+          <div className="grid gap-1.5">
+            <Label>脚本</Label>
+            {scripts.length === 0 ? (
+              <p className="text-xs text-muted-foreground">还没有脚本，请先在脚本管理页新增。</p>
             ) : (
-              <Select value={selectedProfile} onValueChange={setSelectedProfile}>
+              <Select value={selectedScript} onValueChange={setSelectedScript}>
                 <SelectTrigger className="w-full">
-                  <SelectValue placeholder="选择主机" />
+                  <SelectValue placeholder="选择脚本" />
                 </SelectTrigger>
                 <SelectContent>
-                  {profiles.map((p) => (
-                    <SelectItem key={p.id} value={p.id}>
-                      {p.name}（{p.username}@{p.host}:{p.port}）
+                  {scripts.map((s) => (
+                    <SelectItem key={s.id} value={s.id}>
+                      {s.name}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             )}
           </div>
+        )}
 
-          {script && (
-            <div className="grid gap-1.5">
-              <Label>将执行</Label>
-              <pre className="max-h-32 overflow-auto rounded-md border border-border/60 bg-secondary/40 p-2 font-mono text-[11px] whitespace-pre-wrap text-muted-foreground select-text">
-                {script.content}
-              </pre>
+        <div className="grid gap-1.5">
+          <Label>主机</Label>
+          {profiles.length === 0 ? (
+            <div className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
+              还没有主机，请先添加 SSH 连接。
+              <div className="mt-2">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    onOpenChange(false)
+                    setSshDialog(true, null)
+                  }}
+                >
+                  <Plus className="size-4" /> 添加 SSH 连接
+                </Button>
+              </div>
             </div>
+          ) : (
+            <Select value={selectedProfile} onValueChange={setSelectedProfile}>
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="选择主机" />
+              </SelectTrigger>
+              <SelectContent>
+                {profiles.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>
+                    {p.name}（{p.username}@{p.host}:{p.port}）
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           )}
-
-          {error && <p className="text-xs text-destructive">{error}</p>}
         </div>
 
-        <DialogFooter className="gap-2">
-          <Button variant="ghost" disabled={running} onClick={() => onOpenChange(false)}>
-            取消
-          </Button>
-          <Button disabled={!canRun} onClick={() => void handleRun()}>
-            {running ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
-            {running ? '连接中…' : '连接并运行'}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        {script && (
+          <div className="grid gap-1.5">
+            <Label>将执行</Label>
+            <pre className="no-scrollbar max-h-32 overflow-auto rounded-md border border-border/60 bg-secondary/40 p-2 font-mono text-[11px] whitespace-pre-wrap text-muted-foreground select-text">
+              {script.content}
+            </pre>
+          </div>
+        )}
+
+        {error && <p className="text-xs text-destructive">{error}</p>}
+      </div>
+    </Modal>
   )
 }

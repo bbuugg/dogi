@@ -1,14 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { SshAuthType, SshProfile } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle
-} from '@/components/ui/dialog'
-import { Button } from '@/components/ui/button'
+import { Button as AntButton, Modal } from 'antd'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
@@ -19,7 +12,6 @@ import {
   SelectTrigger,
   SelectValue
 } from '@/components/ui/select'
-import { Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
 
 interface FormState {
@@ -137,132 +129,131 @@ export function SshProfileDialog() {
   }
 
   return (
-    <Dialog open={sshDialog.open} onOpenChange={(open) => setSshDialog(open, null)}>
-      <DialogContent onOpenAutoFocus={(e) => e.preventDefault()} className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>{isEdit ? '编辑 SSH 连接' : '新建 SSH 连接'}</DialogTitle>
-        </DialogHeader>
-
-        <div className="grid gap-3 py-2">
-          <div className="grid grid-cols-3 gap-3">
-            <div className="col-span-3 grid gap-1.5">
-              <Label htmlFor="ssh-name">名称</Label>
-              <Input
-                id="ssh-name"
-                placeholder="如：生产环境 Web 服务器"
-                value={form.name}
-                onChange={(e) => patch({ name: e.target.value })}
-              />
-            </div>
-            <div className="col-span-2 grid gap-1.5">
-              <Label htmlFor="ssh-host">主机地址</Label>
-              <Input
-                id="ssh-host"
-                placeholder="ip 或域名"
-                value={form.host}
-                onChange={(e) => patch({ host: e.target.value })}
-              />
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="ssh-port">端口</Label>
-              <Input
-                id="ssh-port"
-                type="number"
-                value={form.port}
-                onChange={(e) => patch({ port: e.target.value })}
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-3 gap-3">
-            <div className="col-span-1 grid gap-1.5">
-              <Label htmlFor="ssh-user">用户名</Label>
-              <Input
-                id="ssh-user"
-                value={form.username}
-                onChange={(e) => patch({ username: e.target.value })}
-              />
-            </div>
-            <div className="col-span-2 grid gap-1.5">
-              <Label>认证方式</Label>
-              <Select
-                value={form.authType}
-                onValueChange={(v) => patch({ authType: v as SshAuthType })}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="password">密码</SelectItem>
-                  <SelectItem value="privateKey">私钥</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-
-          {form.authType === 'password' ? (
-            <div className="grid gap-1.5">
-              <Label htmlFor="ssh-password">密码</Label>
-              <Input
-                id="ssh-password"
-                type="password"
-                placeholder={
-                  isEdit && editing?.hasPassword ? '已保存（留空保持不变）' : '登录密码'
-                }
-                value={form.password}
-                onChange={(e) => patch({ password: e.target.value })}
-              />
-            </div>
-          ) : (
-            <>
-              <div className="grid gap-1.5">
-                <Label htmlFor="ssh-key">私钥（PEM / OpenSSH 格式）</Label>
-                <Textarea
-                  id="ssh-key"
-                  rows={5}
-                  className="font-mono text-xs"
-                  placeholder={
-                    isEdit && editing?.hasPrivateKey
-                      ? '已保存（留空保持不变）'
-                      : '-----BEGIN OPENSSH PRIVATE KEY-----'
-                  }
-                  value={form.privateKey}
-                  onChange={(e) => patch({ privateKey: e.target.value })}
-                />
-              </div>
-              <div className="grid gap-1.5">
-                <Label htmlFor="ssh-passphrase">私钥口令（可选）</Label>
-                <Input
-                  id="ssh-passphrase"
-                  type="password"
-                  placeholder={
-                    isEdit && editing?.hasPassphrase ? '已保存（留空保持不变）' : ''
-                  }
-                  value={form.passphrase}
-                  onChange={(e) => patch({ passphrase: e.target.value })}
-                />
-              </div>
-            </>
+    <Modal
+      open={sshDialog.open}
+      onCancel={() => setSshDialog(false, null)}
+      title={isEdit ? '编辑 SSH 连接' : '新建 SSH 连接'}
+      centered
+      width={520}
+      destroyOnHidden
+      footer={
+        <div className="flex justify-end gap-2">
+          <AntButton onClick={() => setSshDialog(false, null)}>取消</AntButton>
+          <AntButton loading={saving} onClick={() => void handleSave(false)}>
+            保存
+          </AntButton>
+          {!isEdit && (
+            <AntButton type="primary" loading={saving} onClick={() => void handleSave(true)}>
+              保存并连接
+            </AntButton>
           )}
-
-          {error && <p className="text-xs text-destructive">{error}</p>}
+        </div>
+      }
+    >
+      <div className="grid gap-3 py-1">
+        <div className="grid grid-cols-3 gap-3">
+          <div className="col-span-3 grid gap-1.5">
+            <Label htmlFor="ssh-name">名称</Label>
+            <Input
+              id="ssh-name"
+              placeholder="如：生产环境 Web 服务器"
+              value={form.name}
+              onChange={(e) => patch({ name: e.target.value })}
+            />
+          </div>
+          <div className="col-span-2 grid gap-1.5">
+            <Label htmlFor="ssh-host">主机地址</Label>
+            <Input
+              id="ssh-host"
+              placeholder="ip 或域名"
+              value={form.host}
+              onChange={(e) => patch({ host: e.target.value })}
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="ssh-port">端口</Label>
+            <Input
+              id="ssh-port"
+              type="number"
+              value={form.port}
+              onChange={(e) => patch({ port: e.target.value })}
+            />
+          </div>
         </div>
 
-        <DialogFooter className="gap-2">
-          <Button variant="ghost" onClick={() => setSshDialog(false, null)}>
-            取消
-          </Button>
-          <Button variant="secondary" disabled={saving} onClick={() => void handleSave(false)}>
-            {saving && <Loader2 className="size-4 animate-spin" />}
-            保存
-          </Button>
-          {!isEdit && (
-            <Button disabled={saving} onClick={() => void handleSave(true)}>
-              保存并连接
-            </Button>
-          )}
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        <div className="grid grid-cols-3 gap-3">
+          <div className="col-span-1 grid gap-1.5">
+            <Label htmlFor="ssh-user">用户名</Label>
+            <Input
+              id="ssh-user"
+              value={form.username}
+              onChange={(e) => patch({ username: e.target.value })}
+            />
+          </div>
+          <div className="col-span-2 grid gap-1.5">
+            <Label>认证方式</Label>
+            <Select
+              value={form.authType}
+              onValueChange={(v) => patch({ authType: v as SshAuthType })}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="password">密码</SelectItem>
+                <SelectItem value="privateKey">私钥</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+
+        {form.authType === 'password' ? (
+          <div className="grid gap-1.5">
+            <Label htmlFor="ssh-password">密码</Label>
+            <Input
+              id="ssh-password"
+              type="password"
+              placeholder={
+                isEdit && editing?.hasPassword ? '已保存（留空保持不变）' : '登录密码'
+              }
+              value={form.password}
+              onChange={(e) => patch({ password: e.target.value })}
+            />
+          </div>
+        ) : (
+          <>
+            <div className="grid gap-1.5">
+              <Label htmlFor="ssh-key">私钥（PEM / OpenSSH 格式）</Label>
+              <Textarea
+                id="ssh-key"
+                rows={5}
+                className="no-scrollbar font-mono text-xs"
+                placeholder={
+                  isEdit && editing?.hasPrivateKey
+                    ? '已保存（留空保持不变）'
+                    : '-----BEGIN OPENSSH PRIVATE KEY-----'
+                }
+                value={form.privateKey}
+                onChange={(e) => patch({ privateKey: e.target.value })}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="ssh-passphrase">私钥口令（可选）</Label>
+              <Input
+                id="ssh-passphrase"
+                type="password"
+                placeholder={
+                  isEdit && editing?.hasPassphrase ? '已保存（留空保持不变）' : ''
+                }
+                value={form.passphrase}
+                onChange={(e) => patch({ passphrase: e.target.value })}
+              />
+            </div>
+          </>
+        )}
+
+        {error && <p className="text-xs text-destructive">{error}</p>}
+      </div>
+    </Modal>
   )
 }

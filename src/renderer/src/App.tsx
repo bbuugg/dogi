@@ -14,6 +14,7 @@ import { PluginsPage } from '@/components/PluginsPage'
 import { AppToaster } from '@/components/AppToaster'
 import { StatusBar } from '@/components/StatusBar'
 import { ResizeHandle } from '@/components/ResizeHandle'
+import { AntdProvider } from '@/components/AntdProvider'
 import { Button } from '@/components/ui/button'
 
 function EmptyState() {
@@ -69,59 +70,61 @@ export default function App() {
   }, [plugins, view, pluginView])
 
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
-      <TitleBar />
-      <div className="flex min-h-0 flex-1">
-        {/* 侧边栏可折叠：外层容器宽度过渡实现展开/收起动画（内部保持固定宽度不回流，
-            折叠时拖拽条隐藏，展开入口在标题栏） */}
-        <div
-          className="shrink-0 overflow-hidden transition-[width] duration-200 ease-out"
-          style={{ width: sidebarCollapsed ? 0 : sidebarWidth }}
-        >
-          <Sidebar />
-        </div>
-        {!sidebarCollapsed && (
-          <ResizeHandle
-            width={sidebarWidth}
-            min={180}
-            max={480}
-            onResize={setSidebarWidth}
-          />
-        )}
-
-        <main className="relative flex min-w-0 flex-1 flex-col">
-          {/* 终端区常驻挂载，切到脚本页时用 hidden 保活 xterm 实例 */}
-          <div className={view === 'terminal' ? 'min-h-0 flex-1' : 'hidden'}>
-            {layout ? <PaneLayout layout={layout} /> : <EmptyState />}
+    <AntdProvider>
+      <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
+        <TitleBar />
+        <div className="flex min-h-0 flex-1">
+          {/* 侧边栏可折叠：外层容器宽度过渡实现展开/收起动画（内部保持固定宽度不回流，
+              折叠时拖拽条隐藏，展开入口在标题栏） */}
+          <div
+            className="shrink-0 overflow-hidden transition-[width] duration-200 ease-out"
+            style={{ width: sidebarCollapsed ? 0 : sidebarWidth }}
+          >
+            <Sidebar />
           </div>
-          {view === 'scripts' && <ScriptsPage />}
-          {view === 'plugins' && <PluginsPage />}
-          {/* 插件视图：已打开过的保持挂载，只有激活的那个可见（切去终端再切回不丢状态） */}
-          {plugins
-            .filter((p) => p.viewId === pluginView || mountedPluginViews.includes(p.viewId))
-            .map((p) => (
-              <div
-                key={p.viewId}
-                className={
-                  view === 'plugin' && pluginView === p.viewId ? 'min-h-0 flex-1' : 'hidden'
-                }
-              >
-                <p.Component />
-              </div>
-            ))}
-        </main>
+          {!sidebarCollapsed && (
+            <ResizeHandle
+              width={sidebarWidth}
+              min={180}
+              max={480}
+              onResize={setSidebarWidth}
+            />
+          )}
+
+          <main className="relative flex min-w-0 flex-1 flex-col">
+            {/* 终端区常驻挂载，切到脚本页时用 hidden 保活 xterm 实例 */}
+            <div className={view === 'terminal' ? 'min-h-0 flex-1' : 'hidden'}>
+              {layout ? <PaneLayout layout={layout} /> : <EmptyState />}
+            </div>
+            {view === 'scripts' && <ScriptsPage />}
+            {view === 'plugins' && <PluginsPage />}
+            {/* 插件视图：已打开过的保持挂载，只有激活的那个可见（切去终端再切回不丢状态） */}
+            {plugins
+              .filter((p) => p.viewId === pluginView || mountedPluginViews.includes(p.viewId))
+              .map((p) => (
+                <div
+                  key={p.viewId}
+                  className={
+                    view === 'plugin' && pluginView === p.viewId ? 'min-h-0 flex-1' : 'hidden'
+                  }
+                >
+                  <p.Component />
+                </div>
+              ))}
+          </main>
+        </div>
+
+        {/* 底部功能条（类 VS Code 状态栏），整宽；监控指标条常驻左侧 */}
+        <StatusBar>{view === 'terminal' && <MonitorBadge sessionId={activeSessionId} />}</StatusBar>
+
+        <SshProfileDialog />
+        <SettingsDialog />
+        <CommandPalette />
+        <RunScriptDialog />
+
+        {/* 全局通知 */}
+        <AppToaster />
       </div>
-
-      {/* 底部功能条（类 VS Code 状态栏），整宽；监控指标条常驻左侧 */}
-      <StatusBar>{view === 'terminal' && <MonitorBadge sessionId={activeSessionId} />}</StatusBar>
-
-      <SshProfileDialog />
-      <SettingsDialog />
-      <CommandPalette />
-      <RunScriptDialog />
-
-      {/* 全局通知 */}
-      <AppToaster />
-    </div>
+    </AntdProvider>
   )
 }

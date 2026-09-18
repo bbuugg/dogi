@@ -95,6 +95,16 @@
   padding: 8px;
 }
 
+/* antd 弹窗层级取自 zIndexPopupBase（默认 1000），而 Radix 浮层只有 z-50，弹窗内的下拉
+   （如「新建 SSH 连接」的认证方式）会被遮罩压住而点不到。
+   Radix 浮层容器有两种形态：popper 包装层（Popover / DropdownMenu / ContextMenu / Tooltip）
+   与 Select 自带的定位层（无 class、行内 z-index: 50，只能用 :has 选中）。
+   两者都会形成层叠上下文，所以必须抬容器本身而不是里面的 content。 */
+[data-radix-popper-content-wrapper],
+div:has(> [data-slot='select-content']) {
+  z-index: 1100 !important;
+}
+
 .xterm-viewport {
   background-color: unset !important;
 }

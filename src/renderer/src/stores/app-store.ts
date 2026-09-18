@@ -410,6 +410,9 @@ let shortcutWired = false
         window.api.scripts.list(),
         window.api.shortcuts.get()
       ])
+      // 配色必须在偏好写进 store 之前落到 html 上：antd 的 token 是在 store 更新引发的那次
+      // 重渲染里从 CSS 变量读出来的，晚一步就会永远停在默认中性配色（直到用户手动切换）
+      applyColorTheme(preferences.colorTheme)
       set({ profiles, aiConfigs: configs, aiSettings: settings, preferences, shells, scripts, shortcuts })
       // 运行时加载外部插件（扫描 userData/plugins 并收集视图）
       const { loadPlugins } = await import('@/plugins/host')
@@ -424,9 +427,6 @@ let shortcutWired = false
           description: failedPlugins.map((p) => p.name).join('、')
         })
       }
-      // 配色在偏好加载后立即应用（之前用默认中性配色）
-      applyColorTheme(preferences.colorTheme)
-
       // 全局快捷键：主进程触发后在此分发到具体 UI 动作
       if (!shortcutWired) {
         shortcutWired = true

@@ -3,16 +3,7 @@ import { useAppStore } from '@/stores/app-store'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Badge } from '@/components/ui/badge'
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle
-} from '@/components/ui/alert-dialog'
+import { Modal } from 'antd'
 import { cn } from '@/lib/utils'
 import { Boxes, ExternalLink, Package, RefreshCw, RotateCw, Trash2, Upload } from 'lucide-react'
 import { toast } from 'sonner'
@@ -254,25 +245,22 @@ export function PluginsPage() {
         )}
       </div>
 
-      <AlertDialog open={pendingUninstall !== null} onOpenChange={(o) => !o && setPendingUninstall(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>卸载插件「{pendingUninstall?.name}」？</AlertDialogTitle>
-            <AlertDialogDescription>
-              该操作会删除插件在本地用户数据中的全部文件（{pendingUninstall?.id}），且不可恢复。
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={() => void confirmUninstall()}
-            >
-              卸载
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <Modal
+        open={pendingUninstall !== null}
+        onCancel={() => setPendingUninstall(null)}
+        title={`卸载插件「${pendingUninstall?.name}」？`}
+        okText="卸载"
+        cancelText="取消"
+        okButtonProps={{ danger: true }}
+        onOk={() => void confirmUninstall()}
+        centered
+        width={440}
+        destroyOnHidden
+      >
+        <p className="text-sm text-muted-foreground">
+          该操作会删除插件在本地用户数据中的全部文件（{pendingUninstall?.id}），且不可恢复。
+        </p>
+      </Modal>
     </div>
   )
 }

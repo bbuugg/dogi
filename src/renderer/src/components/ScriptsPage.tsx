@@ -4,16 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import MonacoEditor from '@/components/MonacoEditor'
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle
-} from '@/components/ui/alert-dialog'
+import { Modal } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import { toast } from 'sonner'
 import type { ScriptEntry } from '@shared/types'
@@ -228,28 +219,23 @@ export function ScriptsPage() {
         )}
       </div>
 
-      {/* 删除确认（AlertDialog） */}
-      <AlertDialog
+      {/* 删除确认 */}
+      <Modal
         open={pendingDelete !== null}
-        onOpenChange={(open) => {
-          if (!open) setPendingDelete(null)
-        }}
+        onCancel={() => setPendingDelete(null)}
+        title="删除脚本？"
+        okText="删除"
+        cancelText="取消"
+        okButtonProps={{ danger: true }}
+        onOk={() => void confirmDelete()}
+        centered
+        width={420}
+        destroyOnHidden
       >
-        <AlertDialogContent size="sm">
-          <AlertDialogHeader>
-            <AlertDialogTitle>删除脚本？</AlertDialogTitle>
-            <AlertDialogDescription>
-              「{pendingDelete?.name}」将被永久删除，该操作不可撤销。
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction variant="destructive" onClick={() => void confirmDelete()}>
-              删除
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+        <p className="text-sm text-muted-foreground">
+          「{pendingDelete?.name}」将被永久删除，该操作不可撤销。
+        </p>
+      </Modal>
     </div>
   )
 }

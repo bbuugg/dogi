@@ -13,9 +13,9 @@ import {
   TerminalSquare
 } from 'lucide-react'
 import { cn } from 'cn'
+import { Modal } from 'antd'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { useAppStore } from '@/stores/app-store'
 import { scriptToTerminalInput } from '@/lib/script'
 import type { ScriptEntry } from '@shared/types'
@@ -296,6 +296,11 @@ export function CommandPalette() {
     } else if (e.key === 'Enter') {
       e.preventDefault()
       filtered[activeIndex]?.run()
+    } else if (e.key === 'Escape' && mode !== 'root') {
+      // 二级列表里 Esc 返回命令列表（根层不拦截，交给 Modal 关闭）
+      e.preventDefault()
+      e.stopPropagation()
+      goMode('root')
     }
   }
 
@@ -311,22 +316,19 @@ export function CommandPalette() {
           : '没有匹配的主机。'
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent
-        className="top-[12%] max-w-xl translate-y-0 gap-3 p-3"
-        // 点击面板外部即可关闭，不需要右上角的关闭按钮
-        showCloseButton={false}
-        onOpenAutoFocus={(e) => e.preventDefault()}
-        // 二级列表里 Esc 返回命令列表，根层 Esc 才关闭面板
-        onEscapeKeyDown={(e) => {
-          if (mode !== 'root') {
-            e.preventDefault()
-            goMode('root')
-          }
-        }}
-      >
-        <DialogTitle className="sr-only">命令面板</DialogTitle>
-
+    <Modal
+      open={open}
+      onCancel={() => setOpen(false)}
+      footer={null}
+      // 不需要右上角关闭按钮，Esc / 点击遮罩关闭即可
+      closable={false}
+      centered
+      width={620}
+      destroyOnHidden
+      // 弹窗自带内边距会让内部分隔线贴不到边，这里收掉由内容自己控制
+      styles={{ body: { padding: 0 } }}
+    >
+      <div className="flex flex-col gap-3 p-3">
         <div className="flex items-center gap-2 rounded-md border border-border bg-background px-2.5">
           {mode === 'root' ? (
             <Search className="size-4 shrink-0 text-muted-foreground" />
@@ -360,7 +362,7 @@ export function CommandPalette() {
           </div>
         )}
 
-        <div ref={listRef} className="max-h-80 overflow-y-auto">
+        <div ref={listRef} className="no-scrollbar max-h-80 overflow-y-auto">
           {filtered.length === 0 ? (
             <div className="px-3 py-8 text-center text-sm text-muted-foreground">{emptyText}</div>
           ) : (
@@ -421,7 +423,7 @@ export function CommandPalette() {
             </Button>
           )}
         </div>
-      </DialogContent>
-    </Dialog>
+      </div>
+    </Modal>
   )
 }
