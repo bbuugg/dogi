@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ArrowLeft, Pencil, Plus, Play, Trash2 } from 'lucide-react'
+import { Pencil, Plus, Play, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import MonacoEditor from '@/components/MonacoEditor'
 import { Form, Input, Modal } from 'antd'
@@ -11,7 +11,6 @@ import type { ScriptEntry } from '@shared/types'
 export function ScriptsPage() {
   const scripts = useAppStore((s) => s.scripts)
   const refreshScripts = useAppStore((s) => s.refreshScripts)
-  const setView = useAppStore((s) => s.setView)
   const setRunScriptDialog = useAppStore((s) => s.setRunScriptDialog)
 
   // null = 列表视图；非 null = 编辑/新增表单（持有待保存内容）
@@ -77,15 +76,6 @@ export function ScriptsPage() {
   return (
     <div className="flex h-full flex-col bg-background">
       <div className="flex items-center gap-3 border-b border-border px-5 py-3">
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          title="返回终端"
-          aria-label="返回终端"
-          onClick={() => setView('terminal')}
-        >
-          <ArrowLeft className="size-4" />
-        </Button>
         <h1 className="text-sm font-semibold">脚本管理</h1>
         <span className="text-xs text-muted-foreground">共 {scripts.length} 个脚本</span>
         <div className="ml-auto flex gap-2">

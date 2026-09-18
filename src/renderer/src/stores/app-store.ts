@@ -22,6 +22,11 @@ import type { AppShortcutAction } from '@shared/types'
 import type { PluginInfo } from '@shared/plugin'
 import type { PluginViewInstance } from '@/plugins/host'
 import { DEFAULT_SHORTCUTS } from '@shared/shortcuts'
+import {
+  HOSTS_ACTIVITY_ID,
+  SCRIPTS_ACTIVITY_ID,
+  pluginViewIdOf
+} from '@/activity-ids'
 import { clampTerminalFontSize } from '@/lib/terminal-font'
 import { scriptToTerminalInput } from '@/lib/script'
 import { applyColorTheme } from '@/lib/theme'
@@ -38,6 +43,18 @@ import {
 
 /** 终端字号持久化写入的防抖句柄（Ctrl+滚轮会触发连续调整） */
 let fontSizeSaveTimer: number | undefined
+
+/**
+ * 插件被禁用 / 卸载 / 重载后，若当前功能区指向的插件视图已不存在，回到主机功能区。
+ */
+function fallbackFromMissingPlugin(
+  ui: UiState,
+  plugins: PluginViewInstance[]
+): UiState {
+  const viewId = pluginViewIdOf(ui.activeActivity)
+  if (!viewId || plugins.some((p) => p.viewId === viewId)) return ui
+  return { ...ui, activeActivity: HOSTS_ACTIVITY_ID }
+}
 
 /** 重连中的旧会话 ID：其 onClosed 事件不应从布局摘掉面板（会被新会话原地替换） */
 const reconnectingIds = new Set<string>()
@@ -171,14 +188,16 @@ interface UiState {
   settingsTab: 'ai' | 'terminal' | 'prefs' | 'shortcuts'
   /** 是否打开命令面板（Ctrl+Shift+P：脚本、终端、主机、设置等命令入口） */
   commandPaletteOpen: boolean
-  /** 主区域视图：终端 / 脚本管理页 / 插件视图 */
-  view: 'terminal' | 'scripts' | 'plugin' | 'plugins'
-  /** 当前激活的插件视图 id（view==='plugin' 时有效） */
-  pluginView: string | null
+  /**
+   * 当前激活的功能区 id（活动栏选中的 tab，导航的唯一真源）：
+   * 主区域显示什么、侧边栏显示哪个面板都由它派生（见 src/renderer/src/activities.tsx）。
+   * id 失效（插件被卸载等）时回退到第一个内置功能区。
+   */
+  activeActivity: string
+  /** 各功能区的侧边栏是否折叠（key 为功能区 id；侧边栏属于功能区，互不影响） */
+  collapsedActivities: Record<string, boolean>
   /** 侧边栏宽度（px） */
   sidebarWidth: number
-  /** 侧边栏是否折叠（折叠后不渲染侧边栏与拖拽条） */
-  sidebarCollapsed: boolean
   /** AI 助手面板宽度（px） */
   aiPanelWidth: number
 }
@@ -264,8 +283,8 @@ interface AppStore {
   setGroupAiOpen: (groupId: string, open: boolean) => void
   setSettingsOpen: (open: boolean, tab?: UiState['settingsTab']) => void
   setCommandPaletteOpen: (open: boolean) => void
-  setView: (view: 'terminal' | 'scripts' | 'plugin' | 'plugins') => void
-  setPluginView: (viewId: string | null) => void
+  /** 切换功能区（活动栏 tab）：主区域与侧边栏都由它派生，不再单独存 view */
+  selectActivity: (id: string) => void
   /** 运行时加载插件（扫描 userData/plugins，收集视图注入 store） */
   loadPlugins: () => Promise<void>
   /** 刷新插件管理页列表（manifest + 启用状态 + 错误） */
@@ -284,6 +303,7 @@ interface AppStore {
     cmd: { id: string; title: string; run: () => void }
   ) => void
   setSidebarWidth: (width: number) => void
+  /** 折叠/展开「当前功能区」自己的侧边栏（侧边栏属于功能区，互不影响） */
   setSidebarCollapsed: (collapsed: boolean) => void
   setAiPanelWidth: (width: number) => void
   refreshScripts: () => Promise<void>
@@ -391,10 +411,9 @@ let shortcutWired = false
       runScriptDialog: { open: false },
       settingsTab: 'prefs',
       commandPaletteOpen: false,
-      view: 'terminal',
-      pluginView: null,
+      activeActivity: HOSTS_ACTIVITY_ID,
+      collapsedActivities: {},
       sidebarWidth: 240,
-      sidebarCollapsed: false,
       aiPanelWidth: 350
     },
 
@@ -440,7 +459,7 @@ let shortcutWired = false
             const gid = s.activeGroupId
             if (gid) s.setGroupAiOpen(gid, !s.ui.aiOpenGroups[gid])
           }
-          else if (action === 'open-scripts') s.setView('scripts')
+          else if (action === 'open-scripts') s.selectActivity(SCRIPTS_ACTIVITY_ID)
         })
       }
     },
@@ -471,8 +490,8 @@ let shortcutWired = false
         }
         return { sessions: [...s.sessions, info], groups, activeGroupId, activeSessionId: info.id }
       })
-      // 切回终端视图，避免在脚本管理页等其它页面新建后看不到终端
-      get().setView('terminal')
+      // 切回终端功能区，避免在脚本管理页等其它页面新建后看不到终端
+      get().selectActivity(HOSTS_ACTIVITY_ID)
     },
 
     connectSsh: async (profile) => {
@@ -499,13 +518,13 @@ let shortcutWired = false
         }
         return { sessions: [...s.sessions, info], groups, activeGroupId, activeSessionId: info.id }
       })
-      // 连接后切回终端视图（连接可能是在脚本管理页等其它页面发起的）
-      get().setView('terminal')
+      // 连接后切回终端功能区（连接可能是在脚本管理页等其它页面发起的）
+      get().selectActivity(HOSTS_ACTIVITY_ID)
       return info
     },
 
     runScriptOnHost: async (profile, script) => {
-      // connectSsh 内部已把视图切回终端
+      // connectSsh 内部已切回终端功能区
       const info = await get().connectSsh(profile)
       return window.api.terminal.runScript(info.id, scriptToTerminalInput(script.content))
     },
@@ -723,16 +742,12 @@ let shortcutWired = false
     setCommandPaletteOpen: (open) =>
       set((s) => ({ ui: { ...s.ui, commandPaletteOpen: open } })),
 
-    setView: (view) =>
-      set((s) => ({ ui: { ...s.ui, view } })),
-
-    setPluginView: (viewId) =>
-      set((s) => ({ ui: { ...s.ui, pluginView: viewId } })),
+    selectActivity: (id) => set((s) => ({ ui: { ...s.ui, activeActivity: id } })),
 
     loadPlugins: async () => {
       const { loadPlugins } = await import('@/plugins/host')
       const views = await loadPlugins()
-      set({ plugins: views })
+      set((s) => ({ plugins: views, ui: fallbackFromMissingPlugin(s.ui, views) }))
     },
 
     refreshPluginList: async () => {
@@ -743,27 +758,15 @@ let shortcutWired = false
       const list = await window.api.plugins.setEnabled(id, enabled)
       const { loadPlugins } = await import('@/plugins/host')
       const plugins = await loadPlugins()
-      // 若当前正在查看的插件视图因禁用而消失，清空选择
-      set((s) => ({
-        pluginList: list,
-        plugins,
-        ui: plugins.some((p) => p.viewId === s.ui.pluginView)
-          ? s.ui
-          : { ...s.ui, pluginView: null }
-      }))
+      // 当前正在查看的插件功能区因禁用而消失时，回到主机功能区
+      set((s) => ({ pluginList: list, plugins, ui: fallbackFromMissingPlugin(s.ui, plugins) }))
     },
 
     uninstallPlugin: async (id) => {
       const list = await window.api.plugins.uninstall(id)
       const { loadPlugins } = await import('@/plugins/host')
       const plugins = await loadPlugins()
-      set((s) => ({
-        pluginList: list,
-        plugins,
-        ui: plugins.some((p) => p.viewId === s.ui.pluginView)
-          ? s.ui
-          : { ...s.ui, pluginView: null }
-      }))
+      set((s) => ({ pluginList: list, plugins, ui: fallbackFromMissingPlugin(s.ui, plugins) }))
     },
 
     installPlugin: async (sourcePath) => {
@@ -777,14 +780,8 @@ let shortcutWired = false
       const list = await window.api.plugins.reload(id)
       const { loadPlugins } = await import('@/plugins/host')
       const plugins = await loadPlugins()
-      set((s) => ({
-        pluginList: list,
-        plugins,
-        // 当前查看的插件视图若因重载消失/变更，清空选择
-        ui: plugins.some((p) => p.viewId === s.ui.pluginView)
-          ? s.ui
-          : { ...s.ui, pluginView: null }
-      }))
+      // 当前查看的插件功能区若因重载消失，回到主机功能区
+      set((s) => ({ pluginList: list, plugins, ui: fallbackFromMissingPlugin(s.ui, plugins) }))
     },
 
     registerPluginCommand: (pluginId, cmd) =>
@@ -795,8 +792,14 @@ let shortcutWired = false
     setSidebarWidth: (width) =>
       set((s) => ({ ui: { ...s.ui, sidebarWidth: width } })),
 
+    // 折叠状态记在当前功能区名下：侧边栏属于功能区，切 tab 不会互相影响
     setSidebarCollapsed: (collapsed) =>
-      set((s) => ({ ui: { ...s.ui, sidebarCollapsed: collapsed } })),
+      set((s) => ({
+        ui: {
+          ...s.ui,
+          collapsedActivities: { ...s.ui.collapsedActivities, [s.ui.activeActivity]: collapsed }
+        }
+      })),
 
     setAiPanelWidth: (width) =>
       set((s) => ({ ui: { ...s.ui, aiPanelWidth: width } })),

@@ -1,18 +1,17 @@
 import { useEffect, useState } from 'react'
 import type { SshAuthType, SshProfile } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
-import { Button as AntButton, Modal } from 'antd'
+import { Button as AntButton, Modal, Select } from 'antd'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from '@/components/ui/select'
 import { toast } from 'sonner'
+
+/** 认证方式下拉项 */
+const AUTH_TYPE_OPTIONS = [
+  { value: 'password', label: '密码' },
+  { value: 'privateKey', label: '私钥' }
+]
 
 interface FormState {
   name: string
@@ -194,16 +193,10 @@ export function SshProfileDialog() {
             <Label>认证方式</Label>
             <Select
               value={form.authType}
-              onValueChange={(v) => patch({ authType: v as SshAuthType })}
-            >
-              <SelectTrigger className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="password">密码</SelectItem>
-                <SelectItem value="privateKey">私钥</SelectItem>
-              </SelectContent>
-            </Select>
+              onChange={(v) => patch({ authType: v as SshAuthType })}
+              options={AUTH_TYPE_OPTIONS}
+              style={{ width: '100%' }}
+            />
           </div>
         </div>
 

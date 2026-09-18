@@ -3,6 +3,9 @@ import { TerminalSquare } from 'lucide-react'
 import { useAppStore } from '@/stores/app-store'
 import { TitleBar } from '@/components/TitleBar'
 import { Sidebar } from '@/components/Sidebar'
+import { ActivityBar } from '@/components/ActivityBar'
+import { useActiveActivity } from '@/activities'
+import { pluginViewIdOf } from '@/activity-ids'
 import { MonitorBadge } from '@/components/MonitorBadge'
 import { SshProfileDialog } from '@/components/SshProfileDialog'
 import { SettingsDialog } from '@/components/SettingsDialog'
@@ -39,12 +42,14 @@ function EmptyState() {
 export default function App() {
   const layout = useAppStore((s) => s.layout)
   const activeSessionId = useAppStore((s) => s.activeSessionId)
-  const view = useAppStore((s) => s.ui.view)
-  const pluginView = useAppStore((s) => s.ui.pluginView)
   const plugins = useAppStore((s) => s.plugins)
   const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth)
-  const sidebarCollapsed = useAppStore((s) => s.ui.sidebarCollapsed)
   const setSidebarWidth = useAppStore((s) => s.setSidebarWidth)
+  // 导航状态只有活动栏选中项一个真源，主区域显示什么由它派生
+  const { activity, sidebarVisible } = useActiveActivity()
+  const view = activity.view
+  /** 当前功能区是插件视图时，它承载的插件视图 id */
+  const pluginViewId = pluginViewIdOf(activity.id)
 
   /**
    * 已打开过的插件视图 id：保持挂载（非激活时用 hidden 隐藏），
@@ -61,28 +66,30 @@ export default function App() {
         if (!ok) changed = true
         return ok
       })
-      if (view === 'plugin' && pluginView && alive.has(pluginView) && !next.includes(pluginView)) {
-        next.push(pluginView)
+      if (view === 'plugin' && pluginViewId && alive.has(pluginViewId) && !next.includes(pluginViewId)) {
+        next.push(pluginViewId)
         changed = true
       }
       return changed ? next : prev
     })
-  }, [plugins, view, pluginView])
+  }, [plugins, view, pluginViewId])
 
   return (
     <AntdProvider>
       <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
         <TitleBar />
         <div className="flex min-h-0 flex-1">
-          {/* 侧边栏可折叠：外层容器宽度过渡实现展开/收起动画（内部保持固定宽度不回流，
+          {/* 活动栏常驻（不随侧边栏折叠消失），用于切换左侧功能区 */}
+          <ActivityBar />
+          {/* 侧边栏可折叠：外层容器宽度切换（内部保持固定宽度不回流，
               折叠时拖拽条隐藏，展开入口在标题栏） */}
           <div
-            className="shrink-0 overflow-hidden transition-[width] duration-200 ease-out"
-            style={{ width: sidebarCollapsed ? 0 : sidebarWidth }}
+            className="shrink-0 overflow-hidden"
+            style={{ width: sidebarVisible ? sidebarWidth : 0 }}
           >
             <Sidebar />
           </div>
-          {!sidebarCollapsed && (
+          {sidebarVisible && (
             <ResizeHandle
               width={sidebarWidth}
               min={180}
@@ -100,12 +107,12 @@ export default function App() {
             {view === 'plugins' && <PluginsPage />}
             {/* 插件视图：已打开过的保持挂载，只有激活的那个可见（切去终端再切回不丢状态） */}
             {plugins
-              .filter((p) => p.viewId === pluginView || mountedPluginViews.includes(p.viewId))
+              .filter((p) => p.viewId === pluginViewId || mountedPluginViews.includes(p.viewId))
               .map((p) => (
                 <div
                   key={p.viewId}
                   className={
-                    view === 'plugin' && pluginView === p.viewId ? 'min-h-0 flex-1' : 'hidden'
+                    view === 'plugin' && pluginViewId === p.viewId ? 'min-h-0 flex-1' : 'hidden'
                   }
                 >
                   <p.Component />

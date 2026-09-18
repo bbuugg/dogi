@@ -3,6 +3,11 @@ import { Boxes, Command as CommandIcon, ListPlus, Menu, Plus, Settings } from 'l
 import { cn } from 'cn'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { useAppStore } from '@/stores/app-store'
+import {
+  HOSTS_ACTIVITY_ID,
+  PLUGINS_ACTIVITY_ID,
+  SCRIPTS_ACTIVITY_ID
+} from '@/activity-ids'
 
 const ITEM_CLASS =
   'flex h-6 items-center gap-1.5 rounded px-1.5 text-[11px] whitespace-nowrap text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground'
@@ -16,7 +21,7 @@ export function StatusBar({ children }: { children?: ReactNode }) {
   const sessions = useAppStore((s) => s.sessions)
   const activeSessionId = useAppStore((s) => s.activeSessionId)
   const exitedSessions = useAppStore((s) => s.exitedSessions)
-  const setView = useAppStore((s) => s.setView)
+  const selectActivity = useAppStore((s) => s.selectActivity)
   const setCommandPaletteOpen = useAppStore((s) => s.setCommandPaletteOpen)
 
   const session = sessions.find((s) => s.id === activeSessionId) ?? null
@@ -30,7 +35,7 @@ export function StatusBar({ children }: { children?: ReactNode }) {
         <button
           type="button"
           title={session.title}
-          onClick={() => setView('terminal')}
+          onClick={() => selectActivity(HOSTS_ACTIVITY_ID)}
           className={ITEM_CLASS}
         >
           <span
@@ -70,7 +75,7 @@ export function StatusBar({ children }: { children?: ReactNode }) {
 /** 左下角全局菜单：命令面板等入口（后续功能从这里继续加） */
 function MenuButton() {
   const setCommandPaletteOpen = useAppStore((s) => s.setCommandPaletteOpen)
-  const setView = useAppStore((s) => s.setView)
+  const selectActivity = useAppStore((s) => s.selectActivity)
   const setSshDialog = useAppStore((s) => s.setSshDialog)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const [open, setOpen] = useState(false)
@@ -102,10 +107,10 @@ function MenuButton() {
             <CommandIcon className="size-3.5 text-muted-foreground" /> 命令面板
             <span className={hint}>Ctrl+Shift+P</span>
           </button>
-          <button type="button" className={menuItem} onClick={run(() => setView('scripts'))}>
+          <button type="button" className={menuItem} onClick={run(() => selectActivity(SCRIPTS_ACTIVITY_ID))}>
             <ListPlus className="size-3.5 text-muted-foreground" /> 管理脚本
           </button>
-          <button type="button" className={menuItem} onClick={run(() => setView('plugins'))}>
+          <button type="button" className={menuItem} onClick={run(() => selectActivity(PLUGINS_ACTIVITY_ID))}>
             <Boxes className="size-3.5 text-muted-foreground" /> 插件管理
           </button>
           <button

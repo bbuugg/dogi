@@ -2,15 +2,9 @@ import Editor, { loader } from '@monaco-editor/react'
 import { Braces, Check, Code, Copy, Download, Hash, Lock, WrapText } from 'lucide-react'
 import type { FC, ReactNode } from 'react'
 import { useEffect, useRef, useState } from 'react'
+import { Select } from 'antd'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 import { useIsDarkTheme } from '@/lib/theme'
 
@@ -134,21 +128,15 @@ const MonacoEditor: FC<MonacoEditorProps> = ({
         {/* Left side */}
         <div className="flex min-w-0 items-center gap-1.5">
           {showLanguageSelector ? (
-            <Select value={currentLanguage} onValueChange={handleLanguageChange}>
-              <SelectTrigger
-                size="sm"
-                className="h-6 w-auto gap-1 border-none bg-transparent px-1.5 text-xs font-medium shadow-none focus-visible:ring-0"
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {MONACO_LANGUAGES.map((l) => (
-                  <SelectItem key={l.value} value={l.value} className="text-xs">
-                    {l.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <Select
+              value={currentLanguage}
+              onChange={handleLanguageChange}
+              options={MONACO_LANGUAGES}
+              size="small"
+              variant="borderless"
+              popupMatchSelectWidth={false}
+              className="min-w-24 text-xs font-medium"
+            />
           ) : (
             <span className="inline-flex items-center gap-1 text-xs font-bold tracking-wide text-muted-foreground uppercase">
               <Braces className="size-3" />

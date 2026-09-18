@@ -19,6 +19,7 @@ import { Input } from '@/components/ui/input'
 import { useAppStore } from '@/stores/app-store'
 import { scriptToTerminalInput } from '@/lib/script'
 import type { ScriptEntry } from '@shared/types'
+import { PLUGINS_ACTIVITY_ID, SCRIPTS_ACTIVITY_ID } from '@/activity-ids'
 
 /**
  * 命令面板层级：命令列表（根）/ 脚本列表 / 主机列表。
@@ -66,7 +67,7 @@ export function CommandPalette() {
   const activeSessionId = useAppStore((s) => s.activeSessionId)
   const createLocalSession = useAppStore((s) => s.createLocalSession)
   const connectSsh = useAppStore((s) => s.connectSsh)
-  const setView = useAppStore((s) => s.setView)
+  const selectActivity = useAppStore((s) => s.selectActivity)
   const setSshDialog = useAppStore((s) => s.setSshDialog)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   // AI 助手属于终端组：开关作用于当前激活组
@@ -137,7 +138,7 @@ export function CommandPalette() {
       icon: ListPlus,
       run: () => {
         close()
-        setView('scripts')
+        selectActivity(SCRIPTS_ACTIVITY_ID)
       }
     },
     {
@@ -192,7 +193,7 @@ export function CommandPalette() {
       icon: Boxes,
       run: () => {
         close()
-        setView('plugins')
+        selectActivity(PLUGINS_ACTIVITY_ID)
       }
     },
     {
@@ -416,7 +417,7 @@ export function CommandPalette() {
               className="h-7"
               onClick={() => {
                 close()
-                setView('scripts')
+                selectActivity(SCRIPTS_ACTIVITY_ID)
               }}
             >
               <ListPlus className="size-4" /> 管理脚本

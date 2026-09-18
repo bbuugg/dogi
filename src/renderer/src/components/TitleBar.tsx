@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { Copy, Minus, PanelLeftClose, PanelLeftOpen, Square, X } from 'lucide-react'
 import { cn } from 'cn'
 import { useAppStore } from '@/stores/app-store'
+import { useActiveActivity } from '@/activities'
 import { Button } from '@/components/ui/button'
 import appIcon from '@/assets/app-icon.png'
 
@@ -16,8 +17,10 @@ export function TitleBar() {
   const platform = window.api.app.platform
   const isMac = platform === 'darwin'
   const [maximized, setMaximized] = useState(false)
-  const sidebarCollapsed = useAppStore((s) => s.ui.sidebarCollapsed)
+  // 侧边栏折叠状态属于当前功能区；没有侧边栏的功能区（整页界面）视为已折叠
+  const { activity, sidebarCollapsed } = useActiveActivity()
   const setSidebarCollapsed = useAppStore((s) => s.setSidebarCollapsed)
+  const collapsed = !activity.panel || sidebarCollapsed
 
   useEffect(() => {
     void window.api.window.isMaximized().then(setMaximized)
@@ -29,10 +32,10 @@ export function TitleBar() {
       variant="ghost"
       size="icon"
       className="size-8"
-      title={sidebarCollapsed ? '展开侧边栏' : '折叠侧边栏'}
-      onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+      title={collapsed ? '展开侧边栏' : '折叠侧边栏'}
+      onClick={() => setSidebarCollapsed(!collapsed)}
     >
-      {sidebarCollapsed ? (
+      {collapsed ? (
         <PanelLeftOpen className="size-4" />
       ) : (
         <PanelLeftClose className="size-4" />

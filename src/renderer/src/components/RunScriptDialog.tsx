@@ -1,15 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Plus } from 'lucide-react'
-import { Modal } from 'antd'
+import { Modal, Select } from 'antd'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from '@/components/ui/select'
 import { useAppStore } from '@/stores/app-store'
 import { toast } from 'sonner'
 
@@ -118,18 +111,13 @@ export function RunScriptDialog() {
             {scripts.length === 0 ? (
               <p className="text-xs text-muted-foreground">还没有脚本，请先在脚本管理页新增。</p>
             ) : (
-              <Select value={selectedScript} onValueChange={setSelectedScript}>
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="选择脚本" />
-                </SelectTrigger>
-                <SelectContent>
-                  {scripts.map((s) => (
-                    <SelectItem key={s.id} value={s.id}>
-                      {s.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Select
+                value={selectedScript}
+                onChange={setSelectedScript}
+                placeholder="选择脚本"
+                style={{ width: '100%' }}
+                options={scripts.map((s) => ({ value: s.id, label: s.name }))}
+              />
             )}
           </div>
         )}
@@ -153,18 +141,16 @@ export function RunScriptDialog() {
               </div>
             </div>
           ) : (
-            <Select value={selectedProfile} onValueChange={setSelectedProfile}>
-              <SelectTrigger className="w-full">
-                <SelectValue placeholder="选择主机" />
-              </SelectTrigger>
-              <SelectContent>
-                {profiles.map((p) => (
-                  <SelectItem key={p.id} value={p.id}>
-                    {p.name}（{p.username}@{p.host}:{p.port}）
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <Select
+              value={selectedProfile}
+              onChange={setSelectedProfile}
+              placeholder="选择主机"
+              style={{ width: '100%' }}
+              options={profiles.map((p) => ({
+                value: p.id,
+                label: `${p.name}（${p.username}@${p.host}:${p.port}）`
+              }))}
+            />
           )}
         </div>
 

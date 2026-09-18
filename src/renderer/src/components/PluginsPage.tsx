@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils'
 import { Boxes, ExternalLink, Package, RefreshCw, RotateCw, Trash2, Upload } from 'lucide-react'
 import { toast } from 'sonner'
 import type { PluginInfo } from '@shared/plugin'
+import { pluginActivityId } from '@/activity-ids'
 
 /** 统一把异常转成可提示的文本 */
 function errText(e: unknown): string {
@@ -28,8 +29,7 @@ export function PluginsPage() {
   const uninstallPlugin = useAppStore((s) => s.uninstallPlugin)
   const installPlugin = useAppStore((s) => s.installPlugin)
   const reloadPlugins = useAppStore((s) => s.reloadPlugins)
-  const setView = useAppStore((s) => s.setView)
-  const setPluginView = useAppStore((s) => s.setPluginView)
+  const selectActivity = useAppStore((s) => s.selectActivity)
 
   const [installing, setInstalling] = useState(false)
   const [reloading, setReloading] = useState(false)
@@ -62,8 +62,7 @@ export function PluginsPage() {
   const openPlugin = (info: PluginInfo) => {
     const view = plugins.find((p) => p.pluginId === info.id)
     if (!view) return
-    setPluginView(view.viewId)
-    setView('plugin')
+    selectActivity(pluginActivityId(view.viewId))
   }
 
   const reloadOne = async (info: PluginInfo) => {
