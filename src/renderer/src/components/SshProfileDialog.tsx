@@ -95,6 +95,8 @@ export function SshProfileDialog() {
       const payload: SshProfile = {
         id: editing?.id ?? '',
         groupId: form.groupId || undefined,
+        // 颜色不在表单里维护，编辑时原样带回，避免保存时被清掉
+        color: editing?.color,
         name: form.name.trim(),
         host: form.host.trim(),
         port: Number(form.port) || 22,

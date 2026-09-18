@@ -290,8 +290,10 @@ interface AppStore {
   /** 拖拽分隔条时更新某分隔节点的权重 */
   resizeSplit: (splitId: string, sizes: number[]) => void
   refreshProfiles: () => Promise<void>
-  /** 新建（不传 id）或重命名（传 id）SSH 分组 */
-  saveSshGroup: (input: { id?: string; name: string }) => Promise<void>
+  /** 新建（不传 id）或重命名（传 id）SSH 分组；color 为 undefined 保留原色，null 清除 */
+  saveSshGroup: (input: { id?: string; name: string; color?: string | null }) => Promise<void>
+  /** 设置连接的强调色（null 清除，回到继承所属分组） */
+  setSshProfileColor: (id: string, color: string | null) => Promise<void>
   /** 删除分组；deleteProfiles=true 时连同组内连接一起删除，否则组内连接回到「未分组」 */
   deleteSshGroup: (id: string, deleteProfiles?: boolean) => Promise<void>
   /** 拖拽排序 / 换组后的整体重排：数组顺序即显示顺序 */
@@ -337,8 +339,8 @@ interface AppStore {
   setAiPermissionMode: (mode: AiPermissionMode) => Promise<void>
   resolveAiConfirm: (id: string, approved: boolean) => Promise<void>
   setTheme: (mode: ThemeMode) => Promise<void>
-  /** 设置界面配色方案（强调色，立即生效并持久化） */
-  setColorTheme: (name: ColorThemeName) => Promise<void>
+  /** 设置界面配色方案（强调色，立即生效并持久化）；custom 时传入自定义色值 */
+  setColorTheme: (name: ColorThemeName, customColor?: string) => Promise<void>
   setTerminalTheme: (name: TerminalThemeName) => Promise<void>
   setCopyOnSelect: (enabled: boolean) => Promise<void>
   setRightClickPaste: (enabled: boolean) => Promise<void>
@@ -424,7 +426,7 @@ let shortcutWired = false
 
     scripts: [],
 
-    preferences: { theme: 'system', colorTheme: 'neutral', terminalTheme: 'auto', copyOnSelect: true, rightClickPaste: true, commandPrediction: true, terminalFontSize: 13, localShell: 'default', minimizeToTray: true, monitorInterval: 2000 },
+    preferences: { theme: 'system', colorTheme: 'neutral', customColor: '#3b82f6', terminalTheme: 'auto', copyOnSelect: true, rightClickPaste: true, commandPrediction: true, terminalFontSize: 13, localShell: 'default', minimizeToTray: true, monitorInterval: 2000 },
 
     shortcuts: DEFAULT_SHORTCUTS,
 
@@ -467,7 +469,7 @@ let shortcutWired = false
       ])
       // 配色必须在偏好写进 store 之前落到 html 上：antd 的 token 是在 store 更新引发的那次
       // 重渲染里从 CSS 变量读出来的，晚一步就会永远停在默认中性配色（直到用户手动切换）
-      applyColorTheme(preferences.colorTheme)
+      applyColorTheme(preferences.colorTheme, preferences.customColor)
       set({
         profiles,
         sshGroups,
@@ -772,6 +774,13 @@ let shortcutWired = false
       set({ sshGroups: await window.api.ssh.saveGroup(input) })
     },
 
+    setSshProfileColor: async (id, color) => {
+      const profile = get().profiles.find((p) => p.id === id)
+      if (!profile) return
+      // 只改颜色：password 等敏感字段不传，主进程会保留原值
+      set({ profiles: await window.api.ssh.save({ ...profile, color: color ?? undefined }) })
+    },
+
     deleteSshGroup: async (id, deleteProfiles) => {
       // 组内连接可能被删除或回到「未分组」，两份数据都要刷新
       const [sshGroups, profiles] = await Promise.all([
@@ -908,11 +917,12 @@ let shortcutWired = false
       set({ preferences })
     },
 
-    setColorTheme: async (name) => {
-      // 立即生效（改 html 的 data-color-theme），再持久化
-      applyColorTheme(name)
-      set((s) => ({ preferences: { ...s.preferences, colorTheme: name } }))
-      const preferences = await window.api.prefs.save({ colorTheme: name })
+    setColorTheme: async (name, customColor) => {
+      // 立即生效（改 html 的 data-color-theme / 自定义色变量），再持久化
+      const next = customColor ?? get().preferences.customColor
+      applyColorTheme(name, next)
+      set((s) => ({ preferences: { ...s.preferences, colorTheme: name, customColor: next } }))
+      const preferences = await window.api.prefs.save({ colorTheme: name, customColor: next })
       set({ preferences })
     },
 

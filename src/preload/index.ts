@@ -81,7 +81,7 @@ const api = {
     }): Promise<{ groups: SshGroup[]; profiles: SshProfile[] }> =>
       ipcRenderer.invoke('ssh:arrange', payload),
     listGroups: (): Promise<SshGroup[]> => ipcRenderer.invoke('ssh:groups:list'),
-    saveGroup: (input: { id?: string; name: string }): Promise<SshGroup[]> =>
+    saveGroup: (input: { id?: string; name: string; color?: string | null }): Promise<SshGroup[]> =>
       ipcRenderer.invoke('ssh:groups:save', input),
     /** 删除分组；deleteProfiles=true 时连同组内连接一起删除 */
     removeGroup: (id: string, deleteProfiles?: boolean): Promise<SshGroup[]> =>

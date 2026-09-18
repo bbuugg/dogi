@@ -70,6 +70,7 @@ const MODAL_PADDING = '20px'
 export function AntdProvider({ children }: { children: ReactNode }) {
   const isDark = useIsDarkTheme()
   const colorTheme = useAppStore((s) => s.preferences.colorTheme)
+  const customColor = useAppStore((s) => s.preferences.customColor)
 
   const themeConfig = useMemo<ThemeConfig>(
     () => ({
@@ -79,8 +80,8 @@ export function AntdProvider({ children }: { children: ReactNode }) {
         Modal: { contentPadding: MODAL_PADDING }
       } as ThemeConfig['components']
     }),
-    // colorTheme 变化会改写 html 的 data-color-theme（同步生效），据此重新取值
-    [isDark, colorTheme]
+    // colorTheme / customColor 变化会改写 html 的 data-color-theme 与自定义色变量（同步生效），据此重新取值
+    [isDark, colorTheme, customColor]
   )
 
   // 静态方法挂在独立的 React root 上，拿不到 ConfigProvider 上下文，这里统一注入

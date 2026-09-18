@@ -177,7 +177,7 @@ export function registerIpc(win: () => BrowserWindow | null): void {
     ) => storage.arrangeSsh(payload)
   )
   ipcMain.handle('ssh:groups:list', () => storage.listSshGroups())
-  ipcMain.handle('ssh:groups:save', (_e, input: { id?: string; name: string }) =>
+  ipcMain.handle('ssh:groups:save', (_e, input: { id?: string; name: string; color?: string | null }) =>
     storage.saveSshGroup(input)
   )
   ipcMain.handle('ssh:groups:delete', (_e, id: string, deleteProfiles?: boolean) =>

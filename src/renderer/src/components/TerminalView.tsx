@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Spin } from 'antd'
-import { X } from 'lucide-react'
+import { AlertTriangle, Check, RefreshCw, X } from 'lucide-react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 import Zmodem from 'zmodem.js'
 import { cn } from 'cn'
-import type { SessionInfo, SshConnectStage } from '@shared/types'
+import type { SessionInfo, SshConnectProgress, SshConnectStage } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import { useIsDarkTheme } from '@/lib/theme'
 import { resolveTerminalTheme } from '@/lib/terminal-themes'
@@ -56,14 +56,128 @@ interface ZmodemState {
   progress: number
 }
 
-/** SSH 连接阶段文案（连接进度浮层） */
+/** SSH 连接阶段标题（连接进度卡片顶部文案） */
 const CONNECT_STAGE_TEXT: Record<SshConnectStage, string> = {
-  resolving: '正在解析主机并建立 TCP 连接…',
-  handshake: '已建立连接，正在握手（密钥交换）…',
-  authenticating: '握手完成，正在认证…',
-  'opening-shell': '认证通过，正在打开 shell…',
-  retrying: '连接失败，正在重试…',
+  resolving: '正在解析主机并建立 TCP 连接',
+  handshake: '已建立连接，正在握手（密钥交换）',
+  authenticating: '握手完成，正在认证身份',
+  'opening-shell': '认证通过，正在打开 shell',
+  retrying: '连接失败，正在重试',
   ready: '连接就绪'
+}
+
+/** 连接步骤（卡片中逐项展示完成状态） */
+const CONNECT_STEPS: Array<{ stage: SshConnectStage; label: string }> = [
+  { stage: 'resolving', label: 'TCP 连接' },
+  { stage: 'handshake', label: '握手 / 密钥交换' },
+  { stage: 'authenticating', label: '身份认证' },
+  { stage: 'opening-shell', label: '打开 shell' }
+]
+
+/** 当前阶段对应的步骤下标（重试即回到第一步重来） */
+function connectStepIndex(stage: SshConnectStage): number {
+  if (stage === 'retrying') return 0
+  const index = CONNECT_STEPS.findIndex((s) => s.stage === stage)
+  return index < 0 ? CONNECT_STEPS.length : index
+}
+
+/**
+ * SSH 连接进度卡片：连接期间浮在终端上方，
+ * 展示目标主机、认证方式、当前阶段、步骤进度、重试次数与已耗时。
+ */
+function SshConnectCard({
+  session,
+  progress
+}: {
+  session: SessionInfo
+  progress: SshConnectProgress
+}) {
+  const profile = useAppStore((s) =>
+    session.profileId ? (s.profiles.find((p) => p.id === session.profileId) ?? null) : null
+  )
+  // 连接途中允许取消：关闭该会话即中止主进程侧的连接尝试
+  const closeSession = useAppStore((s) => s.closeSession)
+  // 已耗时：从卡片出现开始计时（连接总耗时由主进程侧决定，这里只做用户可感知的等待反馈）
+  const [elapsed, setElapsed] = useState(0)
+  useEffect(() => {
+    const startedAt = Date.now()
+    const timer = window.setInterval(() => setElapsed(Date.now() - startedAt), 100)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  const active = connectStepIndex(progress.stage)
+  const retrying = progress.stage === 'retrying'
+  const target = profile
+    ? `${profile.username}@${profile.host}:${profile.port || 22}`
+    : session.title
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="w-full max-w-sm rounded-lg border border-border bg-card p-4 text-foreground shadow-lg"
+    >
+      <div className="flex items-start gap-3">
+        <Spin size="small" />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-medium">{CONNECT_STAGE_TEXT[progress.stage]}</div>
+          <div className="mt-0.5 truncate text-xs text-muted-foreground">{target}</div>
+        </div>
+        <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+          {(elapsed / 1000).toFixed(1)}s
+        </span>
+      </div>
+
+      {retrying && (
+        <div className="mt-2 flex items-center gap-1.5 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-600 dark:text-amber-400">
+          <AlertTriangle className="size-3 shrink-0" />
+          <span>
+            连接失败，正在重试（第 {progress.attempt ?? 1}/{progress.maxAttempts ?? 1} 次）
+          </span>
+        </div>
+      )}
+
+      <div className="mt-3 space-y-1.5">
+        {CONNECT_STEPS.map((step, i) => {
+          const done = i < active
+          const running = i === active
+          return (
+            <div key={step.stage} className="flex items-center gap-2 text-xs">
+              {done ? (
+                <Check className="size-3.5 shrink-0 text-emerald-500" />
+              ) : running ? (
+                <RefreshCw className="size-3.5 shrink-0 animate-spin text-primary" />
+              ) : (
+                <span className="flex size-3.5 shrink-0 items-center justify-center">
+                  <span className="size-1.5 rounded-full bg-muted-foreground/40" />
+                </span>
+              )}
+              <span className={done || running ? 'text-foreground' : 'text-muted-foreground'}>
+                {step.label}
+              </span>
+              <span className="ml-auto text-[10px] text-muted-foreground">
+                {done ? '已完成' : running ? '进行中' : '等待'}
+              </span>
+            </div>
+          )
+        })}
+      </div>
+
+      <div className="mt-3 flex items-center justify-between gap-2 border-t border-border pt-2 text-[11px] text-muted-foreground">
+        <span>认证：{profile?.authType === 'privateKey' ? '密钥' : '密码'}</span>
+        <span>保活：{Math.round((profile?.keepaliveInterval || 15000) / 1000)}s</span>
+        <span>超时：20s</span>
+      </div>
+
+      <button
+        type="button"
+        onClick={() => void closeSession(session.id)}
+        className="mt-3 w-full rounded border border-border py-1.5 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+      >
+        取消连接
+      </button>
+    </div>
+  )
 }
 
 export function TerminalView({ session, isActive }: TerminalViewProps) {
@@ -712,7 +826,7 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
   // SSH 连接进度：连接阶段由主进程按真实事件推送，就绪/失败后条目被移除
   const connectStage = useAppStore((s) => s.connectStages[session.id])
   const connecting = Boolean(connectStage)
-  // 连接很快时不闪一下浮层：延迟 250ms 才显示；一旦连接完成立刻收起
+  // 遮罩立刻铺上（否则空终端的 shell 光标会先露出来），卡片本身延迟 250ms 淡入，避免快速连接时一闪而过
   const [showConnect, setShowConnect] = useState(false)
   useEffect(() => {
     if (!connecting) {
@@ -722,12 +836,6 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
     const timer = window.setTimeout(() => setShowConnect(true), 250)
     return () => window.clearTimeout(timer)
   }, [connecting])
-  const connectText =
-    connectStage?.stage === 'retrying'
-      ? `${CONNECT_STAGE_TEXT.retrying}（第 ${connectStage.attempt ?? 1}/${connectStage.maxAttempts ?? 1} 次）`
-      : connectStage
-        ? CONNECT_STAGE_TEXT[connectStage.stage]
-        : ''
   // 镜像最新“已结束”状态，供 onData 回调（创建时只绑定一次）读取
   const exitedRef = useRef(exited)
   exitedRef.current = exited
@@ -751,18 +859,12 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
   return (
     <div className="relative h-full w-full" style={{ backgroundColor: theme.background }}>
       <div ref={containerRef} className="h-full w-full" />
-      {showConnect && connectStage && (
+      {connecting && connectStage && (
         <div
-          role="status"
-          aria-live="polite"
-          className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 text-muted-foreground"
+          className="absolute inset-0 z-10 flex items-center justify-center p-4"
           style={{ backgroundColor: theme.background }}
         >
-          <Spin size="small" />
-          <div className="text-center">
-            <div className="text-sm text-foreground">{session.title}</div>
-            <div className="mt-1 text-xs">{connectText}</div>
-          </div>
+          {showConnect && <SshConnectCard session={session} progress={connectStage} />}
         </div>
       )}
       {zmodem && (

@@ -8,6 +8,7 @@ import { HTML5Backend } from 'react-dnd-html5-backend'
 import {
   Button,
   Checkbox,
+  ColorPicker,
   Dropdown,
   Input,
   Modal,
@@ -127,6 +128,76 @@ function DropLine({ after }: { after: boolean }) {
   )
 }
 
+/** 取色面板里的快捷色板（常用的高辨识度色相） */
+const COLOR_PRESETS = [
+  '#ef4444', '#f97316', '#f59e0b', '#eab308',
+  '#84cc16', '#22c55e', '#14b8a6', '#06b6d4',
+  '#3b82f6', '#6366f1', '#8b5cf6', '#ec4899'
+]
+
+/**
+ * 行标签的着色：把用户选的颜色与主题前景色按 oklab 混合。
+ * 直接用原色写文字时，浅色（如亮黄）在浅色主题下几乎看不清；混入前景色后
+ * 既保留明显色相，又能在明暗两种主题下都保证可读性。
+ */
+function tintText(color: string): string {
+  return `color-mix(in oklab, ${color} 70%, var(--foreground))`
+}
+
+/**
+ * 行内悬浮色点：点击直接弹出 antd 取色面板（含快捷色板）。
+ * 未设置颜色时默认隐藏，悬浮行才出现；已设置则常驻显示，方便一眼看出配色。
+ * 传入 onClear 时面板里出现「清除」，用于连接回到继承分组色。
+ */
+function ColorDot({
+  value,
+  fallback,
+  title,
+  hoverGroupClass,
+  onChange,
+  onClear
+}: {
+  /** 已显式设置的颜色（null/undefined 表示未设置） */
+  value?: string
+  /** 未设置时色点显示的参考色（连接为继承到的分组色） */
+  fallback?: string
+  title: string
+  /** 未设置时用于悬浮显隐的父级 group 类名 */
+  hoverGroupClass: string
+  onChange: (color: string) => void
+  onClear?: () => void
+}) {
+  return (
+    <ColorPicker
+      value={value ?? fallback ?? '#64748b'}
+      disabledAlpha
+      allowClear={Boolean(onClear)}
+      presets={[{ label: '快捷色板', colors: COLOR_PRESETS }]}
+      onChangeComplete={(color) => onChange(color.toHexString())}
+      onClear={onClear}
+    >
+      <button
+        type="button"
+        title={title}
+        className={cn(
+          'flex size-5 shrink-0 items-center justify-center rounded transition-opacity',
+          !value && `opacity-0 ${hoverGroupClass}`
+        )}
+        onClick={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
+      >
+        <span
+          className={cn(
+            'size-2.5 rounded-full border',
+            value ? 'border-transparent' : 'border-muted-foreground/50'
+          )}
+          style={{ background: value ?? fallback ?? 'transparent' }}
+        />
+      </button>
+    </ColorPicker>
+  )
+}
+
 /**
  * 「主机」功能区面板：本地终端入口 + SSH 连接列表。
  * 结构用 antd Tree（分组可折叠），拖拽用 react-dnd：
@@ -140,6 +211,7 @@ export function HostsPanel() {
   const refreshProfiles = useAppStore((s) => s.refreshProfiles)
   const selectActivity = useAppStore((s) => s.selectActivity)
   const saveSshGroup = useAppStore((s) => s.saveSshGroup)
+  const setSshProfileColor = useAppStore((s) => s.setSshProfileColor)
   const deleteSshGroup = useAppStore((s) => s.deleteSshGroup)
   const arrangeSsh = useAppStore((s) => s.arrangeSsh)
 
@@ -181,6 +253,11 @@ export function HostsPanel() {
   for (const g of sshGroups) blocks.push({ group: g, items: byGroup.get(g.id) ?? [] })
   /** 有分组时才显示「未分组」这一层 */
   const showUngrouped = sshGroups.length > 0
+
+  const groupById = new Map(sshGroups.map((g) => [g.id, g]))
+  /** 连接的生效颜色：自身设置优先，否则继承所属分组的颜色 */
+  const effectiveColor = (p: SshProfile): string | undefined =>
+    p.color ?? (p.groupId ? groupById.get(p.groupId)?.color : undefined)
 
   const locate = (list: Block[], id: string): { b: number; i: number } | null => {
     for (let b = 0; b < list.length; b++) {
@@ -291,9 +368,11 @@ export function HostsPanel() {
       <ProfileRow
         profile={p}
         hasGroup={hasGroup}
+        color={effectiveColor(p)}
         onConnect={() => connect(p)}
         onEdit={() => setSshDialog(true, p)}
         onDelete={() => setPendingDelete(p)}
+        onColor={(color) => void setSshProfileColor(p.id, color)}
         onDropProfile={dropProfile}
         onDropGroup={dropGroup}
       />
@@ -315,6 +394,9 @@ export function HostsPanel() {
             onDropGroup={dropGroup}
             onNew={() => setSshDialog(true, null, group.id)}
             onRename={() => setGroupEdit({ id: group.id, name: group.name })}
+            onColor={(color) =>
+              void saveSshGroup({ id: group.id, name: group.name, color })
+            }
             onDelete={() => {
               setDeleteGroupHosts(false)
               setPendingGroupDelete(group)
@@ -498,6 +580,7 @@ function GroupRow({
   onDropGroup,
   onNew,
   onRename,
+  onColor,
   onDelete
 }: {
   group: SshGroup
@@ -508,6 +591,8 @@ function GroupRow({
   onDropGroup: DropGroup
   onNew: () => void
   onRename: () => void
+  /** 设置分组颜色（null 清除）；组内未单独设色的连接会继承该颜色 */
+  onColor: (color: string | null) => void
   onDelete: () => void
 }) {
   const [{ isDragging }, drag] = useDrag<DragItem, void, { isDragging: boolean }>(
@@ -564,11 +649,24 @@ function GroupRow({
         }}
       >
         <div className="flex min-w-0 flex-1 items-center gap-1.5">
-          <Folder className="size-3.5 shrink-0 text-muted-foreground" />
-          <span className="truncate text-sm font-medium text-muted-foreground">
+          <Folder
+            className="size-3.5 shrink-0 text-muted-foreground"
+            style={group.color ? { color: group.color } : undefined}
+          />
+          <span
+            className="truncate text-sm font-medium text-muted-foreground"
+            style={group.color ? { color: tintText(group.color) } : undefined}
+          >
             {group.name}
           </span>
           <span className="text-xs text-muted-foreground/70">{count}</span>
+          <ColorDot
+            value={group.color}
+            title={group.color ? '分组颜色' : '设置分组颜色'}
+            hoverGroupClass="group-hover/grp:opacity-100"
+            onChange={(color) => onColor(color)}
+            onClear={() => onColor(null)}
+          />
           <Button
             type="text"
             size="small"
@@ -633,18 +731,24 @@ function UngroupedRow({
 function ProfileRow({
   profile,
   hasGroup,
+  color,
   onConnect,
   onEdit,
   onDelete,
+  onColor,
   onDropProfile,
   onDropGroup
 }: {
   profile: SshProfile
   /** 所在分组真实存在（决定能否用本行作为分组排序的落点） */
   hasGroup: boolean
+  /** 生效颜色：连接自身设置，或继承所属分组 */
+  color?: string
   onConnect: () => void
   onEdit: () => void
   onDelete: () => void
+  /** 设置连接自身颜色（null 清除，回到继承分组） */
+  onColor: (color: string | null) => void
   onDropProfile: DropProfile
   onDropGroup: DropGroup
 }) {
@@ -681,7 +785,7 @@ function ProfileRow({
     <div
       ref={ref}
       className={cn(
-        'relative flex min-w-0 flex-1 cursor-pointer items-center gap-2 pr-1',
+        'group/prof relative flex min-w-0 flex-1 cursor-pointer items-center gap-2 pr-1',
         isDragging && 'opacity-40'
       )}
       onDoubleClick={onConnect}
@@ -704,11 +808,29 @@ function ProfileRow({
           mouseEnterDelay={0.4}
         >
           <div className="flex min-w-0 flex-1 items-center gap-2">
-            <Server className="size-4 shrink-0 text-muted-foreground" />
-            <div className="min-w-0 flex-1 truncate text-sm font-medium">{profile.name}</div>
+            <Server
+              className="size-4 shrink-0 text-muted-foreground"
+              style={color ? { color } : undefined}
+            />
+            <div
+              className="min-w-0 flex-1 truncate text-sm font-medium"
+              style={color ? { color: tintText(color) } : undefined}
+            >
+              {profile.name}
+            </div>
           </div>
         </Tooltip>
       </Dropdown>
+      <ColorDot
+        value={profile.color}
+        fallback={color}
+        title={
+          profile.color ? '连接颜色' : color ? '继承分组颜色（点击可单独设置）' : '设置连接颜色'
+        }
+        hoverGroupClass="group-hover/prof:opacity-100"
+        onChange={(next) => onColor(next)}
+        onClear={() => onColor(null)}
+      />
     </div>
   )
 }

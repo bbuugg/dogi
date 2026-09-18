@@ -29,6 +29,7 @@ const DEFAULT_AI_SETTINGS: AiSettings = { permissionMode: 'full' }
 const DEFAULT_PREFERENCES: Preferences = {
   theme: 'system',
   colorTheme: 'neutral',
+  customColor: '#3b82f6',
   terminalTheme: 'auto',
   copyOnSelect: true,
   rightClickPaste: true,
@@ -196,13 +197,14 @@ class StorageService {
     return this.store.get('sshGroups')
   }
 
-  /** 保存分组（upsert）：不传 id 视为新增 */
-  saveSshGroup(input: { id?: string; name: string }): SshGroup[] {
+  /** 保存分组（upsert）：不传 id 视为新增；color 为 undefined 时保留原色，传 null 清除颜色 */
+  saveSshGroup(input: { id?: string; name: string; color?: string | null }): SshGroup[] {
     const groups = this.store.get('sshGroups')
     const prev = input.id ? groups.find((g) => g.id === input.id) : undefined
     const group: SshGroup = {
       id: input.id || crypto.randomUUID(),
       name: input.name.trim(),
+      color: input.color === undefined ? prev?.color : (input.color ?? undefined),
       createdAt: prev?.createdAt ?? Date.now()
     }
     this.store.set(

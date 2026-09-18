@@ -5,6 +5,7 @@ export type ThemeMode = 'system' | 'light' | 'dark'
 /**
  * 界面配色方案（强调色）：只影响按钮、选中态、焦点框等强调色，
  * 中性色（背景/边框/文字）仍由明暗主题（ThemeMode）决定。
+ * `custom` 表示用 customColor 指定的任意颜色（见 Preferences.customColor）。
  */
 export type ColorThemeName =
   | 'neutral'
@@ -15,6 +16,7 @@ export type ColorThemeName =
   | 'rose'
   | 'orange'
   | 'amber'
+  | 'custom'
 
 /**
  * 终端配色方案：
@@ -33,6 +35,11 @@ export interface Preferences {
   theme: ThemeMode
   /** 界面配色方案（强调色），缺省 neutral */
   colorTheme: ColorThemeName
+  /**
+   * 自定义强调色（十六进制，如 #3b82f6）：colorTheme === 'custom' 时生效。
+   * 只取色相与彩度，亮度会按明暗主题自动夹到可读区间。
+   */
+  customColor: string
   /** 终端配色方案，缺省 auto（跟随应用主题） */
   terminalTheme: TerminalThemeName
   /** 选中终端文本时自动复制到剪贴板，缺省开启 */
@@ -123,6 +130,8 @@ export type SshAuthType = 'password' | 'privateKey'
 export interface SshGroup {
   id: string
   name: string
+  /** 分组强调色（CSS 颜色字符串）；组内连接默认继承，可被连接自身的 color 覆盖 */
+  color?: string
   createdAt: number
 }
 
@@ -130,6 +139,8 @@ export interface SshProfile {
   id: string
   /** 所属分组 id；缺省表示未分组 */
   groupId?: string
+  /** 连接自身的强调色；缺省表示继承所属分组的颜色 */
+  color?: string
   name: string
   host: string
   port: number

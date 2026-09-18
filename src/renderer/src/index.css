@@ -468,3 +468,20 @@
   --primary-foreground: oklch(0.24 0.03 85);
   --ring: oklch(0.64 0.1 85);
 }
+
+/*
+ * 自定义强调色：没有固定色值，由 lib/theme.ts 从用户选的颜色算出
+ * --custom-*-light / --custom-*-dark 内联到 html 上（保留色相、按明暗夹取亮度），
+ * 这里只负责按当前明暗各取一套。
+ */
+:root[data-color-theme='custom'] {
+  --primary: var(--custom-primary-light);
+  --primary-foreground: var(--custom-primary-foreground-light);
+  --ring: var(--custom-ring-light);
+}
+
+.dark[data-color-theme='custom'] {
+  --primary: var(--custom-primary-dark);
+  --primary-foreground: oklch(0.2 0.01 0);
+  --ring: var(--custom-ring-dark);
+}
