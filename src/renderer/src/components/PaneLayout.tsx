@@ -216,6 +216,9 @@ function GroupView({ groupId }: { groupId: string }) {
               ? profiles.find((p) => p.id === session.profileId)
               : undefined
             const tabColor = profile ? resolveSshColor(profile, sshGroups) : undefined
+            // SSH 标签显示主机名（连接名字），本地终端仍用会话标题；
+            // session.title（用户名@主机）保留在悬浮提示里，信息不丢
+            const tabLabel = profile?.name ?? session?.title ?? '终端'
             return (
               <Dropdown
                 key={sid}
@@ -295,7 +298,7 @@ function GroupView({ groupId }: { groupId: string }) {
                     title={session?.title}
                     style={tabColor ? { color: tintText(tabColor) } : undefined}
                   >
-                    {session?.title ?? '终端'}
+                    {tabLabel}
                   </span>
                   {isExited && (
                     <span className="shrink-0 text-[10px] text-destructive">已退出</span>
