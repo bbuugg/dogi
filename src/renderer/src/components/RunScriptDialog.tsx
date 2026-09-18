@@ -98,7 +98,7 @@ export function RunScriptDialog() {
         {hasPreset ? (
           <div className="grid gap-1.5">
             <span className="text-xs font-medium text-foreground">脚本</span>
-            <div className="rounded-md border border-border/60 bg-secondary/40 px-3 py-2 text-sm text-foreground">
+            <div className="rounded-md border border-border/60 bg-secondary/40 px-3 py-1.5 text-sm text-foreground">
               {script ? script.name : '（脚本不存在）'}
             </div>
           </div>
