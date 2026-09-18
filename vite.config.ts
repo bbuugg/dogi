@@ -20,6 +20,35 @@ export default defineConfig({
   },
   build: {
     outDir: resolve(import.meta.dirname, 'out/renderer'),
-    emptyOutDir: true
+    emptyOutDir: true,
+    // 把体积大且相对稳定的 vendor 拆成独立 chunk：便于浏览器缓存，也让首屏只加载必须的依赖
+    // （vendor-antd 为 antd 框架本体，gzip 约 527kB，阈值放开到其实际大小之上）
+    chunkSizeWarningLimit: 1700,
+    rolldownOptions: {
+      output: {
+        // rolldown 的 manualChunks 仅支持函数形式：把稳定的重依赖拆成独立 vendor chunk
+        manualChunks(id) {
+          const i = id.replace(/\\/g, '/')
+          if (!i.includes('/node_modules/')) return undefined
+          if (i.includes('/react-dom/') || i.includes('/react/')) return 'vendor-react'
+          if (
+            i.includes('/@ant-design/') ||
+            i.includes('/@rc-component/') ||
+            i.includes('/antd/') ||
+            /\/rc-[^/]+\//.test(i)
+          )
+            return 'vendor-antd'
+          if (i.includes('monaco')) return 'monaco'
+          if (i.includes('/@xterm/')) return 'xterm'
+          if (
+            i.includes('/node_modules/ai/') ||
+            i.includes('/node_modules/@ai-sdk/') ||
+            i.includes('/node_modules/@modelcontextprotocol/')
+          )
+            return 'vendor-ai'
+          return undefined
+        }
+      }
+    }
   }
 })
