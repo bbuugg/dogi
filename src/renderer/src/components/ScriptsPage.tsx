@@ -73,9 +73,13 @@ export function ScriptsPage() {
 
   return (
     <div className="flex h-full flex-col bg-background">
-      <div className="flex items-center gap-3 border-b border-border px-5 py-3">
-        <h1 className="text-base font-semibold">脚本管理</h1>
-        <span className="text-xs text-muted-foreground">共 {scripts.length} 个脚本</span>
+      <div className="flex items-center justify-between px-5 py-3">
+        <div>
+          <h1 className="text-base font-semibold">脚本管理</h1>
+          <p className="text-[11px] text-muted-foreground">
+            共 {scripts.length} 个脚本
+          </p>
+        </div>
         <div className="ml-auto flex gap-2">
           <Button
             icon={<Play className="size-4" />}
@@ -95,7 +99,7 @@ export function ScriptsPage() {
       </div>
 
       {/* 脚本内容属于「内容」，保持可选中复制 */}
-      <div className="min-h-0 flex-1 overflow-y-auto p-5 select-text">
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-2">
         {scripts.length === 0 ? (
           <div className="mx-auto mt-16 max-w-md rounded-md border border-dashed border-border px-3 py-10 text-center text-sm text-muted-foreground">
             还没有脚本。
@@ -115,7 +119,7 @@ export function ScriptsPage() {
               <div
                 key={s.id}
                 onDoubleClick={() => setRunScriptDialog(true, s.id)}
-                className="group flex min-w-0 flex-col gap-1 rounded-md border border-border/60 px-3 py-2.5 hover:bg-secondary cursor-pointer select-none"
+                className="group flex min-w-0 flex-col gap-1 rounded-md border border-border/60 px-3 py-2.5 hover:bg-secondary cursor-pointer"
               >
                 <div className="flex items-start gap-2">
                   <div className="min-w-0 flex-1">
@@ -129,13 +133,12 @@ export function ScriptsPage() {
                   <div className="flex shrink-0 items-center gap-0.5">
                     <Button
                       type="text"
+                      icon={<Play className="size-4" />}
                       size="small"
                       className="w-7 p-0"
                       title="选择主机运行"
                       onClick={() => setRunScriptDialog(true, s.id)}
-                    >
-                      <Play className="size-4" />
-                    </Button>
+                    />
                     <Button
                       icon={<Pencil className="size-4" />}
                       type="text"
@@ -143,9 +146,7 @@ export function ScriptsPage() {
                       className="w-7 p-0"
                       title="编辑"
                       onClick={() => startEdit(s)}
-                    >
-                      编辑
-                    </Button>
+                    />
                     <Button
                       type="text"
                       icon={<Trash2 className="size-4 text-destructive" />}
@@ -153,9 +154,7 @@ export function ScriptsPage() {
                       className="w-7 p-0"
                       title="删除"
                       onClick={() => setPendingDelete(s)}
-                    >
-                      删除
-                    </Button>
+                    />
                   </div>
                 </div>
                 <div className="truncate font-mono text-[11px] text-muted-foreground/80">
@@ -198,16 +197,15 @@ export function ScriptsPage() {
             />
           </Form.Item>
           <Form.Item label="脚本内容" required style={{ marginBottom: 0 }}>
-            <div className="h-64 overflow-hidden rounded-md border border-border">
-              <MonacoEditor
-                value={content}
-                onChange={setContent}
-                language="shell"
-                showLanguageSelector
-                showLineNumbersToggle
-                showWordWrapToggle
-              />
-            </div>
+            <MonacoEditor
+              height={64 * 4}
+              value={content}
+              onChange={setContent}
+              language="shell"
+              showLanguageSelector
+              showLineNumbersToggle
+              showWordWrapToggle
+            />
           </Form.Item>
         </Form>
       </Modal>

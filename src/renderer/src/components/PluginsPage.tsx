@@ -106,9 +106,9 @@ export function PluginsPage() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* 顶部工具条 */}
-      <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
+      <div className="flex items-center justify-between px-5 py-3">
         <div>
-          <h2 className="text-base font-semibold">插件管理</h2>
+          <h1 className="text-base font-semibold">插件管理</h1>
           <p className="text-[11px] text-muted-foreground">
             已安装 {pluginList.length} 个插件 · 启用 {pluginList.filter((p) => p.enabled).length} 个
           </p>
@@ -138,7 +138,7 @@ export function PluginsPage() {
       </div>
 
       {/* 列表 */}
-      <div className="min-h-0 flex-1 overflow-auto p-4">
+      <div className="min-h-0 flex-1 overflow-auto px-4 py-2">
         {pluginList.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-muted-foreground">
             <Boxes className="size-12 opacity-30" />

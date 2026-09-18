@@ -118,7 +118,7 @@ export function NotesPage() {
   return (
     <div className="flex h-full flex-col bg-background">
       {/* 工具栏：标题 + 语言选择 + 保存状态 */}
-      <div className="flex items-center gap-2 border-b border-border px-3 py-1.5">
+      <div className="flex items-center gap-2 px-3 py-1.5">
         <Input
           value={title}
           onChange={(e) => {
@@ -144,7 +144,7 @@ export function NotesPage() {
             </>
           )}
         </span>
-        <Button size="small" onClick={() => void saveCurrentRef.current()} loading={saving}>
+        <Button onClick={() => void saveCurrentRef.current()} loading={saving}>
           保存
         </Button>
       </div>

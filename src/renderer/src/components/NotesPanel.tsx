@@ -70,7 +70,7 @@ export function NotesPanel() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="border-b border-border px-3 py-2">
+      <div className="px-3 py-2">
         <Button type="primary" block icon={<Plus className="size-4" />} onClick={handleCreate} loading={creating}>
           新建笔记
         </Button>
