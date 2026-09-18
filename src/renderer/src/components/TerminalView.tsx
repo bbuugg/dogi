@@ -9,6 +9,7 @@ import { cn } from 'cn'
 import type { SessionInfo, SshConnectProgress, SshConnectStage } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import { useIsDarkTheme } from '@/lib/theme'
+import { clampCompositionOverflow } from '@/lib/terminal-ime'
 import { resolveTerminalTheme } from '@/lib/terminal-themes'
 import { TERMINAL_FONT_SIZE_DEFAULT, TERMINAL_FONT_SIZE_STEP } from '@/lib/terminal-font'
 
@@ -302,6 +303,8 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
       })
     )
     term.open(container)
+    // 输入法组合串贴屏幕右缘向左生长，防止向右溢出把页面推左（pi 等 TUI 光标停在行尾时必现）
+    const unclampIme = clampCompositionOverflow(container)
     try {
       fit.fit()
     } catch {
@@ -717,6 +720,7 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
 
     return () => {
       resizeObserver.disconnect()
+      unclampIme()
       charSizeDisp?.dispose?.()
       container.removeEventListener('wheel', handleWheelCapture, { capture: true })
       container.removeEventListener('contextmenu', handleContextMenu)

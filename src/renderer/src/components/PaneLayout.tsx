@@ -300,9 +300,13 @@ function GroupView({ groupId }: { groupId: string }) {
                   >
                     {tabLabel}
                   </span>
-                  {isExited && (
-                    <span className="shrink-0 text-[10px] text-destructive">已退出</span>
-                  )}
+                  <span
+                    title={isExited ? '已退出' : '已连接'}
+                    className={cn(
+                      'size-1.5 shrink-0 rounded-full',
+                      isExited ? 'bg-destructive' : 'bg-emerald-500'
+                    )}
+                  />
                   <button
                     onClick={(e) => {
                       e.stopPropagation()

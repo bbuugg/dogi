@@ -75,7 +75,10 @@ export default function App() {
 
   return (
     <AntdProvider>
-      <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
+      {/* overflow-clip（而非 hidden）：clip 不构成滚动容器，Chrome 无法因焦点元素
+          （如终端输入法组合期间被拉宽的 textarea）越界而对应用根节点做横向 scrollIntoView，
+          杜绝「整个页面被推左」 */}
+      <div className="flex h-screen w-screen flex-col overflow-clip bg-background text-foreground">
         <TitleBar />
         <div className="flex min-h-0 flex-1">
           {/* 活动栏常驻（不随侧边栏折叠消失），用于切换左侧功能区 */}

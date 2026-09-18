@@ -478,6 +478,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
       {/* 输入区：圆角卡片，操作按钮集中在卡片底部（对齐 ChatInput 结构） */}
       <div className="shrink-0 p-3">
         <div className="rounded-lg border border-border bg-card transition-colors focus-within:border-primary">
+          {/* antd 的 cssinjs 是非 @layer 样式，会压过 Tailwind 的 border-0/outline-none，
+              用内联样式强制去掉内层边框与焦点描边，避免与外层圆角卡片形成双边框 */}
           <Input.TextArea
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -492,8 +494,9 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             }
             rows={2}
             autoSize={{ minRows: 2, maxRows: 6 }}
-            className="min-h-14 max-h-40 overflow-y-auto border-0 bg-transparent px-2.5 pt-2.5 text-[13px] shadow-none outline-none focus:ring-0 focus-visible:ring-0 no-scrollbar"
+            className="min-h-14 max-h-40 overflow-y-auto px-2.5 pt-2.5 text-[13px] no-scrollbar"
             variant="borderless"
+            style={{ border: 'none', background: 'transparent', boxShadow: 'none', outline: 'none' }}
           />
           <div className="flex items-center justify-between gap-2 px-2 pb-2">
             <div className="flex min-w-0 items-center gap-1">
@@ -527,13 +530,12 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             ) : (
               <Button
                 type="primary"
-                className="size-8 shrink-0 rounded-full"
+                icon={<Send className="size-4" />}
+                className="ai-send-btn size-8 shrink-0 rounded-full"
                 disabled={!input.trim() || !hasConfig || !sessionId}
                 title="发送"
                 onClick={handleSend}
-              >
-                <Send className="size-4" />
-              </Button>
+              />
             )}
           </div>
         </div>
