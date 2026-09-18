@@ -15,6 +15,8 @@ const AUTH_TYPE_OPTIONS = [
 
 interface FormState {
   name: string
+  /** 所属分组 id；空串 = 未分组 */
+  groupId: string
   host: string
   port: string
   username: string
@@ -26,6 +28,7 @@ interface FormState {
 
 const EMPTY_FORM: FormState = {
   name: '',
+  groupId: '',
   host: '',
   port: '22',
   username: 'root',
@@ -39,6 +42,7 @@ function toForm(profile: SshProfile | null | undefined): FormState {
   if (!profile) return { ...EMPTY_FORM }
   return {
     name: profile.name,
+    groupId: profile.groupId ?? '',
     host: profile.host,
     port: String(profile.port ?? 22),
     username: profile.username,
@@ -55,6 +59,7 @@ export function SshProfileDialog() {
   const setSshDialog = useAppStore((s) => s.setSshDialog)
   const refreshProfiles = useAppStore((s) => s.refreshProfiles)
   const connectSsh = useAppStore((s) => s.connectSsh)
+  const sshGroups = useAppStore((s) => s.sshGroups)
 
   const [form, setForm] = useState<FormState>(EMPTY_FORM)
   const [saving, setSaving] = useState(false)
@@ -68,10 +73,13 @@ export function SshProfileDialog() {
   useEffect(() => {
     if (sshDialog.open) {
       setLastEditing(sshDialog.editing ?? null)
-      setForm(toForm(editing))
+      const next = toForm(editing)
+      // 从某个分组里点「+」新建时，预设分组
+      if (!next.name && sshDialog.groupId) next.groupId = sshDialog.groupId
+      setForm(next)
       setError(null)
     }
-  }, [sshDialog.open, editing])
+  }, [sshDialog.open, sshDialog.groupId, editing])
 
   const patch = (partial: Partial<FormState>) => setForm((f) => ({ ...f, ...partial }))
 
@@ -90,6 +98,7 @@ export function SshProfileDialog() {
       const now = Date.now()
       const payload: SshProfile = {
         id: editing?.id ?? '',
+        groupId: form.groupId || undefined,
         name: form.name.trim(),
         host: form.host.trim(),
         port: Number(form.port) || 22,
@@ -189,13 +198,26 @@ export function SshProfileDialog() {
               onChange={(e) => patch({ username: e.target.value })}
             />
           </div>
-          <div className="col-span-2 grid gap-1.5">
+          <div className="col-span-1 grid gap-1.5">
             <Label>认证方式</Label>
             <Select
               value={form.authType}
               onChange={(v) => patch({ authType: v as SshAuthType })}
               options={AUTH_TYPE_OPTIONS}
               style={{ width: '100%' }}
+            />
+          </div>
+          <div className="col-span-1 grid gap-1.5">
+            <Label>分组</Label>
+            <Select
+              value={form.groupId}
+              onChange={(v) => patch({ groupId: v })}
+              placeholder="未分组"
+              style={{ width: '100%' }}
+              options={[
+                { value: '', label: '未分组' },
+                ...sshGroups.map((g) => ({ value: g.id, label: g.name }))
+              ]}
             />
           </div>
         </div>

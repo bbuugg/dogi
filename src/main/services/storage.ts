@@ -8,12 +8,14 @@ import type {
   Preferences,
   ScriptEntry,
   ShortcutConfig,
+  SshGroup,
   SshProfile
 } from '@shared/types'
 import { DEFAULT_SHORTCUTS } from '@shared/shortcuts'
 
 interface StoreSchema {
   sshProfiles: SshProfile[]
+  sshGroups: SshGroup[]
   aiConfigs: AiModelConfig[]
   mcpServers: McpServerConfig[]
   aiSettings: AiSettings
@@ -44,6 +46,7 @@ class StorageService {
   private store = new Store<StoreSchema>({
     defaults: {
       sshProfiles: [],
+      sshGroups: [],
       aiConfigs: [],
       mcpServers: [],
       aiSettings: DEFAULT_AI_SETTINGS,
@@ -148,6 +151,89 @@ class StorageService {
       this.store.get('sshProfiles').filter((p) => p.id !== id)
     )
     return this.listSshProfiles()
+  }
+
+  /**
+   * 拖拽排序 / 换组后的整体重排：数组顺序即显示顺序。
+   * - groupIds：分组的目标顺序（未列出的分组按原相对顺序附在其后）；
+   * - profiles：连接按目标顺序列出，groupId 为最终归属（undefined = 未分组）。
+   * 只改 groupId，不碰密码/私钥等加密字段。
+   */
+  arrangeSsh(payload: {
+    groupIds: string[]
+    profiles: Array<{ id: string; groupId?: string }>
+  }): { groups: SshGroup[]; profiles: SshProfile[] } {
+    const groups = this.store.get('sshGroups')
+    const groupById = new Map(groups.map((g) => [g.id, g]))
+    const ordered = payload.groupIds
+      .map((id) => groupById.get(id))
+      .filter((g): g is SshGroup => Boolean(g))
+    for (const g of groups) {
+      if (!payload.groupIds.includes(g.id)) ordered.push(g)
+    }
+    this.store.set('sshGroups', ordered)
+
+    const profiles = this.store.get('sshProfiles')
+    const profileById = new Map(profiles.map((p) => [p.id, p]))
+    const next: SshProfile[] = []
+    for (const item of payload.profiles) {
+      const p = profileById.get(item.id)
+      if (!p) continue
+      next.push(
+        p.groupId === item.groupId ? p : { ...p, groupId: item.groupId, updatedAt: Date.now() }
+      )
+    }
+    for (const p of profiles) {
+      if (!next.some((x) => x.id === p.id)) next.push(p)
+    }
+    this.store.set('sshProfiles', next)
+
+    return { groups: this.listSshGroups(), profiles: this.listSshProfiles() }
+  }
+
+  // ---------- SSH 分组 ----------
+  listSshGroups(): SshGroup[] {
+    return this.store.get('sshGroups')
+  }
+
+  /** 保存分组（upsert）：不传 id 视为新增 */
+  saveSshGroup(input: { id?: string; name: string }): SshGroup[] {
+    const groups = this.store.get('sshGroups')
+    const prev = input.id ? groups.find((g) => g.id === input.id) : undefined
+    const group: SshGroup = {
+      id: input.id || crypto.randomUUID(),
+      name: input.name.trim(),
+      createdAt: prev?.createdAt ?? Date.now()
+    }
+    this.store.set(
+      'sshGroups',
+      prev ? groups.map((g) => (g.id === group.id ? group : g)) : [...groups, group]
+    )
+    return this.listSshGroups()
+  }
+
+  /**
+   * 删除分组：默认只删分组本身，组内连接回到「未分组」；
+   * deleteProfiles 为 true 时连同组内连接一起删除（由用户在弹出的确认框里勾选）。
+   */
+  deleteSshGroup(id: string, deleteProfiles = false): SshGroup[] {
+    const members = this.store
+      .get('sshProfiles')
+      .filter((p) => p.groupId === id)
+      .map((p) => p.id)
+    const doomed = new Set(deleteProfiles ? members : [])
+    this.store.set(
+      'sshGroups',
+      this.store.get('sshGroups').filter((g) => g.id !== id)
+    )
+    this.store.set(
+      'sshProfiles',
+      this.store
+        .get('sshProfiles')
+        .filter((p) => !doomed.has(p.id))
+        .map((p) => (p.groupId === id ? { ...p, groupId: undefined } : p))
+    )
+    return this.listSshGroups()
   }
 
   // ---------- 用户脚本 ----------

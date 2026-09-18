@@ -57,6 +57,51 @@
   }
 }
 
+/* antd Tree 根节点默认铺 colorBgContainer（浅色主题下是白色），侧边栏里要透出父容器底色 */
+.ssh-tree.ant-tree,
+.ssh-tree .ant-tree-list,
+.ssh-tree .ant-tree-list-holder {
+  background: transparent;
+}
+
+/*
+ * SSH 连接树（侧边栏里的 antd Tree）：antd 默认按「页面级树」排版（14px 字号、
+ * 宽行高、大缩进），这里压到侧边栏密度，并让节点标题铺满整行以便右侧悬浮按钮靠右。
+ */
+.ssh-tree .ant-tree-list-holder-inner {
+  gap: 1px;
+}
+
+.ssh-tree .ant-tree-treenode {
+  width: 100%;
+  padding-bottom: 0;
+  align-items: center;
+}
+
+/* 缩进宽度（antd Tree 无 indentUnit 属性，只能从样式压；切换箭头隐藏后靠它区分层级） */
+.ssh-tree .ant-tree-indent-unit {
+  width: 14px;
+}
+
+/* 展开/折叠改为点击整行标题（GroupRow 自己处理），因此不显示切换箭头 */
+.ssh-tree .ant-tree-switcher {
+  display: none;
+}
+
+.ssh-tree .ant-tree-node-content-wrapper {
+  display: flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 4px;
+  border-radius: var(--radius-md, 6px);
+}
+
+.ssh-tree .ant-tree-node-content-wrapper .ant-tree-title {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+
 /* 自定义标题栏：拖拽区域（窗口控制按钮等交互元素需用 app-no-drag 排除） */
 @utility app-drag {
   -webkit-app-region: drag;

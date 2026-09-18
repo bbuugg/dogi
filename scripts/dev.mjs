@@ -1,6 +1,6 @@
 /**
  * 开发编排（替代 electron-vite 的 dev 流程）：
- * 1. 启动 Vite dev server（渲染进程，端口 5173）
+ * 1. 启动 Vite dev server（渲染进程，端口 5174）
  * 2. 首次构建 main / preload，随后以 --watch 模式增量构建
  * 3. main/preload 每次重新构建后自动重启 Electron
  */
@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 
 const VITE_BIN = fileURLToPath(new URL('../node_modules/vite/bin/vite.js', import.meta.url))
 const ELECTRON_BIN = fileURLToPath(new URL('../node_modules/electron/cli.js', import.meta.url))
-const DEV_URL = 'http://localhost:5173'
+const DEV_URL = 'http://localhost:5174'
 
 const children = new Set()
 

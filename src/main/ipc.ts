@@ -164,6 +164,20 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   ipcMain.handle('ssh:list', () => storage.listSshProfiles())
   ipcMain.handle('ssh:save', (_e, profile: SshProfile) => storage.saveSshProfile(profile))
   ipcMain.handle('ssh:delete', (_e, id: string) => storage.deleteSshProfile(id))
+  ipcMain.handle(
+    'ssh:arrange',
+    (
+      _e,
+      payload: { groupIds: string[]; profiles: Array<{ id: string; groupId?: string }> }
+    ) => storage.arrangeSsh(payload)
+  )
+  ipcMain.handle('ssh:groups:list', () => storage.listSshGroups())
+  ipcMain.handle('ssh:groups:save', (_e, input: { id?: string; name: string }) =>
+    storage.saveSshGroup(input)
+  )
+  ipcMain.handle('ssh:groups:delete', (_e, id: string, deleteProfiles?: boolean) =>
+    storage.deleteSshGroup(id, deleteProfiles)
+  )
 
   // ---------- 用户脚本 CRUD ----------
   ipcMain.handle('scripts:list', () => storage.listScripts())

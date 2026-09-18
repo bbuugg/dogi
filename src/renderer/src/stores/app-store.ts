@@ -14,6 +14,7 @@ import type {
   ShellDetectResult,
   ScriptEntry,
   ShortcutConfig,
+  SshGroup,
   SshProfile,
   TerminalThemeName,
   ThemeMode
@@ -181,8 +182,8 @@ interface UiState {
   /** 各编辑器组是否打开其内置 AI 助手（key 为 groupId；AI 属于终端组而非全局） */
   aiOpenGroups: Record<string, boolean>
   settingsOpen: boolean
-  /** 编辑中的 SSH 配置（null=新建，undefined=关闭） */
-  sshDialog: { open: boolean; editing?: SshProfile | null }
+  /** 编辑中的 SSH 配置（null=新建，undefined=关闭）；groupId 为新建时预设的分组 */
+  sshDialog: { open: boolean; editing?: SshProfile | null; groupId?: string }
   /** 运行脚本对话框：scriptId 为预设脚本（可空，在对话框内选择） */
   runScriptDialog: { open: boolean; scriptId?: string }
   settingsTab: 'ai' | 'terminal' | 'prefs' | 'shortcuts'
@@ -223,6 +224,8 @@ interface AppStore {
 
   // ---------- SSH ----------
   profiles: SshProfile[]
+  /** SSH 连接分组（侧边栏归类用） */
+  sshGroups: SshGroup[]
 
   // ---------- 用户脚本 ----------
   scripts: ScriptEntry[]
@@ -279,6 +282,15 @@ interface AppStore {
   /** 拖拽分隔条时更新某分隔节点的权重 */
   resizeSplit: (splitId: string, sizes: number[]) => void
   refreshProfiles: () => Promise<void>
+  /** 新建（不传 id）或重命名（传 id）SSH 分组 */
+  saveSshGroup: (input: { id?: string; name: string }) => Promise<void>
+  /** 删除分组；deleteProfiles=true 时连同组内连接一起删除，否则组内连接回到「未分组」 */
+  deleteSshGroup: (id: string, deleteProfiles?: boolean) => Promise<void>
+  /** 拖拽排序 / 换组后的整体重排：数组顺序即显示顺序 */
+  arrangeSsh: (payload: {
+    groupIds: string[]
+    profiles: Array<{ id: string; groupId?: string }>
+  }) => Promise<void>
 
   setGroupAiOpen: (groupId: string, open: boolean) => void
   setSettingsOpen: (open: boolean, tab?: UiState['settingsTab']) => void
@@ -307,7 +319,8 @@ interface AppStore {
   setSidebarCollapsed: (collapsed: boolean) => void
   setAiPanelWidth: (width: number) => void
   refreshScripts: () => Promise<void>
-  setSshDialog: (open: boolean, editing?: SshProfile | null) => void
+  /** 打开/关闭 SSH 配置弹窗（editing=null 为新建；groupId 预设新建时的分组） */
+  setSshDialog: (open: boolean, editing?: SshProfile | null, groupId?: string) => void
   /** 打开/关闭「运行脚本」对话框（可预设要运行的脚本） */
   setRunScriptDialog: (open: boolean, scriptId?: string) => void
   refreshAiConfigs: () => Promise<void>
@@ -386,6 +399,7 @@ let shortcutWired = false
     activeGroupId: null,
 
     profiles: [],
+    sshGroups: [],
 
     scripts: [],
 
@@ -420,8 +434,9 @@ let shortcutWired = false
     monitors: {},
 
     bootstrap: async () => {
-      const [profiles, configs, settings, preferences, shells, scripts, shortcuts] = await Promise.all([
+      const [profiles, sshGroups, configs, settings, preferences, shells, scripts, shortcuts] = await Promise.all([
         window.api.ssh.list(),
+        window.api.ssh.listGroups(),
         window.api.ai.listConfigs(),
         window.api.ai.getSettings(),
         window.api.prefs.get(),
@@ -432,7 +447,16 @@ let shortcutWired = false
       // 配色必须在偏好写进 store 之前落到 html 上：antd 的 token 是在 store 更新引发的那次
       // 重渲染里从 CSS 变量读出来的，晚一步就会永远停在默认中性配色（直到用户手动切换）
       applyColorTheme(preferences.colorTheme)
-      set({ profiles, aiConfigs: configs, aiSettings: settings, preferences, shells, scripts, shortcuts })
+      set({
+        profiles,
+        sshGroups,
+        aiConfigs: configs,
+        aiSettings: settings,
+        preferences,
+        shells,
+        scripts,
+        shortcuts
+      })
       // 运行时加载外部插件（扫描 userData/plugins 并收集视图）
       const { loadPlugins } = await import('@/plugins/host')
       const pluginViews = await loadPlugins()
@@ -723,6 +747,24 @@ let shortcutWired = false
       set({ profiles: await window.api.ssh.list() })
     },
 
+    saveSshGroup: async (input) => {
+      set({ sshGroups: await window.api.ssh.saveGroup(input) })
+    },
+
+    deleteSshGroup: async (id, deleteProfiles) => {
+      // 组内连接可能被删除或回到「未分组」，两份数据都要刷新
+      const [sshGroups, profiles] = await Promise.all([
+        window.api.ssh.removeGroup(id, deleteProfiles),
+        window.api.ssh.list()
+      ])
+      set({ sshGroups, profiles })
+    },
+
+    arrangeSsh: async (payload) => {
+      const { groups, profiles } = await window.api.ssh.arrange(payload)
+      set({ sshGroups: groups, profiles })
+    },
+
     setGroupAiOpen: (groupId, open) =>
       set((s) => ({ ui: { ...s.ui, aiOpenGroups: { ...s.ui.aiOpenGroups, [groupId]: open } } })),
     setSettingsOpen: (open, tab) =>
@@ -733,8 +775,8 @@ let shortcutWired = false
           ...(tab ? { settingsTab: tab } : {})
         }
       })),
-    setSshDialog: (open, editing = null) =>
-      set((s) => ({ ui: { ...s.ui, sshDialog: { open, editing } } })),
+    setSshDialog: (open, editing = null, groupId) =>
+      set((s) => ({ ui: { ...s.ui, sshDialog: { open, editing, groupId } } })),
 
     setRunScriptDialog: (open, scriptId) =>
       set((s) => ({ ui: { ...s.ui, runScriptDialog: { open, scriptId } } })),

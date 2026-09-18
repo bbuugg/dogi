@@ -15,6 +15,7 @@ import type {
   ServerMetrics,
   SessionInfo,
   ShellDetectResult,
+  SshGroup,
   SshProfile
 } from '@shared/types'
 import type {
@@ -68,7 +69,19 @@ const api = {
     list: (): Promise<SshProfile[]> => ipcRenderer.invoke('ssh:list'),
     save: (profile: SshProfile): Promise<SshProfile[]> =>
       ipcRenderer.invoke('ssh:save', profile),
-    remove: (id: string): Promise<SshProfile[]> => ipcRenderer.invoke('ssh:delete', id)
+    remove: (id: string): Promise<SshProfile[]> => ipcRenderer.invoke('ssh:delete', id),
+    /** 拖拽排序 / 换组后的整体重排（数组顺序即显示顺序） */
+    arrange: (payload: {
+      groupIds: string[]
+      profiles: Array<{ id: string; groupId?: string }>
+    }): Promise<{ groups: SshGroup[]; profiles: SshProfile[] }> =>
+      ipcRenderer.invoke('ssh:arrange', payload),
+    listGroups: (): Promise<SshGroup[]> => ipcRenderer.invoke('ssh:groups:list'),
+    saveGroup: (input: { id?: string; name: string }): Promise<SshGroup[]> =>
+      ipcRenderer.invoke('ssh:groups:save', input),
+    /** 删除分组；deleteProfiles=true 时连同组内连接一起删除 */
+    removeGroup: (id: string, deleteProfiles?: boolean): Promise<SshGroup[]> =>
+      ipcRenderer.invoke('ssh:groups:delete', id, deleteProfiles)
   },
   ai: {
     listConfigs: (): Promise<AiModelConfig[]> => ipcRenderer.invoke('ai:config:list'),

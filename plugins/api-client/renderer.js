@@ -107,7 +107,7 @@ export function activate(api) {
     'if-none-match': ['*'],
     'x-requested-with': ['XMLHttpRequest'],
     'content-encoding': ['gzip', 'deflate', 'br', 'identity'],
-    origin: ['http://localhost:5173', 'https://example.com'],
+    origin: ['http://localhost:5174', 'https://example.com'],
     'upgrade-insecure-requests': ['1'],
     dnt: ['1', '0'],
     'sec-fetch-mode': ['cors', 'navigate', 'no-cors', 'same-origin'],

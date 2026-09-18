@@ -91,8 +91,17 @@ export interface SessionInfo {
 
 export type SshAuthType = 'password' | 'privateKey'
 
+/** SSH 连接分组：仅用于侧边栏归类；删除分组时组内连接回到「未分组」 */
+export interface SshGroup {
+  id: string
+  name: string
+  createdAt: number
+}
+
 export interface SshProfile {
   id: string
+  /** 所属分组 id；缺省表示未分组 */
+  groupId?: string
   name: string
   host: string
   port: number
