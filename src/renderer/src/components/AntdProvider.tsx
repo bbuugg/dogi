@@ -54,8 +54,16 @@ function readAppTokens(): ThemeConfig['token'] {
 }
 
 /**
+ * antd 弹窗面板（.ant-modal-container）的默认内边距是 `20px 24px`（上下 20 / 左右 24），
+ * 这里统一成四边一致。contentPadding 属于 antd 的内部组件 token（未收进 Modal 的公开
+ * token 类型），但运行时会与默认值合并生效，所以下面做一次断言把它传进去。
+ */
+const MODAL_PADDING = '20px'
+
+/**
  * antd 全局配置：
  * - 跟随应用明暗主题（themeSource 决定 prefers-color-scheme）与「主题色」偏好；
+ * - 弹窗内边距统一；
  * - 通过 holderRender 让 message / notification / Modal.confirm 这类
  *   渲染在独立 root 里的静态方法也能拿到同一套主题与中文语言包。
  */
@@ -66,7 +74,10 @@ export function AntdProvider({ children }: { children: ReactNode }) {
   const themeConfig = useMemo<ThemeConfig>(
     () => ({
       algorithm: isDark ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
-      token: readAppTokens()
+      token: readAppTokens(),
+      components: {
+        Modal: { contentPadding: MODAL_PADDING }
+      } as ThemeConfig['components']
     }),
     // colorTheme 变化会改写 html 的 data-color-theme（同步生效），据此重新取值
     [isDark, colorTheme]
