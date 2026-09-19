@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use async_trait::async_trait;
 use serde::Serialize;
 use tauri::AppHandle;
 
@@ -40,6 +41,7 @@ pub struct ClosedPayload {
     pub session_id: String,
 }
 
+#[async_trait]
 pub trait Session: Send + Sync {
     fn info(&self) -> SessionInfo;
     fn write(&self, data: &[u8]) -> AppResult<()>;
@@ -51,6 +53,10 @@ pub trait Session: Send + Sync {
     /// 读取 `start` 偏移之后的新增输出（字节边界非法时回退到空串）
     fn output_from(&self, start: usize) -> String;
     fn is_ready(&self) -> bool;
+    /// 在**独立通道**执行一次性命令并返回合并输出（监控采集用）。
+    /// 与 `write` 不同：本地会话另起子进程、SSH 会话新开 exec 通道，
+    /// 不会把命令与输出写进交互 shell，避免污染终端显示。
+    async fn exec(&self, command: String) -> AppResult<String>;
 }
 
 #[derive(Default)]

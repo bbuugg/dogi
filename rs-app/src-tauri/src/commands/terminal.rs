@@ -26,12 +26,14 @@ pub fn terminal_create_local(
     rows: Option<u16>,
     shell_id: Option<String>,
 ) -> AppResult<SessionInfo> {
-    state.sessions.create_local(
+    let info = state.sessions.create_local(
         &app,
         cols.unwrap_or(80),
         rows.unwrap_or(24),
         shell_id.as_deref(),
-    )
+    )?;
+    state.monitor.start(&app, &info.id);
+    Ok(info)
 }
 
 /// 按主机配置创建会话：主进程根据主机类型（ssh/local）决定启动方式
@@ -45,11 +47,13 @@ pub fn terminal_create_from_profile(
 ) -> AppResult<SessionInfo> {
     let profile = profile_for_session(&state.storage, &profile_id)?;
     let (cols, rows) = (cols.unwrap_or(80), rows.unwrap_or(24));
-    if profile.kind == "local" {
+    let info = if profile.kind == "local" {
         state.sessions.create_local_host(&app, &profile, cols, rows)
     } else {
         state.sessions.create_ssh(&app, &profile, cols, rows)
-    }
+    }?;
+    state.monitor.start(&app, &info.id);
+    Ok(info)
 }
 
 #[tauri::command]
@@ -61,9 +65,11 @@ pub fn terminal_create_ssh(
     rows: Option<u16>,
 ) -> AppResult<SessionInfo> {
     let profile = profile_for_session(&state.storage, &profile_id)?;
-    state
+    let info = state
         .sessions
-        .create_ssh(&app, &profile, cols.unwrap_or(80), rows.unwrap_or(24))
+        .create_ssh(&app, &profile, cols.unwrap_or(80), rows.unwrap_or(24))?;
+    state.monitor.start(&app, &info.id);
+    Ok(info)
 }
 
 #[tauri::command]
@@ -95,7 +101,8 @@ pub fn terminal_kill(
     state: State<'_, AppState>,
     session_id: String,
 ) -> AppResult<()> {
-    // 会话关闭：销毁其独立的 AI 助手实例（中止进行中的对话与挂起的确认）
+    // 会话关闭：停止监控采集，销毁其独立的 AI 助手实例（中止进行中的对话与挂起的确认）
+    state.monitor.stop(&session_id);
     state.ai.dispose_session(&session_id);
     state.sessions.kill(&app, &session_id);
     Ok(())

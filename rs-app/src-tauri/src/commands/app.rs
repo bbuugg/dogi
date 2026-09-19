@@ -182,8 +182,10 @@ pub fn zmodem_save_file_to(
 
 #[tauri::command]
 pub fn monitor_set_interval(state: State<'_, AppState>, ms: u64) -> AppResult<Preferences> {
+    // 归一化后立即作用于正在采集的会话，并持久化供下次启动沿用
+    state.monitor.set_interval(ms);
     Ok(state.storage.save_preferences(PreferencesPatch {
-        monitor_interval: Some(ms),
+        monitor_interval: Some(state.monitor.interval_ms()),
         ..Default::default()
     }))
 }

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use base64::Engine;
+use async_trait::async_trait;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use tauri::AppHandle;
 
@@ -142,6 +143,7 @@ impl LocalSession {
     }
 }
 
+#[async_trait]
 impl Session for LocalSession {
     fn info(&self) -> SessionInfo {
         self.info.lock().unwrap().clone()
@@ -187,6 +189,30 @@ impl Session for LocalSession {
 
     fn is_ready(&self) -> bool {
         !self.info.lock().unwrap().exited
+    }
+
+    /// 另起子进程执行命令（不经交互 PTY，输出不会显示在终端里）
+    async fn exec(&self, command: String) -> AppResult<String> {
+        let mut cmd = if cfg!(windows) {
+            let mut c = tokio::process::Command::new("cmd");
+            c.arg("/C");
+            c
+        } else {
+            let mut c = tokio::process::Command::new("sh");
+            c.arg("-c");
+            c
+        };
+        let output = cmd
+            .arg(&command)
+            .output()
+            .await
+            .map_err(|e| AppError::msg(format!("执行命令失败：{e}")))?;
+        if !output.status.success() {
+            crate::bail_msg!("命令执行失败（退出码 {:?}）", output.status.code());
+        }
+        let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+        Ok(text)
     }
 }
 

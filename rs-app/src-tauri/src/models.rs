@@ -480,6 +480,42 @@ pub struct McpToolsResult {
     pub errors: Vec<String>,
 }
 
+/* ------------------------------ 服务器监控 ------------------------------ */
+
+/// 单个挂载点的磁盘占用（`df -P -B1` 解析结果）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskUsage {
+    pub mount: String,
+    pub used: u64,
+    pub total: u64,
+    /// 使用率（0-100 整数）
+    pub percent: u32,
+}
+
+/// 服务器监控指标：由主进程周期性地经独立 exec 通道采集 /proc 与 df 解析得到。
+/// 流量为每秒速率（字节/秒），首次采样时 CPU 使用率暂为 null。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerMetrics {
+    /// 首次采样无前值，无法计算增量，为 null
+    pub cpu_percent: Option<f64>,
+    pub cores: u64,
+    pub mem_total: u64,
+    pub mem_used: u64,
+    pub mem_percent: f64,
+    pub load1: f64,
+    pub load5: f64,
+    pub load15: f64,
+    pub net_rx_rate: f64,
+    pub net_tx_rate: f64,
+    pub disk: Vec<DiskUsage>,
+    /// 系统运行时长（秒）
+    pub uptime: f64,
+    /// 采集时间戳（毫秒）
+    pub timestamp: u64,
+}
+
 /* ------------------------------ 应用信息 ------------------------------- */
 
 #[derive(Debug, Clone, Serialize)]

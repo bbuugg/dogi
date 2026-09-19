@@ -10,11 +10,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine;
+use async_trait::async_trait;
 use russh::client::{self, Handle};
 use russh::keys::{decode_secret_key, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::{Channel, ChannelMsg, Disconnect};
 use tauri::AppHandle;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{AppError, AppResult};
 use crate::events;
@@ -52,6 +53,11 @@ enum SshCommand {
     Write(Vec<u8>),
     Resize(u16, u16),
     Kill,
+    /// 在独立 exec 通道执行一次性命令（监控采集），结果经 oneshot 回传
+    Exec {
+        command: String,
+        reply: oneshot::Sender<AppResult<String>>,
+    },
 }
 
 pub struct SshSession {
@@ -100,6 +106,7 @@ impl SshSession {
     }
 }
 
+#[async_trait]
 impl Session for SshSession {
     fn info(&self) -> SessionInfo {
         self.info.lock().unwrap().clone()
@@ -144,6 +151,19 @@ impl Session for SshSession {
     fn is_ready(&self) -> bool {
         self.ready.load(Ordering::SeqCst) && !self.killed.load(Ordering::SeqCst)
     }
+
+    /// 新开一条 exec 通道执行命令（与交互 shell 通道互不影响）
+    async fn exec(&self, command: String) -> AppResult<String> {
+        if self.killed.load(Ordering::SeqCst) || !self.ready.load(Ordering::SeqCst) {
+            crate::bail_msg!("主机未就绪");
+        }
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(SshCommand::Exec { command, reply })
+            .map_err(|_| AppError::msg("会话已关闭"))?;
+        rx.await
+            .map_err(|_| AppError::msg("会话已关闭"))?
+    }
 }
 
 /// 后台任务：连接（含重试）→ 主循环 → 上报退出
@@ -184,6 +204,10 @@ async fn run(
                     }
                     // shell 尚未建立：与原实现一致，丢弃输入
                     Some(SshCommand::Write(_)) => {}
+                    // shell 尚未建立：采集命令直接失败（监控在 is_ready 后才会调用）
+                    Some(SshCommand::Exec { reply, .. }) => {
+                        let _ = reply.send(Err(AppError::msg("主机未就绪")));
+                    }
                 }
             }
         };
@@ -210,7 +234,7 @@ async fn run(
         ready.store(true, Ordering::SeqCst);
         emit_status(&app, &id, "ready", None);
 
-        run_channel(&app, &id, &mut channel, &output, &mut rx).await;
+        run_channel(&app, &id, &handle, &mut channel, &output, &mut rx).await;
 
         ready.store(false, Ordering::SeqCst);
         let _ = handle
@@ -342,10 +366,11 @@ async fn authenticate(
     Ok(result.success())
 }
 
-/// shell 建立后的主循环：双向转发数据 / 尺寸 / 关闭
+/// shell 建立后的主循环：双向转发数据 / 尺寸 / 关闭 / 采集命令
 async fn run_channel(
     app: &AppHandle,
     id: &str,
+    handle: &Handle<SshHandler>,
     channel: &mut Channel<client::Msg>,
     output: &Arc<Mutex<Vec<u8>>>,
     rx: &mut mpsc::UnboundedReceiver<SshCommand>,
@@ -367,6 +392,10 @@ async fn run_channel(
                         .window_change(u32::from(cols), u32::from(rows), 0, 0)
                         .await;
                 }
+                Some(SshCommand::Exec { command, reply }) => {
+                    let result = exec_on_shell(handle, &command).await;
+                    let _ = reply.send(result);
+                }
             },
             msg = channel.wait() => match msg {
                 None => return,
@@ -385,6 +414,34 @@ async fn run_channel(
             },
         }
     }
+}
+
+/// 开一条独立 exec 通道执行命令并收齐全量输出（stdout + stderr）
+async fn exec_on_shell(
+    handle: &Handle<SshHandler>,
+    command: &str,
+) -> AppResult<String> {
+    let mut channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|e| AppError::msg(format!("打开 exec 通道失败：{e}")))?;
+    channel
+        .exec(true, command.as_bytes())
+        .await
+        .map_err(|e| AppError::msg(format!("发送 exec 失败：{e}")))?;
+
+    let mut out = Vec::<u8>::new();
+    loop {
+        match channel.wait().await {
+            None => break,
+            Some(ChannelMsg::Data { data }) => out.extend_from_slice(data.as_ref()),
+            Some(ChannelMsg::ExtendedData { data, .. }) => out.extend_from_slice(data.as_ref()),
+            // exit-status / exit-signal 等在将来可能先于 close 到来，无需处理
+            Some(_) => {}
+        }
+    }
+    let _ = channel.close().await;
+    Ok(String::from_utf8_lossy(&out).to_string())
 }
 
 /// 连接彻底失败：把错误行写进终端并上报退出
