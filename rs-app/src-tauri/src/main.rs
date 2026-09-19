@@ -146,6 +146,11 @@ fn main() {
             commands::config::mcp_list,
             commands::config::mcp_save,
             commands::config::mcp_delete,
+            // AI 对话 / MCP 工具
+            commands::ai::ai_chat,
+            commands::ai::ai_abort,
+            commands::ai::ai_confirm_resolve,
+            commands::ai::mcp_list_tools,
             // 应用
             commands::app::app_info,
             commands::app::app_open_external,

@@ -95,6 +95,8 @@ pub fn terminal_kill(
     state: State<'_, AppState>,
     session_id: String,
 ) -> AppResult<()> {
+    // 会话关闭：销毁其独立的 AI 助手实例（中止进行中的对话与挂起的确认）
+    state.ai.dispose_session(&session_id);
     state.sessions.kill(&app, &session_id);
     Ok(())
 }

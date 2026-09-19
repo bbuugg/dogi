@@ -295,7 +295,8 @@ pub struct AiModelConfig {
     pub api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub has_api_key: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 注意：渲染层字段名是 `baseURL`（大写 URL），不能走 camelCase 自动推导
+    #[serde(default, rename = "baseURL", skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     #[serde(default)]
     pub model: String,
@@ -344,6 +345,104 @@ pub struct AiSettingsPatch {
     pub system_prompt: Option<String>,
 }
 
+/// 单条 AI 对话消息（渲染层 history 原样回传，仅取文本与工具摘要喂给模型）
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiChatMessage {
+    #[serde(default)]
+    pub id: String,
+    /// user | assistant
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub parts: Vec<AiMessagePart>,
+    #[serde(default)]
+    pub created_at: u64,
+}
+
+/// 消息片段：与渲染层 `AiMessagePart` 的标签值一一对应
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "kebab-case", rename_all_fields = "camelCase")]
+pub enum AiMessagePart {
+    Text {
+        #[serde(default)]
+        text: String,
+    },
+    ToolCall {
+        tool_call_id: String,
+        tool_name: String,
+        #[serde(default)]
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_call_id: String,
+        tool_name: String,
+        #[serde(default)]
+        output: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
+    },
+}
+
+/// 发起 AI 对话：history 为完整对话历史，targetSessionId 为本段对话绑定的终端会话
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiChatRequest {
+    #[serde(default)]
+    pub history: Vec<AiChatMessage>,
+    #[serde(default)]
+    pub target_session_id: Option<String>,
+}
+
+/// `ai_chat` 的立即返回值：流式事件随后经 `ai:chat-event` 广播
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiChatStarted {
+    pub request_id: String,
+}
+
+/// 流式事件：序列化后的 JSON 形状必须与渲染层 `AiStreamEvent` 完全一致
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "kebab-case", rename_all_fields = "camelCase")]
+pub enum AiStreamEvent {
+    TextDelta {
+        delta: String,
+    },
+    ToolCall {
+        tool_call_id: String,
+        tool_name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_call_id: String,
+        tool_name: String,
+        output: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
+    },
+    Finish {
+        finish_reason: String,
+    },
+    Error {
+        message: String,
+    },
+}
+
+/// 确认模式下推给渲染层的命令执行请示
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiConfirmRequest {
+    pub id: String,
+    pub request_id: String,
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_title: Option<String>,
+}
+
 /* -------------------------------- MCP --------------------------------- */
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -361,6 +460,24 @@ pub struct McpServerConfig {
     pub env: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default)]
     pub enabled: bool,
+}
+
+/// 单个 MCP 工具的展示信息（设置页 / 工具列表）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolInfo {
+    pub server_name: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// MCP 工具汇总：成功列出的工具 + 各 server 的连接/列举错误
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolsResult {
+    pub tools: Vec<McpToolInfo>,
+    pub errors: Vec<String>,
 }
 
 /* ------------------------------ 应用信息 ------------------------------- */

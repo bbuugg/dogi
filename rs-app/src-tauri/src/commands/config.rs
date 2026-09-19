@@ -184,10 +184,13 @@ pub fn mcp_save(
     state: State<'_, AppState>,
     server: McpServerConfig,
 ) -> AppResult<Vec<McpServerConfig>> {
+    // 配置变更后旧连接失效，下次对话按新配置重建
+    state.mcp.invalidate(Some(&server.id));
     Ok(state.storage.save_mcp_server(server))
 }
 
 #[tauri::command]
 pub fn mcp_delete(state: State<'_, AppState>, id: String) -> AppResult<Vec<McpServerConfig>> {
+    state.mcp.invalidate(Some(&id));
     Ok(state.storage.delete_mcp_server(&id))
 }

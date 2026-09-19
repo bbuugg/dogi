@@ -45,6 +45,11 @@ base64 = "0.22"
 uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "2"
 anyhow = "1"
+genai = "0.6.5"
+rmcp = { version = "2.2.0", features = ["client", "transport-child-process"] }
+
+# 终端输出清洗（剥离 ANSI 转义）与按键序列翻译
+regex = "1"
 
 [profile.dev]
 incremental = true

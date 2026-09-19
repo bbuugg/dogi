@@ -216,9 +216,7 @@ export function McpSettings() {
             className="w-7 p-0"
             title="编辑"
             onClick={() => setEditing(toForm(server))}
-          >
-            编辑
-          </Button>
+          />
           <Button
             size="small"
             type="text"
@@ -226,9 +224,7 @@ export function McpSettings() {
             icon={<Trash2 className="size-3.5" />}
             title="删除"
             onClick={() => void handleDelete(server)}
-          >
-            删除
-          </Button>
+          />
         </div>
       ))}
 

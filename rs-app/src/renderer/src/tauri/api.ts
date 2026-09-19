@@ -108,24 +108,23 @@ const api = {
     getSettings: (): Promise<AiSettings> => invoke('ai_settings_get'),
     saveSettings: (settings: Partial<AiSettings>): Promise<AiSettings> =>
       invoke('ai_settings_save', { settings }),
-    chat: (_req: AiChatRequest): Promise<{ requestId: string }> => notImplemented('AI 对话'),
-    abort: (_requestId: string): Promise<void> => notImplemented('AI 对话'),
+    chat: (req: AiChatRequest): Promise<{ requestId: string }> => invoke('ai_chat', { req }),
+    abort: (requestId: string): Promise<void> => invoke('ai_abort', { requestId }),
     onChatEvent: (cb: (payload: { requestId: string; event: AiStreamEvent }) => void): Unsubscribe =>
       subscribe('ai:chat-event', cb),
     onConfirmRequest: (cb: (req: AiConfirmRequest) => void): Unsubscribe =>
       subscribe('ai:confirm', cb),
     onConfirmResolved: (cb: (payload: { id: string }) => void): Unsubscribe =>
       subscribe('ai:confirm-resolved', cb),
-    resolveConfirm: (_id: string, _approved: boolean): Promise<void> =>
-      notImplemented('AI 命令确认')
+    resolveConfirm: (id: string, approved: boolean): Promise<void> =>
+      invoke('ai_confirm_resolve', { id, approved })
   },
   mcp: {
     list: (): Promise<McpServerConfig[]> => invoke('mcp_list'),
     save: (server: McpServerConfig): Promise<McpServerConfig[]> => invoke('mcp_save', { server }),
     remove: (id: string): Promise<McpServerConfig[]> => invoke('mcp_delete', { id }),
-    // MCP 客户端在 Phase 2 接入，先返回空结果让设置页可正常渲染
     listTools: (): Promise<{ tools: McpToolInfo[]; errors: string[] }> =>
-      Promise.resolve({ tools: [], errors: [] })
+      invoke('mcp_list_tools')
   },
   scripts: {
     list: (): Promise<ScriptEntry[]> => invoke('scripts_list'),

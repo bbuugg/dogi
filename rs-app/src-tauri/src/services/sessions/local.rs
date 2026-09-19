@@ -173,6 +173,18 @@ impl Session for LocalSession {
         String::from_utf8_lossy(&out[start..]).to_string()
     }
 
+    fn output_len(&self) -> usize {
+        self.output.lock().unwrap().len()
+    }
+
+    fn output_from(&self, start: usize) -> String {
+        let out = self.output.lock().unwrap();
+        if start >= out.len() {
+            return String::new();
+        }
+        String::from_utf8_lossy(&out[start..]).to_string()
+    }
+
     fn is_ready(&self) -> bool {
         !self.info.lock().unwrap().exited
     }

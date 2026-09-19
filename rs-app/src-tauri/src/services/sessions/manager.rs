@@ -46,6 +46,10 @@ pub trait Session: Send + Sync {
     fn resize(&self, cols: u16, rows: u16);
     fn kill(&self);
     fn recent_output(&self, max_chars: usize) -> String;
+    /// 输出缓冲的当前总字节数（AI 工具据此定位「写入前」的位置，只回传增量）
+    fn output_len(&self) -> usize;
+    /// 读取 `start` 偏移之后的新增输出（字节边界非法时回退到空串）
+    fn output_from(&self, start: usize) -> String;
     fn is_ready(&self) -> bool;
 }
 
@@ -180,6 +184,16 @@ impl SessionManager {
 
     pub fn recent_output(&self, id: &str, max_chars: usize) -> Option<String> {
         self.get(id).map(|s| s.recent_output(max_chars))
+    }
+
+    /// 输出缓冲长度（无该会话时返回 0）
+    pub fn output_len(&self, id: &str) -> usize {
+        self.get(id).map_or(0, |s| s.output_len())
+    }
+
+    /// 读取某会话自 `start` 偏移起的新增输出
+    pub fn output_from(&self, id: &str, start: usize) -> Option<String> {
+        self.get(id).map(|s| s.output_from(start))
     }
 
     /// 等待会话就绪后写入（SSH 握手 / shell 建立需要时间，未就绪时写入会被丢弃）
