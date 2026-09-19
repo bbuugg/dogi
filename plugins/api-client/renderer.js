@@ -920,9 +920,10 @@ export function activate(api) {
         ),
         // 请求构造区（antd Tabs）：历史入口作为导航右侧附加内容，由抽屉展示
         h(Tabs, {
+          size: 'small',
           activeKey: activeTab.tab,
           onChange: (v) => updateActive({ tab: v }),
-          className: 'flex min-h-0 flex-1 flex-col',
+          className: 'flex px-4! min-h-0 flex-1 flex-col',
           // 去掉 antd 导航默认下外边距，并让内容区撑满高度（antd 的 body / tabpane 默认不拉伸）
           tabBarStyle: { margin: 0 },
           styles: { body: { height: '100%' }, content: { height: '100%' } },
@@ -942,7 +943,7 @@ export function activate(api) {
             {
               key: 'headers',
               label: '请求头',
-              children: el('div', { className: 'h-full overflow-auto p-3' }, headerRows)
+              children: el('div', { className: 'h-full overflow-auto py-3' }, headerRows)
             },
             {
               key: 'body',
@@ -1034,21 +1035,22 @@ export function activate(api) {
         ),
         !activeTab.respCollapsed &&
         h(Tabs, {
+          size: "small",
           activeKey: activeTab.resTab,
           onChange: (v) => updateActive({ resTab: v }),
-          className: 'flex min-h-0 flex-1 flex-col',
+          className: 'flex min-h-0 px-4! flex-1 flex-col',
           tabBarStyle: { margin: 0 },
           styles: { body: { height: '100%' }, content: { height: '100%' } },
           items: [
             {
               key: 'body',
               label: '响应体',
-              children: el('div', { className: 'h-full overflow-auto px-3 pb-3 pt-2' }, responseBody)
+              children: el('div', { className: 'h-full overflow-auto py-3' }, responseBody)
             },
             {
               key: 'headers',
               label: '响应头' + (respHeaders.length ? ' (' + respHeaders.length + ')' : ''),
-              children: el('div', { className: 'h-full overflow-auto px-3 pb-3 pt-2' }, responseHeaders)
+              children: el('div', { className: 'h-full overflow-auto py-3' }, responseHeaders)
             }
           ]
         })

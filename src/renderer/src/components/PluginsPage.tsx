@@ -1,10 +1,10 @@
-import { useState } from 'react'
-import { useAppStore } from '@/stores/app-store'
-import { Button, Modal, Switch, Tag, message } from 'antd'
-import { cn } from '@/lib/utils'
-import { Boxes, ExternalLink, Package, RefreshCw, RotateCw, Trash2, Upload } from 'lucide-react'
-import type { PluginInfo } from '@shared/plugin'
 import { pluginActivityId } from '@/activity-ids'
+import { cn } from '@/lib/utils'
+import { useAppStore } from '@/stores/app-store'
+import type { PluginInfo } from '@shared/plugin'
+import { Button, Modal, Switch, Tag, message } from 'antd'
+import { Boxes, ExternalLink, Package, RefreshCw, RotateCw, Trash2, Upload } from 'lucide-react'
+import { useState } from 'react'
 
 /** 统一把异常转成可提示的文本 */
 function errText(e: unknown): string {
@@ -115,11 +115,12 @@ export function PluginsPage() {
         </div>
         <div className="flex items-center gap-2">
           <Button
-            icon={<RotateCw className={reloading ? 'size-4 animate-spin' : 'size-4'} />}
-            loading={reloading} type="text" onClick={() => void reloadAll()} disabled={reloading}>
-            {reloading ? '重载中…' : '重新加载'}
+            icon={<RotateCw className={reloading || installing ? 'size-4 animate-spin' : 'size-4'} />}
+            loading={reloading || installing} type="text" onClick={() => void reloadAll()} disabled={reloading || installing}>
+            重新加载
           </Button>
           <Button
+            loading={installing || reloading}
             icon={<RefreshCw className="size-4" />}
             type="text"
             onClick={() => void refreshPluginList()}
@@ -128,11 +129,12 @@ export function PluginsPage() {
             刷新
           </Button>
           <Button
+            loading={installing}
             icon={<Upload className="size-4" />}
             variant="filled"
             onClick={() => void installFromFile()}
             disabled={installing}>
-            {installing ? '安装中…' : '从文件安装'}
+            从文件安装
           </Button>
         </div>
       </div>
@@ -157,7 +159,7 @@ export function PluginsPage() {
                 <div
                   key={info.id}
                   className={cn(
-                    'flex flex-col gap-2 rounded-lg border border-border bg-card p-3',
+                    'flex flex-col gap-2 rounded-lg border border-border/60 bg-card p-3',
                     !info.enabled && 'opacity-60'
                   )}
                 >
@@ -211,7 +213,7 @@ export function PluginsPage() {
                   <div className="truncate text-[10px] text-muted-foreground">id: {info.id}</div>
 
                   {/* 底部操作栏 */}
-                  <div className="mt-auto flex items-center gap-1 border-t border-border pt-2">
+                  <div className="mt-auto flex items-center gap-1 pt-2">
                     <Button
                       type="text"
                       size="small"
@@ -225,20 +227,19 @@ export function PluginsPage() {
                     <Button
                       type="text"
                       size="small"
+                      icon={<RotateCw className="size-3.5" />}
                       className="h-7 w-7 p-0 text-muted-foreground"
                       title="重新加载该插件（改动后无需重启）"
                       onClick={() => void reloadOne(info)}
-                    >
-                      <RotateCw className="size-3.5" />
-                    </Button>
+                    />
                     <Button
                       type="text"
                       size="small"
+                      icon={<Trash2 className="size-3.5" />}
                       danger
                       className="ml-auto h-7 px-2 text-[11px]"
                       onClick={() => setPendingUninstall(info)}
                     >
-                      <Trash2 className="size-3.5" />
                       卸载
                     </Button>
                   </div>
