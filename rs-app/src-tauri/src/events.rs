@@ -15,7 +15,6 @@ pub const MONITOR_DATA: &str = "monitor:data";
 pub const AI_CHAT_EVENT: &str = "ai:chat-event";
 pub const AI_CONFIRM: &str = "ai:confirm";
 pub const AI_CONFIRM_RESOLVED: &str = "ai:confirm-resolved";
-pub const PLUGIN_THEME: &str = "plugin:theme";
 
 /// 向主窗口广播一个事件（窗口不存在时静默忽略）。
 pub fn broadcast<P: Serialize + Clone>(app: &AppHandle, event: &str, payload: P) {

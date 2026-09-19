@@ -1,4 +1,4 @@
-//! 应用级命令：应用信息、外部链接、原生对话框、ZMODEM 文件传输、监控间隔、插件占位。
+//! 应用级命令：应用信息、外部链接、原生对话框、ZMODEM 文件传输、监控间隔。
 
 use base64::Engine;
 use serde::Serialize;
@@ -188,64 +188,4 @@ pub fn monitor_set_interval(state: State<'_, AppState>, ms: u64) -> AppResult<Pr
         monitor_interval: Some(state.monitor.interval_ms()),
         ..Default::default()
     }))
-}
-
-/* ---------------------------- 插件（Phase 3 占位） ---------------------------- */
-
-#[tauri::command]
-pub fn plugins_list() -> AppResult<Vec<serde_json::Value>> {
-    Ok(Vec::new())
-}
-
-#[tauri::command]
-pub fn plugins_set_enabled() -> AppResult<Vec<serde_json::Value>> {
-    Ok(Vec::new())
-}
-
-#[tauri::command]
-pub fn plugins_uninstall() -> AppResult<Vec<serde_json::Value>> {
-    Ok(Vec::new())
-}
-
-#[tauri::command]
-pub fn plugins_install() -> AppResult<Vec<serde_json::Value>> {
-    Ok(Vec::new())
-}
-
-#[tauri::command]
-pub fn plugins_reload() -> AppResult<Vec<serde_json::Value>> {
-    Ok(Vec::new())
-}
-
-#[tauri::command]
-pub fn plugin_renderer_code() -> AppResult<Option<String>> {
-    Ok(None)
-}
-
-#[tauri::command]
-pub fn plugin_webview_info() -> AppResult<Option<serde_json::Value>> {
-    Ok(None)
-}
-
-#[tauri::command]
-pub fn plugin_storage_get(
-    state: State<'_, AppState>,
-    plugin_id: String,
-    key: String,
-) -> AppResult<serde_json::Value> {
-    Ok(state
-        .storage
-        .get_plugin_data(&plugin_id, &key)
-        .unwrap_or(serde_json::Value::Null))
-}
-
-#[tauri::command]
-pub fn plugin_storage_set(
-    state: State<'_, AppState>,
-    plugin_id: String,
-    key: String,
-    value: serde_json::Value,
-) -> AppResult<()> {
-    state.storage.set_plugin_data(&plugin_id, &key, value);
-    Ok(())
 }

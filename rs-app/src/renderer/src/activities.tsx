@@ -1,19 +1,12 @@
-import { useMemo } from 'react'
 import type { ComponentType } from 'react'
-import { FileCode2, Puzzle, Server, StickyNote } from 'lucide-react'
+import { FileCode2, Server, StickyNote } from 'lucide-react'
 import { HostsPanel } from '@/components/HostsPanel'
 import { NotesPanel } from '@/components/NotesPanel'
 import { useAppStore } from '@/stores/app-store'
-import {
-  HOSTS_ACTIVITY_ID,
-  NOTES_ACTIVITY_ID,
-  PLUGINS_ACTIVITY_ID,
-  SCRIPTS_ACTIVITY_ID,
-  pluginActivityId
-} from '@/activity-ids'
+import { HOSTS_ACTIVITY_ID, NOTES_ACTIVITY_ID, SCRIPTS_ACTIVITY_ID } from '@/activity-ids'
 
 /** 主区域内容标识（活动栏是唯一导航真源，主区域显示什么由当前功能区决定） */
-export type ActivityView = 'terminal' | 'scripts' | 'plugin' | 'plugins' | 'notes'
+export type ActivityView = 'terminal' | 'scripts' | 'notes'
 
 /**
  * 功能区（活动栏条目）= 一个 tab。
@@ -58,42 +51,10 @@ export const BUILTIN_ACTIVITIES: Activity[] = [
     icon: StickyNote,
     panel: NotesPanel,
     view: 'notes'
-  },
-  {
-    id: PLUGINS_ACTIVITY_ID,
-    label: '插件管理',
-    icon: Puzzle,
-    view: 'plugins'
   }
 ]
 
-/** 插件贡献的功能区所需的最小信息（plugin view 子集） */
-interface PluginActivitySource {
-  viewId: string
-  name: string
-  icon?: string
-}
-
-/** 内置功能区 + 插件贡献的功能区（插件可装卸，所以是运行时算出来的） */
-export function resolveActivities(plugins: PluginActivitySource[]): Activity[] {
-  return [
-    ...BUILTIN_ACTIVITIES,
-    ...plugins.map((p) => {
-      // 插件图标是 emoji 字符串，包一层组件以适配 Activity.icon 的组件签名
-      const EmojiIcon = (): React.ReactElement => (
-        <span className="text-[13px] leading-4">{p.icon ?? '🔌'}</span>
-      )
-      return {
-        id: pluginActivityId(p.viewId),
-        label: p.name,
-        icon: EmojiIcon,
-        view: 'plugin' as const
-      }
-    })
-  ]
-}
-
-/** 解析当前功能区：id 失效（插件被卸载等）时回退到第一个内置功能区 */
+/** 解析当前功能区：id 失效时回退到第一个内置功能区 */
 export function resolveActivity(activities: Activity[], activeId: string): Activity {
   return activities.find((a) => a.id === activeId) ?? activities[0]
 }
@@ -117,10 +78,9 @@ export function useActiveActivity(): {
   sidebarCollapsed: boolean
   sidebarVisible: boolean
 } {
-  const plugins = useAppStore((s) => s.plugins)
   const activeId = useAppStore((s) => s.ui.activeActivity)
   const collapsedActivities = useAppStore((s) => s.ui.collapsedActivities)
-  const activities = useMemo(() => resolveActivities(plugins), [plugins])
+  const activities = BUILTIN_ACTIVITIES
   const activity = resolveActivity(activities, activeId)
   const sidebarCollapsed = Boolean(collapsedActivities[activity.id])
   return {

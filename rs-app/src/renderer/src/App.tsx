@@ -1,11 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { TerminalSquare } from 'lucide-react'
 import { useAppStore } from '@/stores/app-store'
 import { TitleBar } from '@/components/TitleBar'
 import { Sidebar } from '@/components/Sidebar'
 import { ActivityBar } from '@/components/ActivityBar'
 import { useActiveActivity } from '@/activities'
-import { pluginViewIdOf } from '@/activity-ids'
 import { MonitorBadge } from '@/components/MonitorBadge'
 import { SshProfileDialog } from '@/components/SshProfileDialog'
 import { SettingsDialog } from '@/components/SettingsDialog'
@@ -14,7 +13,6 @@ import { CommandPalette } from '@/components/CommandPalette'
 import { RunScriptDialog } from '@/components/RunScriptDialog'
 import { ScriptsPage } from '@/components/ScriptsPage'
 import { NotesPage } from '@/components/NotesPage'
-import { PluginsPage } from '@/components/PluginsPage'
 import { StatusBar } from '@/components/StatusBar'
 import { ResizeHandle } from '@/components/ResizeHandle'
 import { AntdProvider } from '@/components/AntdProvider'
@@ -36,56 +34,38 @@ function EmptyState() {
   )
 }
 
-/**
- * webview 模式插件渲染器。
- * Tauri 没有 Electron 的 <webview> 标签，插件宿主（自定义协议 + iframe 桥）留待后续阶段，
- * 这里先给出占位，保持 App 结构与插件视图挂载逻辑不变。
- */
-function PluginWebview({ active }: { entry: string; preload?: string | null; active: boolean }) {
-  return (
-    <div
-      className="flex h-full items-center justify-center text-xs text-muted-foreground"
-      style={{ display: active ? 'flex' : 'none' }}
-    >
-      插件宿主将在后续阶段接入
-    </div>
-  )
-}
-
 export default function App() {
   const layout = useAppStore((s) => s.layout)
   const activeSessionId = useAppStore((s) => s.activeSessionId)
-  const plugins = useAppStore((s) => s.plugins)
   const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth)
   const setSidebarWidth = useAppStore((s) => s.setSidebarWidth)
   // 导航状态只有活动栏选中项一个真源，主区域显示什么由它派生
   const { activity, sidebarVisible } = useActiveActivity()
   const view = activity.view
-  /** 当前功能区是插件视图时，它承载的插件视图 id */
-  const pluginViewId = pluginViewIdOf(activity.id)
 
   /**
-   * 已打开过的插件视图 id：保持挂载（非激活时用 hidden 隐藏），
-   * 这样切到终端/其它页再切回来，插件内部 state（表单、编辑器内容等）不会丢。
+   * F5 / Ctrl+F5：拦截刷新（WebView2 已禁用浏览器快捷键，这里再做一层兜底），
+   * 避免整窗刷新清空内存里的终端会话状态。Ctrl+R 刻意放行——bash 里是历史逆向搜索。
+   * Ctrl/⌘+W：关闭当前激活的终端标签。
+   * 只作用于本窗口，因此不登记进 SHORTCUT_ACTIONS——那里的条目会被注册成系统级热键，
+   * 会把其它应用的 Ctrl+W 一并抢走。
    */
-  const [mountedPluginViews, setMountedPluginViews] = useState<string[]>([])
-
   useEffect(() => {
-    const alive = new Set(plugins.map((p) => p.viewId))
-    setMountedPluginViews((prev) => {
-      let changed = false
-      const next = prev.filter((id) => {
-        const ok = alive.has(id)
-        if (!ok) changed = true
-        return ok
-      })
-      if (view === 'plugin' && pluginViewId && alive.has(pluginViewId) && !next.includes(pluginViewId)) {
-        next.push(pluginViewId)
-        changed = true
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'F5') {
+        e.preventDefault()
+        return
       }
-      return changed ? next : prev
-    })
-  }, [plugins, view, pluginViewId])
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return
+      if (e.key.toLowerCase() !== 'w') return
+      const { activeSessionId: id, closeSession } = useAppStore.getState()
+      if (!id) return
+      e.preventDefault()
+      void closeSession(id)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
 
   return (
     <AntdProvider>
@@ -123,28 +103,6 @@ export default function App() {
             </div>
             {view === 'scripts' && <ScriptsPage />}
             {view === 'notes' && <NotesPage />}
-            {view === 'plugins' && <PluginsPage />}
-            {/* 插件视图：已打开过的保持挂载，只有激活的那个可见（切去终端再切回不丢状态） */}
-            {plugins
-              .filter((p) => p.viewId === pluginViewId || mountedPluginViews.includes(p.viewId))
-              .map((p) => (
-                <div
-                  key={p.viewId}
-                  className={
-                    view === 'plugin' && pluginViewId === p.viewId ? 'min-h-0 flex-1' : 'hidden'
-                  }
-                >
-                  {p.renderType === 'webview' && p.webviewEntry ? (
-                    <PluginWebview
-                      entry={p.webviewEntry}
-                      preload={p.webviewPreload}
-                      active={view === 'plugin' && pluginViewId === p.viewId}
-                    />
-                  ) : (
-                    <p.Component />
-                  )}
-                </div>
-              ))}
           </main>
         </div>
 

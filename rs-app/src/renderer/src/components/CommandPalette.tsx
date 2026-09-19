@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import {
-  Boxes,
   ChevronLeft,
   ListPlus,
   Plug,
@@ -17,7 +16,7 @@ import { Button, Input, Modal, type InputRef } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import { scriptToTerminalInput } from '@/lib/script'
 import type { ScriptEntry } from '@shared/types'
-import { NOTES_ACTIVITY_ID, PLUGINS_ACTIVITY_ID, SCRIPTS_ACTIVITY_ID } from '@/activity-ids'
+import { NOTES_ACTIVITY_ID, SCRIPTS_ACTIVITY_ID } from '@/activity-ids'
 
 /**
  * 命令面板层级：命令列表（根）/ 脚本列表 / 主机列表。
@@ -163,18 +162,6 @@ export function CommandPalette() {
       run: () => {
         close()
         setSshDialog(true, null)
-      }
-    },
-    {
-      id: 'plugin.manage',
-      group: '界面',
-      title: '插件管理',
-      description: '安装 / 启用 / 卸载插件',
-      keywords: 'plugin manage 插件 管理 扩展',
-      icon: Boxes,
-      run: () => {
-        close()
-        selectActivity(PLUGINS_ACTIVITY_ID)
       }
     },
     {

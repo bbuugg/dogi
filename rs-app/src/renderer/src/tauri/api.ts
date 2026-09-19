@@ -32,7 +32,6 @@ import type {
   SshGroup,
   SshProfile
 } from '@shared/types'
-import type { PluginHttpRequest, PluginHttpResponse, PluginInfo } from '@shared/plugin'
 
 import { base64ToBytes, bytesToBase64, subscribe, terminalDataToBase64 } from './events'
 
@@ -48,11 +47,6 @@ function electronPlatform(): string {
     default:
       return 'linux'
   }
-}
-
-/** 尚未接入的能力统一给出可读错误，避免静默失败 */
-function notImplemented(feature: string): Promise<never> {
-  return Promise.reject(new Error(`${feature}将在后续阶段接入`))
 }
 
 const api = {
@@ -182,26 +176,6 @@ const api = {
     setInterval: (ms: number): Promise<Preferences> => invoke('monitor_set_interval', { ms }),
     onData: (cb: (payload: { sessionId: string; metrics: ServerMetrics }) => void): Unsubscribe =>
       subscribe('monitor:data', cb)
-  },
-  plugins: {
-    // 插件宿主在 Phase 3 接入：列表返回空，其余入口给出可读错误
-    list: (): Promise<PluginInfo[]> => Promise.resolve([]),
-    setEnabled: (_id: string, _enabled: boolean): Promise<PluginInfo[]> =>
-      notImplemented('插件系统'),
-    uninstall: (_id: string): Promise<PluginInfo[]> => notImplemented('插件系统'),
-    install: (_sourcePath: string): Promise<PluginInfo[]> => notImplemented('插件系统'),
-    reload: (_id?: string): Promise<PluginInfo[]> => notImplemented('插件系统'),
-    rendererCode: (_id: string): Promise<string | null> => Promise.resolve(null),
-    webviewInfo: (_id: string): Promise<{ entry: string; preload: string | null } | null> =>
-      Promise.resolve(null),
-    http: (_pluginId: string, _req: PluginHttpRequest): Promise<PluginHttpResponse> =>
-      notImplemented('插件 HTTP 能力'),
-    storageGet: (pluginId: string, key: string): Promise<unknown> =>
-      invoke('plugin_storage_get', { pluginId, key }),
-    storageSet: (pluginId: string, key: string, value: unknown): Promise<void> =>
-      invoke('plugin_storage_set', { pluginId, key, value }),
-    invoke: (_pluginId: string, _name: string, ..._args: unknown[]): Promise<unknown> =>
-      notImplemented('插件主进程能力')
   },
   dialog: {
     open: (options: unknown): Promise<{ canceled: boolean; filePaths: string[] }> =>

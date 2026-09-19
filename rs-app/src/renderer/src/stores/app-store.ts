@@ -22,14 +22,8 @@ import type {
   ThemeMode
 } from '@shared/types'
 import type { AppShortcutAction } from '@shared/types'
-import type { PluginInfo } from '@shared/plugin'
-import type { PluginViewInstance } from '@/plugins/host'
 import { DEFAULT_SHORTCUTS } from '@shared/shortcuts'
-import {
-  HOSTS_ACTIVITY_ID,
-  SCRIPTS_ACTIVITY_ID,
-  pluginViewIdOf
-} from '@/activity-ids'
+import { HOSTS_ACTIVITY_ID, SCRIPTS_ACTIVITY_ID } from '@/activity-ids'
 import { clampTerminalFontSize } from '@/lib/terminal-font'
 import { scriptToTerminalInput } from '@/lib/script'
 import { applyColorTheme } from '@/lib/theme'
@@ -51,18 +45,6 @@ function openSession(profileId: string, cols = 80, rows = 24): Promise<SessionIn
 
 /** 终端字号持久化写入的防抖句柄（Ctrl+滚轮会触发连续调整） */
 let fontSizeSaveTimer: number | undefined
-
-/**
- * 插件被禁用 / 卸载 / 重载后，若当前功能区指向的插件视图已不存在，回到主机功能区。
- */
-function fallbackFromMissingPlugin(
-  ui: UiState,
-  plugins: PluginViewInstance[]
-): UiState {
-  const viewId = pluginViewIdOf(ui.activeActivity)
-  if (!viewId || plugins.some((p) => p.viewId === viewId)) return ui
-  return { ...ui, activeActivity: HOSTS_ACTIVITY_ID }
-}
 
 /** 重连中的旧会话 ID：其 onClosed 事件不应从布局摘掉面板（会被新会话原地替换） */
 const reconnectingIds = new Set<string>()
@@ -267,14 +249,6 @@ interface AppStore {
   // ---------- UI ----------
   ui: UiState
 
-  // ---------- 插件（运行时加载外部插件） ----------
-  /** 已加载插件的视图实例（侧边栏入口 + 主区域渲染组件） */
-  plugins: PluginViewInstance[]
-  /** 插件管理页列表（含启用状态/加载错误），与 plugins 分开以支撑管理操作 */
-  pluginList: PluginInfo[]
-  /** 插件通过宿主注册的命令面板命令 */
-  pluginCommands: Record<string, { pluginId: string; title: string; run: () => void }>
-
   // ---------- 服务器监控 ----------
   /** 各会话最新指标，key 为 sessionId；无该 key 表示取不到数据（不显示指标） */
   monitors: Record<string, ServerMetrics>
@@ -320,23 +294,6 @@ interface AppStore {
   setCommandPaletteOpen: (open: boolean) => void
   /** 切换功能区（活动栏 tab）：主区域与侧边栏都由它派生，不再单独存 view */
   selectActivity: (id: string) => void
-  /** 运行时加载插件（扫描 userData/plugins，收集视图注入 store） */
-  loadPlugins: () => Promise<void>
-  /** 刷新插件管理页列表（manifest + 启用状态 + 错误） */
-  refreshPluginList: () => Promise<void>
-  /** 启用/禁用插件并刷新视图与列表 */
-  togglePluginEnabled: (id: string, enabled: boolean) => Promise<void>
-  /** 卸载插件并刷新视图与列表 */
-  uninstallPlugin: (id: string) => Promise<void>
-  /** 从文件/目录安装插件并刷新视图与列表 */
-  installPlugin: (sourcePath: string) => Promise<void>
-  /** 重新加载插件（不传 id 表示全部）并刷新视图与列表，无需重启应用 */
-  reloadPlugins: (id?: string) => Promise<void>
-  /** 插件注册的命令面板命令 */
-  registerPluginCommand: (
-    pluginId: string,
-    cmd: { id: string; title: string; run: () => void }
-  ) => void
   setSidebarWidth: (width: number) => void
   /** 折叠/展开「当前功能区」自己的侧边栏（侧边栏属于功能区，互不影响） */
   setSidebarCollapsed: (collapsed: boolean) => void
@@ -467,10 +424,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
     aiChats: {},
     pendingConfirms: {},
 
-    plugins: [],
-    pluginList: [],
-    pluginCommands: {},
-
     ui: {
       aiOpenGroups: {},
       settingsOpen: false,
@@ -513,19 +466,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
         notes,
         shortcuts
       })
-      // 运行时加载外部插件（扫描 userData/plugins 并收集视图）
-      const { loadPlugins } = await import('@/plugins/host')
-      const pluginViews = await loadPlugins()
-      const pluginList = await window.api.plugins.list()
-      set({ plugins: pluginViews, pluginList })
-      // 有插件加载失败时给出一次性提示（详情见插件管理页）
-      const failedPlugins = pluginList.filter((p) => p.error)
-      if (failedPlugins.length > 0) {
-        const { message } = await import('antd')
-        message.error(
-          `${failedPlugins.length} 个插件加载失败：${failedPlugins.map((p) => p.name).join('、')}`
-        )
-      }
       // 全局快捷键：主进程触发后在此分发到具体 UI 动作
       if (!shortcutWired) {
         shortcutWired = true
@@ -870,51 +810,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     selectActivity: (id) => set((s) => ({ ui: { ...s.ui, activeActivity: id } })),
 
-    loadPlugins: async () => {
-      const { loadPlugins } = await import('@/plugins/host')
-      const views = await loadPlugins()
-      set((s) => ({ plugins: views, ui: fallbackFromMissingPlugin(s.ui, views) }))
-    },
-
-    refreshPluginList: async () => {
-      set({ pluginList: await window.api.plugins.list() })
-    },
-
-    togglePluginEnabled: async (id, enabled) => {
-      const list = await window.api.plugins.setEnabled(id, enabled)
-      const { loadPlugins } = await import('@/plugins/host')
-      const plugins = await loadPlugins()
-      // 当前正在查看的插件功能区因禁用而消失时，回到主机功能区
-      set((s) => ({ pluginList: list, plugins, ui: fallbackFromMissingPlugin(s.ui, plugins) }))
-    },
-
-    uninstallPlugin: async (id) => {
-      const list = await window.api.plugins.uninstall(id)
-      const { loadPlugins } = await import('@/plugins/host')
-      const plugins = await loadPlugins()
-      set((s) => ({ pluginList: list, plugins, ui: fallbackFromMissingPlugin(s.ui, plugins) }))
-    },
-
-    installPlugin: async (sourcePath) => {
-      const list = await window.api.plugins.install(sourcePath)
-      const { loadPlugins } = await import('@/plugins/host')
-      const plugins = await loadPlugins()
-      set({ pluginList: list, plugins })
-    },
-
-    reloadPlugins: async (id) => {
-      const list = await window.api.plugins.reload(id)
-      const { loadPlugins } = await import('@/plugins/host')
-      const plugins = await loadPlugins()
-      // 当前查看的插件功能区若因重载消失，回到主机功能区
-      set((s) => ({ pluginList: list, plugins, ui: fallbackFromMissingPlugin(s.ui, plugins) }))
-    },
-
-    registerPluginCommand: (pluginId, cmd) =>
-      set((s) => ({
-        pluginCommands: { ...s.pluginCommands, [cmd.id]: { pluginId, ...cmd } }
-      })),
-
     setSidebarWidth: (width) =>
       set((s) => ({ ui: { ...s.ui, sidebarWidth: width } })),
 
@@ -1229,7 +1124,10 @@ export function bindAppListeners(): void {
       // 连接失败/中断：清掉进度，让终端里的失败提示露出来
       const connectStages = { ...s.connectStages }
       delete connectStages[sessionId]
-      return { exitedSessions: exited, connectStages }
+      // 会话已退出，指标立即作废：否则指标条会一直挂到「数据陈旧」阈值（最长间隔×3）才消失
+      const monitors = { ...s.monitors }
+      delete monitors[sessionId]
+      return { exitedSessions: exited, connectStages, monitors }
     })
   })
   // 主机阶段：就绪即移除（渲染端据此收起进度提示）
@@ -1262,7 +1160,12 @@ export function bindAppListeners(): void {
     })
   })
   window.api.monitor.onData(({ sessionId, metrics }) => {
-    useAppStore.setState((s) => ({ monitors: { ...s.monitors, [sessionId]: metrics } }))
+    useAppStore.setState((s) => {
+      // 会话已退出时丢弃迟到的采集结果：采集任务在断开瞬间可能正执行到一半，
+      // 若接受这一帧，指标条会在退出后又重新冒出来并滞留到陈旧阈值
+      if (s.exitedSessions.has(sessionId)) return {}
+      return { monitors: { ...s.monitors, [sessionId]: metrics } }
+    })
   })
 }
 

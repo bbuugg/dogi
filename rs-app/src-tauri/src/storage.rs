@@ -542,18 +542,6 @@ impl Storage {
         let _ = self.db.flush();
         list
     }
-
-    // ---------------- 插件数据 ----------------
-    pub fn get_plugin_data(&self, plugin_id: &str, key: &str) -> Option<serde_json::Value> {
-        db_get(&self.db, &format!("pluginData.{plugin_id}.{key}"))
-    }
-
-    pub fn set_plugin_data(&self, plugin_id: &str, key: &str, value: serde_json::Value) {
-        let _ = self
-            .db
-            .insert(format!("pluginData.{plugin_id}.{key}"), serde_json::to_vec(&value).unwrap());
-        let _ = self.db.flush();
-    }
 }
 
 /// 从 sled 读 JSON，解析失败或缺树返回默认

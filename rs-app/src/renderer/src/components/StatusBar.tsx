@@ -1,10 +1,7 @@
-import {
-  PLUGINS_ACTIVITY_ID,
-  SCRIPTS_ACTIVITY_ID
-} from '@/activity-ids'
+import { SCRIPTS_ACTIVITY_ID } from '@/activity-ids'
 import { useAppStore } from '@/stores/app-store'
 import { Button, Popover } from 'antd'
-import { Boxes, Command as CommandIcon, ListPlus, Menu, Plus, Settings } from 'lucide-react'
+import { Command as CommandIcon, ListPlus, Menu, Plus, Settings } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 
 const ITEM_CLASS =
@@ -80,9 +77,6 @@ function MenuButton() {
           </button>
           <button type="button" className={menuItem} onClick={run(() => selectActivity(SCRIPTS_ACTIVITY_ID))}>
             <ListPlus className="size-3.5 text-muted-foreground" /> 管理脚本
-          </button>
-          <button type="button" className={menuItem} onClick={run(() => selectActivity(PLUGINS_ACTIVITY_ID))}>
-            <Boxes className="size-3.5 text-muted-foreground" /> 插件管理
           </button>
           <button
             type="button"
