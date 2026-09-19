@@ -4,7 +4,6 @@ import {
 } from '@/activity-ids'
 import { useAppStore } from '@/stores/app-store'
 import { Button, Popover } from 'antd'
-import { cn } from 'cn'
 import { Boxes, Command as CommandIcon, ListPlus, Menu, Plus, Settings } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 

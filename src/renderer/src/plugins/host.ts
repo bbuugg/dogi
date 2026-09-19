@@ -14,6 +14,12 @@ export interface PluginViewInstance {
   name: string
   icon?: string
   Component: ComponentType
+  /** 渲染模式：blob = 运行时 blob import（Component 是激活的组件）；webview = 独立 webview */
+  renderType: 'blob' | 'webview'
+  /** webview 模式的 HTML 入口路径（file:// 绝对路径），仅 renderType=webview 时有值 */
+  webviewEntry?: string
+  /** webview 模式的 preload 脚本路径，仅 renderType=webview 时有值 */
+  webviewPreload?: string | null
 }
 
 /** 插件渲染端入口 activate(api) 的返回值 */
@@ -79,8 +85,11 @@ function buildRendererHostApi(manifest: {
 }
 
 /**
- * 运行时加载所有插件：拉取 manifest 与渲染端源码，经 blob import 执行，
- * 调用 activate 收集视图。任一插件失败不影响其它插件。
+ * 运行时加载所有插件：
+ * - renderer 为字符串：blob import 方式（拉取源码 → blob URL → 动态 import → activate）
+ * - renderer 为对象（type=webview）：webview 方式（查询 HTML 入口 + preload 路径，
+ *   渲染时由 App.tsx 创建 <webview> 标签加载）
+ * 任一插件失败不影响其它插件。
  */
 export async function loadPlugins(): Promise<PluginViewInstance[]> {
   const manifests = await window.api.plugins.list()
@@ -89,25 +98,51 @@ export async function loadPlugins(): Promise<PluginViewInstance[]> {
     // 跳过无渲染端入口或被禁用的插件
     if (!manifest.renderer || manifest.enabled === false) continue
     try {
-      const code = await window.api.plugins.rendererCode(manifest.id)
-      if (!code) continue
-      const url = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }))
-      try {
-        const mod = (await import(/* @vite-ignore */ url)) as {
-          activate?: (api: RendererHostApi) => PluginRegistration | Promise<PluginRegistration>
-          default?: { activate?: (api: RendererHostApi) => PluginRegistration | Promise<PluginRegistration> }
+      if (typeof manifest.renderer === 'string') {
+        // ---- blob import 方式 ----
+        const code = await window.api.plugins.rendererCode(manifest.id)
+        if (!code) continue
+        const url = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }))
+        try {
+          const mod = (await import(/* @vite-ignore */ url)) as {
+            activate?: (api: RendererHostApi) => PluginRegistration | Promise<PluginRegistration>
+            default?: { activate?: (api: RendererHostApi) => PluginRegistration | Promise<PluginRegistration> }
+          }
+          const activate = mod.activate ?? mod.default?.activate
+          if (typeof activate !== 'function') continue
+          const reg = await activate(buildRendererHostApi(manifest))
+          for (const [i, v] of (reg.views ?? []).entries()) {
+            const viewId = v.viewId || `${manifest.id}:${i}`
+            views.push({ ...v, viewId, pluginId: manifest.id, renderType: 'blob' as const })
+          }
+        } finally {
+          URL.revokeObjectURL(url)
         }
-        const activate = mod.activate ?? mod.default?.activate
-        if (typeof activate !== 'function') continue
-        const reg = await activate(buildRendererHostApi(manifest))
-        for (const [i, v] of (reg.views ?? []).entries()) {
-          // 视图必须带稳定 viewId（侧边栏 key / 路由均依赖它）；
-          // 插件未提供时按 插件id:序号 兜底，保证唯一且非空。
-          const viewId = v.viewId || `${manifest.id}:${i}`
-          views.push({ ...v, viewId, pluginId: manifest.id })
-        }
-      } finally {
-        URL.revokeObjectURL(url)
+      } else if (manifest.renderer.type === 'webview') {
+        // ---- webview 方式 ----
+        const info = await window.api.plugins.webviewInfo(manifest.id)
+        if (!info) continue
+        // webview 模式不需要 activate（插件独立打包运行），直接注册一个占位 Component
+        // 真正的渲染由 App.tsx 读取 renderType=webview 创建 <webview> 标签
+        const viewId = manifest.id
+        const entryPath = 'file:///' + info.entry.replace(/\\/g, '/')
+        const preloadPath = info.preload ? 'file:///' + info.preload.replace(/\\/g, '/') : null
+        views.push({
+          pluginId: manifest.id,
+          viewId,
+          name: manifest.name,
+          icon: manifest.icon,
+          Component: () => null,
+          renderType: 'webview',
+          // 在 HTML 入口 URL 上附加 pluginId 与时间戳：
+          // pluginId 供 preload 脚本解析；时间戳确保每次重载后 entry 变化，
+          // 触发 PluginWebview 的 useEffect 重建 webview（加载最新构建产物）
+          webviewEntry:
+            entryPath +
+            '?pluginId=' + encodeURIComponent(manifest.id) +
+            '&t=' + Date.now(),
+          webviewPreload: preloadPath
+        })
       }
     } catch (e) {
       console.error(`[plugins] 渲染端加载失败：${manifest.id}`, e)

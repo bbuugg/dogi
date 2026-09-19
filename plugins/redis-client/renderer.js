@@ -156,7 +156,7 @@ export function activate(api) {
       }
       return () => { alive = false }
     }, [open, activeId, db])
-    return h(Drawer, { open, onClose, width: 480, title: 'Redis INFO' },
+    return h(Drawer, { open, onClose, size: 480, title: 'Redis INFO' },
       h('pre', { className: 'whitespace-pre-wrap break-all text-[12px] font-mono select-text' }, txt ?? '加载中...')
     )
   }
@@ -412,7 +412,7 @@ export function activate(api) {
     const renderSidebar = () => h('div',
       { className: 'w-[300px] shrink-0 border-r bg-muted/30 flex flex-col min-h-0' },
       h('div', { className: 'px-3 py-2 flex items-center justify-between border-b' },
-        h('span', { className: 'text-[11px] uppercase tracking-wider text-muted-foreground' }, '连接管理'),
+        h('span', { className: 'text-xs uppercase tracking-wider text-muted-foreground' }, '连接管理'),
         h(Button, { size: 'small', type: 'primary', icon: h(Plus, { className: 'w-3.5 h-3.5' }), onClick: () => setModal({ editing: null }) }, '新建')),
       h('div', { className: 'flex-1 min-h-0 overflow-y-auto p-2 space-y-1' },
         conns.length === 0
@@ -421,7 +421,7 @@ export function activate(api) {
       isConnected
         ? h('div', { className: 'border-t flex flex-col min-h-0 flex-[1.6]' },
             h('div', { className: 'px-3 py-2 flex items-center gap-1.5 border-b' },
-              h('span', { className: 'text-[11px] uppercase tracking-wider text-muted-foreground' }, '数据库'),
+              h('span', { className: 'text-xs uppercase tracking-wider text-muted-foreground' }, '数据库'),
               h(Select, {
                 size: 'small',
                 value: db,

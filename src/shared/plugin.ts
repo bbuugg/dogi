@@ -9,6 +9,22 @@
 /** 插件可向宿主申请的权限（宿主按权限放行对应能力） */
 export type PluginPermission = 'http' | 'storage' | 'fs'
 
+/**
+ * 渲染端入口配置：
+ * - 字符串：旧的运行时 blob import 方式（ESM 源码文件名，由宿主拉取源码执行）；
+ * - 对象：webview 方式（独立构建的 HTML + JS + CSS bundle，由 webview 加载）。
+ */
+export type PluginRenderer =
+  | string
+  | {
+      /** 渲染模式 */
+      type: 'webview'
+      /** webview 加载的 HTML 入口（相对插件目录） */
+      entry: string
+      /** webview 的 preload 脚本（相对插件目录，CJS） */
+      preload?: string
+    }
+
 export interface PluginManifest {
   /** 唯一 id（同 id 视为同一插件，主进程 handler 以 id 命名空间隔离） */
   id: string
@@ -18,8 +34,8 @@ export interface PluginManifest {
   author?: string
   /** 侧边栏/视图图标：emoji 或字符即可（避免插件依赖我们的图标库） */
   icon?: string
-  /** 渲染端入口（相对插件目录的 ESM 源码文件名），缺省则该插件无 UI */
-  renderer?: string
+  /** 渲染端入口（字符串=blob import 方式；对象=webview 方式），缺省则该插件无 UI */
+  renderer?: PluginRenderer
   /** 主进程入口（相对插件目录的 ESM 文件名），缺省则该插件无主进程逻辑 */
   main?: string
   /** 声明需要的宿主权限；未声明的能力调用会被宿主拒绝 */

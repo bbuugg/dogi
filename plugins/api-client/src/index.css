@@ -1,0 +1,295 @@
+@import 'tailwindcss';
+
+@custom-variant dark (&:is(.dark *));
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+    overflow: hidden;
+  }
+
+  button {
+    @apply cursor-pointer;
+  }
+
+  html {
+    @apply font-sans;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  input,
+  textarea,
+  [contenteditable='true'] {
+    user-select: text;
+    -webkit-user-select: text;
+  }
+}
+
+@utility no-scrollbar {
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+  &::-webkit-scrollbar {
+    display: none !important;
+  }
+}
+
+/* 全局滚动条美化 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.2) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 0.5rem;
+  height: 0.5rem;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 3px;
+
+  &:hover {
+    background: rgba(0, 0, 0, 0.3);
+  }
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@theme inline {
+  --font-heading: var(--font-sans);
+  --font-sans: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+  color-scheme: light dark;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --radius: 0.625rem;
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+}
+
+/* ------------------------------------------------------------------
+ * 界面配色（强调色）：由 html 的 data-color-theme 属性切换。
+ * 只覆盖强调色相关变量，中性色（背景/边框/文字）仍由 :root 与 .dark 决定；
+ * 不设置该属性时即为默认的中性配色。
+ * 必须与宿主 src/renderer/src/index.css 保持一致。
+ * ------------------------------------------------------------------ */
+:root[data-color-theme='blue'] {
+  --primary: oklch(0.52 0.19 258);
+  --primary-foreground: oklch(0.985 0.01 258);
+  --ring: oklch(0.63 0.16 258);
+}
+
+.dark[data-color-theme='blue'] {
+  --primary: oklch(0.74 0.13 258);
+  --primary-foreground: oklch(0.2 0.04 258);
+  --ring: oklch(0.58 0.12 258);
+}
+
+:root[data-color-theme='cyan'] {
+  --primary: oklch(0.55 0.11 195);
+  --primary-foreground: oklch(0.985 0.01 195);
+  --ring: oklch(0.66 0.1 195);
+}
+
+.dark[data-color-theme='cyan'] {
+  --primary: oklch(0.78 0.09 195);
+  --primary-foreground: oklch(0.21 0.03 195);
+  --ring: oklch(0.6 0.08 195);
+}
+
+:root[data-color-theme='green'] {
+  --primary: oklch(0.53 0.13 152);
+  --primary-foreground: oklch(0.985 0.01 152);
+  --ring: oklch(0.64 0.11 152);
+}
+
+.dark[data-color-theme='green'] {
+  --primary: oklch(0.76 0.11 152);
+  --primary-foreground: oklch(0.2 0.03 152);
+  --ring: oklch(0.58 0.09 152);
+}
+
+:root[data-color-theme='violet'] {
+  --primary: oklch(0.51 0.2 293);
+  --primary-foreground: oklch(0.985 0.01 293);
+  --ring: oklch(0.62 0.17 293);
+}
+
+.dark[data-color-theme='violet'] {
+  --primary: oklch(0.74 0.14 293);
+  --primary-foreground: oklch(0.21 0.04 293);
+  --ring: oklch(0.58 0.12 293);
+}
+
+:root[data-color-theme='rose'] {
+  --primary: oklch(0.55 0.2 12);
+  --primary-foreground: oklch(0.985 0.01 12);
+  --ring: oklch(0.65 0.17 12);
+}
+
+.dark[data-color-theme='rose'] {
+  --primary: oklch(0.76 0.14 12);
+  --primary-foreground: oklch(0.21 0.04 12);
+  --ring: oklch(0.6 0.12 12);
+}
+
+:root[data-color-theme='orange'] {
+  --primary: oklch(0.6 0.16 48);
+  --primary-foreground: oklch(0.985 0.01 48);
+  --ring: oklch(0.7 0.13 48);
+}
+
+.dark[data-color-theme='orange'] {
+  --primary: oklch(0.79 0.13 55);
+  --primary-foreground: oklch(0.23 0.04 48);
+  --ring: oklch(0.62 0.11 48);
+}
+
+:root[data-color-theme='amber'] {
+  --primary: oklch(0.64 0.14 85);
+  --primary-foreground: oklch(0.22 0.03 85);
+  --ring: oklch(0.72 0.12 85);
+}
+
+.dark[data-color-theme='amber'] {
+  --primary: oklch(0.8 0.12 85);
+  --primary-foreground: oklch(0.24 0.03 85);
+  --ring: oklch(0.64 0.1 85);
+}
+
+/*
+ * 自定义强调色：由 preload 脚本从宿主推送的 --custom-*-light / --custom-*-dark
+ * 内联变量取值，这里只负责按当前明暗各取一套。
+ */
+:root[data-color-theme='custom'] {
+  --primary: var(--custom-primary-light);
+  --primary-foreground: var(--custom-primary-foreground-light);
+  --ring: var(--custom-ring-light);
+}
+
+.dark[data-color-theme='custom'] {
+  --primary: var(--custom-primary-dark);
+  --primary-foreground: oklch(0.2 0.01 0);
+  --ring: var(--custom-ring-dark);
+}
+
+/* autofill 样式：让浏览器自动填充的输入框背景跟随主题 */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+input:-webkit-autofill:active {
+  -webkit-box-shadow: 0 0 0 1000px var(--background, #fff) inset;
+  -webkit-text-fill-color: var(--foreground, currentColor) !important;
+  color: var(--foreground, inherit) !important;
+  caret-color: var(--foreground, currentColor);
+  transition: background-color 9999s ease-in-out 0s;
+}

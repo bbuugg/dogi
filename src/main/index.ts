@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
-import { app, BrowserWindow, Menu, nativeTheme, Tray } from 'electron'
+import { app, BrowserWindow, Menu, nativeTheme, Tray, webContents } from 'electron'
 import { registerIpc, openExternalSafe } from './ipc'
 import { registerShortcuts } from './shortcuts'
 import { pluginHost } from './services/plugins'
@@ -65,7 +65,40 @@ function installMenu(): void {
               }
             }
           },
-          { role: 'toggleDevTools' },
+          // 不用 { role: 'toggleDevTools' }：该角色默认操作当前焦点所在的 webContents，
+          // 当 webview 获得焦点时会打开 webview 的 devtools 而非宿主的。
+          // 这里显式操作主窗口的 webContents，确保快捷键始终打开宿主 DevTools。
+          {
+            label: 'Toggle Developer Tools',
+            accelerator: 'CommandOrControl+Shift+I',
+            registerAccelerator: true,
+            click: () => {
+              if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.toggleDevTools()
+              }
+            }
+          },
+          // 打开 webview 插件的 DevTools：查找主窗口内所有 webview 的 webContents，
+          // 取第一个（当前激活的插件 webview）打开/关闭其 DevTools。
+          {
+            label: 'Toggle Webview DevTools',
+            accelerator: 'CommandOrControl+Shift+Alt+I',
+            registerAccelerator: true,
+            click: () => {
+              if (!mainWindow || mainWindow.isDestroyed()) return
+              const all = webContents.getAllWebContents()
+              // 排除主窗口自身的 webContents，剩下的就是 webview 的
+              for (const wc of all) {
+                if (wc === mainWindow.webContents) continue
+                const url = wc.getURL?.() ?? ''
+                // webview 加载的是 file:// 协议的插件 HTML
+                if (url.startsWith('file://')) {
+                  wc.toggleDevTools()
+                  return
+                }
+              }
+            }
+          },
           { type: 'separator' },
           { role: 'togglefullscreen' }
         ]
@@ -153,7 +186,9 @@ function createWindow(): void {
       preload: join(import.meta.dirname, '../preload/index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      spellcheck: false
+      spellcheck: false,
+      // 启用 <webview> 标签：webview 模式插件需要
+      webviewTag: true
     }
   })
 

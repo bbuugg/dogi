@@ -57,7 +57,7 @@ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.ma
  * 由用户选定的颜色算出两套强调色变量：保留色相与彩度，只把亮度夹进该明暗主题
  * 下可用的区间——浅色主题要够深才压得住白字，深色主题要够亮才能在深背景上显眼。
  */
-function customAccentVars(hex: string): Record<string, string> | null {
+export function customAccentVars(hex: string): Record<string, string> | null {
   const oklch = hexToOklch(hex)
   if (!oklch) return null
   const fmt = (l: number) =>

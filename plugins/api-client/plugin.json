@@ -5,7 +5,11 @@
   "description": "类 Postman 的 HTTP 接口调试工具：构造请求、查看响应、保存常用请求",
   "author": "OpsDesk",
   "icon": "🌐",
-  "renderer": "renderer.js",
   "main": "main.js",
-  "permissions": ["http", "storage"]
+  "permissions": ["http", "storage"],
+  "renderer": {
+    "type": "webview",
+    "entry": "dist/index.html",
+    "preload": "preload.cjs"
+  }
 }

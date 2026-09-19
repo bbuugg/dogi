@@ -297,6 +297,8 @@ export function registerIpc(win: () => BrowserWindow | null): void {
       : dialog.showOpenDialog(options)
   })
   ipcMain.handle('plugin:rendererCode', (_e, id: string) => pluginHost.getRendererCode(id))
+  /** 获取 webview 模式插件的 HTML 入口与 preload 脚本路径 */
+  ipcMain.handle('plugin:webviewInfo', (_e, id: string) => pluginHost.getWebviewInfo(id))
   ipcMain.handle('plugin:invoke', (_e, pluginId: string, name: string, args: unknown[]) =>
     pluginHost.invoke(pluginId, name, args ?? [])
   )

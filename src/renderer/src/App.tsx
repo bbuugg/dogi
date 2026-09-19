@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef, useCallback } from 'react'
 import { TerminalSquare } from 'lucide-react'
 import { useAppStore } from '@/stores/app-store'
 import { TitleBar } from '@/components/TitleBar'
@@ -20,7 +20,9 @@ import { ResizeHandle } from '@/components/ResizeHandle'
 import { AntdProvider } from '@/components/AntdProvider'
 import { DndProvider } from 'react-dnd'
 import { HTML5Backend } from 'react-dnd-html5-backend'
-import { Button } from 'antd'
+import { Button, Spin } from 'antd'
+import { useIsDarkTheme } from '@/lib/theme'
+import { customAccentVars } from '@/lib/theme'
 
 function EmptyState() {
   const setSshDialog = useAppStore((s) => s.setSshDialog)
@@ -32,6 +34,155 @@ function EmptyState() {
       <Button type="primary" icon={<TerminalSquare className="size-4" />} onClick={() => setSshDialog(true, null)}>
         添加主机
       </Button>
+    </div>
+  )
+}
+
+/**
+ * 收集当前主题信息，用于推送给 webview 插件。
+ * 返回 { isDark, colorTheme, customVars } 结构，与 preload 脚本的 applyTheme 对齐。
+ */
+function collectThemeData(isDark: boolean, colorTheme: string, customColor?: string) {
+  const isCustom = colorTheme === 'custom'
+  const vars = isCustom && customColor ? customAccentVars(customColor) : null
+  return {
+    isDark,
+    colorTheme,
+    customVars: vars ?? undefined
+  }
+}
+
+/** webview 模式插件渲染器：创建 <webview> 标签加载插件独立构建的 HTML */
+function PluginWebview({
+  entry,
+  preload,
+  active
+}: {
+  entry: string
+  preload?: string | null
+  active: boolean
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [loading, setLoading] = useState(true)
+
+  const isDark = useIsDarkTheme()
+  const colorTheme = useAppStore((s) => s.preferences.colorTheme)
+  const customColor = useAppStore((s) => s.preferences.customColor)
+
+  /** 向 webview 推送当前主题信息 */
+  const pushTheme = useCallback(() => {
+    const container = ref.current
+    if (!container) return
+    const wv = container.querySelector('webview') as (Electron.WebviewTag & { send: (ch: string, ...args: unknown[]) => void }) | null
+    if (!wv) return
+    // webview 被移除后 guestInstanceId 失效，send 会抛 Invalid guestInstanceId
+    // 检查 isConnected 确保 DOM 仍然附着
+    if (!wv.isConnected) return
+    const data = collectThemeData(isDark, colorTheme, customColor)
+    try {
+      wv.send('plugin:theme', data)
+    } catch {
+      // webview 尚未准备好或已被销毁，忽略
+    }
+  }, [isDark, colorTheme, customColor])
+
+  useEffect(() => {
+    const container = ref.current
+    if (!container) return
+
+    // 清理旧 webview：在创建新 webview 之前先移除旧的。
+    // Electron webview 的 guest 实例销毁是异步的，同步 remove + 立即创建新 webview
+    // 会导致 "Invalid guestInstanceId"（旧 guest 还在清理，新 guest 就 attach）。
+    // 用 try-catch 包裹 remove()，并跳到 microtask 再创建新 webview。
+    const oldWv = container.querySelector('webview')
+    if (oldWv) {
+      try {
+        oldWv.remove()
+      } catch {
+        // guest 已失效，DOM 节点仍残留，强制清空容器
+        container.innerHTML = ''
+      }
+    }
+
+    setLoading(true)
+
+    let webview: (Electron.WebviewTag & { send: (ch: string, ...args: unknown[]) => void }) | null = null
+    let cancelled = false
+
+    // 延迟到 microtask 创建新 webview，给 Electron 时间清理旧 guest 实例
+    const createWv = () => {
+      if (cancelled || !container) return
+
+      webview = document.createElement('webview') as Electron.WebviewTag & {
+        send: (ch: string, ...args: unknown[]) => void
+      }
+      webview.src = entry
+      webview.style.width = '100%'
+      webview.style.height = '100%'
+      webview.style.border = 'none'
+      webview.setAttribute(
+        'webpreferences',
+        'contextIsolation=yes,nodeIntegration=no,spellcheck=no'
+      )
+      if (preload) {
+        webview.setAttribute('preload', preload)
+      }
+
+      // webview 加载完成后隐藏 loading，并推送主题
+      const onStopLoading = () => {
+        if (!webview?.isConnected) return
+        setLoading(false)
+        pushTheme()
+      }
+      // 首次 DOM ready 时也推一次主题（did-stop-loading 可能晚于 DOM ready，
+      // 提前推可让插件在首屏渲染时就拿到正确主题）
+      const onDomReady = () => {
+        if (!webview?.isConnected) return
+        pushTheme()
+      }
+      webview.addEventListener('did-stop-loading', onStopLoading)
+      webview.addEventListener('dom-ready', onDomReady)
+
+      try {
+        container.appendChild(webview)
+      } catch {
+        // attachGuestInstance 在极端竞态下仍可能抛错，忽略
+      }
+    }
+
+    // 用 queueMicrotask 延迟一拍，让旧 guest 实例完成清理
+    queueMicrotask(createWv)
+
+    // 清理：取消待创建的 webview + 移除事件监听器 + 移除 webview 元素
+    return () => {
+      cancelled = true
+      if (webview) {
+        try {
+          webview.remove()
+        } catch {
+          // 忽略
+        }
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entry, preload])
+
+  // 主题变更时实时推送给 webview
+  useEffect(() => {
+    pushTheme()
+  }, [pushTheme])
+
+  return (
+    <div
+      ref={ref}
+      className="relative h-full w-full"
+      style={{ display: active ? 'block' : 'none' }}
+    >
+      {loading && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-background">
+          <Spin size="large" />
+        </div>
+      )}
     </div>
   )
 }
@@ -118,7 +269,15 @@ export default function App() {
                     view === 'plugin' && pluginViewId === p.viewId ? 'min-h-0 flex-1' : 'hidden'
                   }
                 >
-                  <p.Component />
+                  {p.renderType === 'webview' && p.webviewEntry ? (
+                    <PluginWebview
+                      entry={p.webviewEntry}
+                      preload={p.webviewPreload}
+                      active={view === 'plugin' && pluginViewId === p.viewId}
+                    />
+                  ) : (
+                    <p.Component />
+                  )}
                 </div>
               ))}
           </main>
