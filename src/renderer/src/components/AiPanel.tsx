@@ -422,8 +422,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               <Sparkles className="size-8 text-primary/40" />
               {activeSession ? (
                 <>
-                  <div className="text-sm">这个终端拥有独立的 AI 助手</div>
-                  <div className="space-y-1 text-xs leading-5">
+                  <div className="space-y-1 text-sm leading-5">
                     <p>试试：查看当前目录下占用空间最大的文件</p>
                     <p>试试：诊断 nginx 为什么启动失败</p>
                   </div>

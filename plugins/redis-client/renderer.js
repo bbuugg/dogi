@@ -345,6 +345,26 @@ export function activate(api) {
 
     /* --------- 各区域渲染 --------- */
 
+    const deleteConn = async (conn) => {
+      // 如果已连接，先断开
+      const st = connStates[conn.id]
+      if (st?.connected) {
+        try { await api.invoke('disconnect', conn.id) } catch {}
+      }
+      setConnStates((s) => {
+        const next = { ...s }
+        delete next[conn.id]
+        return next
+      })
+      if (activeId === conn.id) {
+        setActiveId(null)
+        resetBrowse(0)
+        setStats(null)
+      }
+      persist(conns.filter((c) => c.id !== conn.id))
+      message.success(`已删除连接「${conn.name}」`)
+    }
+
     const renderConnRow = (conn) => {
       const st = connStates[conn.id]
       const connected = st?.connected
@@ -364,6 +384,19 @@ export function activate(api) {
         h('div', { className: 'flex-1 min-w-0' },
           h('div', { className: 'truncate text-[13px] font-medium' }, conn.name),
           h('div', { className: 'truncate text-[11px] text-muted-foreground font-mono' }, `${conn.host}:${conn.port}`)),
+        h('div', { className: 'flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity' },
+          h(Tooltip, { title: '编辑' },
+            h(Button, { size: 'small', type: 'text', icon: h(Pencil, { className: 'w-3.5 h-3.5' }),
+              onClick: (e) => { e.stopPropagation(); setModal({ editing: conn }) } })),
+          h(Popconfirm, {
+            title: `确认删除连接「${conn.name}」？`,
+            okText: '删除',
+            okButtonProps: { danger: true },
+            cancelText: '取消',
+            onConfirm: () => deleteConn(conn)
+          },
+            h(Button, { size: 'small', type: 'text', danger: true, icon: h(Trash2, { className: 'w-3.5 h-3.5' }),
+              onClick: (e) => e.stopPropagation() }))),
         busyConn === conn.id
           ? h(Loader2, { className: 'w-3.5 h-3.5 animate-spin text-muted-foreground' })
           : h(Button, {
@@ -573,7 +606,14 @@ export function activate(api) {
             err && h('div', { className: 'text-red-500 text-[12.5px] bg-red-500/5 border border-red-500/20 rounded p-2' }, err),
             h('div', { className: 'flex gap-2 pt-1' },
               h(Button, { type: 'primary', icon: h(PlugZap, { className: 'w-4 h-4' }), loading: busyConn === active.id, onClick: () => connect(active) }, '连接'),
-              h(Button, { icon: h(Pencil, { className: 'w-4 h-4' }), onClick: () => setModal({ editing: active }) }, '编辑'))))
+              h(Button, { icon: h(Pencil, { className: 'w-4 h-4' }), onClick: () => setModal({ editing: active }) }, '编辑'),
+              h(Popconfirm, {
+                title: `确认删除连接「${active.name}」？`,
+                okText: '删除',
+                okButtonProps: { danger: true },
+                cancelText: '取消',
+                onConfirm: () => deleteConn(active)
+              }, h(Button, { danger: true, icon: h(Trash2, { className: 'w-4 h-4' }) }, '删除')))))
       }
       // 已连接：头栏 + 内容区（值查看或总览）+ 命令行
       return h('div', { className: 'flex-1 min-w-0 flex flex-col min-h-0' },

@@ -126,9 +126,35 @@ const INTERACTIVE_PROGRAM_RE =
 
 /** 粗略判断终端是否停在 shell 提示符（用于识别前台程序是否已退出） */
 const SHELL_PROMPT_RE = /(PS\s+[A-Za-z]:[\\/].*>)|([$#%]\s*$)/
+
+/**
+ * 完整清除终端输出中的 ANSI 转义序列，使 AI 拿到的是纯文本。
+ *
+ * 覆盖以下序列类型：
+ * - OSC（Operating System Command）：\x1b]... BEL(\x07) 或 ST(\x1b\\)，
+ *   如设置窗口标题 \x1b]0;root@host:~\x07
+ * - CSI（Control Sequence Introducer）：\x1b[...字母，
+ *   如颜色 \x1b[32m、光标移动 \x1b[H、清行 \x1b[K、bracketed paste \x1b[?2004h
+ * - DCS / SOS / PM / APC：\x1bP...\x1b\\ 等（同 OSC 用 ST 结尾）
+ * - 单字符转义：\x1b= / \x1b>（键盘模式）、\x1b7 / \x1b8（光标保存/恢复）等
+ * - 其他 C1 控制字符（\x80-\x9f 范围内除 \x1b 外的偶尔出现的控制字节）
+ */
+function stripAnsi(input: string): string {
+  return input
+    // OSC / DCS / SOS / PM / APC：\x1b 后跟 ] P _ ^ X，以 BEL(\x07) 或 ST(\x1b\\) 结尾
+    .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1b[DP^X][\s\S]*?\x1b\\/g, '')
+    // CSI：\x1b[ 后跟参数字节(0x30-0x3F)和中间字节(0x20-0x2F)，以终结字节(0x40-0x7E)结尾
+    .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '')
+    // 单字符转义序列：\x1b 后跟一个非 [ ] P D ^ X 的可打印字符（如 \x1b= \x1b> \x1b7 \x1b8 \x1bM）
+    .replace(/\x1b[^\x1b]/g, '')
+    // 残留的孤立 ESC 字符
+    .replace(/\x1b/g, '')
+}
+
 /** ansi 转义 + 回车清理，取最后一非空行 */
 function tailCleaned(output: string): string {
-  const cleaned = output.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\r/g, '')
+  const cleaned = stripAnsi(output).replace(/\r/g, '')
   const lines = cleaned.split('\n').filter((l) => l.trim().length > 0)
   return lines.length ? lines[lines.length - 1].trimEnd() : ''
 }
@@ -232,10 +258,10 @@ function buildTerminalTools(
             "发送退出键后，可用 read_terminal_output 确认已回到 shell 提示符，再执行后续命令。",
             '',
             '（附：当前终端最近输出，供判断程序是否已退出）',
-            truncate(raw, 2000)
+            truncate(stripAnsi(raw), 2000)
           ].join('\n')
         }
-        return raw
+        return stripAnsi(raw)
       })
   })
 
@@ -257,7 +283,7 @@ function buildTerminalTools(
         if (!sessionManager.get(id)) throw new Error(`会话不存在: ${id}`)
         sessionManager.write(id, translateKeys(keys))
         await new Promise((resolve) => setTimeout(resolve, 300))
-        return sessionManager.recentOutput(id, 2000) ?? ''
+        return stripAnsi(sessionManager.recentOutput(id, 2000) ?? '')
       })
   })
 
@@ -271,7 +297,7 @@ function buildTerminalTools(
       queueExec(async () => {
         const id = resolveTarget(sessionId)
         if (!id) throw new Error('当前没有打开的终端会话')
-        return sessionManager.recentOutput(id, maxChars ?? 4000) ?? ''
+        return stripAnsi(sessionManager.recentOutput(id, maxChars ?? 4000) ?? '')
       })
   })
 
