@@ -5,12 +5,12 @@ import { defineConfig } from 'vite'
 
 export default defineConfig({
   // 渲染进程源码根目录（index.html 所在处）
-  root: 'src/renderer',
+  root: 'src',
   base: './',
   resolve: {
     alias: {
-      '@': resolve(import.meta.dirname, 'src/renderer/src'),
-      '@shared': resolve(import.meta.dirname, 'src/renderer/src/shared')
+      '@': resolve(import.meta.dirname, 'src'),
+      '@shared': resolve(import.meta.dirname, 'src/shared')
     }
   },
   plugins: [react(), tailwindcss()],
