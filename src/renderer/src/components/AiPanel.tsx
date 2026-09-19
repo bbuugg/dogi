@@ -515,7 +515,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             </div>
             {aiStreaming ? (
               <Button
-                type="text"
+                type="primary"
                 icon={<Square className="size-4" />}
                 className="size-8 shrink-0 rounded-full text-destructive"
                 title="停止"

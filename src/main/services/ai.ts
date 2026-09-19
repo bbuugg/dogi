@@ -36,7 +36,6 @@ const DEFAULT_SYSTEM_PROMPT = [
   '部分命令会启动交互式 / 前台程序（如 htop、top、vim、nano、less、man、watch、python、node 等），它们占据终端且不返回 shell 提示符。执行这类命令后，不要继续向该会话输入新命令，应先用 send_keys 工具发送退出指令（多数程序用 "q"，卡死用 "C-c"，个别用 "exit" / "C-d"），并用 read_terminal_output 确认已回到 shell 提示符后再继续。'
 ].join('\n')
 
-const TOOL_OUTPUT_LIMIT = 8000
 const MAX_STEPS = 15
 /** 确认模式下等待用户响应的最长时间，超时按「取消」处理 */
 const CONFIRM_TIMEOUT_MS = 10 * 60 * 1000
@@ -117,17 +116,6 @@ function currentPermissionMode(): AiPermissionMode {
 }
 
 /**
- * 命中即视为「交互式/前台程序」的命令（不会返回 shell 提示符）。
- * 例如 htop、top、vim、less、man、watch、python、node 等：
- * 这类命令会占据终端，若把后续命令直接写进去会被程序吞掉导致异常。
- */
-const INTERACTIVE_PROGRAM_RE =
-  /(?:^|[\s;|&])(htop|top|btop|atop|iotop|iftop|nethogs|vim?|nvim|nano|emacs|less|more|most|man|tmux|screen|watch|tail\s+-f|python3?|ipython|node|irb|pry|byebug|bc|ftp|sftp|telnet|nc\b|mysql|psql|sqlite3|redis-cli|mongosh|mongo|lua|ghci|ranger|nnn|mc\b|lf\b|lynx|w3m|elinks|links|ncdu|glances|vifm|newsboat|mutt|alpine)\b/i
-
-/** 粗略判断终端是否停在 shell 提示符（用于识别前台程序是否已退出） */
-const SHELL_PROMPT_RE = /(PS\s+[A-Za-z]:[\\/].*>)|([$#%]\s*$)/
-
-/**
  * 完整清除终端输出中的 ANSI 转义序列，使 AI 拿到的是纯文本。
  *
  * 覆盖以下序列类型：
@@ -152,16 +140,6 @@ function stripAnsi(input: string): string {
     .replace(/\x1b/g, '')
 }
 
-/** ansi 转义 + 回车清理，取最后一非空行 */
-function tailCleaned(output: string): string {
-  const cleaned = stripAnsi(output).replace(/\r/g, '')
-  const lines = cleaned.split('\n').filter((l) => l.trim().length > 0)
-  return lines.length ? lines[lines.length - 1].trimEnd() : ''
-}
-function hasShellPrompt(output: string): boolean {
-  return SHELL_PROMPT_RE.test(tailCleaned(output))
-}
-
 /** 把 send_keys 的语义化按键翻译成终端控制字节 */
 function translateKeys(keys: string): string {
   return keys
@@ -171,10 +149,6 @@ function translateKeys(keys: string): string {
     .replace(/Escape/gi, '\x1b')
     .replace(/Enter|Return/gi, '\r')
     .replace(/\r?\n/g, '\r')
-}
-
-function truncate(text: string, max: number): string {
-  return text.length > max ? `${text.slice(-max)}\n…（输出已截断）` : text
 }
 
 /** 终端操作工具：AI 通过这些工具查看与驱动真实终端。
@@ -213,11 +187,11 @@ function buildTerminalTools(
 
   const runInTerminal = tool({
     description:
-      '在指定终端会话中执行命令（等同于用户在键盘输入并回车），等待片刻后返回终端最近输出。未指定会话时使用本次对话绑定的会话。命令串行执行：前一条完成并读取结果后才开始下一条。',
+      '在指定终端会话中执行命令（等同于用户在键盘输入并回车），等待片刻后返回本次命令的新增输出（不含历史内容）。未指定会话时使用本次对话绑定的会话。命令串行执行：前一条完成并读取结果后才开始下一条。返回的输出中如果末尾有 shell 提示符（如 $ 或 # 结尾的行），说明命令已执行完毕、终端可继续输入；如果没有 shell 提示符，说明命令可能仍在运行或启动了交互式/前台程序（如 htop、vim、less、python REPL 等），此时不要继续执行新命令，应先用 send_keys 发送退出指令。',
     inputSchema: z.object({
       command: z.string().describe('要执行的命令，无需附加换行符'),
       sessionId: z.string().optional().describe('目标会话 ID，缺省为本次对话绑定的会话'),
-      waitMs: z.number().optional().describe('执行后等待毫秒数，默认 3000')
+      waitMs: z.number().optional().describe('执行后等待毫秒数，默认 3000，长耗时命令可适当增大')
     }),
     execute: ({ command, sessionId, waitMs }, { toolCallId }) =>
       queueExec(async () => {
@@ -241,26 +215,13 @@ function buildTerminalTools(
           }
         }
 
+        // 记录写入前的缓冲区位置，执行后只返回新增部分（增量读取），
+        // 避免每次都把 SSH 登录横幅等历史内容重复返回给 AI。
+        const beforeLen = sessionManager.outputLength(id)
         sessionManager.write(id, command.endsWith('\n') ? command : `${command}\r`)
-        const waited = Math.min(waitMs ?? 3000, 15000)
+        const waited = Math.min(waitMs ?? 3000, 180000)
         await new Promise((resolve) => setTimeout(resolve, waited))
-        const raw = sessionManager.recentOutput(id, TOOL_OUTPUT_LIMIT) ?? ''
-
-        // 交互式 / 前台程序（htop、vim、less、watch、python 等）不会返回 shell 提示符，
-        // 若把后续命令直接写进去会被程序吞掉导致异常。主动提示 AI 先退出。
-        if (INTERACTIVE_PROGRAM_RE.test(command) && !hasShellPrompt(raw)) {
-          return [
-            `命令「${command.trim()}」已启动一个交互式 / 前台程序（htop、top、vim、less、watch、python 等），它当前占据终端、尚未返回 shell 提示符。`,
-            '请勿继续向该会话输入新命令（会被该程序吞掉，造成异常）。如需继续，请先用 send_keys 工具发送退出指令：',
-            "  · 多数程序按 'q' 即可退出；",
-            "  · 卡死或无法退出时发送 Ctrl-C（send_keys 传入 'C-c'）；",
-            "  · 个别程序用 'exit' / 'quit' / Ctrl-D（'C-d'）。",
-            "发送退出键后，可用 read_terminal_output 确认已回到 shell 提示符，再执行后续命令。",
-            '',
-            '（附：当前终端最近输出，供判断程序是否已退出）',
-            truncate(stripAnsi(raw), 2000)
-          ].join('\n')
-        }
+        const raw = sessionManager.outputFrom(id, beforeLen) ?? ''
         return stripAnsi(raw)
       })
   })
@@ -281,9 +242,11 @@ function buildTerminalTools(
         const id = resolveTarget(sessionId)
         if (!id) throw new Error('当前没有打开的终端会话')
         if (!sessionManager.get(id)) throw new Error(`会话不存在: ${id}`)
+        // 增量读取：只返回发送按键后的新增输出
+        const beforeLen = sessionManager.outputLength(id)
         sessionManager.write(id, translateKeys(keys))
         await new Promise((resolve) => setTimeout(resolve, 300))
-        return stripAnsi(sessionManager.recentOutput(id, 2000) ?? '')
+        return stripAnsi(sessionManager.outputFrom(id, beforeLen) ?? '')
       })
   })
 

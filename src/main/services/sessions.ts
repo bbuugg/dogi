@@ -28,6 +28,10 @@ interface InternalSession {
   kill(): void
   /** 读取最近输出（AI 工具用） */
   recentOutput(maxChars: number): string
+  /** 当前输出缓冲区长度（AI 工具用于增量读取） */
+  outputLength(): number
+  /** 读取从指定偏移开始的新增输出（AI 工具用于增量读取） */
+  outputFrom(start: number): string
   /** 在远端/本地执行一次性命令并返回完整输出（监控采集用） */
   exec(command: string): Promise<string>
   /** 连接是否已就绪（本地 shell 已启动 / SSH 握手已完成），监控采集前应判读 */
@@ -121,6 +125,14 @@ class LocalSession implements InternalSession {
 
   recentOutput(maxChars: number): string {
     return this.output.slice(-maxChars)
+  }
+
+  outputLength(): number {
+    return this.output.length
+  }
+
+  outputFrom(start: number): string {
+    return this.output.slice(Math.max(0, start))
   }
 
   exec(command: string): Promise<string> {
@@ -337,6 +349,14 @@ class SshSession implements InternalSession {
     return this.output.slice(-maxChars)
   }
 
+  outputLength(): number {
+    return this.output.length
+  }
+
+  outputFrom(start: number): string {
+    return this.output.slice(Math.max(0, start))
+  }
+
   isReady(): boolean {
     return this.ready && !this.killed
   }
@@ -500,6 +520,16 @@ class SessionManager extends EventEmitter {
 
   recentOutput(id: string, maxChars = 8000): string | null {
     return this.sessions.get(id)?.recentOutput(maxChars) ?? null
+  }
+
+  /** 当前输出缓冲区长度（AI 工具增量读取用） */
+  outputLength(id: string): number {
+    return this.sessions.get(id)?.outputLength() ?? 0
+  }
+
+  /** 读取从指定偏移开始的新增输出（AI 工具增量读取用） */
+  outputFrom(id: string, start: number): string | null {
+    return this.sessions.get(id)?.outputFrom(start) ?? null
   }
 }
 
