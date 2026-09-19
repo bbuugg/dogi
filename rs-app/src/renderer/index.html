@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      CSP 由 src-tauri/tauri.conf.json 的 app.security.csp 统一下发（Tauri 会注入响应头
+      并自动追加 IPC 所需的 connect-src），这里不再重复声明 meta CSP，避免两套策略取交集
+      后把 IPC / Vite HMR 掐掉。
+    -->
+    <title>OpsDesk - AI 运维终端</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
