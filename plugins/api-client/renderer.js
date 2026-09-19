@@ -345,9 +345,9 @@ export function activate(api) {
     return status < 400 ? 'bg-emerald-500/15 text-emerald-500' : 'bg-destructive/15 text-destructive'
   }
 
-  /** 新建一个空白请求标签 */
+  /** 新建一个空白请求标签（id 用 crypto.randomUUID 生成 UUID v4，作为保存记录的唯一标识） */
   const newTab = () => ({
-    id: 't' + Date.now() + Math.random().toString(36).slice(2, 6),
+    id: crypto.randomUUID(),
     method: 'GET',
     url: '',
     headers: [emptyHeader()],
@@ -364,7 +364,9 @@ export function activate(api) {
     /** 响应面板是否折叠为仅状态行 */
     respCollapsed: false,
     /** 请求体编辑器语言 */
-    bodyLang: 'json'
+    bodyLang: 'json',
+    /** 对应「保存的请求」条目 id：首次保存后关联，重复保存只更新该条而不新增 */
+    savedId: null
   })
 
   function ApiClientView() {
@@ -483,30 +485,48 @@ export function activate(api) {
       api.storage.set(SAVED_KEY, next)
     }
 
-    const saveCurrent = () => {
-      if (!activeTab.url.trim()) return
-      persistSaved([
-        ...saved,
-        {
-          id: String(Date.now()),
-          method: activeTab.method,
-          url: activeTab.url.trim(),
-          headers: activeTab.headers,
-          body: activeTab.body,
-          at: Date.now()
-        }
-      ])
+    const saveTab = (t) => {
+      if (!t.url.trim()) return
+      // 已保存过（含载入历史保存记录）则更新原条目，否则以标签 UUID 新增
+      const savedId = t.savedId || t.id
+      const entry = {
+        id: savedId,
+        method: t.method,
+        url: t.url.trim(),
+        headers: t.headers,
+        body: t.body,
+        at: Date.now()
+      }
+      const exists = saved.some((s) => s.id === savedId)
+      persistSaved(exists ? saved.map((s) => (s.id === savedId ? entry : s)) : [...saved, entry])
+      // 回写关联 id 到标签，保证重复保存命中同一条
+      setTabs((prev) => prev.map((x) => (x.id === t.id ? { ...x, savedId } : x)))
       message.success('已保存请求')
     }
 
-    /** 把保存的请求载入到当前激活标签 */
+    const saveCurrent = () => saveTab(activeTab)
+
+    /** Ctrl / Cmd + S 保存当前请求（无依赖数组：每次渲染都挂最新闭包） */
+    useEffect(() => {
+      const onKey = (e) => {
+        if ((e.ctrlKey || e.metaKey) && !e.altKey && String(e.key).toLowerCase() === 's') {
+          e.preventDefault()
+          saveCurrent()
+        }
+      }
+      window.addEventListener('keydown', onKey)
+      return () => window.removeEventListener('keydown', onKey)
+    })
+
+    /** 把保存的请求载入到当前激活标签（带上原条目 id，重复保存仍更新该条） */
     const applyRequest = (req) => {
       updateActive({
         method: req.method || 'GET',
         url: req.url || '',
         headers: normalizeHeaders(req.headers ?? req.headersText),
         body: req.body || '',
-        tab: 'headers'
+        tab: 'headers',
+        savedId: req.id ?? null
       })
     }
 
@@ -788,7 +808,7 @@ export function activate(api) {
           ),
           el(
             'div',
-            { className: 'h-[320px] overflow-hidden rounded-md border border-border' },
+            { className: 'h-[320px]' },
             h(MonacoEditor, {
               value: formatBody(response.body, contentType, activeTab.format),
               language: detectLanguage(contentType, response.body),
@@ -865,6 +885,16 @@ export function activate(api) {
                 },
                 h(Tag, { className: 'm-0 shrink-0 font-mono text-[10px]' }, t.method),
                 el('span', { className: 'min-w-0 truncate' }, t.url || '未命名'),
+                // 保存当前标签请求（悬停标签时显示，位于关闭按钮左侧）
+                el('button', {
+                  className:
+                    'ml-0.5 shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-secondary hover:text-foreground group-hover/tt:opacity-100',
+                  title: '保存当前请求',
+                  onClick: (e) => {
+                    e.stopPropagation()
+                    saveTab(t)
+                  }
+                }, h(Save, { className: 'size-3' })),
                 el('button', {
                   className:
                     'ml-0.5 shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-secondary hover:text-foreground group-hover/tt:opacity-100',
@@ -913,9 +943,8 @@ export function activate(api) {
           }),
           h(
             Button,
-            { type: 'primary', onClick: send, disabled: activeTab.sending, title: '发送（Ctrl+Enter）' },
-            h(Send, { className: 'size-4' }),
-            activeTab.sending ? '发送中…' : '发送'
+            { type: 'primary', loading: activeTab.sending, onClick: send, disabled: activeTab.sending, title: '发送（Ctrl+Enter）' },
+            '发送'
           )
         ),
         // 请求构造区（antd Tabs）：历史入口作为导航右侧附加内容，由抽屉展示
@@ -953,7 +982,7 @@ export function activate(api) {
                 { className: 'h-full overflow-auto p-3' },
                 el(
                   'div',
-                  { className: 'h-64 overflow-hidden rounded-md border border-border' },
+                  { className: 'h-64' },
                   h(MonacoEditor, {
                     value: activeTab.body,
                     onChange: (v) => updateActive({ body: v || '' }),
@@ -968,12 +997,6 @@ export function activate(api) {
             }
           ]
         }),
-      // 保存当前请求
-      el(
-        'div',
-        { className: 'flex items-center justify-end gap-2 border-t border-border px-3 py-1.5' },
-        h(Button, { variant: 'outlined', color: 'default', size: 'small', onClick: saveCurrent }, h(Save, { className: 'size-3.5' }), '保存当前请求')
-      ),
       // 拖拽条：上下拖动调整响应面板高度（与项目内 ResizeHandle 同款的视觉与热区处理；响应折叠时隐藏）
       !activeTab.respCollapsed &&
       el(
@@ -1019,7 +1042,28 @@ export function activate(api) {
         el(
           'div',
           { className: 'flex items-center gap-3 px-3 py-1.5 text-xs' },
-          el('span', { className: 'shrink-0 font-medium text-muted-foreground' }, '响应'),
+          // 有响应后，此处的「响应」标签换成 响应体 / 响应头 切换页签（下方 Tabs 的导航条随之隐藏）
+          response
+            ? el(
+                'div',
+                { className: 'flex shrink-0 items-center gap-1' },
+                ...[
+                  { key: 'body', label: '响应体' },
+                  { key: 'headers', label: '响应头' + (respHeaders.length ? ' (' + respHeaders.length + ')' : '') }
+                ].map((it) =>
+                  el('button', {
+                    key: it.key,
+                    onClick: () => updateActive({ resTab: it.key }),
+                    className: cn(
+                      'rounded px-2 py-0.5 transition-colors',
+                      activeTab.resTab === it.key
+                        ? 'bg-secondary font-medium text-foreground'
+                        : 'text-muted-foreground hover:text-foreground'
+                    )
+                  }, it.label)
+                )
+              )
+            : el('span', { className: 'shrink-0 font-medium text-muted-foreground' }, '响应'),
           statusPill,
           response && el('span', { className: 'text-muted-foreground' }, response.timeMs + ' ms'),
           response && el('span', { className: 'text-muted-foreground' }, (response.body || '').length + ' B'),
@@ -1034,26 +1078,30 @@ export function activate(api) {
           }, h(activeTab.respCollapsed ? ChevronUp : ChevronDown, { className: 'size-3.5' }))
         ),
         !activeTab.respCollapsed &&
-        h(Tabs, {
-          size: "small",
-          activeKey: activeTab.resTab,
-          onChange: (v) => updateActive({ resTab: v }),
-          className: 'flex min-h-0 px-4! flex-1 flex-col',
-          tabBarStyle: { margin: 0 },
-          styles: { body: { height: '100%' }, content: { height: '100%' } },
-          items: [
-            {
-              key: 'body',
-              label: '响应体',
-              children: el('div', { className: 'h-full overflow-auto py-3' }, responseBody)
-            },
-            {
-              key: 'headers',
-              label: '响应头' + (respHeaders.length ? ' (' + respHeaders.length + ')' : ''),
-              children: el('div', { className: 'h-full overflow-auto py-3' }, responseHeaders)
-            }
-          ]
-        })
+        (response
+          ? h(Tabs, {
+              size: "small",
+              activeKey: activeTab.resTab,
+              onChange: (v) => updateActive({ resTab: v }),
+              className: 'flex min-h-0 px-4! flex-1 flex-col',
+              // 页签已上移到状态行，只渲染内容区
+              tabBarStyle: { margin: 0, display: 'none' },
+              styles: { body: { height: '100%' }, content: { height: '100%' } },
+              items: [
+                {
+                  key: 'body',
+                  label: '响应体',
+                  children: el('div', { className: 'h-full overflow-auto py-3' }, responseBody)
+                },
+                {
+                  key: 'headers',
+                  label: '响应头' + (respHeaders.length ? ' (' + respHeaders.length + ')' : ''),
+                  children: el('div', { className: 'h-full overflow-auto py-3' }, responseHeaders)
+                }
+              ]
+            })
+          // 未发送请求：不显示响应体 / 响应头切换页签，仅保留提示文案
+          : el('div', { className: 'h-full overflow-auto px-4 py-3' }, responseBody))
       )
       ),
       // 请求历史抽屉（右侧滑出）
