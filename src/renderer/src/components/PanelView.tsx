@@ -29,7 +29,6 @@ import { ApiPage } from '@/components/ApiPage'
 import { ScriptsPage } from '@/components/ScriptsPage'
 import { NotesPage } from '@/components/NotesPage'
 import { PluginsPage } from '@/components/PluginsPage'
-import { ResizeHandle } from '@/components/ResizeHandle'
 import { Button, Dropdown } from 'antd'
 import { useDrag, useDrop } from 'react-dnd'
 import type { PaneNode, SplitDirection, SplitDirectionInput } from '@/lib/pane-layout'
@@ -236,8 +235,6 @@ function PanelGroupView({ groupId }: { groupId: string }) {
     const sid = groupTerminalSessionId(s, groupId)
     return sid ? !!s.ui.aiOpenSessions[sid] : false
   })
-  const aiPanelWidth = useAppStore((s) => s.ui.aiPanelWidth)
-  const setAiPanelWidth = useAppStore((s) => s.setAiPanelWidth)
 
   /** 当前悬停的分屏落区（null = 没有拖拽悬停） */
   const [zone, setZone] = useState<DropZone | null>(null)
@@ -359,19 +356,8 @@ function PanelGroupView({ groupId }: { groupId: string }) {
             )
           })}
         </div>
-        {/* AI 助手内嵌在本组右侧：只在「激活标签是终端且该页面开了 AI」时出现 */}
-        {aiOpen && aiSessionId && (
-          <>
-            <ResizeHandle
-              width={aiPanelWidth}
-              min={280}
-              max={720}
-              onResize={setAiPanelWidth}
-              invert
-            />
-            <AiPanel sessionId={aiSessionId} />
-          </>
-        )}
+        {/* AI 助手浮窗叠在终端之上（absolute 定位，不占布局）：只在「激活标签是终端且该页面开了 AI」时出现 */}
+        {aiOpen && aiSessionId && <AiPanel sessionId={aiSessionId} />}
 
         {/* 分屏落区高亮 */}
         {isOver && zone && zone !== 'center' && <DropZoneOverlay zone={zone} />}

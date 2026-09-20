@@ -279,6 +279,8 @@ function applyTabClose(
   delete aiChats[id]
   const aiOpenSessions = { ...s.ui.aiOpenSessions }
   delete aiOpenSessions[id]
+  const aiMinimizedSessions = { ...s.ui.aiMinimizedSessions }
+  delete aiMinimizedSessions[id]
   // 连接进度也随之清理
   const connectStages = { ...s.connectStages }
   delete connectStages[id]
@@ -292,7 +294,7 @@ function applyTabClose(
     monitors,
     aiChats,
     connectStages,
-    ui: { ...s.ui, panelTabs: tabs, aiOpenSessions }
+    ui: { ...s.ui, panelTabs: tabs, aiOpenSessions, aiMinimizedSessions }
   }
 }
 
@@ -459,6 +461,11 @@ interface UiState {
    * 每个终端页面各自记住自己的开关，互不影响（对话状态见 `aiChats`，同样按会话隔离）。
    */
   aiOpenSessions: Record<string, boolean>
+  /**
+   * 各终端页面的 AI 浮窗是否最小化（key 为会话 id）：
+   * 最小化后收起消息列表与输入栏，只留一行状态条展示最新对话内容。
+   */
+  aiMinimizedSessions: Record<string, boolean>
   settingsOpen: boolean
   /** 编辑中的 SSH 配置（null=新建，undefined=关闭）；groupId 为新建时预设的分组 */
   sshDialog: { open: boolean; editing?: SshProfile | null; groupId?: string }
@@ -481,8 +488,10 @@ interface UiState {
   panelTabs: PanelTab[]
   /** 侧边栏宽度（px） */
   sidebarWidth: number
-  /** AI 助手面板宽度（px） */
+  /** AI 助手浮窗宽度（px） */
   aiPanelWidth: number
+  /** AI 助手浮窗位置（相对面板组内容区：x=左边距、y=下边距；null=默认底部居中） */
+  aiFloatingPos: { x: number; y: number } | null
 }
 
 interface AppStore {
@@ -593,8 +602,12 @@ interface AppStore {
     profiles: Array<{ id: string; groupId?: string }>
   }) => Promise<void>
 
-  /** 开/关某个终端页面（会话）的 AI 助手面板 */
+  /** 开/关某个终端页面（会话）的 AI 助手浮窗 */
   setSessionAiOpen: (sessionId: string, open: boolean) => void
+  /** 最小化/展开 AI 浮窗的消息列表区 */
+  setAiMinimized: (sessionId: string, minimized: boolean) => void
+  /** 移动 AI 浮窗（null = 恢复默认底部居中） */
+  setAiFloatingPos: (pos: { x: number; y: number } | null) => void
   setSettingsOpen: (open: boolean, tab?: UiState['settingsTab']) => void
   setCommandPaletteOpen: (open: boolean) => void
   /** 切换功能区（活动栏 tab）：主区域与侧边栏都由它派生，不再单独存 view */
@@ -826,6 +839,7 @@ let shortcutWired = false
 
     ui: {
       aiOpenSessions: {},
+      aiMinimizedSessions: {},
       settingsOpen: false,
       sshDialog: { open: false, editing: null },
       runScriptDialog: { open: false },
@@ -836,7 +850,8 @@ let shortcutWired = false
       activePluginId: null,
       panelTabs: [],
       sidebarWidth: 240,
-      aiPanelWidth: 350
+      aiPanelWidth: 380,
+      aiFloatingPos: null
     },
 
     monitors: {},
@@ -1128,15 +1143,19 @@ let shortcutWired = false
         const tabs = st.ui.panelTabs.filter((t) => t.groupId !== groupId)
         const layout = removeLeaf(st.layout, groupId)
         const focus = resolveFocus(layout, groups, tabs, null, st.activeSessionId)
-        // 组已移除：组内各终端页面的 AI 面板开关一并清理
+        // 组已移除：组内各终端页面的 AI 面板开关与最小化状态一并清理
         const aiOpenSessions = { ...st.ui.aiOpenSessions }
-        for (const id of sessionIds) delete aiOpenSessions[id]
+        const aiMinimizedSessions = { ...st.ui.aiMinimizedSessions }
+        for (const id of sessionIds) {
+          delete aiOpenSessions[id]
+          delete aiMinimizedSessions[id]
+        }
         return {
           groups,
           layout,
           activeGroupId: focus.activeGroupId,
           activeSessionId: focus.activeSessionId,
-          ui: { ...st.ui, panelTabs: tabs, aiOpenSessions }
+          ui: { ...st.ui, panelTabs: tabs, aiOpenSessions, aiMinimizedSessions }
         }
       })
     },
@@ -1197,6 +1216,14 @@ let shortcutWired = false
       set((s) => ({
         ui: { ...s.ui, aiOpenSessions: { ...s.ui.aiOpenSessions, [sessionId]: open } }
       })),
+
+    setAiMinimized: (sessionId, minimized) =>
+      set((s) => ({
+        ui: { ...s.ui, aiMinimizedSessions: { ...s.ui.aiMinimizedSessions, [sessionId]: minimized } }
+      })),
+
+    setAiFloatingPos: (pos) =>
+      set((s) => ({ ui: { ...s.ui, aiFloatingPos: pos } })),
     setSettingsOpen: (open, tab) =>
       set((s) => ({
         ui: {

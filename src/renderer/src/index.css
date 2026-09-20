@@ -165,6 +165,24 @@
   }
 }
 
+/* AI 浮窗折叠状态条：新文本替换旧文本时整行淡入上移（Codex「思考中」闪过的风格，
+   配合 React key=文本 触发重播） */
+@keyframes ai-line-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.ai-line {
+  animation: ai-line-in 0.25s ease-out;
+}
+
 @theme inline {
   --font-heading:
       var(--font-sans);

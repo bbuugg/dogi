@@ -1,5 +1,5 @@
 import { AiMarkdown } from '@/components/AiMarkdown'
-import { Button, Input, Select } from 'antd'
+import { Button, Dropdown, Input, Select } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'
 import type {
@@ -12,8 +12,11 @@ import {
   ArrowDown,
   Ban,
   Check,
+  ChevronDown,
+  ChevronUp,
   Copy,
   Eraser,
+  GripVertical,
   Loader2,
   Send,
   Settings2,
@@ -23,7 +26,13 @@ import {
   Terminal,
   X
 } from 'lucide-react'
-import { useLayoutEffect, useRef, useState } from 'react'
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent
+} from 'react'
 
 const TOOL_LABELS: Record<string, string> = {
   run_in_terminal: '执行终端命令',
@@ -220,7 +229,7 @@ function MessageBubble({
       .join('')
     return (
       <div className="flex justify-end">
-        <div className="max-w-[85%] whitespace-pre-wrap rounded-lg rounded-br-sm bg-primary px-3 py-2 text-[13px] text-primary-foreground">
+        <div className="max-w-[85%] whitespace-pre-wrap rounded-lg rounded-br-sm bg-primary px-3 py-2 text-[13px] text-white">
           {text}
         </div>
       </div>
@@ -297,11 +306,39 @@ function MessageBubble({
 /** 稳定的空消息数组：避免每次渲染新引用导致滚动 effect 误触发 */
 const NO_MESSAGES: AiChatMessage[] = []
 
+/** 折叠状态条文本：取最后一条消息的最新一段（流式增长时取尾部，呈现「闪过」效果） */
+function buildCollapsedLine(messages: AiChatMessage[]): string {
+  const last = messages[messages.length - 1]
+  if (!last) return ''
+  let line = ''
+  for (const p of last.parts) {
+    if (p.type === 'text' && p.text.trim()) line = p.text.trim()
+    else if (p.type === 'tool-call') line = `⚙ ${TOOL_LABELS[p.toolName] ?? p.toolName}`
+    else if (p.type === 'tool-result' && p.isError) {
+      line = `⚠ ${TOOL_LABELS[p.toolName] ?? p.toolName}失败`
+    }
+  }
+  const flat = line.replace(/\s+/g, ' ')
+  if (last.role === 'user') return flat ? `你：${flat}` : ''
+  // AI 消息还没吐出文字（含工具执行中）：对齐 Codex 的思考态文案
+  if (!flat) return '思考中…'
+  // 取尾部而不是一行开头：流式增长时看起来像文字在往下闪过
+  return flat.length > 100 ? `…${flat.slice(-100)}` : `AI：${flat}`
+}
+
+/** 浮窗容器与面板组内容区的边距下限（px） */
+const FLOAT_MARGIN = 8
+
 /**
- * 终端页面内嵌的 AI 助手面板：展示并驱动 sessionId 所属会话的独立对话。
+ * 浮在终端之上的 AI 助手浮窗：展示并驱动 sessionId 所属会话的独立对话。
+ *
+ * 平时只是终端底部居中的一条横式输入栏（拖拽手柄 + 权限模式图标 + 输入框 + 发送）；
+ * 发送后向上展开消息列表卡片，卡片头部可最小化 —— 最小化后只留一行状态条，
+ * 最新对话内容像 Codex「思考中」那样逐行替换闪过。整体可拖拽移动（位置存 store，各终端共享）。
  *
  * AI 助手属于**终端页面**（终端标签 = 一个会话）：每个终端页面一个实例，
- * 对话（`aiChats`）与开关（`ui.aiOpenSessions`）都按会话隔离，互不影响。
+ * 对话（`aiChats`）、开关（`ui.aiOpenSessions`）与最小化（`ui.aiMinimizedSessions`）
+ * 都按会话隔离，互不影响。
  */
 export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const aiConfigs = useAppStore((s) => s.aiConfigs)
@@ -326,9 +363,22 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const setActiveAiConfig = useAppStore((s) => s.setActiveAiConfig)
   const setAiPermissionMode = useAppStore((s) => s.setAiPermissionMode)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
+  const setSessionAiOpen = useAppStore((s) => s.setSessionAiOpen)
   const aiPanelWidth = useAppStore((s) => s.ui.aiPanelWidth)
+  const floatingPos = useAppStore((s) => s.ui.aiFloatingPos)
+  const setAiFloatingPos = useAppStore((s) => s.setAiFloatingPos)
+  // 未显式设置过则为最小化（只露输入条），发送/待批准时自动展开
+  const minimized = useAppStore((s) =>
+    sessionId ? s.ui.aiMinimizedSessions[sessionId] !== false : true
+  )
+  const setAiMinimized = useAppStore((s) => s.setAiMinimized)
 
   const [input, setInput] = useState('')
+  // 弹层展开状态受控：antd 的下拉 portal 在 body 上，拖浮窗时不会跟随，
+  // 会在原地悬空错位 —— 拖拽开始就把它们收起
+  const [modelSelectOpen, setModelSelectOpen] = useState(false)
+  const [permMenuOpen, setPermMenuOpen] = useState(false)
+  const rootRef = useRef<HTMLElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   // 是否跟随底部：用户上翻阅读历史时暂停自动跟随，避免被强制拉回底部
   const nearBottomRef = useRef(true)
@@ -364,184 +414,320 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   useLayoutEffect(() => {
     const el = scrollRef.current
     if (el && nearBottomRef.current) el.scrollTop = el.scrollHeight
-  }, [messages, aiStreaming])
+  }, [messages, aiStreaming, minimized])
+
+  // 确认模式下出现待批准请求：自动展开列表，免得批准按钮藏在最小化态里看不到
+  useEffect(() => {
+    if (pendingConfirm && sessionId) setAiMinimized(sessionId, false)
+  }, [pendingConfirm, sessionId, setAiMinimized])
 
   const hasConfig = Boolean(aiSettings.activeConfigId) && aiConfigs.length > 0
   const permissionMode: AiPermissionMode =
     aiSettings.permissionMode === 'confirm' ? 'confirm' : 'full'
+  const permissionMeta =
+    PERMISSION_MODES.find((m) => m.value === permissionMode) ?? PERMISSION_MODES[1]
+  const PermissionIcon = permissionMeta.icon
+  const hasMessages = messages.length > 0 || aiStreaming
+  const showList = !minimized
+  const collapsedLine = buildCollapsedLine(messages)
+
+  /**
+   * 拖拽移动浮窗：以 pointerdown 时的 rect 为基准算偏移（浮窗用 left/bottom 定位，
+   * 列表向上展开时输入条不会跑位），并夹在面板组内容区内。落点在按钮/输入框等
+   * 交互控件上时不启动拖拽，否则会抢走它们的点击。
+   */
+  const startDrag = (e: ReactPointerEvent<HTMLElement>) => {
+    if (e.button !== 0) return
+    if ((e.target as HTMLElement).closest('button, input, textarea, .ant-select')) return
+    setModelSelectOpen(false)
+    setPermMenuOpen(false)
+    e.preventDefault()
+    const el = rootRef.current
+    const parent = el?.parentElement
+    if (!el || !parent) return
+    const cRect = parent.getBoundingClientRect()
+    const rect = el.getBoundingClientRect()
+    const baseX = rect.left - cRect.left
+    const baseY = cRect.bottom - rect.bottom
+    const startX = e.clientX
+    const startY = e.clientY
+    if (!floatingPos) setAiFloatingPos({ x: baseX, y: baseY })
+    const move = (ev: PointerEvent) => {
+      const x = Math.max(
+        FLOAT_MARGIN,
+        Math.min(cRect.width - rect.width - FLOAT_MARGIN, baseX + ev.clientX - startX)
+      )
+      const y = Math.max(
+        FLOAT_MARGIN,
+        Math.min(cRect.height - rect.height - FLOAT_MARGIN, baseY - (ev.clientY - startY))
+      )
+      setAiFloatingPos({ x, y })
+    }
+    const up = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
 
   const handleSend = () => {
     if (!input.trim() || aiStreaming || !sessionId) return
-    // 用户刚发出新消息：无论当前在哪个位置都跟随到底部
+    // 用户刚发出新消息：无论当前在哪个位置都跟随到底部，并向上展开消息列表
     nearBottomRef.current = true
+    setAiMinimized(sessionId, false)
     void sendAiMessage(input, sessionId)
     setInput('')
   }
 
   return (
-    <aside className="flex shrink-0 flex-col bg-sidebar" style={{ width: aiPanelWidth }}>
-      {/* 头部 */}
-      <div className="flex h-12 shrink-0 items-center gap-2 px-3">
-        <Sparkles className="size-4 text-primary" />
-        <span className="text-sm font-semibold">AI 助手</span>
-        <div className="flex-1" />
-        <Select
-          size="small"
-          variant="borderless"
-          className="min-w-0 flex-1"
-          value={aiSettings.activeConfigId ?? ''}
-          onChange={(v) => void setActiveAiConfig(v)}
-          placeholder="选择模型"
-          popupMatchSelectWidth={false}
-          options={aiConfigs.map((c) => ({ value: c.id, label: `${c.name}（${c.model}）` }))}
-        />
-        <Button
-          type="text"
-          icon={<Eraser className="size-3.5" />}
-          className="h-7 w-7 shrink-0 p-0 text-muted-foreground"
-          title="清空对话"
-          onClick={() => sessionId && clearAiMessages(sessionId)}
-        />
-        <Button
-          type="text"
-          icon={<Settings2 className="size-3.5" />}
-          className="h-7 w-7 shrink-0 p-0 text-muted-foreground"
-          title="AI 设置"
-          onClick={() => setSettingsOpen(true, 'ai')}
-        />
-      </div>
-
-      {/* 消息区：AI 回复属于「内容」，保持可选中复制 */}
-      <div className="relative min-h-0 flex-1">
-        <div
-          ref={scrollRef}
-          onScroll={handleListScroll}
-          className="h-full overflow-y-auto select-text"
-          style={{ overflowAnchor: 'none' }}
-        >
-        <div className="space-y-3 p-3">
-          {messages.length === 0 && (
-            <div className="mt-16 flex flex-col items-center gap-3 text-center text-muted-foreground">
-              <Sparkles className="size-8 text-primary/40" />
-              {activeSession ? (
-                <>
-                  <div className="space-y-1 text-sm leading-5">
-                    <p>试试：查看当前目录下占用空间最大的文件</p>
-                    <p>试试：诊断 nginx 为什么启动失败</p>
-                  </div>
-                </>
-              ) : (
-                <div className="space-y-1 text-xs leading-5">
-                  <p>打开一个终端会话后开始对话</p>
-                  <p>每个终端都有独立、互不影响的 AI 上下文</p>
-                </div>
-              )}
-              {!hasConfig && (
-                <Button
-                  size="small"
-                  variant="filled"
-                  className="mt-2"
-                  onClick={() => setSettingsOpen(true, 'ai')}
-                >
-                  先去配置模型
-                </Button>
-              )}
-            </div>
-          )}
-          {messages.map((msg, i) => (
-            <MessageBubble
-              key={msg.id}
-              role={msg.role}
-              parts={msg.parts}
-              streaming={aiStreaming && i === messages.length - 1 && msg.role === 'assistant'}
-              pendingConfirm={pendingConfirm}
-            />
-          ))}
-          {aiError && <p className="text-xs text-destructive">{aiError}</p>}
-        </div>
-        </div>
-        {/* 不在底部时显示：一键滚动到底部 */}
-        {showJump && (
-          <button
-            type="button"
-            onClick={jumpToBottom}
-            title="滚动到底部"
-            className="absolute bottom-3 left-1/2 flex size-8 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-background text-muted-foreground shadow-md transition-colors hover:bg-secondary hover:text-foreground"
+    <aside
+      ref={rootRef}
+      className="absolute z-20 flex select-none flex-col overflow-hidden rounded-xl border border-border bg-card/95 shadow-2xl backdrop-blur"
+      style={{
+        width: aiPanelWidth,
+        left: floatingPos ? floatingPos.x : '50%',
+        bottom: floatingPos ? floatingPos.y : 24,
+        transform: floatingPos ? undefined : 'translateX(-50%)'
+      }}
+    >
+      {showList && (
+        <>
+          {/* 卡片头部：拖拽手柄 + 模型选择 + 操作（整行可拖动） */}
+          <div
+            onPointerDown={startDrag}
+            className="flex h-10 shrink-0 cursor-move touch-none items-center gap-1 border-b border-border/70 bg-sidebar px-2"
           >
-            <ArrowDown className="size-4" />
-          </button>
-        )}
-      </div>
+            <GripVertical className="size-3.5 shrink-0 text-muted-foreground/50" />
+            <Sparkles className="size-4 shrink-0 text-primary" />
+            <Select
+              size="small"
+              variant="borderless"
+              className="min-w-0 flex-1"
+              value={aiSettings.activeConfigId ?? ''}
+              onChange={(v) => void setActiveAiConfig(v)}
+              placeholder="选择模型"
+              popupMatchSelectWidth={false}
+              open={modelSelectOpen}
+              onOpenChange={setModelSelectOpen}
+              options={aiConfigs.map((c) => ({ value: c.id, label: `${c.name}（${c.model}）` }))}
+            />
+            <Button
+              type="text"
+              icon={<Eraser className="size-3.5" />}
+              className="h-7 w-7 shrink-0 p-0 text-muted-foreground"
+              title="清空对话"
+              onClick={() => sessionId && clearAiMessages(sessionId)}
+            />
+            <Button
+              type="text"
+              icon={<Settings2 className="size-3.5" />}
+              className="h-7 w-7 shrink-0 p-0 text-muted-foreground"
+              title="AI 设置"
+              onClick={() => setSettingsOpen(true, 'ai')}
+            />
+            <Button
+              type="text"
+              icon={<ChevronDown className="size-4" />}
+              className="h-7 w-7 shrink-0 p-0 text-muted-foreground"
+              title="最小化（收起为状态条）"
+              onClick={() => sessionId && setAiMinimized(sessionId, true)}
+            />
+            <Button
+              type="text"
+              icon={<X className="size-4" />}
+              className="h-7 w-7 shrink-0 p-0 text-muted-foreground"
+              title="关闭 AI 助手"
+              onClick={() => sessionId && setSessionAiOpen(sessionId, false)}
+            />
+          </div>
 
-      {/* 输入区：圆角卡片，操作按钮集中在卡片底部（对齐 ChatInput 结构） */}
-      <div className="shrink-0 p-3">
-        <div className="rounded-lg border border-border bg-card transition-colors focus-within:border-primary">
-          {/* antd 的 cssinjs 是非 @layer 样式，会压过 Tailwind 的 border-0/outline-none，
-              用内联样式强制去掉内层边框与焦点描边，避免与外层圆角卡片形成双边框 */}
-          <Input.TextArea
+          {/* 消息区：向上展开，AI 回复属于「内容」，保持可选中复制 */}
+          <div className="relative min-h-0">
+            <div
+              ref={scrollRef}
+              onScroll={handleListScroll}
+              className="max-h-[40vh] min-h-16 overflow-y-auto select-text"
+              style={{ overflowAnchor: 'none' }}
+            >
+              <div className="space-y-3 p-3">
+                {messages.length === 0 && (
+                  <div className="flex flex-col items-center gap-3 py-6 text-center text-muted-foreground">
+                    <Sparkles className="size-8 text-primary/40" />
+                    {activeSession ? (
+                      <div className="space-y-1 text-sm leading-5">
+                        <p>试试：查看当前目录下占用空间最大的文件</p>
+                        <p>试试：诊断 nginx 为什么启动失败</p>
+                      </div>
+                    ) : (
+                      <div className="space-y-1 text-xs leading-5">
+                        <p>打开一个终端会话后开始对话</p>
+                        <p>每个终端都有独立、互不影响的 AI 上下文</p>
+                      </div>
+                    )}
+                    {!hasConfig && (
+                      <Button
+                        size="small"
+                        variant="filled"
+                        className="mt-2"
+                        onClick={() => setSettingsOpen(true, 'ai')}
+                      >
+                        先去配置模型
+                      </Button>
+                    )}
+                  </div>
+                )}
+                {messages.map((msg, i) => (
+                  <MessageBubble
+                    key={msg.id}
+                    role={msg.role}
+                    parts={msg.parts}
+                    streaming={aiStreaming && i === messages.length - 1 && msg.role === 'assistant'}
+                    pendingConfirm={pendingConfirm}
+                  />
+                ))}
+                {aiError && <p className="text-xs text-destructive">{aiError}</p>}
+              </div>
+            </div>
+            {/* 不在底部时显示：一键滚动到底部 */}
+            {showJump && (
+              <button
+                type="button"
+                onClick={jumpToBottom}
+                title="滚动到底部"
+                className="absolute bottom-3 left-1/2 flex size-8 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-background text-muted-foreground shadow-md transition-colors hover:bg-secondary hover:text-foreground"
+              >
+                <ArrowDown className="size-4" />
+              </button>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* 列表收起时错误也要可见 */}
+      {!showList && aiError && (
+        <div className="border-b border-border/60 px-3 py-1 text-[11px] text-destructive">
+          {aiError}
+        </div>
+      )}
+
+      {/* 横条输入栏（始终显示）：拖拽手柄 · 权限模式图标 · 输入框/状态条 · 展开按钮 · 发送/停止；
+          展开态下手柄与展开按钮隐藏（拖拽/收起由卡片头部承担）；
+          折叠且有对话时仅输入框让位给一行状态条（Codex「思考中」风格），
+          权限模式与发送/停止照常可用 */}
+      <div className="flex items-center gap-1 px-2 py-1.5">
+        {minimized && (
+          <span
+            onPointerDown={startDrag}
+            title="拖拽移动"
+            className="shrink-0 cursor-move touch-none rounded p-1 text-muted-foreground/50 transition-colors hover:text-foreground"
+          >
+            <GripVertical className="size-4" />
+          </span>
+        )}
+        <Dropdown
+          trigger={['click']}
+          placement="topLeft"
+          open={permMenuOpen}
+          onOpenChange={setPermMenuOpen}
+          menu={{
+            selectable: true,
+            selectedKeys: [permissionMode],
+            items: PERMISSION_MODES.map((m) => ({
+              key: m.value,
+              icon: <m.icon className="size-3.5" />,
+              label: (
+                <span>
+                  {m.label}
+                  <span className="block text-[10px] text-muted-foreground">{m.hint}</span>
+                </span>
+              )
+            })),
+            onClick: ({ key }) => void setAiPermissionMode(key as AiPermissionMode)
+          }}
+        >
+          <Button
+            type="text"
+            size="small"
+            icon={<PermissionIcon className="size-4" />}
+            title={`${permissionMeta.label}：${permissionMeta.hint}（点击切换）`}
+            className={cn(
+              'shrink-0',
+              permissionMode === 'full' ? 'text-muted-foreground' : 'text-amber-500'
+            )}
+          />
+        </Dropdown>
+        {minimized && hasMessages ? (
+          /* 折叠态的输入框位置：一行最新对话内容闪过，点击展开对话；
+             h-8 对齐 antd 输入框默认高度（32px），两种中心内容切换时条高不变 */
+          <div
+            className="flex h-8 min-w-0 flex-1 cursor-pointer items-center gap-1.5 px-1"
+            title="展开对话"
+            onClick={() => sessionId && setAiMinimized(sessionId, false)}
+          >
+            {aiStreaming && (
+              <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />
+            )}
+            {/* key=文本：每次替换重新触发淡入上移动画，制造「闪过」感 */}
+            <div
+              key={collapsedLine}
+              className="ai-line min-w-0 flex-1 truncate text-[12px] text-muted-foreground"
+            >
+              {collapsedLine}
+            </div>
+          </div>
+        ) : (
+          <Input
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+              if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
                 e.preventDefault()
                 handleSend()
               }
             }}
             placeholder={
-              hasConfig ? '描述你想做的事…（Enter 发送，Shift+Enter 换行）' : '请先在设置中配置模型'
+              hasConfig
+                ? activeSession
+                  ? `描述你想做的事…（Enter 发送 · 绑定 ${activeSession.title}）`
+                  : '描述你想做的事…（Enter 发送）'
+                : '请先在设置中配置模型'
             }
-            rows={2}
-            autoSize={{ minRows: 2, maxRows: 6 }}
-            className="min-h-14 max-h-40 overflow-y-auto px-2.5 pt-2.5 text-[13px] no-scrollbar"
             variant="borderless"
-            style={{ border: 'none', background: 'transparent', boxShadow: 'none', outline: 'none' }}
+            className="min-w-0 flex-1 text-[13px]"
           />
-          <div className="flex items-center justify-between gap-2 px-2 pb-2">
-            <div className="flex min-w-0 items-center gap-1">
-              <Select
-                placement="topLeft"
-                size="small"
-                variant="borderless"
-                className="w-28 shrink-0"
-                value={permissionMode}
-                onChange={(v) => void setAiPermissionMode(v as AiPermissionMode)}
-                popupMatchSelectWidth={false}
-                options={PERMISSION_MODES.map((m) => ({
-                  value: m.value,
-                  label: (
-                    <span className="flex items-center gap-1.5">
-                      <m.icon className="size-3" />
-                      {m.label}
-                    </span>
-                  )
-                }))}
-              />
-            </div>
-            {aiStreaming ? (
-              <Button
-                type="text"
-                danger
-                icon={<Square className="size-4" />}
-                title="停止"
-                onClick={() => sessionId && void abortAi(sessionId)}
-              />
-            ) : (
-              <Button
-                type="text"
-                icon={<Send className="size-4" />}
-                disabled={!input.trim() || !hasConfig || !sessionId}
-                title="发送"
-                onClick={handleSend}
-              />
-            )}
-          </div>
-        </div>
-        <div className="mt-1.5 truncate text-[10px] text-muted-foreground text-center">
-          {activeSession
-            ? `本对话绑定终端：${activeSession.title}`
-            : '打开一个终端会话后，AI 才能执行命令'}
-          {' · '}
-        </div>
+        )}
+        {minimized && (
+          <Button
+            type="text"
+            size="small"
+            icon={<ChevronUp className="size-4" />}
+            title="展开对话"
+            className="h-7 w-7 shrink-0 p-0 text-muted-foreground"
+            onClick={() => sessionId && setAiMinimized(sessionId, false)}
+          />
+        )}
+        {aiStreaming ? (
+          <Button
+            type="text"
+            danger
+            size="small"
+            icon={<Square className="size-4" />}
+            title="停止"
+            className="shrink-0"
+            onClick={() => sessionId && void abortAi(sessionId)}
+          />
+        ) : (
+          <Button
+            type="text"
+            size="small"
+            icon={<Send className="size-4" />}
+            disabled={!input.trim() || !hasConfig || !sessionId}
+            title="发送"
+            className="shrink-0"
+            onClick={handleSend}
+          />
+        )}
       </div>
     </aside>
   )

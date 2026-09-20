@@ -35,9 +35,9 @@ export function SettingsDialog() {
       centered
       width={880}
       destroyOnHidden
-      // 弹窗高度固定在 62vh：header 由 antd 固定，body 收内容并内部滚动（无滚动条）
+      // 弹窗高度固定在 70vh：header 由 antd 固定，body 收内容并内部滚动（无滚动条）
       styles={{
-        container: { height: '62vh', minHeight: 380, display: 'flex', flexDirection: 'column' },
+        container: { height: '70vh', minHeight: 380, display: 'flex', flexDirection: 'column' },
         body: { flex: 1, minHeight: 0, padding: 0 }
       }}
       classNames={{ body: 'no-scrollbar' }}
