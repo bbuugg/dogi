@@ -426,36 +426,45 @@ export function ApiPanel() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="px-3 py-2">
-        {/* 新建入口带下拉：空白请求 / cURL 导入 / 新建分组都从这里进 */}
-        <Dropdown
-          trigger={['click']}
-          menu={{
-            items: [
-              { key: 'blank', icon: <Plus className="size-3.5" />, label: '新建请求' },
-              { key: 'curl', icon: <Terminal className="size-3.5" />, label: '导入 cURL' },
-              { type: 'divider' },
-              { key: 'group', icon: <FolderPlus className="size-3.5" />, label: '新建分组' }
-            ],
-            onClick: ({ key }) => {
-              if (key === 'blank') void handleCreate()
-              else if (key === 'group') setGroupEdit({ name: '' })
-              else setCurlOpen(true)
-            }
-          }}
-        >
+      {/* 接口请求（左侧标题 + 右侧新建分组 / 新建下拉，与「主机」「笔记」面板同款） */}
+      <div className="mb-1 flex items-center justify-between gap-1 px-3 py-2">
+        <span className="text-sm font-medium text-muted-foreground">
+          接口请求 ({apiRequests.length})
+        </span>
+        <div className="flex items-center gap-1">
           <Button
-            type="primary"
-            block
-            icon={<Plus className="size-4" />}
-            title="新建请求 / 导入 cURL / 新建分组"
+            type="text"
+            size="small"
+            className="px-0.5 text-muted-foreground"
+            title="新建分组"
+            icon={<FolderPlus className="size-3.5" />}
+            onClick={() => setGroupEdit({ name: '' })}
+          />
+          {/* 新建入口带下拉：空白请求 / cURL 导入两个动作收进菜单 */}
+          <Dropdown
+            trigger={['click']}
+            menu={{
+              items: [
+                { key: 'blank', icon: <Plus className="size-3.5" />, label: '新建请求' },
+                { key: 'curl', icon: <Terminal className="size-3.5" />, label: '导入 cURL' }
+              ],
+              onClick: ({ key }) => {
+                if (key === 'blank') void handleCreate()
+                else setCurlOpen(true)
+              }
+            }}
           >
-            <span className="inline-flex items-center gap-1">
-              新建
-              <ChevronDown className="size-3.5 opacity-60" />
-            </span>
-          </Button>
-        </Dropdown>
+            <Button
+              type="text"
+              size="small"
+              className="px-0.5 text-muted-foreground"
+              title="新建请求 / 导入 cURL"
+              icon={<Plus className="size-3.5" />}
+            >
+              <ChevronDown className="size-3 opacity-60" />
+            </Button>
+          </Dropdown>
+        </div>
       </div>
 
       <div className="px-3 pb-2">
@@ -472,7 +481,7 @@ export function ApiPanel() {
           <div className="mx-2 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
             还没有保存的请求。
             <br />
-            点击上方「新建」创建请求，或导入 cURL 命令。
+            点击右上角 + 新建请求，或导入 cURL 命令。
           </div>
         ) : noMatch ? (
           <div className="mx-2 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
@@ -777,8 +786,10 @@ function RequestRow({
     <div
       ref={ref}
       className={cn(
-        'group/req relative flex min-w-0 flex-1 cursor-pointer items-start gap-2 rounded pr-1',
-        isDragging && 'opacity-40'
+        'group/req relative flex min-w-0 flex-1 cursor-pointer items-start gap-2 rounded px-1 py-1',
+        isDragging && 'opacity-40',
+        // 高亮画在最外层整行：右侧悬浮删除按钮所在区域也要有底色，否则视觉上断一块
+        active ? 'bg-primary/10 text-foreground' : 'text-muted-foreground'
       )}
       onClick={onOpen}
       title={`${request.method} ${request.url}`}
@@ -795,12 +806,7 @@ function RequestRow({
           }
         }}
       >
-        <div
-          className={cn(
-            'flex min-w-0 flex-1 items-start gap-2 rounded px-1 py-1',
-            active ? 'bg-primary/10 text-foreground' : 'text-muted-foreground'
-          )}
-        >
+        <div className="flex min-w-0 flex-1 items-start gap-2">
           <Globe className="mt-0.5 size-3.5 shrink-0 opacity-70" />
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">

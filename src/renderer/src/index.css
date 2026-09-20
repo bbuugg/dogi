@@ -87,6 +87,10 @@
 
 .side-tree .ant-tree-node-content-wrapper {
   display: flex;
+  /* blockNode 下 antd 给 wrapper 的是 flex:auto（min-width 按内容算），长标题会把整行撑出 sidebar；
+     min-width:0 让它能收缩，内部的 truncate 才能生效（不用 overflow:hidden，会裁掉拖拽指示线） */
+  flex: 1 1 auto;
+  min-width: 0;
   align-items: center;
   min-height: 30px;
   padding: 0 4px;

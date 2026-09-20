@@ -669,8 +669,10 @@ function NoteRow({
     <div
       ref={ref}
       className={cn(
-        'group/note relative flex min-w-0 flex-1 cursor-pointer items-start gap-2 rounded pr-1',
-        isDragging && 'opacity-40'
+        'group/note relative flex min-w-0 flex-1 cursor-pointer items-start gap-2 rounded px-1 py-1',
+        isDragging && 'opacity-40',
+        // 高亮画在最外层整行：右侧悬浮删除按钮所在区域也要有底色，否则视觉上断一块
+        active ? 'bg-primary/10 text-foreground' : 'text-muted-foreground'
       )}
       onClick={onOpen}
       title={note.title}
@@ -687,12 +689,7 @@ function NoteRow({
           }
         }}
       >
-        <div
-          className={cn(
-            'flex min-w-0 flex-1 items-start gap-2 rounded px-1 py-1',
-            active ? 'bg-primary/10 text-foreground' : 'text-muted-foreground'
-          )}
-        >
+        <div className="flex min-w-0 flex-1 items-start gap-2">
           <FileText className="mt-0.5 size-3.5 shrink-0 opacity-70" />
           <div className="min-w-0 flex-1">
             <div className="truncate text-[13px] font-medium">{note.title}</div>
