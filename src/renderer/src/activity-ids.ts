@@ -12,5 +12,6 @@
  */
 export const HOSTS_ACTIVITY_ID = 'hosts'
 export const SCRIPTS_ACTIVITY_ID = 'scripts'
-export const PLUGINS_ACTIVITY_ID = 'plugins'
 export const NOTES_ACTIVITY_ID = 'notes'
+export const API_ACTIVITY_ID = 'api'
+export const PLUGINS_ACTIVITY_ID = 'plugins'

@@ -17,7 +17,7 @@ export const SHORTCUT_ACTIONS: ShortcutActionMeta[] = [
   { action: 'open-command-palette', label: '打开命令面板', defaultAccelerator: 'CommandOrControl+Shift+P' },
   { action: 'open-settings', label: '打开设置', defaultAccelerator: 'CommandOrControl+Alt+S' },
   { action: 'open-scripts', label: '打开脚本页', defaultAccelerator: 'CommandOrControl+Alt+K' },
-  { action: 'toggle-ai-panel', label: '切换 AI 助手面板', defaultAccelerator: '' }
+  { action: 'toggle-ai-panel', label: '切换当前终端页面的 AI 助手', defaultAccelerator: '' }
 ]
 
 /** 缺省快捷键（首次启动 / 恢复默认时使用） */

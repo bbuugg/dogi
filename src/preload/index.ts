@@ -6,6 +6,10 @@ import type {
   AiModelConfig,
   AiSettings,
   AiStreamEvent,
+  ApiHistoryEntry,
+  ApiHttpRequest,
+  ApiHttpResponse,
+  ApiRequestEntry,
   AppInfo,
   AppShortcutAction,
   McpServerConfig,
@@ -133,6 +137,19 @@ const api = {
     list: (): Promise<NoteEntry[]> => ipcRenderer.invoke('notes:list'),
     save: (note: NoteEntry): Promise<NoteEntry[]> => ipcRenderer.invoke('notes:save', note),
     remove: (id: string): Promise<NoteEntry[]> => ipcRenderer.invoke('notes:delete', id)
+  },
+  /** 内置的「接口请求」功能：请求由主进程发出，规避渲染进程的 CORS 限制 */
+  apiClient: {
+    list: (): Promise<ApiRequestEntry[]> => ipcRenderer.invoke('api:list'),
+    save: (entry: ApiRequestEntry): Promise<ApiRequestEntry[]> =>
+      ipcRenderer.invoke('api:save', entry),
+    remove: (id: string): Promise<ApiRequestEntry[]> => ipcRenderer.invoke('api:delete', id),
+    listHistory: (): Promise<ApiHistoryEntry[]> => ipcRenderer.invoke('api:history:list'),
+    /** 覆盖写入整段历史（渲染端负责裁剪条数） */
+    saveHistory: (entries: ApiHistoryEntry[]): Promise<ApiHistoryEntry[]> =>
+      ipcRenderer.invoke('api:history:save', entries),
+    clearHistory: (): Promise<ApiHistoryEntry[]> => ipcRenderer.invoke('api:history:clear'),
+    send: (req: ApiHttpRequest): Promise<ApiHttpResponse> => ipcRenderer.invoke('api:send', req)
   },
   prefs: {
     get: (): Promise<Preferences> => ipcRenderer.invoke('prefs:get'),

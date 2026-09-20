@@ -4,6 +4,7 @@ import { Sidebar } from '@/components/Sidebar'
 import { ActivityBar } from '@/components/ActivityBar'
 import { useActiveActivity } from '@/activities'
 import { MonitorBadge } from '@/components/MonitorBadge'
+import { AiStatusButton } from '@/components/AiStatusButton'
 import { SshProfileDialog } from '@/components/SshProfileDialog'
 import { SettingsDialog } from '@/components/SettingsDialog'
 import { CommandPalette } from '@/components/CommandPalette'
@@ -62,8 +63,15 @@ export default function App() {
           </main>
         </div>
 
-        {/* 底部功能条（类 VS Code 状态栏），整宽；监控指标条仅在终端标签激活时显示 */}
-        <StatusBar>{isTerminalActive && <MonitorBadge sessionId={activeSessionId} />}</StatusBar>
+        {/*
+          底部功能条（类 VS Code 状态栏），整宽。
+          左侧：监控指标条仅在终端标签激活时显示；
+          右侧：AI 助手开关（纯图标）由 AiStatusButton 自己判断「当前激活标签是终端」
+          才渲染，操作的是该终端页面自己的开关状态。
+        */}
+        <StatusBar right={<AiStatusButton />}>
+          {isTerminalActive && <MonitorBadge sessionId={activeSessionId} />}
+        </StatusBar>
 
         <SshProfileDialog />
         <SettingsDialog />

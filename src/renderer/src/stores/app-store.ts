@@ -7,6 +7,8 @@ import type {
   AiPermissionMode,
   AiSettings,
   AiStreamEvent,
+  ApiHistoryEntry,
+  ApiRequestEntry,
   ColorThemeName,
   NoteEntry,
   Preferences,
@@ -27,6 +29,7 @@ import type { PluginViewInstance } from '@/plugins/host'
 import { DEFAULT_SHORTCUTS } from '@shared/shortcuts'
 import { HOSTS_ACTIVITY_ID, SCRIPTS_ACTIVITY_ID } from '@/activity-ids'
 import { clampTerminalFontSize } from '@/lib/terminal-font'
+import { parseCurl } from '@/lib/api-client'
 import { scriptToTerminalInput } from '@/lib/script'
 import { applyColorTheme } from '@/lib/theme'
 import {
@@ -41,13 +44,13 @@ import {
 } from '@/lib/pane-layout'
 
 /** PanelView 标签类型（终端会话也是其中一种，不再有独立的「终端」固定标签） */
-export type PanelTabType = 'terminal' | 'script' | 'note' | 'plugins' | 'plugin'
+export type PanelTabType = 'terminal' | 'script' | 'note' | 'api' | 'plugins' | 'plugin'
 
 /**
  * PanelView 中打开的标签页。
  *
- * 标签 id 由身份推导（terminal-<sessionId> / script-<id> / note-<id> / plugins / plugin-<viewId>），
- * 这样「是否已打开」只需比对 id，无需遍历业务字段。
+ * 标签 id 由身份推导（terminal-<sessionId> / script-<id> / note-<id> / api-<id> /
+ * plugins / plugin-<viewId>），这样「是否已打开」只需比对 id，无需遍历业务字段。
  */
 export interface PanelTab {
   id: string
@@ -60,6 +63,8 @@ export interface PanelTab {
   sessionId?: string
   scriptId?: string
   noteId?: string
+  /** 接口请求：保存的请求 id */
+  apiRequestId?: string
   pluginViewId?: string
 }
 
@@ -76,6 +81,34 @@ export interface PanelGroup {
 /** 终端标签 id：由会话 id 推导，重连换会话 id 时同步换标签 id */
 export function terminalTabId(sessionId: string): string {
   return `terminal-${sessionId}`
+}
+
+/** 接口请求标签 id：由请求 id 推导 */
+export function apiTabId(requestId: string): string {
+  return `api-${requestId}`
+}
+
+/** 请求历史最多保留的条数 */
+export const API_HISTORY_LIMIT = 50
+
+/**
+ * 接口请求的展示名：优先用用户起的名字，否则退回「方法 + 路径」，
+ * 都没有时给个占位（新建但还没填地址的请求）。
+ */
+export function apiTabTitle(req: Pick<ApiRequestEntry, 'name' | 'method' | 'url'>): string {
+  const name = req.name.trim()
+  if (name) return name
+  const url = req.url.trim()
+  if (!url) return '新建请求'
+  try {
+    const u = new URL(url)
+    // 根路径且无查询串时用主机名，避免出现「GET /」这种没信息量的标题
+    const path = u.pathname === '/' && !u.search ? u.host : `${u.pathname}${u.search}`
+    return `${req.method} ${path}`
+  } catch {
+    // 地址还不完整（如只输入了 example.com）时按原文展示
+    return `${req.method} ${url}`
+  }
 }
 
 /** 打开一个已保存的主机会话：主进程按主机类型（ssh / local）决定启动方式 */
@@ -233,9 +266,11 @@ function applyTabClose(
   exited.delete(id)
   const monitors = { ...s.monitors }
   delete monitors[id]
-  // 会话关闭，其独立的 AI 对话随之清理
+  // 会话关闭，其独立的 AI 对话与 AI 面板开关随之清理
   const aiChats = { ...s.aiChats }
   delete aiChats[id]
+  const aiOpenSessions = { ...s.ui.aiOpenSessions }
+  delete aiOpenSessions[id]
   // 连接进度也随之清理
   const connectStages = { ...s.connectStages }
   delete connectStages[id]
@@ -249,7 +284,7 @@ function applyTabClose(
     monitors,
     aiChats,
     connectStages,
-    ui: { ...s.ui, panelTabs: tabs }
+    ui: { ...s.ui, panelTabs: tabs, aiOpenSessions }
   }
 }
 
@@ -393,9 +428,29 @@ function addOrFocusTab(s: AppStore, tab: Omit<PanelTab, 'groupId'>): Partial<App
   }
 }
 
+/**
+ * 某个面板组里「激活标签对应的终端会话 id」（激活的不是终端时为 undefined）。
+ *
+ * 「终端页面」= 终端标签 = 一个会话，这是 AI 助手的归属单位。状态栏开关、
+ * 面板渲染、快捷键都以此为准，省得每处各写一遍「取激活标签再判类型」。
+ */
+export function groupTerminalSessionId(
+  s: { groups: Record<string, PanelGroup>; ui: { panelTabs: PanelTab[] } },
+  groupId: string | null | undefined
+): string | undefined {
+  const tabId = groupId ? s.groups[groupId]?.activeTabId : null
+  const tab = tabId ? s.ui.panelTabs.find((t) => t.id === tabId) : undefined
+  return tab?.type === 'terminal' ? tab.sessionId : undefined
+}
+
 interface UiState {
-  /** 各面板组是否打开其内置 AI 助手（key 为 groupId；AI 属于组而非全局） */
-  aiOpenGroups: Record<string, boolean>
+  /**
+   * 各终端页面是否打开其内置 AI 助手（key 为会话 id，终端标签 = 一个终端页面）。
+   *
+   * AI 助手**属于终端页面**而不是面板组：同一个组里切标签就换实例，
+   * 每个终端页面各自记住自己的开关，互不影响（对话状态见 `aiChats`，同样按会话隔离）。
+   */
+  aiOpenSessions: Record<string, boolean>
   settingsOpen: boolean
   /** 编辑中的 SSH 配置（null=新建，undefined=关闭）；groupId 为新建时预设的分组 */
   sshDialog: { open: boolean; editing?: SshProfile | null; groupId?: string }
@@ -447,6 +502,12 @@ interface AppStore {
   // ---------- 笔记 ----------
   notes: NoteEntry[]
 
+  // ---------- 接口请求 ----------
+  /** 保存的接口请求（侧边栏列表；一个请求对应 PanelView 里的一个标签） */
+  apiRequests: ApiRequestEntry[]
+  /** 请求历史（发送后自动记录，按时间倒序） */
+  apiHistory: ApiHistoryEntry[]
+
   // ---------- 偏好 ----------
   preferences: Preferences
   /** 全局快捷键配置（动作 -> accelerator），主进程据此注册系统级快捷键 */
@@ -490,7 +551,10 @@ interface AppStore {
   setActiveSession: (id: string) => void
   /** 聚焦某个面板组 */
   setActiveGroup: (groupId: string) => void
-  /** 向当前激活组的上/下/左/右拆分出新组（组内多标签则把激活标签拆过去） */
+  /**
+   * 向当前激活组的上/下/左/右拆分出新组：把该组的激活标签拎过去。
+   * 组内不足两个标签时不做任何事（拆了还是同一个组，且绝不新建终端）。
+   */
   splitActivePane: (direction: SplitDirectionInput) => Promise<void>
   /** 把标签移到目标组（可指定插入位置）；源组若因此变空则从布局中移除 */
   moveTabToGroup: (tabId: string, targetGroupId: string, index?: number) => void
@@ -515,7 +579,8 @@ interface AppStore {
     profiles: Array<{ id: string; groupId?: string }>
   }) => Promise<void>
 
-  setGroupAiOpen: (groupId: string, open: boolean) => void
+  /** 开/关某个终端页面（会话）的 AI 助手面板 */
+  setSessionAiOpen: (sessionId: string, open: boolean) => void
   setSettingsOpen: (open: boolean, tab?: UiState['settingsTab']) => void
   setCommandPaletteOpen: (open: boolean) => void
   /** 切换功能区（活动栏 tab）：主区域与侧边栏都由它派生，不再单独存 view */
@@ -544,6 +609,28 @@ interface AppStore {
   refreshScripts: () => Promise<void>
   /** 删除脚本，并关掉它的标签页 */
   deleteScript: (id: string) => Promise<void>
+  /** 刷新接口请求列表到 store */
+  refreshApiRequests: () => Promise<void>
+  /**
+   * 新建一条请求并返回其 id（不自动打开标签，由调用方决定）。
+   * `seed` 用于预填内容（导入 cURL 走这条路），缺省就是一条空请求。
+   */
+  createApiRequest: (seed?: Partial<ApiRequestEntry>) => Promise<string>
+  /**
+   * 解析 cURL 命令并保存为一条新请求，返回新请求 id。
+   * 解析失败会抛错（由调用方提示），成功时也不自动打开标签。
+   */
+  importCurlRequest: (curlText: string) => Promise<string>
+  /** 刷新请求历史到 store */
+  refreshApiHistory: () => Promise<void>
+  /** 保存接口请求（upsert）：已有请求原地更新 */
+  saveApiRequest: (entry: ApiRequestEntry) => Promise<void>
+  /** 删除接口请求，并关掉它的标签页 */
+  deleteApiRequest: (id: string) => Promise<void>
+  /** 记录一条请求历史（截断到 API_HISTORY_LIMIT 条并落盘） */
+  recordApiHistory: (entry: ApiHistoryEntry) => Promise<void>
+  /** 清空请求历史 */
+  clearApiHistory: () => Promise<void>
   /** 刷新笔记列表到 store */
   refreshNotes: () => Promise<void>
   /** 新建一篇空笔记并返回其 id（默认语言 markdown） */
@@ -558,6 +645,8 @@ interface AppStore {
   openScriptTab: (scriptId: string) => void
   /** 在 PanelView 中打开笔记标签（已存在则激活） */
   openNoteTab: (noteId: string) => void
+  /** 在 PanelView 中打开接口请求标签（已存在则激活） */
+  openApiTab: (requestId: string) => void
   /** 在 PanelView 中打开插件管理标签（已存在则激活） */
   openPluginsTab: () => void
   /** 在 PanelView 中打开插件视图标签（已存在则激活） */
@@ -665,6 +754,8 @@ let shortcutWired = false
 
     scripts: [],
     notes: [],
+    apiRequests: [],
+    apiHistory: [],
 
     preferences: { theme: 'system', colorTheme: 'neutral', customColor: '#3b82f6', terminalTheme: 'auto', copyOnSelect: true, rightClickPaste: true, commandPrediction: true, terminalFontSize: 13, localShell: 'default', minimizeToTray: true, monitorInterval: 2000 },
 
@@ -682,7 +773,7 @@ let shortcutWired = false
     pluginCommands: {},
 
     ui: {
-      aiOpenGroups: {},
+      aiOpenSessions: {},
       settingsOpen: false,
       sshDialog: { open: false, editing: null },
       runScriptDialog: { open: false },
@@ -699,7 +790,7 @@ let shortcutWired = false
     monitors: {},
 
     bootstrap: async () => {
-      const [profiles, sshGroups, configs, settings, preferences, shells, scripts, notes, shortcuts] = await Promise.all([
+      const [profiles, sshGroups, configs, settings, preferences, shells, scripts, notes, apiRequests, apiHistory, shortcuts] = await Promise.all([
         window.api.ssh.list(),
         window.api.ssh.listGroups(),
         window.api.ai.listConfigs(),
@@ -708,6 +799,8 @@ let shortcutWired = false
         window.api.terminal.listShells(),
         window.api.scripts.list(),
         window.api.notes.list(),
+        window.api.apiClient.list(),
+        window.api.apiClient.listHistory(),
         window.api.shortcuts.get()
       ])
       // 配色必须在偏好写进 store 之前落到 html 上：antd 的 token 是在 store 更新引发的那次
@@ -722,6 +815,8 @@ let shortcutWired = false
         shells,
         scripts,
         notes,
+        apiRequests,
+        apiHistory,
         shortcuts
       })
       // 运行时加载外部插件（扫描 userData/plugins 并收集视图）
@@ -746,9 +841,9 @@ let shortcutWired = false
           else if (action === 'new-session') void s.createLocalSession()
           else if (action === 'open-command-palette') s.setCommandPaletteOpen(true)
           else if (action === 'toggle-ai-panel') {
-            // AI 属于终端组：作用于当前激活组
-            const gid = s.activeGroupId
-            if (gid) s.setGroupAiOpen(gid, !s.ui.aiOpenGroups[gid])
+            // AI 属于终端页面：只作用于当前激活的终端标签（激活的不是终端则忽略）
+            const sid = groupTerminalSessionId(s, s.activeGroupId)
+            if (sid) s.setSessionAiOpen(sid, !s.ui.aiOpenSessions[sid])
           }
           else if (action === 'open-scripts') s.selectActivity(SCRIPTS_ACTIVITY_ID)
         })
@@ -850,54 +945,16 @@ let shortcutWired = false
     },
 
     splitActivePane: async (direction) => {
+      // 只搬动标签：把当前激活标签拎到该方向的新组。
+      // 组内只有这一个标签时不做事（拆了也还是同一个组，等于空操作）——
+      // 这里不再「顺手新建一个终端」来凑分屏，标签操作不牵连其它功能。
       const s = get()
       const activeGroupId = s.activeGroupId
-      // 无激活组时退化为新建一个终端
-      if (!activeGroupId || !s.groups[activeGroupId]) {
-        await get().createLocalSession()
-        return
-      }
+      if (!activeGroupId) return
       const g = s.groups[activeGroupId]
-
-      // 组内有多个标签：把当前激活标签「拎出来」放到该方向的新组，不新建会话
-      if (g.tabIds.length > 1) {
-        const movingId = g.activeTabId ?? g.tabIds[0]
-        get().splitTabToGroup(movingId, activeGroupId, direction)
-        return
-      }
-
-      // 组内只有一个标签：镜像它新建一个同类型会话并拆到该方向
-      const activeTab = g.activeTabId ? s.ui.panelTabs.find((t) => t.id === g.activeTabId) : undefined
-      const src = activeTab?.sessionId
-        ? s.sessions.find((x) => x.id === activeTab.sessionId)
-        : undefined
-      // 镜像当前标签：绑定了主机（ssh / local 主机）的沿用其配置，纯本地会话新建默认 shell
-      const info: SessionInfo = src?.profileId
-        ? await openSession(src.profileId)
-        : await window.api.terminal.createLocal(80, 24)
-      set((st) => {
-        const gid = genPaneId()
-        const tab: PanelTab = {
-          id: terminalTabId(info.id),
-          type: 'terminal',
-          title: info.title || '终端',
-          closable: true,
-          groupId: gid,
-          sessionId: info.id
-        }
-        // 在激活组旁插入承载新组的叶子
-        const layout = st.layout
-          ? insertSibling(st.layout, activeGroupId, direction, makeLeaf(gid))
-          : makeLeaf(gid)
-        return {
-          sessions: [...st.sessions, info],
-          groups: { ...st.groups, [gid]: { id: gid, tabIds: [tab.id], activeTabId: tab.id } },
-          layout,
-          activeGroupId: gid,
-          activeSessionId: info.id,
-          ui: { ...st.ui, panelTabs: [...st.ui.panelTabs, tab] }
-        }
-      })
+      if (!g || g.tabIds.length < 2) return
+      const movingId = g.activeTabId ?? g.tabIds[0]
+      get().splitTabToGroup(movingId, activeGroupId, direction)
     },
 
     moveTabToGroup: (tabId, targetGroupId, index) =>
@@ -1013,15 +1070,15 @@ let shortcutWired = false
         const tabs = st.ui.panelTabs.filter((t) => t.groupId !== groupId)
         const layout = removeLeaf(st.layout, groupId)
         const focus = resolveFocus(layout, groups, tabs, null, st.activeSessionId)
-        // 组已移除：其 AI 面板开关状态一并清理
-        const aiOpenGroups = { ...st.ui.aiOpenGroups }
-        delete aiOpenGroups[groupId]
+        // 组已移除：组内各终端页面的 AI 面板开关一并清理
+        const aiOpenSessions = { ...st.ui.aiOpenSessions }
+        for (const id of sessionIds) delete aiOpenSessions[id]
         return {
           groups,
           layout,
           activeGroupId: focus.activeGroupId,
           activeSessionId: focus.activeSessionId,
-          ui: { ...st.ui, panelTabs: tabs, aiOpenGroups }
+          ui: { ...st.ui, panelTabs: tabs, aiOpenSessions }
         }
       })
     },
@@ -1078,8 +1135,10 @@ let shortcutWired = false
       set({ sshGroups: groups, profiles })
     },
 
-    setGroupAiOpen: (groupId, open) =>
-      set((s) => ({ ui: { ...s.ui, aiOpenGroups: { ...s.ui.aiOpenGroups, [groupId]: open } } })),
+    setSessionAiOpen: (sessionId, open) =>
+      set((s) => ({
+        ui: { ...s.ui, aiOpenSessions: { ...s.ui.aiOpenSessions, [sessionId]: open } }
+      })),
     setSettingsOpen: (open, tab) =>
       set((s) => ({
         ui: {
@@ -1228,6 +1287,64 @@ let shortcutWired = false
       set((s) => ({ ui: { ...s.ui, activePluginId: id } }))
     },
 
+    refreshApiRequests: async () => {
+      set({ apiRequests: await window.api.apiClient.list() })
+    },
+
+    createApiRequest: async (seed) => {
+      const prevIds = new Set(get().apiRequests.map((r) => r.id))
+      const list = await window.api.apiClient.save({
+        id: '',
+        name: '',
+        method: 'GET',
+        url: '',
+        headers: [{ key: '', value: '' }],
+        body: '',
+        createdAt: 0,
+        updatedAt: 0,
+        ...seed
+      })
+      const created = list.find((r) => !prevIds.has(r.id))
+      set({ apiRequests: list })
+      return created?.id ?? ''
+    },
+
+    importCurlRequest: async (curlText) => {
+      // 纯文本 → 解析 → 复用 createApiRequest 落盘（解析失败直接抛给调用方）
+      const parsed = parseCurl(curlText)
+      return get().createApiRequest({
+        method: parsed.method,
+        url: parsed.url,
+        headers: parsed.headers.length ? parsed.headers : [{ key: '', value: '' }],
+        body: parsed.body
+      })
+    },
+
+    refreshApiHistory: async () => {
+      set({ apiHistory: await window.api.apiClient.listHistory() })
+    },
+
+    saveApiRequest: async (entry) => {
+      set({ apiRequests: await window.api.apiClient.save(entry) })
+    },
+
+    deleteApiRequest: async (id) => {
+      const apiRequests = await window.api.apiClient.remove(id)
+      // 该请求若正在标签页里打开，一并关掉（与脚本/笔记删除一致）
+      set((s) => ({ apiRequests, ...closePlainTab(s, apiTabId(id)) }))
+    },
+
+    recordApiHistory: async (entry) => {
+      const next = [entry, ...get().apiHistory].slice(0, API_HISTORY_LIMIT)
+      // 先更新界面再落盘：历史是滑动窗口的覆盖式写入，落盘失败也不影响继续发送
+      set({ apiHistory: next })
+      await window.api.apiClient.saveHistory(next)
+    },
+
+    clearApiHistory: async () => {
+      set({ apiHistory: await window.api.apiClient.clearHistory() })
+    },
+
     openScriptTab: (scriptId) => {
       set((s) => {
         const script = s.scripts.find((sc) => sc.id === scriptId)
@@ -1250,6 +1367,19 @@ let shortcutWired = false
           title: note?.title ?? '未命名笔记',
           closable: true,
           noteId
+        })
+      })
+    },
+
+    openApiTab: (requestId) => {
+      set((s) => {
+        const req = s.apiRequests.find((r) => r.id === requestId)
+        return addOrFocusTab(s, {
+          id: apiTabId(requestId),
+          type: 'api',
+          title: req ? apiTabTitle(req) : '接口请求',
+          closable: true,
+          apiRequestId: requestId
         })
       })
     },

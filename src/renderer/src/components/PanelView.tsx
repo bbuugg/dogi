@@ -14,17 +14,18 @@ import {
   Boxes,
   FileCode2,
   FileText,
+  Globe,
   Plus,
   Puzzle,
-  Sparkles,
   TerminalSquare,
   X
 } from 'lucide-react'
 import { cn } from 'cn'
 import type { SessionInfo } from '@shared/types'
-import { useAppStore, type PanelTab, type PanelTabType } from '@/stores/app-store'
+import { groupTerminalSessionId, useAppStore, type PanelTab, type PanelTabType } from '@/stores/app-store'
 import { TerminalView } from '@/components/TerminalView'
 import { AiPanel } from '@/components/AiPanel'
+import { ApiPage } from '@/components/ApiPage'
 import { ScriptsPage } from '@/components/ScriptsPage'
 import { NotesPage } from '@/components/NotesPage'
 import { PluginsPage } from '@/components/PluginsPage'
@@ -69,6 +70,8 @@ function TabIcon({ type }: { type: PanelTabType }) {
       return <FileCode2 className="size-3.5 shrink-0" />
     case 'note':
       return <FileText className="size-3.5 shrink-0" />
+    case 'api':
+      return <Globe className="size-3.5 shrink-0" />
     case 'plugins':
       return <Boxes className="size-3.5 shrink-0" />
     case 'plugin':
@@ -214,7 +217,7 @@ function Splitter({
   )
 }
 
-/** 单个面板组：标签条 + 内容区（+ 可选的本组 AI 助手） */
+/** 单个面板组：标签条 + 内容区（+ 激活标签是终端时可能出现的 AI 助手） */
 function PanelGroupView({ groupId }: { groupId: string }) {
   const group = useAppStore((s) => s.groups[groupId])
   const tabs = useAppStore((s) => s.ui.panelTabs)
@@ -225,8 +228,14 @@ function PanelGroupView({ groupId }: { groupId: string }) {
   const splitTabToGroup = useAppStore((s) => s.splitTabToGroup)
   const reorderTabs = useAppStore((s) => s.reorderTabs)
   const closeGroup = useAppStore((s) => s.closeGroup)
-  const aiOpen = useAppStore((s) => !!s.ui.aiOpenGroups[groupId])
-  const setGroupAiOpen = useAppStore((s) => s.setGroupAiOpen)
+  // AI 助手属于终端页面：以本组「激活标签对应的会话」为 key。
+  // 同组内切标签即换实例 —— 切到脚本/笔记时没有终端会话，面板自动收起，
+  // 切回原来的终端标签时它自己那份开关状态还在。
+  const aiSessionId = useAppStore((s) => groupTerminalSessionId(s, groupId))
+  const aiOpen = useAppStore((s) => {
+    const sid = groupTerminalSessionId(s, groupId)
+    return sid ? !!s.ui.aiOpenSessions[sid] : false
+  })
   const aiPanelWidth = useAppStore((s) => s.ui.aiPanelWidth)
   const setAiPanelWidth = useAppStore((s) => s.setAiPanelWidth)
 
@@ -285,8 +294,6 @@ function PanelGroupView({ groupId }: { groupId: string }) {
 
   if (!group) return null
 
-  const activeTab = group.activeTabId ? tabs.find((t) => t.id === group.activeTabId) : undefined
-  const activeSessionId = activeTab?.type === 'terminal' ? activeTab.sessionId : undefined
   return (
     <div
       ref={dropRef as (node: HTMLDivElement | null) => void}
@@ -325,18 +332,7 @@ function PanelGroupView({ groupId }: { groupId: string }) {
           })}
           <NewTabButton groupId={groupId} />
         </div>
-        {/* 组操作：AI 助手开关（AI 属于组，不作为全局功能） */}
-        <button
-          type="button"
-          title={aiOpen ? '隐藏 AI 助手' : '显示 AI 助手'}
-          onClick={() => setGroupAiOpen(groupId, !aiOpen)}
-          className={cn(
-            'flex w-8 shrink-0 items-center justify-center border-l border-border/60 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground',
-            aiOpen && 'text-primary'
-          )}
-        >
-          <Sparkles className="size-3.5" />
-        </button>
+        {/* 组操作：关闭整个组（AI 助手开关在状态栏，见 AiStatusButton） */}
         {groupCount > 1 && (
           <button
             type="button"
@@ -363,7 +359,8 @@ function PanelGroupView({ groupId }: { groupId: string }) {
             )
           })}
         </div>
-        {aiOpen && activeSessionId && (
+        {/* AI 助手内嵌在本组右侧：只在「激活标签是终端且该页面开了 AI」时出现 */}
+        {aiOpen && aiSessionId && (
           <>
             <ResizeHandle
               width={aiPanelWidth}
@@ -372,7 +369,7 @@ function PanelGroupView({ groupId }: { groupId: string }) {
               onResize={setAiPanelWidth}
               invert
             />
-            <AiPanel sessionId={activeSessionId} />
+            <AiPanel sessionId={aiSessionId} />
           </>
         )}
 
@@ -407,6 +404,8 @@ function DropZoneOverlay({ zone }: { zone: SplitDirectionInput }) {
 /** 标签条末尾的「新建」入口（替代过去常驻的「终端」标签） */
 function NewTabButton({ groupId }: { groupId: string }) {
   const createLocalSession = useAppStore((s) => s.createLocalSession)
+  const createApiRequest = useAppStore((s) => s.createApiRequest)
+  const openApiTab = useAppStore((s) => s.openApiTab)
   const setSshDialog = useAppStore((s) => s.setSshDialog)
   const setActiveGroup = useAppStore((s) => s.setActiveGroup)
   return (
@@ -418,17 +417,22 @@ function NewTabButton({ groupId }: { groupId: string }) {
       menu={{
         items: [
           { key: 'local', icon: <TerminalSquare className="size-3.5" />, label: '新建本地终端' },
+          { key: 'api', icon: <Globe className="size-3.5" />, label: '新建接口请求' },
           { key: 'host', icon: <Plus className="size-3.5" />, label: '添加主机…' }
         ],
         onClick: ({ key }) => {
           if (key === 'local') void createLocalSession()
-          else setSshDialog(true, null)
+          else if (key === 'api') {
+            void createApiRequest().then((id) => {
+              if (id) openApiTab(id)
+            })
+          } else setSshDialog(true, null)
         }
       }}
     >
       <button
         type="button"
-        title="新建终端 / 添加主机"
+        title="新建终端 / 接口请求 / 添加主机"
         className="flex w-8 shrink-0 items-center justify-center text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
       >
         <Plus className="size-3.5" />
@@ -459,11 +463,9 @@ function PanelTabItem({
   const setActiveGroup = useAppStore((s) => s.setActiveGroup)
   const setActiveSession = useAppStore((s) => s.setActiveSession)
   const activatePanelTab = useAppStore((s) => s.activatePanelTab)
-  const splitActivePane = useAppStore((s) => s.splitActivePane)
   const splitTabToGroup = useAppStore((s) => s.splitTabToGroup)
   const closePanelTab = useAppStore((s) => s.closePanelTab)
   const closeGroup = useAppStore((s) => s.closeGroup)
-  const createLocalSession = useAppStore((s) => s.createLocalSession)
   const reorderTabs = useAppStore((s) => s.reorderTabs)
   const moveTabToGroup = useAppStore((s) => s.moveTabToGroup)
   const innerRef = useRef<HTMLDivElement | null>(null)
@@ -521,15 +523,31 @@ function PanelTabItem({
         items: [
           { key: 'title', label, disabled: true },
           { type: 'divider' },
-          { key: 'split-up', icon: <ArrowUp className="size-3.5" />, label: '向上拆分' },
-          { key: 'split-down', icon: <ArrowDown className="size-3.5" />, label: '向下拆分' },
-          { key: 'split-left', icon: <ArrowLeft className="size-3.5" />, label: '向左拆分' },
-          { key: 'split-right', icon: <ArrowRight className="size-3.5" />, label: '向右拆分' },
-          { type: 'divider' },
+          // 拆分只搬动标签本身（把它拎到该方向的新组）。组内只有这一个标签时没有可拆的
+          // 东西，置灰 —— 不再「顺手新建一个终端」来凑分屏，标签功能不牵连其它功能。
           {
-            key: 'new-in-group',
-            icon: <Plus className="size-3.5" />,
-            label: '在本组新建终端'
+            key: 'split-up',
+            icon: <ArrowUp className="size-3.5" />,
+            label: '向上拆分',
+            disabled: tabCount === 1
+          },
+          {
+            key: 'split-down',
+            icon: <ArrowDown className="size-3.5" />,
+            label: '向下拆分',
+            disabled: tabCount === 1
+          },
+          {
+            key: 'split-left',
+            icon: <ArrowLeft className="size-3.5" />,
+            label: '向左拆分',
+            disabled: tabCount === 1
+          },
+          {
+            key: 'split-right',
+            icon: <ArrowRight className="size-3.5" />,
+            label: '向右拆分',
+            disabled: tabCount === 1
           },
           { type: 'divider' },
           {
@@ -546,14 +564,9 @@ function PanelTabItem({
           }
         ],
         onClick: ({ key }) => {
-          if (key === 'split-up' || key === 'split-down' || key === 'split-left' || key === 'split-right') {
-            // 组内多标签时把本标签拆过去，否则镜像新建一个终端
-            const dir = key.slice('split-'.length) as SplitDirectionInput
-            if (tabCount > 1) splitTabToGroup(tab.id, groupId, dir)
-            else void splitActivePane(dir)
-          } else if (key === 'new-in-group') {
-            setActiveGroup(groupId)
-            void createLocalSession()
+          if (key.startsWith('split-')) {
+            if (tabCount === 1) return
+            splitTabToGroup(tab.id, groupId, key.slice('split-'.length) as SplitDirectionInput)
           } else if (key === 'close-tab') {
             closePanelTab(tab.id)
           } else if (key === 'close-group') {
@@ -630,6 +643,8 @@ function TabContent({ tab, active }: { tab: PanelTab; active: boolean }) {
       return tab.scriptId ? <ScriptsPage scriptId={tab.scriptId} /> : null
     case 'note':
       return tab.noteId ? <NotesPage noteId={tab.noteId} /> : null
+    case 'api':
+      return tab.apiRequestId ? <ApiPage requestId={tab.apiRequestId} /> : null
     case 'plugins':
       return <PluginsPage />
     case 'plugin':

@@ -297,7 +297,12 @@ function MessageBubble({
 /** 稳定的空消息数组：避免每次渲染新引用导致滚动 effect 误触发 */
 const NO_MESSAGES: AiChatMessage[] = []
 
-/** 终端组内嵌的 AI 助手面板：展示并驱动 sessionId 所属会话的独立对话 */
+/**
+ * 终端页面内嵌的 AI 助手面板：展示并驱动 sessionId 所属会话的独立对话。
+ *
+ * AI 助手属于**终端页面**（终端标签 = 一个会话）：每个终端页面一个实例，
+ * 对话（`aiChats`）与开关（`ui.aiOpenSessions`）都按会话隔离，互不影响。
+ */
 export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const aiConfigs = useAppStore((s) => s.aiConfigs)
   const aiSettings = useAppStore((s) => s.aiSettings)

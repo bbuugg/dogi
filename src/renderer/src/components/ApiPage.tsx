@@ -1,0 +1,805 @@
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent
+} from 'react'
+import {
+  ChevronDown,
+  ChevronUp,
+  CheckCircle2,
+  Globe,
+  History,
+  Loader2,
+  Send,
+  Trash2
+} from 'lucide-react'
+import {
+  AutoComplete,
+  Button,
+  Drawer,
+  Input,
+  Modal,
+  Select,
+  Table,
+  Tabs,
+  Tag,
+  message
+} from 'antd'
+import { apiTabId, apiTabTitle, useAppStore } from '@/stores/app-store'
+import { cn } from 'cn'
+import {
+  COMMON_HEADERS,
+  METHODS,
+  emptyHeader,
+  formatBody,
+  formatBytes,
+  headerValueSuggestions,
+  isBlankHeader,
+  normalizeHeaders,
+  pairsToHeaders,
+  relTime,
+  statusClass,
+  tidyHeaderRows
+} from '@/lib/api-client'
+import type { ApiHeaderPair, ApiHttpResponse, ApiRequestEntry } from '@shared/types'
+
+/** 自动保存防抖间隔（毫秒） */
+const AUTOSAVE_DELAY = 800
+/** 请求超时（毫秒） */
+const TIMEOUT_MS = 30_000
+/** 响应面板高度占比的默认值与上下限（拖动分隔条时按此范围夹取） */
+const RES_RATIO_DEFAULT = 0.45
+const RES_RATIO_MIN = 0.15
+const RES_RATIO_MAX = 0.8
+/**
+ * 请求构造区（请求头 / 请求体）至少保留的高度（px）。
+ * 只按比例卡上限是不够的：窗口一矮，80% 的响应面板照样能把请求区压成 0，
+ * 压扁后请求区内容会溢出、透过响应面板显出来，所以还要按像素留底。
+ */
+const MIN_REQ_PANE_H = 120
+
+interface Draft {
+  name: string
+  method: string
+  url: string
+  headers: ApiHeaderPair[]
+  body: string
+}
+
+/**
+ * 接口请求编辑页（主区域）：一个标签 = 一个已保存的请求。
+ *
+ * 与原 api-client 插件的区别：请求的「多标签」由 PanelView 承担，
+ * 「已保存请求列表」由 ApiPanel 承担，所以这里只专注单个请求的构造与响应查看。
+ * 请求由主进程发出（window.api.apiClient.send），因此不受渲染进程 CORS 限制。
+ */
+export function ApiPage({ requestId }: { requestId: string }) {
+  const apiRequests = useAppStore((s) => s.apiRequests)
+  const saveApiRequest = useAppStore((s) => s.saveApiRequest)
+  const deleteApiRequest = useAppStore((s) => s.deleteApiRequest)
+  const apiHistory = useAppStore((s) => s.apiHistory)
+  const recordApiHistory = useAppStore((s) => s.recordApiHistory)
+  const clearApiHistory = useAppStore((s) => s.clearApiHistory)
+  const updatePanelTabTitle = useAppStore((s) => s.updatePanelTabTitle)
+
+  const request = apiRequests.find((r) => r.id === requestId) ?? null
+
+  // ---------- 请求草稿（防抖自动保存） ----------
+  const [name, setName] = useState('')
+  const [method, setMethod] = useState('GET')
+  const [url, setUrl] = useState('')
+  const [headers, setHeaders] = useState<ApiHeaderPair[]>([emptyHeader()])
+  const [body, setBody] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [dirty, setDirty] = useState(false)
+
+  const draftRef = useRef<Draft>({ name, method, url, headers, body })
+  draftRef.current = { name, method, url, headers, body }
+  const idRef = useRef<string | null>(requestId)
+  idRef.current = requestId
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingIdRef = useRef<string | null>(null)
+
+  // ---------- 视图状态（无需持久化；标签保持挂载，所以切标签不丢） ----------
+  const [reqTab, setReqTab] = useState<'headers' | 'body'>('headers')
+  const [resTab, setResTab] = useState<'body' | 'headers'>('body')
+  const [sending, setSending] = useState(false)
+  const [response, setResponse] = useState<ApiHttpResponse | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [format, setFormat] = useState(true)
+  const [respCollapsed, setRespCollapsed] = useState(false)
+  const [resRatio, setResRatio] = useState(RES_RATIO_DEFAULT)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [pendingDelete, setPendingDelete] = useState<ApiRequestEntry | null>(null)
+  /** 页面根容器：拖动分隔条时按它的高度换算比例（不依赖 parentElement 的层级假设） */
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  /** 请求行（方法 + 地址 + 发送）：它的底边就是请求构造区的顶边，用来算响应面板的高度上限 */
+  const reqRowRef = useRef<HTMLDivElement | null>(null)
+
+  /** 把指定 id 的草稿落盘 */
+  const doSave = useCallback(
+    async (id: string | null, d: Draft): Promise<void> => {
+      if (!id) return
+      setSaving(true)
+      try {
+        await saveApiRequest({
+          id,
+          name: d.name.trim(),
+          method: d.method,
+          url: d.url.trim(),
+          headers: d.headers,
+          body: d.body,
+          createdAt: 0,
+          updatedAt: 0
+        })
+        setDirty(false)
+      } catch (e) {
+        message.error(`保存失败：${e instanceof Error ? e.message : String(e)}`)
+      } finally {
+        setSaving(false)
+      }
+    },
+    [saveApiRequest]
+  )
+
+  const saveSnapshot = useCallback(
+    (id: string) => void doSave(id, draftRef.current),
+    [doSave]
+  )
+  const saveCurrent = useCallback(() => doSave(idRef.current, draftRef.current), [doSave])
+  const saveCurrentRef = useRef(saveCurrent)
+  saveCurrentRef.current = saveCurrent
+
+  const markDirty = useCallback(
+    (id: string | null) => {
+      setDirty(true)
+      if (timerRef.current) clearTimeout(timerRef.current)
+      if (!id) return
+      pendingIdRef.current = id
+      timerRef.current = setTimeout(() => {
+        const pid = pendingIdRef.current
+        pendingIdRef.current = null
+        if (pid) void saveSnapshot(pid)
+      }, AUTOSAVE_DELAY)
+    },
+    [saveSnapshot]
+  )
+
+  /** 切换请求：先冲刷旧请求的待保存内容，再用新请求重置草稿 */
+  useEffect(() => {
+    if (timerRef.current) clearTimeout(timerRef.current)
+    const pendingId = pendingIdRef.current
+    pendingIdRef.current = null
+    if (pendingId && pendingId !== requestId) void saveSnapshot(pendingId)
+
+    const req = useAppStore.getState().apiRequests.find((r) => r.id === requestId) ?? null
+    setName(req?.name ?? '')
+    setMethod(req?.method ?? 'GET')
+    setUrl(req?.url ?? '')
+    setHeaders(req?.headers?.length ? normalizeHeaders(req.headers) : [emptyHeader()])
+    setBody(req?.body ?? '')
+    // 响应与错误属于「上一次请求的结果」，换请求时清空避免张冠李戴
+    setResponse(null)
+    setError(null)
+    setDirty(false)
+  }, [requestId, saveSnapshot])
+
+  /** 关闭标签（组件卸载）时冲刷待保存内容；请求已被删除则跳过 */
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current)
+      const pendingId = pendingIdRef.current
+      pendingIdRef.current = null
+      if (!pendingId) return
+      const exists = useAppStore.getState().apiRequests.some((r) => r.id === pendingId)
+      if (exists) void doSave(pendingId, draftRef.current)
+    }
+  }, [doSave])
+
+  /** 草稿变动后同步标签标题（否则改名/改地址后标签还停在旧文字） */
+  useEffect(() => {
+    updatePanelTabTitle(apiTabId(requestId), apiTabTitle({ name, method, url }))
+  }, [name, method, url, requestId, updatePanelTabTitle])
+
+  // ---------- 请求头增删改 ----------
+  // 没有「添加请求头」按钮：末行填了内容就自动补一个空槽位（见 tidyHeaderRows），
+  // 所以表格最后一行永远是待填的那一行。
+  const updateHeader = (idx: number, field: keyof ApiHeaderPair, value: string): void => {
+    setHeaders((prev) =>
+      tidyHeaderRows(prev.map((p, i) => (i === idx ? { ...p, [field]: value } : p)))
+    )
+    markDirty(requestId)
+  }
+  const removeHeader = (idx: number): void => {
+    setHeaders((prev) => tidyHeaderRows(prev.filter((_, i) => i !== idx)))
+    markDirty(requestId)
+  }
+
+  // ---------- 发送 ----------
+  const send = async (): Promise<void> => {
+    const trimmed = url.trim()
+    if (!trimmed) {
+      setError('请填写请求地址')
+      return
+    }
+    setSending(true)
+    setError(null)
+    setResponse(null)
+    let res: ApiHttpResponse | null = null
+    try {
+      res = await window.api.apiClient.send({
+        method,
+        url: trimmed,
+        headers: pairsToHeaders(headers),
+        body: method !== 'GET' && method !== 'HEAD' ? body : undefined,
+        timeoutMs: TIMEOUT_MS
+      })
+      setResponse(res)
+      if (res.error) message.error('请求失败：' + res.error)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setError(msg)
+      message.error('请求失败：' + msg)
+    } finally {
+      setSending(false)
+      // 失败也记历史（status=0），便于回看「当时发的是什么」
+      void recordApiHistory({
+        id: String(Date.now()) + Math.random().toString(36).slice(2, 6),
+        method,
+        url: trimmed,
+        headers,
+        body,
+        status: res?.status ?? 0,
+        statusText: res?.statusText ?? '',
+        timeMs: res?.timeMs ?? 0,
+        at: Date.now()
+      })
+    }
+  }
+
+  /** 载入一条历史到当前草稿 */
+  const applyHistory = (entry: {
+    method: string
+    url: string
+    headers: unknown
+    body: string
+  }): void => {
+    setMethod(entry.method || 'GET')
+    setUrl(entry.url || '')
+    setHeaders(normalizeHeaders(entry.headers))
+    setBody(entry.body || '')
+    setReqTab('headers')
+    markDirty(requestId)
+  }
+
+  const confirmDelete = async (): Promise<void> => {
+    const target = pendingDelete
+    if (!target) return
+    setPendingDelete(null)
+    try {
+      await deleteApiRequest(target.id)
+      message.success('已删除该请求')
+    } catch (e) {
+      message.error(`删除失败：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  /**
+   * 拖动分隔条调整响应面板高度。
+   *
+   * 高度按「页面根容器」的高度换算成比例，所以窗口缩放后仍然正确；
+   * 上限不是死比例，而是「请求构造区至少留 MIN_REQ_PANE_H」反推出来的，
+   * 否则能一路把请求区压成 0、让响应面板盖住请求头。
+   * 用 pointer capture 把后续事件锁在分隔条上，避免被页面里其它滚动容器 / 拖拽层
+   * 抢走指针（拿不到 capture 时退化为 window 监听，行为一致）。
+   */
+  const startResize = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    e.preventDefault()
+    e.stopPropagation()
+    const handle = e.currentTarget
+    const pointerId = e.pointerId
+    const rootRect = rootRef.current?.getBoundingClientRect()
+    const reqRect = reqRowRef.current?.getBoundingClientRect()
+    if (!rootRect || !reqRect || rootRect.height <= 0) return
+    const total = rootRect.height
+    const startY = e.clientY
+    const startRatio = resRatio
+    // 请求构造区之上还有工具栏 + 请求行（固定高度），上限要从这里减掉，
+    // 否则「上方留 120px」会被这两行吃掉，请求区实际只剩几十像素。
+    const fixedAbove = reqRect.bottom - rootRect.top
+    const maxRatio = Math.min(
+      RES_RATIO_MAX,
+      Math.max(RES_RATIO_MIN, (total - fixedAbove - MIN_REQ_PANE_H) / total)
+    )
+
+    const move = (ev: PointerEvent): void => {
+      const next = startRatio - (ev.clientY - startY) / total
+      setResRatio(Math.min(maxRatio, Math.max(RES_RATIO_MIN, next)))
+    }
+    const stop = (): void => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', stop)
+      window.removeEventListener('pointercancel', stop)
+      try {
+        handle.releasePointerCapture(pointerId)
+      } catch {
+        // 指针已经释放（如 pointercancel）时忽略
+      }
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+    try {
+      handle.setPointerCapture(pointerId)
+    } catch {
+      // 合成事件没有真实指针，退化为 window 监听即可
+    }
+    document.body.style.cursor = 'row-resize'
+    document.body.style.userSelect = 'none'
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', stop)
+    window.addEventListener('pointercancel', stop)
+  }
+
+  /** 快捷键：Ctrl/Cmd+S 立即保存，Ctrl/Cmd+Enter 发送（限定在页内，避免多标签同时触发） */
+  const onKeyDown = (e: ReactKeyboardEvent): void => {
+    const mod = e.ctrlKey || e.metaKey
+    if (!mod) return
+    if (e.key.toLowerCase() === 's') {
+      e.preventDefault()
+      void saveCurrentRef.current()
+    } else if (e.key === 'Enter') {
+      e.preventDefault()
+      void send()
+    }
+  }
+
+  if (!request) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-muted-foreground">
+        <Globe className="size-12 opacity-30" />
+        <div className="text-sm">该请求已被删除</div>
+        <div className="text-xs text-muted-foreground/70">从左侧列表选择其他请求</div>
+      </div>
+    )
+  }
+
+  const contentType = response?.headers?.['content-type'] || ''
+  const respHeaders = response ? Object.entries(response.headers || {}) : []
+  const statusOk = response && response.status > 0 && response.status < 400
+
+  return (
+    <div ref={rootRef} className="flex h-full flex-col bg-background" onKeyDown={onKeyDown}>
+      {/* 工具栏：名称 + 保存状态 + 历史 / 删除（新建与导入 cURL 在侧边栏） */}
+      <div className="flex shrink-0 items-center gap-2 px-3 py-1.5">
+        <Input
+          value={name}
+          onChange={(e) => {
+            setName(e.target.value)
+            markDirty(requestId)
+          }}
+          placeholder="请求名称（可选，缺省显示「方法 + 路径」）"
+          variant="borderless"
+          className="min-w-0 flex-1 text-[15px] font-semibold"
+        />
+        <span className="inline-flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+          {saving ? (
+            <>
+              <Loader2 className="size-3.5 animate-spin" />
+              保存中…
+            </>
+          ) : dirty ? (
+            '未保存'
+          ) : (
+            <>
+              <CheckCircle2 className="size-3.5 text-emerald-500" />
+              已保存
+            </>
+          )}
+        </span>
+        <Button
+          type="text"
+          size="small"
+          className="shrink-0 gap-1.5 text-[11px] text-muted-foreground"
+          title="查看请求历史"
+          onClick={() => setHistoryOpen(true)}
+        >
+          <History className="size-3.5" />
+          历史 ({apiHistory.length})
+        </Button>
+        <Button
+          size="small"
+          icon={<Trash2 className="size-4" />}
+          danger
+          onClick={() => setPendingDelete(request)}
+          title="删除该请求"
+        />
+      </div>
+
+      {/* 请求行：方法 + 地址 + 发送 */}
+      <div
+        ref={reqRowRef}
+        className="flex shrink-0 items-center gap-2 border-y border-border px-3 py-2"
+      >
+        <Select
+          value={method}
+          onChange={(m) => {
+            setMethod(m)
+            markDirty(requestId)
+          }}
+          options={METHODS.map((m) => ({ label: m, value: m }))}
+          className="w-28 shrink-0"
+        />
+        <Input
+          value={url}
+          onChange={(e) => {
+            setUrl(e.target.value)
+            markDirty(requestId)
+          }}
+          placeholder="请求地址，如 https://api.example.com/users"
+          className="min-w-0 flex-1 font-mono text-xs"
+        />
+        <Button
+          type="primary"
+          icon={<Send className="size-4" />}
+          loading={sending}
+          onClick={() => void send()}
+          disabled={sending}
+          title="发送（Ctrl+Enter）"
+        >
+          发送
+        </Button>
+      </div>
+
+      {/* 请求构造区（overflow-hidden：被压扁时裁掉内容，不要溢出去糊在响应面板上） */}
+      <Tabs
+        size="small"
+        activeKey={reqTab}
+        onChange={(v) => setReqTab(v as 'headers' | 'body')}
+        className="flex min-h-0 flex-1 flex-col overflow-hidden px-4!"
+        tabBarStyle={{ margin: 0 }}
+        styles={{ body: { height: '100%' }, content: { height: '100%' } }}
+        items={[
+          {
+            key: 'headers',
+            label: '请求头',
+            children: (
+              <div className="flex h-full flex-col overflow-auto py-3">
+                <Table<ApiHeaderPair>
+                  size="small"
+                  columns={[
+                    {
+                      key: 'name',
+                      width: 200,
+                      onCell: () => ({ style: { padding: 0 } }),
+                      render: (_, _r, i) => (
+                        <AutoComplete
+                          value={headers[i]?.key ?? ''}
+                          options={COMMON_HEADERS.map((n) => ({ value: n }))}
+                          onChange={(v) => updateHeader(i, 'key', v)}
+                          placeholder="名称，如 Content-Type"
+                          className="w-full"
+                          showSearch={{
+                            filterOption: (input, option) =>
+                              (option?.value ?? '').toLowerCase().includes(input.toLowerCase())
+                          }}
+                        >
+                          <Input
+                            size="small"
+                            variant="filled"
+                            className="font-mono text-[11px]"
+                            style={{ height: 32 }}
+                          />
+                        </AutoComplete>
+                      )
+                    },
+                    {
+                      key: 'value',
+                      onCell: () => ({ style: { padding: 0 } }),
+                      render: (_, _r, i) => {
+                        const p = headers[i]
+                        const suggestions = headerValueSuggestions(p?.key ?? '')
+                        return (
+                          <AutoComplete
+                            value={p?.value ?? ''}
+                            options={suggestions ? suggestions.map((v) => ({ value: v })) : []}
+                            onChange={(v) => updateHeader(i, 'value', v)}
+                            placeholder={suggestions ? '可从常见取值中选择' : '值，如 application/json'}
+                            className="w-full"
+                            showSearch={{
+                              filterOption: suggestions
+                                ? (input, option) =>
+                                    (option?.value ?? '').toLowerCase().includes(input.toLowerCase())
+                                : false
+                            }}
+                          >
+                            <Input
+                              size="small"
+                              variant="filled"
+                              className="font-mono text-[11px]"
+                              style={{ height: 32 }}
+                            />
+                          </AutoComplete>
+                        )
+                      }
+                    },
+                    {
+                      key: 'action',
+                      width: 40,
+                      onCell: () => ({ style: { padding: 0, textAlign: 'center' } }),
+                      // 末行的空槽位不给删除按钮：删了 tidyHeaderRows 也会立刻补回来，是个空操作
+                      render: (_, _r, i) =>
+                        i === headers.length - 1 && isBlankHeader(headers[i]) ? null : (
+                          <Button
+                            type="text"
+                            size="small"
+                            className="size-7 text-muted-foreground"
+                            title="删除该请求头"
+                            icon={<Trash2 className="size-3.5" />}
+                            onClick={() => removeHeader(i)}
+                          />
+                        )
+                    }
+                  ]}
+                  dataSource={headers}
+                  rowKey={(_, i) => 'h' + i}
+                  pagination={false}
+                  showHeader={false}
+                  tableLayout="fixed"
+                />
+              </div>
+            )
+          },
+          {
+            key: 'body',
+            label: '请求体',
+            children: (
+              <div className="h-full overflow-auto p-3">
+                <Input.TextArea
+                  value={body}
+                  onChange={(e) => {
+                    setBody(e.target.value)
+                    markDirty(requestId)
+                  }}
+                  placeholder={
+                    method === 'GET' || method === 'HEAD'
+                      ? `${method} 请求不携带请求体（填写的内容会被忽略）`
+                      : '请求体 JSON，如 {"name":"foo"}'
+                  }
+                  className="h-48! font-mono text-xs"
+                  spellCheck={false}
+                />
+              </div>
+            )
+          }
+        ]}
+      />
+
+      {/*
+        拖拽条：调整响应面板高度。**常驻**（只在面板折叠时隐藏）——
+        不能等有响应了才出现，否则没发过请求时根本抓不到这条分隔线。
+      */}
+      {!respCollapsed && (
+        <div
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="调整响应面板高度"
+          className="group/res relative z-20 -my-1 h-2 shrink-0 cursor-row-resize select-none"
+          title="拖动调整响应面板高度"
+          onPointerDown={startResize}
+        >
+          <div className="pointer-events-none absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-border transition-colors group-hover/res:bg-primary" />
+        </div>
+      )}
+
+      {/*
+        响应区：高度由上面的分隔条拖动决定（没折叠就固定占比，保证拖动一定有可见效果）。
+        bg-background 必须显式写：这一块是不透明的面板，否则下面被压扁的请求区会透出来。
+      */}
+      <div
+        className="flex shrink-0 flex-col overflow-hidden bg-background"
+        style={respCollapsed ? undefined : { height: Math.round(resRatio * 100) + '%' }}
+      >
+        <div className="flex shrink-0 items-center gap-3 px-3 py-1.5 text-xs">
+          {response ? (
+            <div className="flex shrink-0 items-center gap-1">
+              {(
+                [
+                  { key: 'body' as const, label: '响应体' },
+                  {
+                    key: 'headers' as const,
+                    label: '响应头' + (respHeaders.length ? ' (' + respHeaders.length + ')' : '')
+                  }
+                ]
+              ).map((it) => (
+                <button
+                  key={it.key}
+                  onClick={() => setResTab(it.key)}
+                  className={cn(
+                    'rounded px-2 py-0.5 transition-colors',
+                    resTab === it.key
+                      ? 'bg-secondary font-medium text-foreground'
+                      : 'text-muted-foreground hover:text-foreground'
+                  )}
+                >
+                  {it.label}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <span className="shrink-0 font-medium text-muted-foreground">响应</span>
+          )}
+          {response && (
+            <Tag color={statusOk ? 'success' : 'error'} className="font-medium">
+              {response.status} {response.statusText}
+            </Tag>
+          )}
+          {response && <span className="text-muted-foreground">{response.timeMs} ms</span>}
+          {response && (
+            <span className="text-muted-foreground">{formatBytes((response.body || '').length)}</span>
+          )}
+          {contentType && (
+            <span className="truncate text-muted-foreground/80" title={contentType}>
+              {contentType}
+            </span>
+          )}
+          {error && <span className="text-destructive">错误：{error}</span>}
+          <button
+            className="ml-auto shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+            title={respCollapsed ? '展开响应面板' : '折叠响应面板'}
+            onClick={() => setRespCollapsed((v) => !v)}
+          >
+            {respCollapsed ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}
+          </button>
+        </div>
+
+        {!respCollapsed &&
+          (response ? (
+            resTab === 'body' ? (
+              <div className="flex min-h-0 flex-1 flex-col gap-2 px-3 pb-3">
+                <div className="flex shrink-0 items-center gap-2">
+                  <Button
+                    type="text"
+                    size="small"
+                    className="h-7 px-2 text-[11px]"
+                    onClick={() => setFormat((v) => !v)}
+                  >
+                    {format ? '已格式化' : '格式化'}
+                  </Button>
+                  <span className="text-[10px] text-muted-foreground">
+                    {format ? '已按内容类型美化（JSON 缩进）' : '显示原始响应正文'}
+                  </span>
+                </div>
+                <textarea
+                  readOnly
+                  value={formatBody(response.body, contentType, format)}
+                  className="min-h-0 w-full flex-1 resize-none rounded-md border border-border bg-muted/30 p-3 font-mono text-xs text-foreground"
+                />
+              </div>
+            ) : (
+              <div className="min-h-0 flex-1 overflow-auto px-3 pb-3">
+                {respHeaders.length === 0 ? (
+                  <div className="text-xs text-muted-foreground">暂无响应头。</div>
+                ) : (
+                  <div className="space-y-0.5">
+                    {respHeaders.map(([k, v]) => (
+                      <div key={k} className="flex gap-3 border-b border-border/40 py-1">
+                        <span className="w-56 shrink-0 break-all font-mono text-[11px] text-muted-foreground">
+                          {k}
+                        </span>
+                        <span className="min-w-0 flex-1 break-all font-mono text-[11px]">{v}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          ) : (
+            <div className="px-3 pb-3 text-xs text-muted-foreground">
+              发送请求后在此查看响应（状态码、耗时与正文）。
+            </div>
+          ))}
+      </div>
+
+      {/* 请求历史抽屉 */}
+      <Drawer
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        placement="right"
+        size={448}
+        title={
+          <div className="min-w-0">
+            <div className="text-sm">请求历史</div>
+            <div className="text-[11px] text-muted-foreground">发送请求后自动记录，最多保留 50 条</div>
+          </div>
+        }
+        extra={
+          <Button
+            type="text"
+            size="small"
+            danger
+            className="h-7 shrink-0 gap-1.5 px-2 text-[11px]"
+            disabled={apiHistory.length === 0}
+            onClick={() => void clearApiHistory()}
+          >
+            <Trash2 className="size-3.5" />
+            清空
+          </Button>
+        }
+        footer={
+          <div className="flex justify-end">
+            <Button size="small" onClick={() => setHistoryOpen(false)}>
+              关闭
+            </Button>
+          </div>
+        }
+      >
+        <div className="min-h-0 flex-1 overflow-auto">
+          {apiHistory.length === 0 ? (
+            <div className="text-xs text-muted-foreground">
+              还没有请求历史。发送请求后会自动记录到这里（最多保留 50 条）。
+            </div>
+          ) : (
+            <div className="space-y-1">
+              {apiHistory.map((entry, idx) => (
+                <div
+                  key={entry.id || idx}
+                  className="flex items-center gap-2 rounded-md border border-border/60 px-2 py-1.5"
+                >
+                  <Tag className="m-0 shrink-0 font-mono text-[10px]">{entry.method || 'GET'}</Tag>
+                  <span
+                    className={cn(
+                      'shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px]',
+                      statusClass(entry.status)
+                    )}
+                    title={entry.statusText || ''}
+                  >
+                    {entry.status || 'ERR'}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={entry.url}>
+                    {entry.url}
+                  </span>
+                  <span className="shrink-0 text-[10px] text-muted-foreground">
+                    {relTime(entry.at)}
+                  </span>
+                  <Button
+                    type="text"
+                    size="small"
+                    className="h-6 shrink-0 px-2 text-[11px]"
+                    onClick={() => {
+                      applyHistory(entry)
+                      setHistoryOpen(false)
+                    }}
+                  >
+                    载入
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </Drawer>
+
+      {/* 删除确认 */}
+      <Modal
+        open={pendingDelete !== null}
+        onCancel={() => setPendingDelete(null)}
+        title="删除接口请求？"
+        okText="删除"
+        cancelText="取消"
+        okButtonProps={{ danger: true }}
+        onOk={() => void confirmDelete()}
+        centered
+        width={420}
+        destroyOnHidden
+      >
+        <p className="text-sm text-muted-foreground">
+          「{pendingDelete?.name.trim() || pendingDelete?.url || '未命名请求'}」将被永久删除，
+          该操作不可撤销。
+        </p>
+      </Modal>
+    </div>
+  )
+}

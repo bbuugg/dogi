@@ -7,37 +7,28 @@ import { Button, Popover } from 'antd'
 import { Boxes, Command as CommandIcon, ListPlus, Menu, Plus, Settings } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 
-const ITEM_CLASS =
+/** 状态栏条目统一样式（外部传入的节点也用它，保证与内置条目一致） */
+export const STATUS_ITEM_CLASS =
   'flex h-full items-center gap-1.5 rounded px-1.5 text-xs whitespace-nowrap text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground'
 
 /**
- * 应用底部功能条（类 VS Code 状态栏）：
- * 左侧是全局菜单，右侧是常用入口。
- * 通用容器：接收 children 直接渲染，追加在原有功能项之后、右侧入口之前。
+ * 应用底部功能条（类 VS Code 状态栏）：左侧是全局菜单，右侧是外部注入的区域。
+ *
+ * 自身只放「全局菜单」这一项，其余内容都由外部传入：
+ * - `children`：追加在左侧（菜单之后），如服务器指标条；
+ * - `right`：右侧区域（原「命令面板」按钮的位置），如终端打开时的 AI 助手开关。
  * 终端连接状态已内联到终端标签页中展示，不再占用状态栏。
  */
-export function StatusBar({ children }: { children?: ReactNode }) {
-  const setCommandPaletteOpen = useAppStore((s) => s.setCommandPaletteOpen)
-
+export function StatusBar({ children, right }: { children?: ReactNode; right?: ReactNode }) {
   return (
     <footer className="flex h-8 shrink-0 items-center gap-0.5 bg-sidebar px-1">
       <MenuButton />
 
-      {/* 追加的功能项（如服务器指标条）直接渲染在原有功能后面 */}
+      {/* 左侧追加项（如服务器指标条） */}
       {children}
 
-      <div className="ml-auto flex items-center gap-0.5">
-        <button
-          type="button"
-          title="命令面板"
-          onClick={() => setCommandPaletteOpen(true)}
-          className={ITEM_CLASS}
-        >
-          <CommandIcon className="size-3.5" />
-          命令面板
-          <span className="text-muted-foreground/70">Ctrl+Shift+P</span>
-        </button>
-      </div>
+      {/* 右侧区域：由外部按当前上下文注入（无内容时不留白） */}
+      <div className="ml-auto flex items-center gap-0.5">{right}</div>
     </footer>
   )
 }
@@ -101,7 +92,7 @@ function MenuButton() {
       <Button
         type="text" title="菜单"
         icon={<Menu className="size-4" />}
-        className={ITEM_CLASS}
+        className={STATUS_ITEM_CLASS}
       />
     </Popover>
   )

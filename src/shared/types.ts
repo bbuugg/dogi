@@ -217,6 +217,72 @@ export interface NoteEntry {
   updatedAt: number
 }
 
+/** 一条请求头：以「键值对数组」而非对象保存，保留空行以便在界面上继续编辑 */
+export interface ApiHeaderPair {
+  key: string
+  value: string
+}
+
+/**
+ * 保存的接口请求：侧边栏列表项，同时是 PanelView 里「接口请求」标签的打开对象。
+ * 一个请求 = 一个标签，所以这里不带「未保存草稿」的概念（新建即落盘）。
+ */
+export interface ApiRequestEntry {
+  id: string
+  /** 展示名，缺省由「方法 + 地址」推导（见渲染端 apiNameOf） */
+  name: string
+  method: string
+  url: string
+  headers: ApiHeaderPair[]
+  body: string
+  createdAt: number
+  updatedAt: number
+}
+
+/** 请求历史：每次发送后自动记录，按时间倒序保留最近若干条 */
+export interface ApiHistoryEntry {
+  id: string
+  method: string
+  url: string
+  headers: ApiHeaderPair[]
+  body: string
+  /** 失败时为 0 */
+  status: number
+  statusText: string
+  timeMs: number
+  at: number
+}
+
+/** 主进程执行 HTTP 请求的入参 */
+export interface ApiHttpRequest {
+  method: string
+  url: string
+  headers?: Record<string, string>
+  body?: string
+  /** 超时（毫秒） */
+  timeoutMs?: number
+  /** 跳过 TLS 证书校验（自签证书） */
+  rejectUnauthorized?: boolean
+  /** 代理地址，如 http://127.0.0.1:7890 */
+  proxy?: string
+}
+
+/**
+ * 请求结果：网络层失败（DNS/超时/证书）不抛异常，而是返回 status=0 + error，
+ * 这样界面可以照常展示耗时与错误，无需区分「异常」和「非 2xx」两条路径。
+ */
+export interface ApiHttpResponse {
+  ok: boolean
+  status: number
+  statusText: string
+  headers: Record<string, string>
+  body: string
+  /** 耗时（毫秒） */
+  timeMs: number
+  /** 失败时的错误信息 */
+  error?: string
+}
+
 export type AiProviderKind =
   | 'openai'
   | 'anthropic'

@@ -8,10 +8,14 @@ import { aiService } from './services/ai'
 import { mcpManager } from './services/mcp'
 import { registerShortcuts, unregisterShortcuts } from './shortcuts'
 import { pluginHost } from './services/plugins'
+import { executeHttp } from './services/http'
 import { app } from 'electron'
 import type {
   AiModelConfig,
   AiStreamEvent,
+  ApiHistoryEntry,
+  ApiHttpRequest,
+  ApiRequestEntry,
   McpServerConfig,
   NoteEntry,
   Preferences,
@@ -205,6 +209,18 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   ipcMain.handle('notes:list', () => storage.listNotes())
   ipcMain.handle('notes:save', (_e, note: NoteEntry) => storage.saveNote(note))
   ipcMain.handle('notes:delete', (_e, id: string) => storage.deleteNote(id))
+
+  // ---------- 接口请求（内置的 API 调试功能） ----------
+  ipcMain.handle('api:list', () => storage.listApiRequests())
+  ipcMain.handle('api:save', (_e, entry: ApiRequestEntry) => storage.saveApiRequest(entry))
+  ipcMain.handle('api:delete', (_e, id: string) => storage.deleteApiRequest(id))
+  ipcMain.handle('api:history:list', () => storage.listApiHistory())
+  ipcMain.handle('api:history:save', (_e, entries: ApiHistoryEntry[]) =>
+    storage.saveApiHistory(entries)
+  )
+  ipcMain.handle('api:history:clear', () => storage.clearApiHistory())
+  // 由主进程发出请求：不受渲染进程 CORS 限制，可访问内网与自签证书服务
+  ipcMain.handle('api:send', (_e, req: ApiHttpRequest) => executeHttp(req))
 
   // ---------- AI 模型配置 ----------
   ipcMain.handle('ai:config:list', () => storage.listAiConfigs())

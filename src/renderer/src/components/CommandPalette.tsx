@@ -3,6 +3,7 @@ import type { LucideIcon } from 'lucide-react'
 import {
   Boxes,
   ChevronLeft,
+  Globe,
   ListPlus,
   Plug,
   Search,
@@ -17,13 +18,18 @@ import { Button, Input, Modal, type InputRef } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import { scriptToTerminalInput } from '@/lib/script'
 import type { ScriptEntry } from '@shared/types'
-import { NOTES_ACTIVITY_ID, PLUGINS_ACTIVITY_ID, SCRIPTS_ACTIVITY_ID } from '@/activity-ids'
+import {
+  API_ACTIVITY_ID,
+  NOTES_ACTIVITY_ID,
+  PLUGINS_ACTIVITY_ID,
+  SCRIPTS_ACTIVITY_ID
+} from '@/activity-ids'
 
 /**
- * 命令面板层级：命令列表（根）/ 脚本列表 / 主机列表。
- * 新增功能只需往 ROOT_ITEMS 里加一条命令；需要二级列表时再加一个 mode + 一组条目。
+ * 命令面板层级：命令列表（根）/ 脚本列表 / 主机列表 / 插件列表。
+ * 新增功能只需往 rootItems 里加一条命令；需要二级列表时再加一个 mode + 一组条目。
  */
-type PaletteMode = 'root' | 'scripts' | 'hosts'
+type PaletteMode = 'root' | 'scripts' | 'hosts' | 'plugins'
 
 interface PaletteItem {
   id: string
@@ -42,13 +48,15 @@ interface PaletteItem {
 
 const MODE_LABEL: Record<Exclude<PaletteMode, 'root'>, string> = {
   scripts: '运行脚本',
-  hosts: '连接主机'
+  hosts: '连接主机',
+  plugins: '打开插件'
 }
 
 const MODE_PLACEHOLDER: Record<PaletteMode, string> = {
   root: '输入命令名称…',
   scripts: '搜索脚本…',
-  hosts: '搜索主机…'
+  hosts: '搜索主机…',
+  plugins: '搜索插件…'
 }
 
 /**
@@ -66,6 +74,13 @@ export function CommandPalette() {
   const createLocalSession = useAppStore((s) => s.createLocalSession)
   const connectHost = useAppStore((s) => s.connectHost)
   const selectActivity = useAppStore((s) => s.selectActivity)
+  const createApiRequest = useAppStore((s) => s.createApiRequest)
+  const openApiTab = useAppStore((s) => s.openApiTab)
+  /** 插件列表（含启用状态）与已加载的插件视图实例（只有启用且加载成功的插件才有视图） */
+  const pluginList = useAppStore((s) => s.pluginList)
+  const plugins = useAppStore((s) => s.plugins)
+  const refreshPluginList = useAppStore((s) => s.refreshPluginList)
+  const openPluginTab = useAppStore((s) => s.openPluginTab)
   const setSshDialog = useAppStore((s) => s.setSshDialog)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const setRunScriptDialog = useAppStore((s) => s.setRunScriptDialog)
@@ -76,7 +91,7 @@ export function CommandPalette() {
   const inputRef = useRef<InputRef>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
-  // 打开时回到命令列表并刷新数据（脚本/主机可能在管理页中被改动过）
+  // 打开时回到命令列表并刷新数据（脚本/主机/插件可能在管理页中被改动过）
   useEffect(() => {
     if (!open) return
     setMode('root')
@@ -84,9 +99,10 @@ export function CommandPalette() {
     setActiveIndex(0)
     void refreshScripts()
     void refreshProfiles()
+    void refreshPluginList()
     // 等待 Dialog 渲染后再聚焦输入框
     requestAnimationFrame(() => inputRef.current?.focus())
-  }, [open, refreshScripts, refreshProfiles])
+  }, [open, refreshScripts, refreshProfiles, refreshPluginList])
 
   const close = () => setOpen(false)
 
@@ -166,6 +182,15 @@ export function CommandPalette() {
       }
     },
     {
+      id: 'plugin.open',
+      group: '界面',
+      title: '打开插件',
+      description: '选择要打开的插件界面',
+      keywords: 'plugin open view 插件 打开 视图 扩展',
+      icon: Boxes,
+      run: () => goMode('plugins')
+    },
+    {
       id: 'plugin.manage',
       group: '界面',
       title: '插件管理',
@@ -187,6 +212,32 @@ export function CommandPalette() {
       run: () => {
         close()
         selectActivity(NOTES_ACTIVITY_ID)
+      }
+    },
+    {
+      id: 'api.open',
+      group: '界面',
+      title: '打开接口请求',
+      description: '调试 HTTP 接口（类 Postman）',
+      keywords: 'api http request postman 接口 请求 调试 rest',
+      icon: Globe,
+      run: () => {
+        close()
+        selectActivity(API_ACTIVITY_ID)
+      }
+    },
+    {
+      id: 'api.new',
+      group: '界面',
+      title: '新建接口请求',
+      description: '创建一条空请求并在新标签中打开',
+      keywords: 'api http new request 接口 请求 新建',
+      icon: Globe,
+      run: () => {
+        close()
+        void createApiRequest().then((id) => {
+          if (id) openApiTab(id)
+        })
       }
     },
     {
@@ -260,7 +311,36 @@ export function CommandPalette() {
     }
   }))
 
-  const items = mode === 'root' ? rootItems : mode === 'scripts' ? scriptItems : hostItems
+  /**
+   * 可打开的插件：只列出「已启用且视图已加载」的插件 —— 禁用 / 加载失败的插件
+   * 没有可渲染的视图，列出来点了也没反应，不如不显示（管理入口见底部「插件管理」）。
+   */
+  const pluginItems: PaletteItem[] = pluginList.flatMap((p) => {
+    const view = plugins.find((v) => v.pluginId === p.id)
+    if (!p.enabled || !view) return []
+    return [
+      {
+        id: `plugin.${p.id}`,
+        group: '插件',
+        title: p.name,
+        description: p.description || `v${p.version}`,
+        keywords: `${p.id} ${p.author ?? ''} plugin 插件 扩展`,
+        icon: Boxes,
+        run: () => {
+          close()
+          openPluginTab(view.viewId)
+        }
+      }
+    ]
+  })
+
+  const itemsByMode: Record<PaletteMode, PaletteItem[]> = {
+    root: rootItems,
+    scripts: scriptItems,
+    hosts: hostItems,
+    plugins: pluginItems
+  }
+  const items = itemsByMode[mode]
 
   const q = query.trim().toLowerCase()
   const filtered = q
@@ -306,9 +386,13 @@ export function CommandPalette() {
         ? scripts.length === 0
           ? '还没有脚本，先去「管理脚本」添加。'
           : '没有匹配的脚本。'
-        : profiles.length === 0
-          ? '还没有保存的主机，先在侧边栏添加主机。'
-          : '没有匹配的主机。'
+        : mode === 'plugins'
+          ? pluginItems.length === 0
+            ? '没有可打开的插件，先去「插件管理」安装并启用插件。'
+            : '没有匹配的插件。'
+          : profiles.length === 0
+            ? '还没有保存的主机，先在侧边栏添加主机。'
+            : '没有匹配的主机。'
 
   return (
     <Modal
@@ -421,6 +505,20 @@ export function CommandPalette() {
               }}
             >
               管理脚本
+            </Button>
+          )}
+          {mode === 'plugins' && (
+            <Button
+              type="text"
+              size="small"
+              icon={<Boxes className="size-4" />}
+              className="h-7"
+              onClick={() => {
+                close()
+                selectActivity(PLUGINS_ACTIVITY_ID)
+              }}
+            >
+              插件管理
             </Button>
           )}
         </div>

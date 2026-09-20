@@ -1,11 +1,13 @@
 import type { ComponentType } from 'react'
-import { FileCode2, Puzzle, Server, StickyNote } from 'lucide-react'
+import { FileCode2, Globe, Puzzle, Server, StickyNote } from 'lucide-react'
+import { ApiPanel } from '@/components/ApiPanel'
 import { HostsPanel } from '@/components/HostsPanel'
 import { NotesPanel } from '@/components/NotesPanel'
 import { PluginsPanel } from '@/components/PluginsPanel'
 import { ScriptsPanel } from '@/components/ScriptsPanel'
 import { useAppStore } from '@/stores/app-store'
 import {
+  API_ACTIVITY_ID,
   HOSTS_ACTIVITY_ID,
   NOTES_ACTIVITY_ID,
   PLUGINS_ACTIVITY_ID,
@@ -53,6 +55,12 @@ export const BUILTIN_ACTIVITIES: Activity[] = [
     label: '笔记',
     icon: StickyNote,
     panel: NotesPanel
+  },
+  {
+    id: API_ACTIVITY_ID,
+    label: '接口请求',
+    icon: Globe,
+    panel: ApiPanel
   },
   {
     id: PLUGINS_ACTIVITY_ID,

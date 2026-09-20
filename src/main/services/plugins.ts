@@ -12,6 +12,7 @@ import type {
   PluginPermission
 } from '@shared/plugin'
 import { storage } from './storage'
+import { executeHttp } from './http'
 
 /**
  * 插件宿主（主进程侧）：
@@ -164,11 +165,35 @@ class PluginHost {
     }
   }
 
+  /**
+   * 已「内置化」的旧插件 id：这些插件的能力已经做成了应用内置功能（功能区 + 主区域页面），
+   * 对应的插件目录要从 userData/plugins 清掉，否则插件列表里会留一个功能重复的残留项。
+   *
+   * 播种只做「覆盖 / 新增」，不会删除仓库里已不存在的插件，所以这里显式清理一次。
+   */
+  private static readonly RETIRED_PLUGINS = ['api-client']
+
+  /** 清理已内置化的旧插件目录（仅限本应用自己管理的 userData/plugins 目录） */
+  private async removeRetiredPlugins(dir: string): Promise<void> {
+    for (const id of PluginHost.RETIRED_PLUGINS) {
+      const target = join(dir, id)
+      if (!existsSync(target)) continue
+      try {
+        await rm(target, { recursive: true, force: true })
+        console.log(`[plugins] 已清理已内置化的旧插件：${id}`)
+      } catch (e) {
+        console.error(`[plugins] 清理旧插件失败：${id}`, e)
+      }
+    }
+  }
+
   /** 扫描并加载所有插件的主进程入口（在 registerIpc 之后调用） */
   async init(): Promise<void> {
     const dir = this.pluginsDir()
     // 内置插件同步到 userData（始终覆盖）
     await this.seedBuiltinPlugins(dir)
+    // 已内置化的旧插件：清掉 userData 里的残留副本
+    await this.removeRetiredPlugins(dir)
     // 读取启用配置（与插件目录分离，禁用状态持久化）
     await this.loadEnabledConfig()
     // 扫描 manifest
@@ -195,6 +220,7 @@ class PluginHost {
   async reload(id?: string): Promise<PluginInfo[]> {
     const dir = this.pluginsDir()
     await this.seedBuiltinPlugins(dir)
+    await this.removeRetiredPlugins(dir)
     await this.rescan(dir)
     const targets = id ? [id] : [...this.manifests.keys()]
     for (const pid of targets) {
@@ -405,68 +431,6 @@ class PluginHost {
         set: <T>(key: string, value: T) => this.storageSet(manifest.id, key, value)
       }
     }
-  }
-}
-
-/**
- * 用 Node 全局 fetch 执行请求；支持超时、代理与跳过 TLS 校验（需要 undici，
- * 若运行环境无 undici 则忽略代理/不安全 TLS 选项，回退到普通 fetch）。
- */
-async function executeHttp(req: PluginHttpRequest): Promise<PluginHttpResponse> {
-  const start = performance.now()
-  const ctrl = new AbortController()
-  const timer =
-    req.timeoutMs && req.timeoutMs > 0 ? setTimeout(() => ctrl.abort(), req.timeoutMs) : null
-  const init: RequestInit = {
-    method: req.method,
-    headers: req.headers as Record<string, string>,
-    body: req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined,
-    signal: ctrl.signal
-  }
-  // 代理 / 自签证书：尝试使用 undici 构造 dispatcher（非必需依赖，缺失时降级）
-  try {
-    const undici = (await import('undici').catch(() => null)) as
-      | { Agent: new (o: unknown) => unknown; ProxyAgent: new (p: string) => unknown }
-      | null
-    if (undici) {
-      if (req.proxy) {
-        ;(init as { dispatcher?: unknown }).dispatcher = new undici.ProxyAgent(req.proxy)
-      } else if (req.rejectUnauthorized === false) {
-        ;(init as { dispatcher?: unknown }).dispatcher = new undici.Agent({
-          connect: { rejectUnauthorized: false }
-        })
-      }
-    }
-  } catch {
-    // 忽略：无 undici 时走默认 dispatcher
-  }
-  try {
-    const res = await fetch(req.url, init)
-    const body = await res.text()
-    const headers: Record<string, string> = {}
-    res.headers.forEach((v, k) => {
-      headers[k] = v
-    })
-    return {
-      ok: res.ok,
-      status: res.status,
-      statusText: res.statusText,
-      headers,
-      body,
-      timeMs: Math.round(performance.now() - start)
-    }
-  } catch (e) {
-    return {
-      ok: false,
-      status: 0,
-      statusText: '',
-      headers: {},
-      body: '',
-      timeMs: Math.round(performance.now() - start),
-      error: e instanceof Error ? e.message : String(e)
-    }
-  } finally {
-    if (timer) clearTimeout(timer)
   }
 }
 

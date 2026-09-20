@@ -774,13 +774,10 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
     })
   }, [isActive, session.id])
 
-  // 所在组的 AI 面板显隐会改变终端可用宽度，主动重新适配，避免关闭面板后终端仍停留在旧（较窄）的宽度
-  const aiPanelOpen = useAppStore((s) => {
-    const tab = s.ui.panelTabs.find(
-      (t) => t.type === 'terminal' && t.sessionId === session.id
-    )
-    return tab ? !!s.ui.aiOpenGroups[tab.groupId] : false
-  })
+  // 本终端页面的 AI 面板显隐会改变终端可用宽度，主动重新适配，
+  // 避免关闭面板后终端仍停留在旧（较窄）的宽度。
+  // AI 属于终端页面（= 会话），所以直接看本会话自己的开关即可。
+  const aiPanelOpen = useAppStore((s) => !!s.ui.aiOpenSessions[session.id])
   useEffect(() => {
     if (!isActive) return
     const raf = requestAnimationFrame(() => {

@@ -4,6 +4,8 @@ import type {
   AiModelConfig,
   AiPermissionMode,
   AiSettings,
+  ApiHistoryEntry,
+  ApiRequestEntry,
   McpServerConfig,
   NoteEntry,
   Preferences,
@@ -23,6 +25,8 @@ interface StoreSchema {
   preferences: Preferences
   scripts: ScriptEntry[]
   notes: NoteEntry[]
+  apiRequests: ApiRequestEntry[]
+  apiHistory: ApiHistoryEntry[]
   shortcuts: ShortcutConfig[]
   windowBounds?: { x?: number; y?: number; width: number; height: number }
 }
@@ -56,6 +60,8 @@ class StorageService {
       preferences: DEFAULT_PREFERENCES,
       scripts: [],
       notes: [],
+      apiRequests: [],
+      apiHistory: [],
       shortcuts: DEFAULT_SHORTCUTS
     }
   })
@@ -305,6 +311,55 @@ class StorageService {
       this.store.get('notes').filter((n) => n.id !== id)
     )
     return this.listNotes()
+  }
+
+  // ---------- 接口请求（内置的 API 调试功能） ----------
+  listApiRequests(): ApiRequestEntry[] {
+    return this.store.get('apiRequests')
+  }
+
+  /** 保存接口请求（upsert）：不传 id 视为新增 */
+  saveApiRequest(input: ApiRequestEntry): ApiRequestEntry[] {
+    const requests = this.store.get('apiRequests')
+    const now = Date.now()
+    const prev = input.id ? requests.find((r) => r.id === input.id) : undefined
+    const entry: ApiRequestEntry = {
+      ...input,
+      id: input.id || crypto.randomUUID(),
+      createdAt: prev?.createdAt ?? now,
+      updatedAt: now
+    }
+    const next = prev
+      ? requests.map((r) => (r.id === entry.id ? entry : r))
+      : [...requests, entry]
+    this.store.set('apiRequests', next)
+    return next
+  }
+
+  deleteApiRequest(id: string): ApiRequestEntry[] {
+    this.store.set(
+      'apiRequests',
+      this.store.get('apiRequests').filter((r) => r.id !== id)
+    )
+    return this.listApiRequests()
+  }
+
+  listApiHistory(): ApiHistoryEntry[] {
+    return this.store.get('apiHistory')
+  }
+
+  /**
+   * 覆盖写入整段历史（渲染端每次发送后把裁剪过的数组传回来）。
+   * 历史是「最近 N 条」的滑动窗口，逐条增删反而更容易和界面状态不一致。
+   */
+  saveApiHistory(entries: ApiHistoryEntry[]): ApiHistoryEntry[] {
+    this.store.set('apiHistory', entries)
+    return this.listApiHistory()
+  }
+
+  clearApiHistory(): ApiHistoryEntry[] {
+    this.store.set('apiHistory', [])
+    return []
   }
 
   // ---------- 快捷键（全局，系统级） ----------

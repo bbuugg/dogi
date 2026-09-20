@@ -14,8 +14,11 @@ function errText(e: unknown): string {
  * 插件侧边栏：列出全部插件（启用在前），支持搜索 / 安装 / 选中 / 启用禁用 / 打开 / 卸载。
  * 选中状态存在 store 的 ui.activePluginId，右侧 PluginsPage 据此展示插件详情。
  *
- * 行内布局：第一行是图标 + 信息 + 启停开关（开关常驻，任何时刻都能直接切）；
- * 第二行是「打开 / 卸载」，鼠标悬浮时展开（0fr → 1fr 过渡，不改变未悬浮项的间距）。
+ * 行内操作分两类，位置都常驻、不改变行高（鼠标扫过列表时整列不跳）：
+ * - 右侧上排：启停开关，常驻可见，任何时刻都能直接切换；
+ * - 右侧下排（开关正下方）：「打开 / 卸载」纯图标按钮，`invisible` 占位、悬浮才显形。
+ * 不用「悬浮时插入新的一行」：那会把 item 撑高。
+ * 插件界面的入口也在命令面板（「打开插件」→ 选插件）。
  */
 export function PluginsPanel() {
   const pluginList = useAppStore((s) => s.pluginList)
@@ -152,33 +155,37 @@ export function PluginsPanel() {
                     openPluginsTab()
                   }}
                   className={cn(
-                    'group flex cursor-pointer flex-col rounded-md px-2 py-1.5',
+                    'group flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5',
                     active
                       ? 'bg-primary/10 text-foreground'
                       : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
                     !p.enabled && 'opacity-60'
                   )}
                 >
-                  {/* 第一行：图标 + 信息 + 启停开关（开关常驻，不随悬浮变化） */}
-                  <div className="flex items-start gap-2">
-                    <span className="mt-0.5 flex size-4 shrink-0 items-center justify-center text-[13px] leading-none">
-                      {p.icon ?? '🔌'}
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-1">
-                        <span className="truncate text-[13px] font-medium">{p.name}</span>
-                        {p.error && <AlertCircle className="size-3 shrink-0 text-destructive" />}
-                      </div>
-                      <div className="truncate text-[11px] text-muted-foreground/80">
-                        {p.description || `v${p.version}`}
-                      </div>
-                      <div className="truncate text-[10px] text-muted-foreground/60">
-                        v{p.version}
-                        {!p.enabled && ' · 已禁用'}
-                        {p.error && ' · 加载失败'}
-                      </div>
+                  <span className="mt-0.5 flex size-4 shrink-0 items-center justify-center text-[13px] leading-none">
+                    {p.icon ?? '🔌'}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1">
+                      <span className="truncate text-[13px] font-medium">{p.name}</span>
+                      {p.error && <AlertCircle className="size-3 shrink-0 text-destructive" />}
                     </div>
-                    <span className="mt-0.5 flex h-5 shrink-0 items-center">
+                    <div className="truncate text-[11px] text-muted-foreground/80">
+                      {p.description || `v${p.version}`}
+                    </div>
+                    <div className="truncate text-[10px] text-muted-foreground/60">
+                      v{p.version}
+                      {!p.enabled && ' · 已禁用'}
+                      {p.error && ' · 加载失败'}
+                    </div>
+                  </div>
+
+                  {/*
+                    右侧一列：上排是常驻的启停开关，下排（开关正下方）是「打开 / 卸载」。
+                    下排用 invisible 占位而不是不渲染 —— 位置始终留着，悬浮显形时行高、列宽都不变。
+                  */}
+                  <div className="mt-0.5 flex shrink-0 flex-col items-end gap-0.5">
+                    <span className="flex h-5 items-center">
                       <Switch
                         size="small"
                         checked={p.enabled}
@@ -187,40 +194,30 @@ export function PluginsPanel() {
                         aria-label="启用/禁用"
                       />
                     </span>
-                  </div>
-
-                  {/* 第二行：打开 / 卸载，鼠标悬浮时展开
-                      （0fr → 1fr 过渡到内容高度，列表不会先跳一下再回位） */}
-                  <div className="grid grid-rows-[0fr] transition-[grid-template-rows] duration-150 group-hover:grid-rows-[1fr]">
-                    <div className="overflow-hidden">
-                      <div className="flex items-center justify-end gap-1 pt-1">
-                        <Button
-                          type="text"
-                          size="small"
-                          icon={<ExternalLink className="size-3.5" />}
-                          className="h-6 px-1.5 text-xs"
-                          disabled={!p.enabled || !view}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            openPlugin(p)
-                          }}
-                        >
-                          打开
-                        </Button>
-                        <Button
-                          type="text"
-                          size="small"
-                          danger
-                          icon={<Trash2 className="size-3.5" />}
-                          className="h-6 px-1.5 text-xs"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            setPendingUninstall(p)
-                          }}
-                        >
-                          卸载
-                        </Button>
-                      </div>
+                    <div className="invisible flex h-5 items-center gap-0.5 group-hover:visible">
+                      <Button
+                        type="text"
+                        size="small"
+                        icon={<ExternalLink className="size-3.5" />}
+                        className="h-5 w-5 p-0"
+                        title="打开插件界面"
+                        disabled={!p.enabled || !view}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          openPlugin(p)
+                        }}
+                      />
+                      <Button
+                        type="text"
+                        size="small"
+                        icon={<Trash2 className="size-3.5 text-destructive" />}
+                        className="h-5 w-5 p-0"
+                        title="卸载插件"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setPendingUninstall(p)
+                        }}
+                      />
                     </div>
                   </div>
                 </div>
