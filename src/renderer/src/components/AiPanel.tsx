@@ -369,8 +369,6 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const hasConfig = Boolean(aiSettings.activeConfigId) && aiConfigs.length > 0
   const permissionMode: AiPermissionMode =
     aiSettings.permissionMode === 'confirm' ? 'confirm' : 'full'
-  const modeMeta =
-    PERMISSION_MODES.find((m) => m.value === permissionMode) ?? PERMISSION_MODES[0]
 
   const handleSend = () => {
     if (!input.trim() || aiStreaming || !sessionId) return
@@ -501,6 +499,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           <div className="flex items-center justify-between gap-2 px-2 pb-2">
             <div className="flex min-w-0 items-center gap-1">
               <Select
+                placement="topLeft"
                 size="small"
                 variant="borderless"
                 className="w-28 shrink-0"
@@ -520,17 +519,16 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             </div>
             {aiStreaming ? (
               <Button
-                type="primary"
+                type="text"
+                danger
                 icon={<Square className="size-4" />}
-                className="size-8 shrink-0 rounded-full text-destructive"
                 title="停止"
                 onClick={() => sessionId && void abortAi(sessionId)}
               />
             ) : (
               <Button
-                type="primary"
+                type="text"
                 icon={<Send className="size-4" />}
-                className="ai-send-btn size-8 shrink-0 rounded-full"
                 disabled={!input.trim() || !hasConfig || !sessionId}
                 title="发送"
                 onClick={handleSend}
@@ -538,12 +536,11 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             )}
           </div>
         </div>
-        <div className="mt-1.5 truncate text-[10px] text-muted-foreground">
+        <div className="mt-1.5 truncate text-[10px] text-muted-foreground text-center">
           {activeSession
-            ? `本对话绑定终端：${activeSession.title}（各终端对话互相独立）`
-            : '提示：打开一个终端会话后，AI 才能执行命令'}
+            ? `本对话绑定终端：${activeSession.title}`
+            : '打开一个终端会话后，AI 才能执行命令'}
           {' · '}
-          {modeMeta.hint}
         </div>
       </div>
     </aside>
