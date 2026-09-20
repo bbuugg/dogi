@@ -138,20 +138,6 @@ function subtitleOf(req: ApiRequestEntry): string {
   return url || '尚未填写请求地址'
 }
 
-/** 相对时间（列表里显示「刚刚」「5 分钟前」…） */
-function formatTime(ts: number): string {
-  if (!ts) return ''
-  const diff = Date.now() - ts
-  if (diff < 60_000) return '刚刚'
-  if (diff < 3600_000) return `${Math.floor(diff / 60_000)} 分钟前`
-  if (diff < 86400_000) return `${Math.floor(diff / 3600_000)} 小时前`
-  if (diff < 7 * 86400_000) return `${Math.floor(diff / 86400_000)} 天前`
-  const d = new Date(ts)
-  const mm = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${mm}/${day}`
-}
-
 /**
  * 接口请求侧边栏：保存的请求按分组列出，支持搜索 / 新建 / 打开 / 删除。
  *
@@ -167,16 +153,15 @@ export function ApiPanel() {
     const gid = s.activeGroupId
     return gid ? (s.groups[gid]?.activeTabId ?? null) : null
   })
-  const createApiRequest = useAppStore((s) => s.createApiRequest)
   const importCurlRequest = useAppStore((s) => s.importCurlRequest)
   const deleteApiRequest = useAppStore((s) => s.deleteApiRequest)
   const openApiTab = useAppStore((s) => s.openApiTab)
+  const openNewApiDraft = useAppStore((s) => s.openNewApiDraft)
   const saveApiGroup = useAppStore((s) => s.saveApiGroup)
   const deleteApiGroup = useAppStore((s) => s.deleteApiGroup)
   const arrangeApi = useAppStore((s) => s.arrangeApi)
 
   const [search, setSearch] = useState('')
-  const [creating, setCreating] = useState(false)
   const [pendingDelete, setPendingDelete] = useState<ApiRequestEntry | null>(null)
   /** 待确认删除的分组 */
   const [pendingGroupDelete, setPendingGroupDelete] = useState<ApiGroup | null>(null)
@@ -301,17 +286,12 @@ export function ApiPanel() {
     setExpandedKeys((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]))
   }
 
-  /** 新建：先落盘再打开标签（一个请求 = 一个标签，不存在未保存的草稿标签） */
-  const handleCreate = async (groupId?: string) => {
-    setCreating(true)
-    try {
-      const id = await createApiRequest(groupId ? { groupId } : undefined)
-      if (id) openApiTab(id)
-    } catch (e) {
-      message.error(`新建失败：${e instanceof Error ? e.message : String(e)}`)
-    } finally {
-      setCreating(false)
-    }
+  /**
+   * 新建：只打开右侧一个「未保存草稿」标签，不落盘、不进列表。
+   * 真正的保存发生在用户在该标签里按 Ctrl/Cmd+S 并输入名称之后（见 ApiPage.saveNow）。
+   */
+  const handleCreate = (groupId?: string): void => {
+    openNewApiDraft(groupId)
   }
 
   const confirmDelete = async () => {
@@ -467,7 +447,6 @@ export function ApiPanel() {
           <Button
             type="primary"
             block
-            loading={creating}
             icon={<Plus className="size-4" />}
             title="新建请求 / 导入 cURL / 新建分组"
           >

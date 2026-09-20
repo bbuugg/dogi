@@ -200,6 +200,11 @@ export interface ScriptEntry {
   content: string
   /** 可选描述，用于搜索与展示 */
   description?: string
+  /**
+   * 所属分组；undefined = 未分组。
+   * 只由 `scripts:arrange`（拖拽重排）改动 —— 普通的保存/新建不要碰它。
+   */
+  groupId?: string
   createdAt: number
   updatedAt: number
 }
@@ -213,8 +218,27 @@ export interface NoteEntry {
   content: string
   /** Monaco 语言（见 MONACO_LANGUAGES），缺省按创建时指定，默认 markdown */
   language: string
+  /**
+   * 所属分组；undefined = 未分组。
+   * 只由 `notes:arrange`（拖拽重排）改动 —— 普通的保存/新建不要碰它。
+   */
+  groupId?: string
   createdAt: number
   updatedAt: number
+}
+
+/** 脚本分组：侧边栏里的分组节点（只承担归类 + 排序，不设颜色） */
+export interface ScriptGroup {
+  id: string
+  name: string
+  createdAt: number
+}
+
+/** 笔记分组：侧边栏里的分组节点（只承担归类 + 排序，不设颜色） */
+export interface NoteGroup {
+  id: string
+  name: string
+  createdAt: number
 }
 
 /** 一条请求头：以「键值对数组」而非对象保存，保留空行以便在界面上继续编辑 */

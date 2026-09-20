@@ -222,6 +222,8 @@ export function HostsPanel() {
   const [groupEdit, setGroupEdit] = useState<{ id?: string; name: string } | null>(null)
 
   const [expandedKeys, setExpandedKeys] = useState<string[]>([])
+  /** 搜索关键字（主机名 / 地址 / 账号 / 启动命令） */
+  const [search, setSearch] = useState('')
   /** 已自动展开过的分组 key：只在新分组出现时补展开，不覆盖用户的折叠操作 */
   const knownKeys = useRef<Set<string>>(new Set())
 
@@ -248,6 +250,25 @@ export function HostsPanel() {
   // 「未分组」块恒在首位
   blocks.push({ group: undefined, items: ungrouped })
   for (const g of sshGroups) blocks.push({ group: g, items: byGroup.get(g.id) ?? [] })
+
+  // 搜索时按命中过滤（组名命中 = 整组保留）；拖拽落点一律走**完整的** blocks
+  const q = search.trim().toLowerCase()
+  const searching = q.length > 0
+  const hitProfile = (p: SshProfile): boolean =>
+    !searching ||
+    p.name.toLowerCase().includes(q) ||
+    (p.host ?? '').toLowerCase().includes(q) ||
+    (p.username ?? '').toLowerCase().includes(q) ||
+    (p.command ?? '').toLowerCase().includes(q)
+
+  const viewBlocks: Block[] = !searching
+    ? blocks
+    : blocks
+        .map((b) => {
+          const groupHit = b.group ? b.group.name.toLowerCase().includes(q) : false
+          return { group: b.group, items: groupHit ? b.items : b.items.filter(hitProfile) }
+        })
+        .filter((b) => b.items.length > 0 || (b.group && b.group.name.toLowerCase().includes(q)))
 
   /** 连接的生效颜色：自身设置优先，否则继承所属分组的颜色 */
   const effectiveColor = (p: SshProfile): string | undefined => resolveSshColor(p, sshGroups)
@@ -384,7 +405,7 @@ export function HostsPanel() {
     )
   })
 
-  const groupNodes: TreeDataNode[] = blocks
+  const groupNodes: TreeDataNode[] = viewBlocks
     .filter((b) => b.group)
     .map((b) => {
       const group = b.group!
@@ -415,9 +436,18 @@ export function HostsPanel() {
       }
     })
 
+  // 搜索时把命中的分组全部展开（否则要逐个点开才看得到结果）
+  const effectiveExpanded = searching
+    ? groupNodes.map((n) => String(n.key))
+    : expandedKeys
+
   // 分组在前，未分组的主机平铺在最后（不另设「未分组」折叠组）
   const treeData: TreeDataNode[] = [...groupNodes]
-  treeData.push(...ungrouped.map((p) => profileNode(p, false)))
+  const viewUngrouped = viewBlocks.find((b) => !b.group)?.items ?? []
+  treeData.push(...viewUngrouped.map((p) => profileNode(p, false)))
+
+  const isEmpty = profiles.length === 0 && sshGroups.length === 0
+  const noMatch = searching && treeData.length === 0
 
   return (
     <div className="flex-1 overflow-y-auto p-2">
@@ -446,11 +476,24 @@ export function HostsPanel() {
           </div>
         </div>
 
-        {profiles.length === 0 && sshGroups.length === 0 ? (
+        <div className="px-0 pb-2">
+          <Input
+            placeholder="搜索主机…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            allowClear
+          />
+        </div>
+
+        {isEmpty ? (
           <div className="px-2 py-3 text-center text-xs text-muted-foreground">
             还没有主机
             <br />
             点击右上角 + 添加
+          </div>
+        ) : noMatch ? (
+          <div className="px-2 py-3 text-center text-xs text-muted-foreground">
+            没有匹配「{search}」的主机。
           </div>
         ) : (
           <Tree
@@ -458,7 +501,7 @@ export function HostsPanel() {
             treeData={treeData}
             selectable={false}
             blockNode
-            expandedKeys={expandedKeys}
+            expandedKeys={effectiveExpanded}
             onExpand={(keys) => setExpandedKeys(keys.map(String))}
           />
         )}

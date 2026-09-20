@@ -2,12 +2,13 @@ import {
   useEffect,
   useRef,
   useState,
+  type ChangeEvent as ReactChangeEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent
 } from 'react'
 import { ChevronDown, ChevronUp, Globe, History, Send, Trash2 } from 'lucide-react'
-import { AutoComplete, Button, Drawer, Input, Select, Table, Tabs, Tag, message } from 'antd'
-import { apiTabId, apiTabTitle, useAppStore } from '@/stores/app-store'
+import { AutoComplete, Button, Drawer, Input, Modal, Select, Table, Tabs, Tag, message } from 'antd'
+import { apiTabId, apiTabTitle, NEW_API_REQUEST_ID, useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'
 import MonacoEditor from '@/components/MonacoEditor'
 import {
@@ -22,9 +23,12 @@ import {
   isBlankHeader,
   normalizeHeaders,
   pairsToHeaders,
+  parseQueryParams,
   relTime,
+  serializeParams,
   statusClass,
-  tidyHeaderRows
+  tidyHeaderRows,
+  withQuery
 } from '@/lib/api-client'
 import type { ApiHeaderPair, ApiHttpResponse } from '@shared/types'
 
@@ -53,12 +57,17 @@ const MIN_REQ_PANE_H = 120
 export function ApiPage({ requestId }: { requestId: string }) {
   const apiRequests = useAppStore((s) => s.apiRequests)
   const saveApiRequest = useAppStore((s) => s.saveApiRequest)
+  const createApiRequest = useAppStore((s) => s.createApiRequest)
+  const openApiTab = useAppStore((s) => s.openApiTab)
+  const closePanelTab = useAppStore((s) => s.closePanelTab)
   const apiHistory = useAppStore((s) => s.apiHistory)
   const recordApiHistory = useAppStore((s) => s.recordApiHistory)
   const clearApiHistory = useAppStore((s) => s.clearApiHistory)
   const updatePanelTabTitle = useAppStore((s) => s.updatePanelTabTitle)
 
   const request = apiRequests.find((r) => r.id === requestId) ?? null
+  /** 本标签是否是「未保存的新请求」草稿（requestId 为哨兵值，不是真实存储条目） */
+  const isDraft = requestId === NEW_API_REQUEST_ID
 
   // ---------- 请求草稿 ----------
   // 不自动保存：改完必须按 Ctrl/Cmd+S 才落盘。标签保持挂载，所以切走再回来草稿还在；
@@ -67,6 +76,12 @@ export function ApiPage({ requestId }: { requestId: string }) {
   const [method, setMethod] = useState('GET')
   const [url, setUrl] = useState('')
   const [headers, setHeaders] = useState<ApiHeaderPair[]>([emptyHeader()])
+  /**
+   * 查询参数表。URL 的查询串是它的唯一事实来源（不另存一份），
+   * 所以这里只是「查询串的可编辑视图」：改 URL 的查询 → 解析进本表；
+   * 改本表 → 序列化回 URL 的查询串（见 paramsRef 旁的同步 effect）。
+   */
+  const [params, setParams] = useState<ApiHeaderPair[]>([emptyHeader()])
   const [body, setBody] = useState('')
   /**
    * 请求体编辑器（Monaco）的高亮语言。
@@ -76,13 +91,17 @@ export function ApiPage({ requestId }: { requestId: string }) {
   const [bodyLanguage, setBodyLanguage] = useState('json')
 
   // ---------- 视图状态（无需持久化；标签保持挂载，所以切标签不丢） ----------
-  const [reqTab, setReqTab] = useState<'headers' | 'body'>('headers')
+  const [reqTab, setReqTab] = useState<'headers' | 'params' | 'body'>('headers')
   const [resTab, setResTab] = useState<'body' | 'headers'>('body')
   const [sending, setSending] = useState(false)
   const [response, setResponse] = useState<ApiHttpResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [format, setFormat] = useState(true)
+  /** 响应正文：本地可编辑副本；用 Monaco 展示并允许其格式化按钮美化（不落盘） */
+  const [respBody, setRespBody] = useState('')
   const [respCollapsed, setRespCollapsed] = useState(false)
+  /** 未保存草稿按 Ctrl/Cmd+S 时，弹窗要求输入请求名才落盘 */
+  const [saveNameOpen, setSaveNameOpen] = useState(false)
+  const [saveName, setSaveName] = useState('')
   const [resRatio, setResRatio] = useState(RES_RATIO_DEFAULT)
   const [historyOpen, setHistoryOpen] = useState(false)
   /** 页面根容器：拖动分隔条时按它的高度换算比例（不依赖 parentElement 的层级假设） */
@@ -91,13 +110,31 @@ export function ApiPage({ requestId }: { requestId: string }) {
   const reqRowRef = useRef<HTMLDivElement | null>(null)
 
   /**
+   * 新响应到达时，把正文按内容类型美化后放进可编辑副本（Monaco 展示 + 允许格式化按钮）。
+   * 放在 early return 之前：它是纯派生副作用，不依赖 request 是否存在。
+   */
+  useEffect(() => {
+    if (response) {
+      const ct = response.headers?.['content-type'] || ''
+      setRespBody(formatBody(response.body, ct, true))
+    }
+  }, [response])
+
+  /**
    * 保存当前草稿 —— **唯一的落盘入口**，只有 Ctrl/Cmd+S 会走到这里。
    * 不做自动保存、不在切标签 / 关标签时偷偷写盘。
    *
-   * groupId 必须从 store 里现取带回去：保存是「整条覆盖写」，漏了它按一次 Ctrl+S
-   * 就会把请求从分组里踢出去（分组归属只由侧边栏的拖拽重排改动）。
+   * - 未保存草稿：先弹窗要请求名，确认后才真正落盘（见 confirmSaveDraft）。
+   * - 已保存请求：整条覆盖写；groupId 必须从 store 里现取带回去 —— 否则按一次
+   *   Ctrl+S 就会把请求从分组里踢出去（分组归属只由侧边栏的拖拽重排改动）。
    */
   const saveNow = async (): Promise<void> => {
+    // 未保存草稿：先要请求名，确认后才落盘
+    if (isDraft) {
+      setSaveName(name)
+      setSaveNameOpen(true)
+      return
+    }
     try {
       const current = useAppStore.getState().apiRequests.find((r) => r.id === requestId)
       await saveApiRequest({
@@ -117,6 +154,33 @@ export function ApiPage({ requestId }: { requestId: string }) {
     }
   }
 
+  /** 草稿落盘：输入名称后写入列表并切到真实标签（草稿标签随之关闭） */
+  const confirmSaveDraft = async (): Promise<void> => {
+    const nm = saveName.trim()
+    if (!nm) return
+    try {
+      // 草稿标签上记着「目标分组」：在分组里点「新建」时带过来
+      const gid = useAppStore
+        .getState()
+        .ui.panelTabs.find((t) => t.id === apiTabId(NEW_API_REQUEST_ID))?.apiGroupId
+      const id = await createApiRequest({
+        name: nm,
+        method,
+        url: url.trim(),
+        headers,
+        body,
+        groupId: gid
+      })
+      // 草稿标签 → 真实标签：关掉草稿，避免残留一个空白标签
+      closePanelTab(apiTabId(NEW_API_REQUEST_ID))
+      openApiTab(id)
+      message.success('已保存')
+      setSaveNameOpen(false)
+    } catch (e) {
+      message.error(`保存失败：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
   /** 切换请求：用新请求重置草稿（不冲刷未保存的改动 —— 那是用户自己的事） */
   useEffect(() => {
     const req = useAppStore.getState().apiRequests.find((r) => r.id === requestId) ?? null
@@ -124,6 +188,8 @@ export function ApiPage({ requestId }: { requestId: string }) {
     setMethod(req?.method ?? 'GET')
     setUrl(req?.url ?? '')
     setHeaders(req?.headers?.length ? normalizeHeaders(req.headers) : [emptyHeader()])
+    // 查询参数表从 URL 的查询串解析出来（不另存，URL 才是事实来源）
+    setParams(tidyHeaderRows(parseQueryParams(req?.url ?? '')))
     setBody(req?.body ?? '')
     // 编辑器语言跟着这个请求的 Content-Type 走（没有 Content-Type 时给 json）
     setBodyLanguage(bodyLanguageOf(contentTypeOf(req?.headers ?? [])))
@@ -136,6 +202,21 @@ export function ApiPage({ requestId }: { requestId: string }) {
   useEffect(() => {
     updatePanelTabTitle(apiTabId(requestId), apiTabTitle({ name, method, url }))
   }, [name, method, url, requestId, updatePanelTabTitle])
+
+  /**
+   * 参数表 → URL 的同步（与 onUrlChange 形成双向）。
+   * 仅当参数表变化时触发：把整张表序列化回 URL 的查询串。
+   * 因为 onUrlChange 已经把「URL 改动」解析进了参数表，这里序列化回去
+   * 得到的就是同源字符串，setUrl 会被 React 的同值跳过（除非确实存在差异，
+   * 例如用户改了某个参数行的值），所以不会和地址框输入形成回环。
+   */
+  useEffect(() => {
+    const candidate = withQuery(url, serializeParams(params))
+    if (candidate !== url) setUrl(candidate)
+    // 只依赖 params：本 effect 要的是「用当前 URL 替换其查询串」，
+    // 闭包里的 url 就是本次提交时的地址（已是上一次同步后的结果）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params])
 
   // ---------- 请求头增删改 ----------
   // 没有「添加请求头」按钮：末行填了内容就自动补一个空槽位（见 tidyHeaderRows），
@@ -153,6 +234,26 @@ export function ApiPage({ requestId }: { requestId: string }) {
   }
   const removeHeader = (idx: number): void => {
     setHeaders((prev) => tidyHeaderRows(prev.filter((_, i) => i !== idx)))
+  }
+
+  // ---------- 查询参数（与请求头同样的「末行空槽位」交互，但无补全/无下拉） ----------
+  const updateParam = (idx: number, field: keyof ApiHeaderPair, value: string): void => {
+    setParams((prev) =>
+      tidyHeaderRows(prev.map((p, i) => (i === idx ? { ...p, [field]: value } : p)))
+    )
+  }
+  const removeParam = (idx: number): void => {
+    setParams((prev) => tidyHeaderRows(prev.filter((_, i) => i !== idx)))
+  }
+
+  /**
+   * 地址框输入：直接把新 URL 落盘到草稿，同时把查询串解析进参数表
+   * （这是「URL → 表格」这一向的同步；「表格 → URL」由下面的 effect 负责）。
+   */
+  const onUrlChange = (e: ReactChangeEvent<HTMLInputElement>): void => {
+    const raw = e.target.value
+    setUrl(raw)
+    setParams(tidyHeaderRows(parseQueryParams(raw)))
   }
 
   // ---------- 发送 ----------
@@ -207,6 +308,7 @@ export function ApiPage({ requestId }: { requestId: string }) {
     const nextHeaders = normalizeHeaders(entry.headers)
     setMethod(entry.method || 'GET')
     setUrl(entry.url || '')
+    setParams(tidyHeaderRows(parseQueryParams(entry.url || '')))
     setHeaders(nextHeaders)
     setBody(entry.body || '')
     setBodyLanguage(bodyLanguageOf(contentTypeOf(nextHeaders)))
@@ -285,7 +387,7 @@ export function ApiPage({ requestId }: { requestId: string }) {
     }
   }
 
-  if (!request) {
+  if (!request && !isDraft) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-muted-foreground">
         <Globe className="size-12 opacity-30" />
@@ -296,6 +398,7 @@ export function ApiPage({ requestId }: { requestId: string }) {
   }
 
   const contentType = response?.headers?.['content-type'] || ''
+  const respLang = bodyLanguageOf(contentType)
   const respHeaders = response ? Object.entries(response.headers || {}) : []
   const statusOk = response && response.status > 0 && response.status < 400
 
@@ -335,7 +438,7 @@ export function ApiPage({ requestId }: { requestId: string }) {
         />
         <Input
           value={url}
-          onChange={(e) => setUrl(e.target.value)}
+          onChange={onUrlChange}
           placeholder="请求地址，如 https://api.example.com/users"
           className="min-w-0 flex-1 font-mono text-xs"
         />
@@ -451,10 +554,76 @@ export function ApiPage({ requestId }: { requestId: string }) {
             )
           },
           {
+            key: 'params',
+            label: '参数',
+            children: (
+              <div className="flex h-full flex-col overflow-auto py-3">
+                <Table<ApiHeaderPair>
+                  size="small"
+                  columns={[
+                    {
+                      key: 'name',
+                      width: 200,
+                      onCell: () => ({ style: { padding: 0 } }),
+                      render: (_, _r, i) => (
+                        <Input
+                          size="small"
+                          variant="filled"
+                          value={params[i]?.key ?? ''}
+                          onChange={(e) => updateParam(i, 'key', e.target.value)}
+                          placeholder="参数名"
+                          className="w-full font-mono text-[11px]"
+                          style={{ height: 32 }}
+                        />
+                      )
+                    },
+                    {
+                      key: 'value',
+                      onCell: () => ({ style: { padding: 0 } }),
+                      render: (_, _r, i) => (
+                        <Input
+                          size="small"
+                          variant="filled"
+                          value={params[i]?.value ?? ''}
+                          onChange={(e) => updateParam(i, 'value', e.target.value)}
+                          placeholder="参数值"
+                          className="w-full font-mono text-[11px]"
+                          style={{ height: 32 }}
+                        />
+                      )
+                    },
+                    {
+                      key: 'action',
+                      width: 40,
+                      onCell: () => ({ style: { padding: 0, textAlign: 'center' } }),
+                      // 末行空槽位不给删除按钮（删了 tidyHeaderRows 也会立刻补回来）
+                      render: (_, _r, i) =>
+                        i === params.length - 1 && isBlankHeader(params[i]) ? null : (
+                          <Button
+                            type="text"
+                            size="small"
+                            className="size-7 text-muted-foreground"
+                            title="删除该参数"
+                            icon={<Trash2 className="size-3.5" />}
+                            onClick={() => removeParam(i)}
+                          />
+                        )
+                    }
+                  ]}
+                  dataSource={params}
+                  rowKey={(_, i) => 'p' + i}
+                  pagination={false}
+                  showHeader={false}
+                  tableLayout="fixed"
+                />
+              </div>
+            )
+          },
+          {
             key: 'body',
             label: '请求体',
             children: (
-              <div className="flex h-full min-h-0 flex-col p-3">
+              <div className="flex h-full min-h-0 flex-col">
                 <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-border">
                   <MonacoEditor
                     value={body}
@@ -563,32 +732,24 @@ export function ApiPage({ requestId }: { requestId: string }) {
         {!respCollapsed &&
           (response ? (
             resTab === 'body' ? (
-              <div className="flex min-h-0 flex-1 flex-col gap-2 px-3 pb-3">
-                <div className="flex shrink-0 items-center gap-2">
-                  <Button
-                    type="text"
-                    size="small"
-                    className="h-7 px-2 text-[11px]"
-                    onClick={() => setFormat((v) => !v)}
-                  >
-                    {format ? '已格式化' : '格式化'}
-                  </Button>
-                  <span className="text-[10px] text-muted-foreground">
-                    {format ? '已按内容类型美化（JSON 缩进）' : '显示原始响应正文'}
-                  </span>
+              <div className="min-h-0 flex-1 overflow-hidden px-3 pb-3">
+                <div className="h-full overflow-hidden rounded-md border border-border">
+                  {/* 响应体用 Monaco：自带格式化按钮（工具栏的「代码」图标），无需再写自定义按钮 */}
+                  <MonacoEditor
+                    value={respBody}
+                    onChange={setRespBody}
+                    language={respLang}
+                    showLanguageSelector
+                    showCopyButton
+                  />
                 </div>
-                <textarea
-                  readOnly
-                  value={formatBody(response.body, contentType, format)}
-                  className="min-h-0 w-full flex-1 resize-none rounded-md border border-border bg-muted/30 p-3 font-mono text-xs text-foreground"
-                />
               </div>
             ) : (
               <div className="min-h-0 flex-1 overflow-auto px-3 pb-3">
                 {respHeaders.length === 0 ? (
                   <div className="text-xs text-muted-foreground">暂无响应头。</div>
                 ) : (
-                  <div className="space-y-0.5">
+                  <div className="select-text space-y-0.5">
                     {respHeaders.map(([k, v]) => (
                       <div key={k} className="flex gap-3 border-b border-border/40 py-1">
                         <span className="w-56 shrink-0 break-all font-mono text-[11px] text-muted-foreground">
@@ -686,6 +847,29 @@ export function ApiPage({ requestId }: { requestId: string }) {
           )}
         </div>
       </Drawer>
+
+      {/* 未保存草稿按下 Ctrl/Cmd+S 时，要求输入请求名才落盘 */}
+      <Modal
+        open={saveNameOpen}
+        onCancel={() => setSaveNameOpen(false)}
+        title="保存请求"
+        okText="保存"
+        cancelText="取消"
+        centered
+        width={400}
+        destroyOnHidden
+        okButtonProps={{ disabled: !saveName.trim() }}
+        onOk={() => void confirmSaveDraft()}
+      >
+        <Input
+          autoFocus
+          placeholder="请求名称，如：查询用户列表"
+          value={saveName}
+          onChange={(e) => setSaveName(e.target.value)}
+          onPressEnter={() => void confirmSaveDraft()}
+        />
+        <p className="mt-2 text-xs text-muted-foreground">保存后该请求才会显示在左侧列表中。</p>
+      </Modal>
     </div>
   )
 }

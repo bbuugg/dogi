@@ -12,11 +12,13 @@ import type {
   ApiRequestEntry,
   ColorThemeName,
   NoteEntry,
+  NoteGroup,
   Preferences,
   ServerMetrics,
   SessionInfo,
   ShellDetectResult,
   ScriptEntry,
+  ScriptGroup,
   ShortcutConfig,
   SshConnectProgress,
   SshGroup,
@@ -66,6 +68,8 @@ export interface PanelTab {
   noteId?: string
   /** 接口请求：保存的请求 id */
   apiRequestId?: string
+  /** 接口请求（未保存草稿）的目标分组：保存落盘时写入该分组 */
+  apiGroupId?: string
   pluginViewId?: string
 }
 
@@ -88,6 +92,9 @@ export function terminalTabId(sessionId: string): string {
 export function apiTabId(requestId: string): string {
   return `api-${requestId}`
 }
+
+/** 未保存的「新建请求」草稿标签使用的请求 id（不是一个真实存储条目） */
+export const NEW_API_REQUEST_ID = '__new__'
 
 /** 请求历史最多保留的条数 */
 export const API_HISTORY_LIMIT = 50
@@ -499,9 +506,13 @@ interface AppStore {
 
   // ---------- 用户脚本 ----------
   scripts: ScriptEntry[]
+  /** 脚本分组（侧边栏里的分组节点，数组顺序即显示顺序） */
+  scriptGroups: ScriptGroup[]
 
   // ---------- 笔记 ----------
   notes: NoteEntry[]
+  /** 笔记分组（侧边栏里的分组节点，数组顺序即显示顺序） */
+  noteGroups: NoteGroup[]
 
   // ---------- 接口请求 ----------
   /** 保存的接口请求（侧边栏列表；一个请求对应 PanelView 里的一个标签） */
@@ -612,6 +623,17 @@ interface AppStore {
   refreshScripts: () => Promise<void>
   /** 删除脚本，并关掉它的标签页 */
   deleteScript: (id: string) => Promise<void>
+  /** 刷新脚本分组到 store */
+  refreshScriptGroups: () => Promise<void>
+  /** 新建（不传 id）或重命名（传 id）脚本分组 */
+  saveScriptGroup: (input: { id?: string; name: string }) => Promise<void>
+  /** 删除分组；deleteScripts=true 时连同组内脚本一起删除 */
+  deleteScriptGroup: (id: string, deleteScripts?: boolean) => Promise<void>
+  /** 拖拽排序 / 换组后的整体重排：数组顺序即显示顺序 */
+  arrangeScripts: (payload: {
+    groupIds: string[]
+    scripts: Array<{ id: string; groupId?: string }>
+  }) => Promise<void>
   /** 刷新接口请求列表到 store */
   refreshApiRequests: () => Promise<void>
   /** 刷新接口请求分组到 store */
@@ -647,12 +669,23 @@ interface AppStore {
   clearApiHistory: () => Promise<void>
   /** 刷新笔记列表到 store */
   refreshNotes: () => Promise<void>
-  /** 新建一篇空笔记并返回其 id（默认语言 markdown） */
-  createNote: () => Promise<string>
+  /** 新建一篇空笔记并返回其 id（默认语言 markdown）；groupId 用于「在某分组内新建」 */
+  createNote: (groupId?: string) => Promise<string>
   /** 保存笔记（upsert）：已有笔记原地更新 */
   saveNote: (note: NoteEntry) => Promise<void>
   /** 删除笔记，并关掉它的标签页 */
   deleteNote: (id: string) => Promise<void>
+  /** 刷新笔记分组到 store */
+  refreshNoteGroups: () => Promise<void>
+  /** 新建（不传 id）或重命名（传 id）笔记分组 */
+  saveNoteGroup: (input: { id?: string; name: string }) => Promise<void>
+  /** 删除分组；deleteNotes=true 时连同组内笔记一起删除 */
+  deleteNoteGroup: (id: string, deleteNotes?: boolean) => Promise<void>
+  /** 拖拽排序 / 换组后的整体重排：数组顺序即显示顺序 */
+  arrangeNotes: (payload: {
+    groupIds: string[]
+    notes: Array<{ id: string; groupId?: string }>
+  }) => Promise<void>
   /** 选择要查看的插件（null 表示取消选择） */
   selectPlugin: (id: string | null) => void
   /** 在 PanelView 中打开脚本标签（已存在则激活） */
@@ -661,6 +694,8 @@ interface AppStore {
   openNoteTab: (noteId: string) => void
   /** 在 PanelView 中打开接口请求标签（已存在则激活） */
   openApiTab: (requestId: string) => void
+  /** 打开一个「未保存的新请求」草稿标签（不落盘，保存时才写进列表） */
+  openNewApiDraft: (groupId?: string) => void
   /** 在 PanelView 中打开插件管理标签（已存在则激活） */
   openPluginsTab: () => void
   /** 在 PanelView 中打开插件视图标签（已存在则激活） */
@@ -767,7 +802,9 @@ let shortcutWired = false
     sshGroups: [],
 
     scripts: [],
+    scriptGroups: [],
     notes: [],
+    noteGroups: [],
     apiRequests: [],
     apiGroups: [],
     apiHistory: [],
@@ -805,7 +842,7 @@ let shortcutWired = false
     monitors: {},
 
     bootstrap: async () => {
-      const [profiles, sshGroups, configs, settings, preferences, shells, scripts, notes, apiRequests, apiGroups, apiHistory, shortcuts] = await Promise.all([
+      const [profiles, sshGroups, configs, settings, preferences, shells, scripts, scriptGroups, notes, noteGroups, apiRequests, apiGroups, apiHistory, shortcuts] = await Promise.all([
         window.api.ssh.list(),
         window.api.ssh.listGroups(),
         window.api.ai.listConfigs(),
@@ -813,7 +850,9 @@ let shortcutWired = false
         window.api.prefs.get(),
         window.api.terminal.listShells(),
         window.api.scripts.list(),
+        window.api.scripts.listGroups(),
         window.api.notes.list(),
+        window.api.notes.listGroups(),
         window.api.apiClient.list(),
         window.api.apiClient.listGroups(),
         window.api.apiClient.listHistory(),
@@ -830,7 +869,9 @@ let shortcutWired = false
         preferences,
         shells,
         scripts,
+        scriptGroups,
         notes,
+        noteGroups,
         apiRequests,
         apiGroups,
         apiHistory,
@@ -1271,17 +1312,46 @@ let shortcutWired = false
       set((s) => ({ scripts, ...closePlainTab(s, `script-${id}`) }))
     },
 
+    refreshScriptGroups: async () => {
+      set({ scriptGroups: await window.api.scripts.listGroups() })
+    },
+
+    saveScriptGroup: async (input) => {
+      set({ scriptGroups: await window.api.scripts.saveGroup(input) })
+    },
+
+    deleteScriptGroup: async (id, deleteScripts) => {
+      // 组内脚本可能被删除或回到「未分组」，两份数据一起刷新
+      const { groups, scripts } = await window.api.scripts.removeGroup(id, deleteScripts)
+      const alive = new Set(scripts.map((s) => s.id))
+      set((s) => {
+        let patch: Partial<AppStore> = { scriptGroups: groups, scripts }
+        // 被删掉的脚本若正在标签页里打开，一并关掉（与单条删除一致）
+        for (const tab of s.ui.panelTabs) {
+          if (tab.type !== 'script' || !tab.scriptId || alive.has(tab.scriptId)) continue
+          patch = { ...patch, ...closePlainTab({ ...s, ...patch } as AppStore, tab.id) }
+        }
+        return patch
+      })
+    },
+
+    arrangeScripts: async (payload) => {
+      const { groups, scripts } = await window.api.scripts.arrange(payload)
+      set({ scriptGroups: groups, scripts })
+    },
+
     refreshNotes: async () => {
       set({ notes: await window.api.notes.list() })
     },
 
-    createNote: async () => {
+    createNote: async (groupId) => {
       const prevIds = new Set(get().notes.map((n) => n.id))
       const list = await window.api.notes.save({
         id: '',
         title: '未命名笔记',
         content: '',
         language: 'markdown',
+        groupId,
         createdAt: 0,
         updatedAt: 0
       })
@@ -1298,6 +1368,34 @@ let shortcutWired = false
       const notes = await window.api.notes.remove(id)
       // 该笔记若正在标签页里打开，一并关掉
       set((s) => ({ notes, ...closePlainTab(s, `note-${id}`) }))
+    },
+
+    refreshNoteGroups: async () => {
+      set({ noteGroups: await window.api.notes.listGroups() })
+    },
+
+    saveNoteGroup: async (input) => {
+      set({ noteGroups: await window.api.notes.saveGroup(input) })
+    },
+
+    deleteNoteGroup: async (id, deleteNotes) => {
+      // 组内笔记可能被删除或回到「未分组」，两份数据一起刷新
+      const { groups, notes } = await window.api.notes.removeGroup(id, deleteNotes)
+      const alive = new Set(notes.map((n) => n.id))
+      set((s) => {
+        let patch: Partial<AppStore> = { noteGroups: groups, notes }
+        // 被删掉的笔记若正在标签页里打开，一并关掉（与单条删除一致）
+        for (const tab of s.ui.panelTabs) {
+          if (tab.type !== 'note' || !tab.noteId || alive.has(tab.noteId)) continue
+          patch = { ...patch, ...closePlainTab({ ...s, ...patch } as AppStore, tab.id) }
+        }
+        return patch
+      })
+    },
+
+    arrangeNotes: async (payload) => {
+      const { groups, notes } = await window.api.notes.arrange(payload)
+      set({ noteGroups: groups, notes })
     },
 
     selectPlugin: (id) => {
@@ -1427,6 +1525,21 @@ let shortcutWired = false
           apiRequestId: requestId
         })
       })
+    },
+
+    /** 打开一个未保存的「新建请求」草稿：右侧只建一个标签，不写进请求列表；
+     *  真正的落盘发生在用户按 Ctrl/Cmd+S 输入名称后（见 ApiPage 的 saveNow）。 */
+    openNewApiDraft: (groupId) => {
+      set((s) =>
+        addOrFocusTab(s, {
+          id: apiTabId(NEW_API_REQUEST_ID),
+          type: 'api',
+          title: '新建请求',
+          closable: true,
+          apiRequestId: NEW_API_REQUEST_ID,
+          apiGroupId: groupId
+        })
+      )
     },
 
     openPluginsTab: () => {

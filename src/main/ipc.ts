@@ -204,11 +204,39 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   ipcMain.handle('scripts:list', () => storage.listScripts())
   ipcMain.handle('scripts:save', (_e, entry: ScriptEntry) => storage.saveScript(entry))
   ipcMain.handle('scripts:delete', (_e, id: string) => storage.deleteScript(id))
+  ipcMain.handle(
+    'scripts:arrange',
+    (
+      _e,
+      payload: { groupIds: string[]; scripts: Array<{ id: string; groupId?: string }> }
+    ) => storage.arrangeScripts(payload)
+  )
+  ipcMain.handle('scripts:groups:list', () => storage.listScriptGroups())
+  ipcMain.handle('scripts:groups:save', (_e, input: { id?: string; name: string }) =>
+    storage.saveScriptGroup(input)
+  )
+  ipcMain.handle('scripts:groups:delete', (_e, id: string, deleteScripts?: boolean) =>
+    storage.deleteScriptGroup(id, deleteScripts)
+  )
 
   // ---------- 笔记 CRUD ----------
   ipcMain.handle('notes:list', () => storage.listNotes())
   ipcMain.handle('notes:save', (_e, note: NoteEntry) => storage.saveNote(note))
   ipcMain.handle('notes:delete', (_e, id: string) => storage.deleteNote(id))
+  ipcMain.handle(
+    'notes:arrange',
+    (
+      _e,
+      payload: { groupIds: string[]; notes: Array<{ id: string; groupId?: string }> }
+    ) => storage.arrangeNotes(payload)
+  )
+  ipcMain.handle('notes:groups:list', () => storage.listNoteGroups())
+  ipcMain.handle('notes:groups:save', (_e, input: { id?: string; name: string }) =>
+    storage.saveNoteGroup(input)
+  )
+  ipcMain.handle('notes:groups:delete', (_e, id: string, deleteNotes?: boolean) =>
+    storage.deleteNoteGroup(id, deleteNotes)
+  )
 
   // ---------- 接口请求（内置的 API 调试功能） ----------
   ipcMain.handle('api:list', () => storage.listApiRequests())

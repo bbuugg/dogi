@@ -155,6 +155,80 @@ export function normalizeHeaders(raw: unknown): ApiHeaderPair[] {
   return [emptyHeader()]
 }
 
+/**
+ * 查询参数（Query Params）与 URL 的双向解析。
+ *
+ * 约定：请求地址里的查询串是查询参数的**唯一事实来源**——落盘只存 URL，
+ * 不另存一份参数表，参数表格只是查询串的可编辑视图。两边必须保持一致：
+ * 改 URL 的查询 → 解析进表格；改表格 → 序列化回 URL 的查询串。
+ */
+/** 从请求地址里取出查询串，解析成键值对数组（保留顺序，空值也保留） */
+export function parseQueryParams(url: string): ApiHeaderPair[] {
+  const qIdx = String(url ?? '').indexOf('?')
+  if (qIdx < 0) return []
+  let qs = url.slice(qIdx + 1)
+  const hIdx = qs.indexOf('#')
+  if (hIdx >= 0) qs = qs.slice(0, hIdx)
+  if (!qs) return []
+  const out: ApiHeaderPair[] = []
+  for (const pair of qs.split('&')) {
+    if (pair === '') continue
+    const eq = pair.indexOf('=')
+    if (eq < 0) {
+      out.push({ key: safeDecode(pair), value: '' })
+    } else {
+      out.push({ key: safeDecode(pair.slice(0, eq)), value: safeDecode(pair.slice(eq + 1)) })
+    }
+  }
+  return out
+}
+
+/** 把参数表序列化回查询串（不含前导 ?）：跳过空键，值允许为空（key=） */
+export function serializeParams(params: ApiHeaderPair[]): string {
+  const parts: string[] = []
+  for (const p of params || []) {
+    const k = (p.key ?? '').trim()
+    if (!k) continue
+    parts.push(encodeURIComponent(p.key) + '=' + encodeURIComponent(p.value ?? ''))
+  }
+  return parts.join('&')
+}
+
+/**
+ * 把查询串写回 URL（替换原查询；query 为空则去掉 ? 与查询串，保留 #fragment）。
+ * base 部分原样保留、不重新编码，避免把用户手打的 path/域名也污染掉。
+ */
+export function withQuery(url: string, query: string): string {
+  const raw = String(url ?? '')
+  const qIdx = raw.indexOf('?')
+  let base: string
+  let hash = ''
+  if (qIdx < 0) {
+    const hIdx = raw.indexOf('#')
+    if (hIdx < 0) {
+      base = raw
+    } else {
+      base = raw.slice(0, hIdx)
+      hash = raw.slice(hIdx)
+    }
+  } else {
+    base = raw.slice(0, qIdx)
+    const after = raw.slice(qIdx + 1)
+    const hIdx = after.indexOf('#')
+    hash = hIdx < 0 ? '' : '#' + after.slice(hIdx + 1)
+  }
+  return query ? base + '?' + query + hash : base + hash
+}
+
+/** 解码失败（畸形 %）时退化为原串，避免整条参数解析崩掉 */
+function safeDecode(s: string): string {
+  try {
+    return decodeURIComponent(s)
+  } catch {
+    return s
+  }
+}
+
 export interface ParsedCurl {
   method: string
   url: string

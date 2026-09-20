@@ -16,8 +16,10 @@ import type {
   McpServerConfig,
   McpToolInfo,
   NoteEntry,
+  NoteGroup,
   Preferences,
   ScriptEntry,
+  ScriptGroup,
   ServerMetrics,
   SessionInfo,
   ShellDetectResult,
@@ -132,12 +134,42 @@ const api = {
     list: (): Promise<ScriptEntry[]> => ipcRenderer.invoke('scripts:list'),
     save: (entry: ScriptEntry): Promise<ScriptEntry[]> =>
       ipcRenderer.invoke('scripts:save', entry),
-    remove: (id: string): Promise<ScriptEntry[]> => ipcRenderer.invoke('scripts:delete', id)
+    remove: (id: string): Promise<ScriptEntry[]> => ipcRenderer.invoke('scripts:delete', id),
+    /** 拖拽排序 / 换组后的整体重排（数组顺序即显示顺序） */
+    arrange: (payload: {
+      groupIds: string[]
+      scripts: Array<{ id: string; groupId?: string }>
+    }): Promise<{ groups: ScriptGroup[]; scripts: ScriptEntry[] }> =>
+      ipcRenderer.invoke('scripts:arrange', payload),
+    listGroups: (): Promise<ScriptGroup[]> => ipcRenderer.invoke('scripts:groups:list'),
+    saveGroup: (input: { id?: string; name: string }): Promise<ScriptGroup[]> =>
+      ipcRenderer.invoke('scripts:groups:save', input),
+    /** 删除分组；deleteScripts=true 时连同组内脚本一起删除 */
+    removeGroup: (
+      id: string,
+      deleteScripts?: boolean
+    ): Promise<{ groups: ScriptGroup[]; scripts: ScriptEntry[] }> =>
+      ipcRenderer.invoke('scripts:groups:delete', id, deleteScripts)
   },
   notes: {
     list: (): Promise<NoteEntry[]> => ipcRenderer.invoke('notes:list'),
     save: (note: NoteEntry): Promise<NoteEntry[]> => ipcRenderer.invoke('notes:save', note),
-    remove: (id: string): Promise<NoteEntry[]> => ipcRenderer.invoke('notes:delete', id)
+    remove: (id: string): Promise<NoteEntry[]> => ipcRenderer.invoke('notes:delete', id),
+    /** 拖拽排序 / 换组后的整体重排（数组顺序即显示顺序） */
+    arrange: (payload: {
+      groupIds: string[]
+      notes: Array<{ id: string; groupId?: string }>
+    }): Promise<{ groups: NoteGroup[]; notes: NoteEntry[] }> =>
+      ipcRenderer.invoke('notes:arrange', payload),
+    listGroups: (): Promise<NoteGroup[]> => ipcRenderer.invoke('notes:groups:list'),
+    saveGroup: (input: { id?: string; name: string }): Promise<NoteGroup[]> =>
+      ipcRenderer.invoke('notes:groups:save', input),
+    /** 删除分组；deleteNotes=true 时连同组内笔记一起删除 */
+    removeGroup: (
+      id: string,
+      deleteNotes?: boolean
+    ): Promise<{ groups: NoteGroup[]; notes: NoteEntry[] }> =>
+      ipcRenderer.invoke('notes:groups:delete', id, deleteNotes)
   },
   /** 内置的「接口请求」功能：请求由主进程发出，规避渲染进程的 CORS 限制 */
   apiClient: {

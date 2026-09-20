@@ -9,8 +9,10 @@ import type {
   ApiRequestEntry,
   McpServerConfig,
   NoteEntry,
+  NoteGroup,
   Preferences,
   ScriptEntry,
+  ScriptGroup,
   ShortcutConfig,
   SshGroup,
   SshProfile
@@ -26,6 +28,8 @@ interface StoreSchema {
   preferences: Preferences
   scripts: ScriptEntry[]
   notes: NoteEntry[]
+  scriptGroups: ScriptGroup[]
+  noteGroups: NoteGroup[]
   apiRequests: ApiRequestEntry[]
   apiGroups: ApiGroup[]
   apiHistory: ApiHistoryEntry[]
@@ -62,6 +66,8 @@ class StorageService {
       preferences: DEFAULT_PREFERENCES,
       scripts: [],
       notes: [],
+      scriptGroups: [],
+      noteGroups: [],
       apiRequests: [],
       apiGroups: [],
       apiHistory: [],
@@ -284,6 +290,79 @@ class StorageService {
     return this.listScripts()
   }
 
+  // ---------- 脚本分组 ----------
+  listScriptGroups(): ScriptGroup[] {
+    return this.store.get('scriptGroups')
+  }
+
+  saveScriptGroup(input: { id?: string; name: string }): ScriptGroup[] {
+    const groups = this.store.get('scriptGroups')
+    const prev = input.id ? groups.find((g) => g.id === input.id) : undefined
+    const group: ScriptGroup = {
+      id: input.id || crypto.randomUUID(),
+      name: input.name.trim(),
+      createdAt: prev?.createdAt ?? Date.now()
+    }
+    this.store.set(
+      'scriptGroups',
+      prev ? groups.map((g) => (g.id === group.id ? group : g)) : [...groups, group]
+    )
+    return this.listScriptGroups()
+  }
+
+  deleteScriptGroup(
+    id: string,
+    deleteScripts = false
+  ): { groups: ScriptGroup[]; scripts: ScriptEntry[] } {
+    const members = this.store
+      .get('scripts')
+      .filter((s) => s.groupId === id)
+      .map((s) => s.id)
+    const doomed = new Set(deleteScripts ? members : [])
+    this.store.set(
+      'scriptGroups',
+      this.store.get('scriptGroups').filter((g) => g.id !== id)
+    )
+    this.store.set(
+      'scripts',
+      this.store
+        .get('scripts')
+        .filter((s) => !doomed.has(s.id))
+        .map((s) => (s.groupId === id ? { ...s, groupId: undefined } : s))
+    )
+    return { groups: this.listScriptGroups(), scripts: this.listScripts() }
+  }
+
+  arrangeScripts(payload: {
+    groupIds: string[]
+    scripts: Array<{ id: string; groupId?: string }>
+  }): { groups: ScriptGroup[]; scripts: ScriptEntry[] } {
+    const groups = this.store.get('scriptGroups')
+    const groupById = new Map(groups.map((g) => [g.id, g]))
+    const ordered = payload.groupIds
+      .map((id) => groupById.get(id))
+      .filter((g): g is ScriptGroup => Boolean(g))
+    for (const g of groups) {
+      if (!payload.groupIds.includes(g.id)) ordered.push(g)
+    }
+    this.store.set('scriptGroups', ordered)
+
+    const scripts = this.store.get('scripts')
+    const scriptById = new Map(scripts.map((s) => [s.id, s]))
+    const next: ScriptEntry[] = []
+    for (const item of payload.scripts) {
+      const s = scriptById.get(item.id)
+      if (!s) continue
+      next.push(s.groupId === item.groupId ? s : { ...s, groupId: item.groupId })
+    }
+    for (const s of scripts) {
+      if (!next.some((x) => x.id === s.id)) next.push(s)
+    }
+    this.store.set('scripts', next)
+
+    return { groups: this.listScriptGroups(), scripts: this.listScripts() }
+  }
+
   // ---------- 笔记 ----------
   listNotes (): NoteEntry[] {
     return this.store.get('notes')
@@ -314,6 +393,79 @@ class StorageService {
       this.store.get('notes').filter((n) => n.id !== id)
     )
     return this.listNotes()
+  }
+
+  // ---------- 笔记分组 ----------
+  listNoteGroups(): NoteGroup[] {
+    return this.store.get('noteGroups')
+  }
+
+  saveNoteGroup(input: { id?: string; name: string }): NoteGroup[] {
+    const groups = this.store.get('noteGroups')
+    const prev = input.id ? groups.find((g) => g.id === input.id) : undefined
+    const group: NoteGroup = {
+      id: input.id || crypto.randomUUID(),
+      name: input.name.trim(),
+      createdAt: prev?.createdAt ?? Date.now()
+    }
+    this.store.set(
+      'noteGroups',
+      prev ? groups.map((g) => (g.id === group.id ? group : g)) : [...groups, group]
+    )
+    return this.listNoteGroups()
+  }
+
+  deleteNoteGroup(
+    id: string,
+    deleteNotes = false
+  ): { groups: NoteGroup[]; notes: NoteEntry[] } {
+    const members = this.store
+      .get('notes')
+      .filter((n) => n.groupId === id)
+      .map((n) => n.id)
+    const doomed = new Set(deleteNotes ? members : [])
+    this.store.set(
+      'noteGroups',
+      this.store.get('noteGroups').filter((g) => g.id !== id)
+    )
+    this.store.set(
+      'notes',
+      this.store
+        .get('notes')
+        .filter((n) => !doomed.has(n.id))
+        .map((n) => (n.groupId === id ? { ...n, groupId: undefined } : n))
+    )
+    return { groups: this.listNoteGroups(), notes: this.listNotes() }
+  }
+
+  arrangeNotes(payload: {
+    groupIds: string[]
+    notes: Array<{ id: string; groupId?: string }>
+  }): { groups: NoteGroup[]; notes: NoteEntry[] } {
+    const groups = this.store.get('noteGroups')
+    const groupById = new Map(groups.map((g) => [g.id, g]))
+    const ordered = payload.groupIds
+      .map((id) => groupById.get(id))
+      .filter((g): g is NoteGroup => Boolean(g))
+    for (const g of groups) {
+      if (!payload.groupIds.includes(g.id)) ordered.push(g)
+    }
+    this.store.set('noteGroups', ordered)
+
+    const notes = this.store.get('notes')
+    const noteById = new Map(notes.map((n) => [n.id, n]))
+    const next: NoteEntry[] = []
+    for (const item of payload.notes) {
+      const n = noteById.get(item.id)
+      if (!n) continue
+      next.push(n.groupId === item.groupId ? n : { ...n, groupId: item.groupId })
+    }
+    for (const n of notes) {
+      if (!next.some((x) => x.id === n.id)) next.push(n)
+    }
+    this.store.set('notes', next)
+
+    return { groups: this.listNoteGroups(), notes: this.listNotes() }
   }
 
   // ---------- 接口请求（内置的 API 调试功能） ----------
