@@ -483,7 +483,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   return (
     <aside
       ref={rootRef}
-      className="absolute z-20 flex select-none flex-col overflow-hidden rounded-xl border border-border bg-card/95 shadow-2xl backdrop-blur"
+      className="absolute z-20 flex select-none flex-col overflow-hidden rounded-xl border border-border bg-card/40 shadow-2xl backdrop-blur-md"
       style={{
         width: aiPanelWidth,
         left: floatingPos ? floatingPos.x : '50%',
@@ -503,7 +503,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           {/* 卡片头部：拖拽手柄 + 模型选择 + 操作（整行可拖动） */}
           <div
             onPointerDown={startDrag}
-            className="flex h-10 shrink-0 cursor-move touch-none items-center gap-1 border-b border-border/70 bg-sidebar px-2"
+            className="flex h-10 shrink-0 cursor-move touch-none items-center gap-1 border-b border-border/70 bg-sidebar/40 px-2"
           >
             <GripVertical className="size-3.5 shrink-0 text-muted-foreground/50" />
             <Sparkles className="size-4 shrink-0 text-primary" />
