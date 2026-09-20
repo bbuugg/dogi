@@ -1,38 +1,20 @@
 import {
-  useCallback,
   useEffect,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent
 } from 'react'
-import {
-  ChevronDown,
-  ChevronUp,
-  CheckCircle2,
-  Globe,
-  History,
-  Loader2,
-  Send,
-  Trash2
-} from 'lucide-react'
-import {
-  AutoComplete,
-  Button,
-  Drawer,
-  Input,
-  Modal,
-  Select,
-  Table,
-  Tabs,
-  Tag,
-  message
-} from 'antd'
+import { ChevronDown, ChevronUp, Globe, History, Send, Trash2 } from 'lucide-react'
+import { AutoComplete, Button, Drawer, Input, Select, Table, Tabs, Tag, message } from 'antd'
 import { apiTabId, apiTabTitle, useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'
+import MonacoEditor from '@/components/MonacoEditor'
 import {
   COMMON_HEADERS,
   METHODS,
+  bodyLanguageOf,
+  contentTypeOf,
   emptyHeader,
   formatBody,
   formatBytes,
@@ -44,10 +26,8 @@ import {
   statusClass,
   tidyHeaderRows
 } from '@/lib/api-client'
-import type { ApiHeaderPair, ApiHttpResponse, ApiRequestEntry } from '@shared/types'
+import type { ApiHeaderPair, ApiHttpResponse } from '@shared/types'
 
-/** 自动保存防抖间隔（毫秒） */
-const AUTOSAVE_DELAY = 800
 /** 请求超时（毫秒） */
 const TIMEOUT_MS = 30_000
 /** 响应面板高度占比的默认值与上下限（拖动分隔条时按此范围夹取） */
@@ -61,25 +41,18 @@ const RES_RATIO_MAX = 0.8
  */
 const MIN_REQ_PANE_H = 120
 
-interface Draft {
-  name: string
-  method: string
-  url: string
-  headers: ApiHeaderPair[]
-  body: string
-}
-
 /**
  * 接口请求编辑页（主区域）：一个标签 = 一个已保存的请求。
  *
  * 与原 api-client 插件的区别：请求的「多标签」由 PanelView 承担，
  * 「已保存请求列表」由 ApiPanel 承担，所以这里只专注单个请求的构造与响应查看。
  * 请求由主进程发出（window.api.apiClient.send），因此不受渲染进程 CORS 限制。
+ *
+ * 草稿**不自动保存**：改完按 Ctrl/Cmd+S 才落盘（保存成功给 message 提示）。
  */
 export function ApiPage({ requestId }: { requestId: string }) {
   const apiRequests = useAppStore((s) => s.apiRequests)
   const saveApiRequest = useAppStore((s) => s.saveApiRequest)
-  const deleteApiRequest = useAppStore((s) => s.deleteApiRequest)
   const apiHistory = useAppStore((s) => s.apiHistory)
   const recordApiHistory = useAppStore((s) => s.recordApiHistory)
   const clearApiHistory = useAppStore((s) => s.clearApiHistory)
@@ -87,21 +60,20 @@ export function ApiPage({ requestId }: { requestId: string }) {
 
   const request = apiRequests.find((r) => r.id === requestId) ?? null
 
-  // ---------- 请求草稿（防抖自动保存） ----------
+  // ---------- 请求草稿 ----------
+  // 不自动保存：改完必须按 Ctrl/Cmd+S 才落盘。标签保持挂载，所以切走再回来草稿还在；
+  // 但**关掉标签**就会丢掉未保存的改动（这是「不自动保存」的必然代价）。
   const [name, setName] = useState('')
   const [method, setMethod] = useState('GET')
   const [url, setUrl] = useState('')
   const [headers, setHeaders] = useState<ApiHeaderPair[]>([emptyHeader()])
   const [body, setBody] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [dirty, setDirty] = useState(false)
-
-  const draftRef = useRef<Draft>({ name, method, url, headers, body })
-  draftRef.current = { name, method, url, headers, body }
-  const idRef = useRef<string | null>(requestId)
-  idRef.current = requestId
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const pendingIdRef = useRef<string | null>(null)
+  /**
+   * 请求体编辑器（Monaco）的高亮语言。
+   * 不做持久化：它由 Content-Type 推导（见 bodyLanguageOf），
+   * 内容类型才是唯一的事实来源 —— 换了 Content-Type 高亮就该跟着换。
+   */
+  const [bodyLanguage, setBodyLanguage] = useState('json')
 
   // ---------- 视图状态（无需持久化；标签保持挂载，所以切标签不丢） ----------
   const [reqTab, setReqTab] = useState<'headers' | 'body'>('headers')
@@ -113,91 +85,47 @@ export function ApiPage({ requestId }: { requestId: string }) {
   const [respCollapsed, setRespCollapsed] = useState(false)
   const [resRatio, setResRatio] = useState(RES_RATIO_DEFAULT)
   const [historyOpen, setHistoryOpen] = useState(false)
-  const [pendingDelete, setPendingDelete] = useState<ApiRequestEntry | null>(null)
   /** 页面根容器：拖动分隔条时按它的高度换算比例（不依赖 parentElement 的层级假设） */
   const rootRef = useRef<HTMLDivElement | null>(null)
   /** 请求行（方法 + 地址 + 发送）：它的底边就是请求构造区的顶边，用来算响应面板的高度上限 */
   const reqRowRef = useRef<HTMLDivElement | null>(null)
 
-  /** 把指定 id 的草稿落盘 */
-  const doSave = useCallback(
-    async (id: string | null, d: Draft): Promise<void> => {
-      if (!id) return
-      setSaving(true)
-      try {
-        await saveApiRequest({
-          id,
-          name: d.name.trim(),
-          method: d.method,
-          url: d.url.trim(),
-          headers: d.headers,
-          body: d.body,
-          createdAt: 0,
-          updatedAt: 0
-        })
-        setDirty(false)
-      } catch (e) {
-        message.error(`保存失败：${e instanceof Error ? e.message : String(e)}`)
-      } finally {
-        setSaving(false)
-      }
-    },
-    [saveApiRequest]
-  )
+  /**
+   * 保存当前草稿 —— **唯一的落盘入口**，只有 Ctrl/Cmd+S 会走到这里。
+   * 不做自动保存、不在切标签 / 关标签时偷偷写盘。
+   */
+  const saveNow = async (): Promise<void> => {
+    try {
+      await saveApiRequest({
+        id: requestId,
+        name: name.trim(),
+        method,
+        url: url.trim(),
+        headers,
+        body,
+        createdAt: 0,
+        updatedAt: 0
+      })
+      message.success('已保存')
+    } catch (e) {
+      message.error(`保存失败：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
 
-  const saveSnapshot = useCallback(
-    (id: string) => void doSave(id, draftRef.current),
-    [doSave]
-  )
-  const saveCurrent = useCallback(() => doSave(idRef.current, draftRef.current), [doSave])
-  const saveCurrentRef = useRef(saveCurrent)
-  saveCurrentRef.current = saveCurrent
-
-  const markDirty = useCallback(
-    (id: string | null) => {
-      setDirty(true)
-      if (timerRef.current) clearTimeout(timerRef.current)
-      if (!id) return
-      pendingIdRef.current = id
-      timerRef.current = setTimeout(() => {
-        const pid = pendingIdRef.current
-        pendingIdRef.current = null
-        if (pid) void saveSnapshot(pid)
-      }, AUTOSAVE_DELAY)
-    },
-    [saveSnapshot]
-  )
-
-  /** 切换请求：先冲刷旧请求的待保存内容，再用新请求重置草稿 */
+  /** 切换请求：用新请求重置草稿（不冲刷未保存的改动 —— 那是用户自己的事） */
   useEffect(() => {
-    if (timerRef.current) clearTimeout(timerRef.current)
-    const pendingId = pendingIdRef.current
-    pendingIdRef.current = null
-    if (pendingId && pendingId !== requestId) void saveSnapshot(pendingId)
-
     const req = useAppStore.getState().apiRequests.find((r) => r.id === requestId) ?? null
     setName(req?.name ?? '')
     setMethod(req?.method ?? 'GET')
     setUrl(req?.url ?? '')
     setHeaders(req?.headers?.length ? normalizeHeaders(req.headers) : [emptyHeader()])
     setBody(req?.body ?? '')
+    // 编辑器语言跟着这个请求的 Content-Type 走（没有 Content-Type 时给 json）
+    setBodyLanguage(bodyLanguageOf(contentTypeOf(req?.headers ?? [])))
     // 响应与错误属于「上一次请求的结果」，换请求时清空避免张冠李戴
     setResponse(null)
     setError(null)
-    setDirty(false)
-  }, [requestId, saveSnapshot])
-
-  /** 关闭标签（组件卸载）时冲刷待保存内容；请求已被删除则跳过 */
-  useEffect(() => {
-    return () => {
-      if (timerRef.current) clearTimeout(timerRef.current)
-      const pendingId = pendingIdRef.current
-      pendingIdRef.current = null
-      if (!pendingId) return
-      const exists = useAppStore.getState().apiRequests.some((r) => r.id === pendingId)
-      if (exists) void doSave(pendingId, draftRef.current)
-    }
-  }, [doSave])
+  }, [requestId])
 
   /** 草稿变动后同步标签标题（否则改名/改地址后标签还停在旧文字） */
   useEffect(() => {
@@ -211,11 +139,15 @@ export function ApiPage({ requestId }: { requestId: string }) {
     setHeaders((prev) =>
       tidyHeaderRows(prev.map((p, i) => (i === idx ? { ...p, [field]: value } : p)))
     )
-    markDirty(requestId)
+    // 改的是 Content-Type 的值 → 请求体编辑器的高亮语言跟着换
+    // （只看「值」的改动，且这一行的键名得本来就是 content-type；
+    //  否则用户随手改别的头名也会把手动选的语言冲掉）
+    if (field === 'value' && (headers[idx]?.key ?? '').trim().toLowerCase() === 'content-type') {
+      setBodyLanguage(bodyLanguageOf(value))
+    }
   }
   const removeHeader = (idx: number): void => {
     setHeaders((prev) => tidyHeaderRows(prev.filter((_, i) => i !== idx)))
-    markDirty(requestId)
   }
 
   // ---------- 发送 ----------
@@ -267,24 +199,13 @@ export function ApiPage({ requestId }: { requestId: string }) {
     headers: unknown
     body: string
   }): void => {
+    const nextHeaders = normalizeHeaders(entry.headers)
     setMethod(entry.method || 'GET')
     setUrl(entry.url || '')
-    setHeaders(normalizeHeaders(entry.headers))
+    setHeaders(nextHeaders)
     setBody(entry.body || '')
+    setBodyLanguage(bodyLanguageOf(contentTypeOf(nextHeaders)))
     setReqTab('headers')
-    markDirty(requestId)
-  }
-
-  const confirmDelete = async (): Promise<void> => {
-    const target = pendingDelete
-    if (!target) return
-    setPendingDelete(null)
-    try {
-      await deleteApiRequest(target.id)
-      message.success('已删除该请求')
-    } catch (e) {
-      message.error(`删除失败：${e instanceof Error ? e.message : String(e)}`)
-    }
   }
 
   /**
@@ -343,13 +264,16 @@ export function ApiPage({ requestId }: { requestId: string }) {
     window.addEventListener('pointercancel', stop)
   }
 
-  /** 快捷键：Ctrl/Cmd+S 立即保存，Ctrl/Cmd+Enter 发送（限定在页内，避免多标签同时触发） */
+  /**
+   * 快捷键：Ctrl/Cmd+S 保存（这是唯一的保存方式），Ctrl/Cmd+Enter 发送。
+   * 限定在页内（onKeyDown 挂在根容器上），避免多标签同时触发。
+   */
   const onKeyDown = (e: ReactKeyboardEvent): void => {
     const mod = e.ctrlKey || e.metaKey
     if (!mod) return
     if (e.key.toLowerCase() === 's') {
       e.preventDefault()
-      void saveCurrentRef.current()
+      void saveNow()
     } else if (e.key === 'Enter') {
       e.preventDefault()
       void send()
@@ -372,33 +296,15 @@ export function ApiPage({ requestId }: { requestId: string }) {
 
   return (
     <div ref={rootRef} className="flex h-full flex-col bg-background" onKeyDown={onKeyDown}>
-      {/* 工具栏：名称 + 保存状态 + 历史 / 删除（新建与导入 cURL 在侧边栏） */}
+      {/* 工具栏：名称 + 历史（保存状态提示与删除按钮已移除；新建与导入 cURL 在侧边栏） */}
       <div className="flex shrink-0 items-center gap-2 px-3 py-1.5">
         <Input
           value={name}
-          onChange={(e) => {
-            setName(e.target.value)
-            markDirty(requestId)
-          }}
+          onChange={(e) => setName(e.target.value)}
           placeholder="请求名称（可选，缺省显示「方法 + 路径」）"
           variant="borderless"
           className="min-w-0 flex-1 text-[15px] font-semibold"
         />
-        <span className="inline-flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
-          {saving ? (
-            <>
-              <Loader2 className="size-3.5 animate-spin" />
-              保存中…
-            </>
-          ) : dirty ? (
-            '未保存'
-          ) : (
-            <>
-              <CheckCircle2 className="size-3.5 text-emerald-500" />
-              已保存
-            </>
-          )}
-        </span>
         <Button
           type="text"
           size="small"
@@ -409,13 +315,6 @@ export function ApiPage({ requestId }: { requestId: string }) {
           <History className="size-3.5" />
           历史 ({apiHistory.length})
         </Button>
-        <Button
-          size="small"
-          icon={<Trash2 className="size-4" />}
-          danger
-          onClick={() => setPendingDelete(request)}
-          title="删除该请求"
-        />
       </div>
 
       {/* 请求行：方法 + 地址 + 发送 */}
@@ -425,19 +324,13 @@ export function ApiPage({ requestId }: { requestId: string }) {
       >
         <Select
           value={method}
-          onChange={(m) => {
-            setMethod(m)
-            markDirty(requestId)
-          }}
+          onChange={(m) => setMethod(m)}
           options={METHODS.map((m) => ({ label: m, value: m }))}
           className="w-28 shrink-0"
         />
         <Input
           value={url}
-          onChange={(e) => {
-            setUrl(e.target.value)
-            markDirty(requestId)
-          }}
+          onChange={(e) => setUrl(e.target.value)}
           placeholder="请求地址，如 https://api.example.com/users"
           className="min-w-0 flex-1 font-mono text-xs"
         />
@@ -556,21 +449,28 @@ export function ApiPage({ requestId }: { requestId: string }) {
             key: 'body',
             label: '请求体',
             children: (
-              <div className="h-full overflow-auto p-3">
-                <Input.TextArea
-                  value={body}
-                  onChange={(e) => {
-                    setBody(e.target.value)
-                    markDirty(requestId)
-                  }}
-                  placeholder={
-                    method === 'GET' || method === 'HEAD'
-                      ? `${method} 请求不携带请求体（填写的内容会被忽略）`
-                      : '请求体 JSON，如 {"name":"foo"}'
-                  }
-                  className="h-48! font-mono text-xs"
-                  spellCheck={false}
-                />
+              <div className="flex h-full min-h-0 flex-col p-3">
+                <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-border">
+                  <MonacoEditor
+                    value={body}
+                    onChange={setBody}
+                    language={bodyLanguage}
+                    onLanguageChange={setBodyLanguage}
+                    showLanguageSelector
+                    showLineNumbersToggle
+                    showWordWrapToggle
+                    showCopyButton
+                    // Monaco 没有 placeholder，GET/HEAD 的提醒改挂在工具栏上 ——
+                    // 不额外占一行高度（请求构造区本来就容易被响应面板压扁）
+                    toolbar={
+                      method === 'GET' || method === 'HEAD' ? (
+                        <span className="shrink-0 text-[11px] text-amber-600 dark:text-amber-400">
+                          {method} 请求不携带请求体，这里的内容发送时会被忽略
+                        </span>
+                      ) : undefined
+                    }
+                  />
+                </div>
               </div>
             )
           }
@@ -781,25 +681,6 @@ export function ApiPage({ requestId }: { requestId: string }) {
           )}
         </div>
       </Drawer>
-
-      {/* 删除确认 */}
-      <Modal
-        open={pendingDelete !== null}
-        onCancel={() => setPendingDelete(null)}
-        title="删除接口请求？"
-        okText="删除"
-        cancelText="取消"
-        okButtonProps={{ danger: true }}
-        onOk={() => void confirmDelete()}
-        centered
-        width={420}
-        destroyOnHidden
-      >
-        <p className="text-sm text-muted-foreground">
-          「{pendingDelete?.name.trim() || pendingDelete?.url || '未命名请求'}」将被永久删除，
-          该操作不可撤销。
-        </p>
-      </Modal>
     </div>
   )
 }

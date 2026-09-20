@@ -39,8 +39,11 @@ export const MONACO_LANGUAGES = [
   { value: 'cpp', label: 'C++' }
 ]
 
-/** Monaco 编辑器实例的最小接口（仅用到 getAction） */
-type EditorInstance = { getAction: (id: string) => { run: () => void } | null } | null
+/** Monaco 编辑器实例的最小接口（仅用到 getAction / layout） */
+type EditorInstance = {
+  getAction: (id: string) => { run: () => void } | null
+  layout: () => void
+} | null
 
 interface MonacoEditorProps {
   value?: string
@@ -94,11 +97,58 @@ const MonacoEditor: FC<MonacoEditorProps> = ({
   const [mounted, setMounted] = useState(false)
 
   const editorRef = useRef<EditorInstance>(null)
+  /** 编辑器所在容器：自己盯它的尺寸（见下面那个 ResizeObserver 的说明） */
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  /** 上一次已同步过的容器尺寸，用来避免 layout → 尺寸回调 → layout 的来回触发 */
+  const laidOutSize = useRef({ w: 0, h: 0 })
 
   const handleEditorDidMount = (editor: unknown): void => {
     editorRef.current = editor as EditorInstance
     setMounted(true)
   }
+
+  /**
+   * 补一次 `layout()`，把编辑器从 5×5 的保底尺寸拉回容器真实大小。
+   *
+   * 背景：Monaco 创建时如果容器还是 0×0（藏在 `display:none` 的标签页 / 折叠面板里），
+   * 它会把自身尺寸夹到 5×5；之后容器被撑开，**它不会自愈** ——
+   * 实测 `automaticLayout` 已经是 `'on'`，手动派发 window resize、来回切页签都不恢复，
+   * 必须显式调一次 `editor.layout()`。
+   *
+   * 这里用「ResizeObserver 主力 + 定时器兜底」两条腿：
+   * ResizeObserver 依赖浏览器产出帧才会回调，窗口被遮挡 / 不可见时 Chromium 会
+   * 把帧和 RO 一起挂起（实测：现场新建的 RO 连初始回调都不来），而定时器不受影响。
+   * 兜底定时器尺寸一对上就自己停掉，不留常驻开销。
+   */
+  useEffect(() => {
+    if (!mounted) return
+
+    /** 容器尺寸和上次不同就补一次 layout；返回「当前尺寸是否已同步」 */
+    const syncLayout = (): boolean => {
+      const el = containerRef.current
+      if (!el) return false
+      const w = el.clientWidth
+      const h = el.clientHeight
+      if (w <= 0 || h <= 0) return false
+      if (w === laidOutSize.current.w && h === laidOutSize.current.h) return true
+      laidOutSize.current = { w, h }
+      editorRef.current?.layout()
+      return true
+    }
+
+    const observer =
+      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => void syncLayout())
+    if (observer && containerRef.current) observer.observe(containerRef.current)
+
+    const timer = window.setInterval(() => {
+      if (syncLayout()) window.clearInterval(timer)
+    }, 150)
+
+    return () => {
+      observer?.disconnect()
+      window.clearInterval(timer)
+    }
+  }, [mounted])
 
   const handleFormat = (): void => {
     editorRef.current?.getAction('editor.action.formatDocument')?.run()
@@ -218,7 +268,7 @@ const MonacoEditor: FC<MonacoEditorProps> = ({
       </div>
 
       {/* Editor Area */}
-      <div className="min-h-0 flex-1">
+      <div ref={containerRef} className="min-h-0 flex-1">
         <Editor
           height={height}
           language={currentLanguage}

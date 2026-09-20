@@ -306,6 +306,34 @@ export function parseCurl(cmd: string): ParsedCurl {
   }
 }
 
+/** 从请求头键值对里取 Content-Type 的值（键名大小写不敏感）；没有则返回空串 */
+export function contentTypeOf(headers: ApiHeaderPair[]): string {
+  for (const p of headers || []) {
+    if ((p?.key ?? '').trim().toLowerCase() === 'content-type') return p?.value ?? ''
+  }
+  return ''
+}
+
+/**
+ * 按 Content-Type 推断请求体在 Monaco 里该用哪种语言高亮。
+ *
+ * 没有 Content-Type 时默认 json —— 接口调试里绝大多数请求体是 JSON，
+ * 也只有给 JSON 才有语法校验与格式化。认不出的类型一律 plaintext：
+ * 宁可不高亮，也不要猜成某种代码然后满屏假报错。
+ */
+export function bodyLanguageOf(contentType: string): string {
+  const ct = String(contentType || '')
+    .trim()
+    .toLowerCase()
+  if (!ct) return 'json'
+  if (ct.includes('json')) return 'json'
+  if (ct.includes('xml')) return 'xml'
+  if (ct.includes('html')) return 'html'
+  if (ct.includes('javascript') || ct.includes('ecmascript')) return 'javascript'
+  if (ct.includes('yaml') || ct.includes('yml')) return 'yaml'
+  return 'plaintext'
+}
+
 /** 响应体美化：JSON（按 Content-Type 或首字符判断）缩进，其余原样返回 */
 export function formatBody(body: string, contentType: string, enabled: boolean): string {
   if (!body || !enabled) return body
