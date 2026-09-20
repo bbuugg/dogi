@@ -623,7 +623,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             <div
               ref={scrollRef}
               onScroll={handleListScroll}
-              className="max-h-[40vh] min-h-48 overflow-y-auto select-text"
+              className="max-h-[60vh] min-h-48 overflow-y-auto select-text"
               style={{ overflowAnchor: 'none' }}
             >
               <div className="space-y-3 p-3">
