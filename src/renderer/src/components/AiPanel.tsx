@@ -336,6 +336,30 @@ const DEFAULT_BOTTOM = 24
 /** 横条输入栏固定高度（px）：py-1.5×2 + 内容 h-8，锚点翻转/拖拽钳制都以此为准 */
 const BAR_HEIGHT = 44
 
+/** 浮窗展开时的最小高度（px）：输入横条 + 至少能看到一小段消息区 */
+const MIN_PANEL_HEIGHT = 180
+
+/** 浮窗最小宽度（px）：卡片头部一排控件挤得下即可 */
+const MIN_PANEL_WIDTH = 260
+
+/**
+ * 浮窗缩放方向：n/s 上下边、e/w 左右边、四角为两两组合。
+ * 语义是「窗口边」——拖动哪条边，哪条边动，对边保持不动。
+ */
+type ResizeDir = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
+
+/** 四边 + 四角手柄的位置/光标描述（角排在边之后，命中优先级更高） */
+const RESIZE_HANDLES: Array<{ dir: ResizeDir; cls: string; indicator: string }> = [
+  { dir: 'n', cls: 'inset-x-2.5 top-0 h-1.5 cursor-row-resize', indicator: 'h-1 w-10' },
+  { dir: 's', cls: 'inset-x-2.5 bottom-0 h-1.5 cursor-row-resize', indicator: 'h-1 w-10' },
+  { dir: 'w', cls: 'inset-y-2.5 left-0 w-1.5 cursor-col-resize', indicator: 'h-10 w-1' },
+  { dir: 'e', cls: 'inset-y-2.5 right-0 w-1.5 cursor-col-resize', indicator: 'h-10 w-1' },
+  { dir: 'nw', cls: 'left-0 top-0 size-2.5 cursor-nwse-resize', indicator: 'size-1.5' },
+  { dir: 'ne', cls: 'right-0 top-0 size-2.5 cursor-nesw-resize', indicator: 'size-1.5' },
+  { dir: 'sw', cls: 'left-0 bottom-0 size-2.5 cursor-nesw-resize', indicator: 'size-1.5' },
+  { dir: 'se', cls: 'right-0 bottom-0 size-2.5 cursor-nwse-resize', indicator: 'size-1.5' }
+]
+
 /**
  * 浮在终端之上的 AI 助手浮窗：展示并驱动 sessionId 所属会话的独立对话。
  *
@@ -373,8 +397,11 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const setSessionAiOpen = useAppStore((s) => s.setSessionAiOpen)
   const aiPanelWidth = useAppStore((s) => s.ui.aiPanelWidth)
+  const aiPanelHeight = useAppStore((s) => s.ui.aiPanelHeight)
   const floatingPos = useAppStore((s) => s.ui.aiFloatingPos)
   const setAiFloatingPos = useAppStore((s) => s.setAiFloatingPos)
+  const setAiPanelWidth = useAppStore((s) => s.setAiPanelWidth)
+  const setAiPanelHeight = useAppStore((s) => s.setAiPanelHeight)
   // 未显式设置过则为最小化（只露输入条），发送/待批准时自动展开
   const minimized = useAppStore((s) =>
     sessionId ? s.ui.aiMinimizedSessions[sessionId] !== false : true
@@ -389,13 +416,18 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const rootRef = useRef<HTMLElement>(null)
   const barRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
-  // 面板组内容区高度：用于「横条在上半区时卡片向下展开」的翻转判断与高度钳制
+  // 面板组内容区尺寸：用于「横条在上半区时卡片向下展开」的翻转判断，以及
+  // 尺寸/位置钳制（窗口缩小、分屏后浮窗不能溢出内容区）
   const [containerH, setContainerH] = useState<number | null>(null)
+  const [containerW, setContainerW] = useState<number | null>(null)
 
   useEffect(() => {
     const parent = rootRef.current?.parentElement
     if (!parent) return
-    const update = () => setContainerH(parent.clientHeight)
+    const update = () => {
+      setContainerH(parent.clientHeight)
+      setContainerW(parent.clientWidth)
+    }
     update()
     const ro = new ResizeObserver(update)
     ro.observe(parent)
@@ -455,8 +487,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     (minimized && Boolean(pendingConfirm)) ||
     (!showList && Boolean(aiError))
   // 横条落在容器上半区（条顶边越过中线）：卡片整体向下展开，
-  // 否则列表/确认条向上长会超出容器顶边。两种模式的 maxHeight 都被
-  // 钳在横条所在侧的剩余空间内，内容超高时消息区自动压缩内部滚动。
+  // 否则列表/确认条向上长会超出容器顶边。两种模式的高度都被
+  // 钳在横条所在侧的剩余空间内，内容超高时消息区内部滚动。
   const barNearTop =
     containerH !== null && containerH - anchoredBottom - BAR_HEIGHT < containerH / 2
   const flipped = hasUpperContent && barNearTop
@@ -473,21 +505,42 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     const t = setTimeout(() => setFlippedSticky(false), 240)
     return () => clearTimeout(t)
   }, [flipped])
+  // 缩放期间冻结翻转态：拖「横条侧」的边会带着横条移动、可能越过中线触发翻转，
+  // 若中途翻，同一个 (x, y, 高度) 的渲染位置会整体跳一下 —— 冻结到松手再重算。
+  const [frozenFlip, setFrozenFlip] = useState<boolean | null>(null)
+  const flip = frozenFlip ?? flippedSticky
+
+  // 高度上限：按当前锚点方向取「横条到容器另一侧」的剩余空间（与旧的 maxHeight 同源）。
+  // 容器还没量到时不设限，先按用户设定值渲染。
+  const maxPanelHeight =
+    containerH === null
+      ? Number.POSITIVE_INFINITY
+      : Math.max(
+          MIN_PANEL_HEIGHT,
+          (flip ? anchoredBottom + BAR_HEIGHT : containerH - anchoredBottom) - FLOAT_MARGIN
+        )
+  // 展开态尺寸固定（不再随消息多少伸缩），用户拖四边/四角可调整；
+  // 再按可用空间钳制一次，保证容器变小（窗口缩小 / 分屏）时浮窗仍留在可视区内。
+  const panelHeight = Math.max(MIN_PANEL_HEIGHT, Math.min(aiPanelHeight, maxPanelHeight))
+  const maxPanelWidth =
+    containerW === null
+      ? Number.POSITIVE_INFINITY
+      : Math.max(MIN_PANEL_WIDTH, containerW - FLOAT_MARGIN * 2)
+  const panelWidth = Math.max(MIN_PANEL_WIDTH, Math.min(aiPanelWidth, maxPanelWidth))
+  const cardHeight = panelHeight - BAR_HEIGHT
+  // 位置同样夹一下：容器变窄后从左边缘起算的位置不能把面板顶出右边
+  const panelLeft =
+    !floatingPos || containerW === null
+      ? floatingPos?.x
+      : Math.max(FLOAT_MARGIN, Math.min(floatingPos.x, containerW - panelWidth - FLOAT_MARGIN))
+
   const asideStyle: CSSProperties = {
-    width: aiPanelWidth,
-    left: floatingPos ? floatingPos.x : '50%',
+    width: panelWidth,
+    left: floatingPos ? panelLeft : '50%',
     transform: floatingPos ? undefined : 'translateX(-50%)',
-    ...(flippedSticky && containerH !== null
-      ? {
-          top: containerH - anchoredBottom - BAR_HEIGHT,
-          maxHeight: anchoredBottom + BAR_HEIGHT - FLOAT_MARGIN
-        }
-      : {
-          bottom: anchoredBottom,
-          ...(containerH !== null
-            ? { maxHeight: containerH - anchoredBottom - FLOAT_MARGIN }
-            : {})
-        })
+    ...(flip && containerH !== null
+      ? { top: containerH - anchoredBottom - BAR_HEIGHT }
+      : { bottom: anchoredBottom })
   }
 
   /**
@@ -523,7 +576,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         FLOAT_MARGIN,
         Math.min(cRect.width - rect.width - FLOAT_MARGIN, baseX + ev.clientX - startX)
       )
-      // 只保证横条本体在容器内；卡片主体靠 flipped + maxHeight 自适应剩余空间
+      // 只保证横条本体在容器内；卡片主体靠 flipped + 固定高度自适应剩余空间
       const y = Math.max(
         FLOAT_MARGIN,
         Math.min(cRect.height - BAR_HEIGHT - FLOAT_MARGIN, baseY - (ev.clientY - startY))
@@ -536,6 +589,91 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     }
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
+  }
+
+  /**
+   * 拖四边 / 四角缩放浮窗：按「窗口边」语义 —— 拖哪条边哪条边动，对边不动，
+   * 拖动中始终把整个矩形夹在面板组内容区内，并且不小于最小宽高。
+   *
+   * 位置存储是 (左边距, 横条底边距容器底)，而手势算的是面板矩形，两者在翻转
+   * 与否时换算方式不同（翻转后横条在面板顶部），所以这里按手势开始时的翻转态换算。
+   */
+  const startResize = (e: ReactPointerEvent<HTMLElement>, dir: ResizeDir) => {
+    if (e.button !== 0) return
+    e.preventDefault()
+    e.stopPropagation()
+    const el = rootRef.current
+    const parent = el?.parentElement
+    if (!el || !parent) return
+    // 用 pointer capture 把后续事件锁在手柄上：鼠标拖出窗口边界再松手也能收到 pointerup，
+    // 否则翻转态冻结会一直留着不放（拿不到 capture 时退化为 window 监听，行为一致）
+    const handle = e.currentTarget
+    const pointerId = e.pointerId
+    try {
+      handle.setPointerCapture(pointerId)
+    } catch {
+      // 忽略：下面仍用 window 监听兜底
+    }
+    const cRect = parent.getBoundingClientRect()
+    const rect = el.getBoundingClientRect()
+    const flipAtStart = flip
+    setFrozenFlip(flipAtStart)
+    // 面板矩形（相对容器左上角）
+    const left0 = rect.left - cRect.left
+    const top0 = rect.top - cRect.top
+    const right0 = left0 + rect.width
+    const bottom0 = top0 + rect.height
+    const startX = e.clientX
+    const startY = e.clientY
+    /** 由面板矩形反算「位置 + 尺寸」并写入 store */
+    const apply = (left: number, top: number, right: number, bottom: number) => {
+      setAiPanelWidth(right - left)
+      setAiPanelHeight(bottom - top)
+      setAiFloatingPos({
+        x: left,
+        // 横条底边的位置：未翻转时横条在面板底部，翻转后在面板顶部
+        y: flipAtStart ? cRect.height - top - BAR_HEIGHT : cRect.height - bottom
+      })
+    }
+    const move = (ev: PointerEvent) => {
+      const dx = ev.clientX - startX
+      const dy = ev.clientY - startY
+      let left = left0
+      let top = top0
+      let right = right0
+      let bottom = bottom0
+      if (dir.includes('w')) {
+        left = Math.min(Math.max(FLOAT_MARGIN, left0 + dx), right0 - MIN_PANEL_WIDTH)
+      }
+      if (dir.includes('e')) {
+        right = Math.max(Math.min(cRect.width - FLOAT_MARGIN, right0 + dx), left0 + MIN_PANEL_WIDTH)
+      }
+      if (dir.includes('n')) {
+        top = Math.min(Math.max(FLOAT_MARGIN, top0 + dy), bottom0 - MIN_PANEL_HEIGHT)
+      }
+      if (dir.includes('s')) {
+        bottom = Math.max(
+          Math.min(cRect.height - FLOAT_MARGIN, bottom0 + dy),
+          top0 + MIN_PANEL_HEIGHT
+        )
+      }
+      apply(left, top, right, bottom)
+    }
+    const up = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
+      try {
+        handle.releasePointerCapture(pointerId)
+      } catch {
+        // 忽略：capture 可能已随元素卸载释放
+      }
+      // 松手后再交回给自动翻转判断
+      setFrozenFlip(null)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up)
   }
 
   const handleSend = () => {
@@ -555,20 +693,23 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         // 使 bottom/top 两套锚定公式对不上横条，展开/折叠时横条会微跳 2px
         'absolute z-20 flex select-none flex-col overflow-hidden rounded-xl bg-card/40 shadow-2xl ring-1 ring-inset ring-border backdrop-blur-md',
         // 上半区时反转主轴：DOM 里的「列表在上、横条在下」视觉上变为「横条在上、列表在下」
-        flippedSticky && 'flex-col-reverse'
+        flip && 'flex-col-reverse'
       )}
       style={asideStyle}
     >
-      {/* 消息列表卡片展开/收起：grid 行轨道 0fr↔1fr 过渡（沿横条对侧平滑生长），
-         不直接装卸载；收起时禁用交互，避免隐形内容截获点击/焦点。
-         min-h-0（不用 shrink-0）：maxHeight 钳制生效时让列表收缩，横条永不被挤出卡片 */}
+      {/* 消息列表卡片展开/收起：直接对卡片高度做 0 ↔ cardHeight 过渡（沿横条对侧平滑生长），
+          不直接装卸载；收起时禁用交互，避免隐形内容截获点击/焦点。
+          ⚠️ 别改回 grid-rows 0fr/1fr 那套折叠：卡片高度是写死的确定值，会把这个 0fr
+          轨道顶开（实测 grid-template-rows:0fr 会解析成 396px），折叠态照样把卡片露出来 */}
       <div
         className={cn(
-          'grid min-h-0 transition-[grid-template-rows] duration-200 ease-out',
-          showList ? 'grid-rows-[1fr]' : 'pointer-events-none grid-rows-[0fr]'
+          'min-h-0 overflow-hidden transition-[height] duration-200 ease-out',
+          !showList && 'pointer-events-none'
         )}
+        style={{ height: showList ? cardHeight : 0 }}
       >
-        <div className="min-h-0 overflow-hidden">
+        {/* 卡片内容：撑满折叠容器，头 + 消息区 + 横条自上而下排布 */}
+        <div className="flex h-full min-h-0 flex-col">
           {/* 卡片头部：拖拽手柄 + 模型选择 + 操作（整行可拖动） */}
           <div
             onPointerDown={startDrag}
@@ -609,11 +750,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             <Button
               type="text"
               icon={
-                flippedSticky ? (
-                  <ChevronUp className="size-4" />
-                ) : (
-                  <ChevronDown className="size-4" />
-                )
+                flip ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />
               }
               className="h-7 w-7 shrink-0 p-0 text-muted-foreground"
               title="最小化（收起为状态条）"
@@ -628,17 +765,18 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             />
           </div>
 
-          {/* 消息区：向上展开，AI 回复属于「内容」，保持可选中复制 */}
-          <div className="relative min-h-0">
+          {/* 消息区：占满卡片剩余高度并在内部滚动（高度固定，不随消息多少伸缩），
+              AI 回复属于「内容」，保持可选中复制 */}
+          <div className="relative min-h-0 flex-1">
             <div
               ref={scrollRef}
               onScroll={handleListScroll}
-              className="max-h-[60vh] min-h-48 overflow-y-auto select-text"
+              className="h-full overflow-y-auto select-text"
               style={{ overflowAnchor: 'none' }}
             >
-              <div className="space-y-3 p-3">
+              <div className="flex min-h-full flex-col space-y-3 p-3">
                 {messages.length === 0 && (
-                  <div className="flex flex-col items-center gap-3 py-6 text-center text-muted-foreground">
+                  <div className="flex flex-1 flex-col items-center justify-center gap-3 py-6 text-center text-muted-foreground">
                     <Sparkles className="size-8 text-primary/40" />
                     {activeSession ? (
                       <div className="space-y-1 text-sm leading-5">
@@ -859,6 +997,29 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           />
         )}
       </div>
+
+      {/* 缩放热区：四边 + 四角，按「窗口边」语义拖动（拖哪条边哪条边动，对边不动）。
+          展开态才有意义，折叠成横条时不显示；平时完全透明不挡视线，
+          悬停时在该边/角露出一小段胶囊提示可拖 */}
+      {showList &&
+        RESIZE_HANDLES.map((h) => (
+          <div
+            key={h.dir}
+            onPointerDown={(e) => startResize(e, h.dir)}
+            title="拖动调整大小"
+            className={cn(
+              'group/resize absolute z-10 flex touch-none items-center justify-center',
+              h.cls
+            )}
+          >
+            <span
+              className={cn(
+                'rounded-full bg-transparent transition-colors group-hover/resize:bg-primary/60',
+                h.indicator
+              )}
+            />
+          </div>
+        ))}
     </aside>
   )
 }

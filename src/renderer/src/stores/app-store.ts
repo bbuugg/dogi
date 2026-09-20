@@ -490,6 +490,13 @@ interface UiState {
   sidebarWidth: number
   /** AI 助手浮窗宽度（px） */
   aiPanelWidth: number
+  /**
+   * AI 助手浮窗展开时的高度（px，含底部输入横条）。
+   *
+   * 展开态高度固定为它，不随消息多少变化（空对话 / 长回复都一样高），
+   * 用户可拖动卡片自由边调整；实际渲染时再按容器剩余空间钳制。
+   */
+  aiPanelHeight: number
   /** AI 助手浮窗位置（相对面板组内容区：x=左边距、y=下边距；null=默认底部居中） */
   aiFloatingPos: { x: number; y: number } | null
 }
@@ -633,6 +640,8 @@ interface AppStore {
   /** 折叠/展开「当前功能区」自己的侧边栏（侧边栏属于功能区，互不影响） */
   setSidebarCollapsed: (collapsed: boolean) => void
   setAiPanelWidth: (width: number) => void
+  /** 设置 AI 助手浮窗展开高度（px，含输入横条） */
+  setAiPanelHeight: (height: number) => void
   refreshScripts: () => Promise<void>
   /** 删除脚本，并关掉它的标签页 */
   deleteScript: (id: string) => Promise<void>
@@ -853,6 +862,7 @@ let shortcutWired = false
       panelTabs: [],
       sidebarWidth: 240,
       aiPanelWidth: 380,
+      aiPanelHeight: 440,
       aiFloatingPos: null
     },
 
@@ -1329,6 +1339,9 @@ let shortcutWired = false
 
     setAiPanelWidth: (width) =>
       set((s) => ({ ui: { ...s.ui, aiPanelWidth: width } })),
+
+    setAiPanelHeight: (height) =>
+      set((s) => ({ ui: { ...s.ui, aiPanelHeight: height } })),
 
     refreshScripts: async () => {
       set({ scripts: await window.api.scripts.list() })
