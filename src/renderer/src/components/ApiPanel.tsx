@@ -288,7 +288,8 @@ export function ApiPanel() {
 
   /**
    * 新建：只打开右侧一个「未保存草稿」标签，不落盘、不进列表。
-   * 真正的保存发生在用户在该标签里按 Ctrl/Cmd+S 并输入名称之后（见 ApiPage.saveNow）。
+   * 真正的保存发生在用户在该标签里按 Ctrl/Cmd+S 之后（已填名称直接落盘，
+   * 没填则弹窗补名称，见 ApiPage.saveNow）。
    */
   const handleCreate = (groupId?: string): void => {
     openNewApiDraft(groupId)

@@ -450,49 +450,48 @@ export function HostsPanel() {
   const noMatch = searching && treeData.length === 0
 
   return (
-    <div className="flex-1 overflow-y-auto p-2">
-      {/* 主机 */}
-        <div className="mb-1 flex items-center justify-between gap-1 rounded py-1">
-          <span className="text-sm font-medium text-muted-foreground">
-           主机 ({profiles.length})
-          </span>
-          <div className="flex items-center gap-1">
-            <Button
-              type="text"
-              size="small"
-              className="px-0.5 text-muted-foreground"
-              title="新建分组"
-              icon={<FolderPlus className="size-3.5" />}
-              onClick={() => setGroupEdit({ name: '' })}
-            />
-            <Button
-              type="text"
-              size="small"
-              className="px-0.5 text-muted-foreground"
-              title="新建主机"
-              icon={<Plus className="size-3.5" />}
-              onClick={() => setSshDialog(true, null)}
-            />
-          </div>
-        </div>
-
-        <div className="px-0 pb-2">
-          <Input
-            placeholder="搜索主机…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            allowClear
+    <div className="flex h-full flex-col">
+      {/* 主机（左侧标题 + 右侧新建分组 / 新建主机，与「脚本」「笔记」面板同款） */}
+      <div className="mb-1 flex items-center justify-between gap-1 px-3 py-2">
+        <span className="text-sm font-medium text-muted-foreground">主机 ({profiles.length})</span>
+        <div className="flex items-center gap-1">
+          <Button
+            type="text"
+            size="small"
+            className="px-0.5 text-muted-foreground"
+            title="新建分组"
+            icon={<FolderPlus className="size-3.5" />}
+            onClick={() => setGroupEdit({ name: '' })}
+          />
+          <Button
+            type="text"
+            size="small"
+            className="px-0.5 text-muted-foreground"
+            title="新建主机"
+            icon={<Plus className="size-3.5" />}
+            onClick={() => setSshDialog(true, null)}
           />
         </div>
+      </div>
 
+      <div className="px-3 pb-2">
+        <Input
+          placeholder="搜索主机…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          allowClear
+        />
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
         {isEmpty ? (
-          <div className="px-2 py-3 text-center text-xs text-muted-foreground">
+          <div className="mx-2 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
             还没有主机
             <br />
             点击右上角 + 添加
           </div>
         ) : noMatch ? (
-          <div className="px-2 py-3 text-center text-xs text-muted-foreground">
+          <div className="mx-2 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
             没有匹配「{search}」的主机。
           </div>
         ) : (
@@ -505,8 +504,9 @@ export function HostsPanel() {
             onExpand={(keys) => setExpandedKeys(keys.map(String))}
           />
         )}
+      </div>
 
-        {/* 新建 / 重命名分组 */}
+      {/* 新建 / 重命名分组 */}
       <Modal
         open={groupEdit !== null}
         onCancel={() => setGroupEdit(null)}

@@ -99,7 +99,7 @@ export function ApiPage({ requestId }: { requestId: string }) {
   /** 响应正文：本地可编辑副本；用 Monaco 展示并允许其格式化按钮美化（不落盘） */
   const [respBody, setRespBody] = useState('')
   const [respCollapsed, setRespCollapsed] = useState(false)
-  /** 未保存草稿按 Ctrl/Cmd+S 时，弹窗要求输入请求名才落盘 */
+  /** 未保存草稿按 Ctrl/Cmd+S 且**没填名称**时才弹窗要请求名；填了就直接落盘 */
   const [saveNameOpen, setSaveNameOpen] = useState(false)
   const [saveName, setSaveName] = useState('')
   const [resRatio, setResRatio] = useState(RES_RATIO_DEFAULT)
@@ -124,15 +124,20 @@ export function ApiPage({ requestId }: { requestId: string }) {
    * 保存当前草稿 —— **唯一的落盘入口**，只有 Ctrl/Cmd+S 会走到这里。
    * 不做自动保存、不在切标签 / 关标签时偷偷写盘。
    *
-   * - 未保存草稿：先弹窗要请求名，确认后才真正落盘（见 confirmSaveDraft）。
+   * - 未保存草稿：已填名称就直接落盘，没填才弹窗要请求名（见 persistDraft）。
    * - 已保存请求：整条覆盖写；groupId 必须从 store 里现取带回去 —— 否则按一次
    *   Ctrl+S 就会把请求从分组里踢出去（分组归属只由侧边栏的拖拽重排改动）。
    */
   const saveNow = async (): Promise<void> => {
-    // 未保存草稿：先要请求名，确认后才落盘
+    // 未保存草稿：名称是新建落盘的必需项；已填就不弹窗，没填才要用户补
     if (isDraft) {
-      setSaveName(name)
-      setSaveNameOpen(true)
+      const nm = name.trim()
+      if (!nm) {
+        setSaveName('')
+        setSaveNameOpen(true)
+        return
+      }
+      await persistDraft(nm)
       return
     }
     try {
@@ -154,10 +159,8 @@ export function ApiPage({ requestId }: { requestId: string }) {
     }
   }
 
-  /** 草稿落盘：输入名称后写入列表并切到真实标签（草稿标签随之关闭） */
-  const confirmSaveDraft = async (): Promise<void> => {
-    const nm = saveName.trim()
-    if (!nm) return
+  /** 草稿真正落盘：按给定名称写入列表，并把草稿标签切成真实标签 */
+  const persistDraft = async (nm: string): Promise<void> => {
     try {
       // 草稿标签上记着「目标分组」：在分组里点「新建」时带过来
       const gid = useAppStore
@@ -175,10 +178,17 @@ export function ApiPage({ requestId }: { requestId: string }) {
       closePanelTab(apiTabId(NEW_API_REQUEST_ID))
       openApiTab(id)
       message.success('已保存')
-      setSaveNameOpen(false)
     } catch (e) {
       message.error(`保存失败：${e instanceof Error ? e.message : String(e)}`)
     }
+  }
+
+  /** 弹窗确认落盘：名称取自弹窗输入框（为空则不提交） */
+  const confirmSaveDraft = async (): Promise<void> => {
+    const nm = saveName.trim()
+    if (!nm) return
+    await persistDraft(nm)
+    setSaveNameOpen(false)
   }
 
   /** 切换请求：用新请求重置草稿（不冲刷未保存的改动 —— 那是用户自己的事） */
@@ -848,7 +858,7 @@ export function ApiPage({ requestId }: { requestId: string }) {
         </div>
       </Drawer>
 
-      {/* 未保存草稿按下 Ctrl/Cmd+S 时，要求输入请求名才落盘 */}
+      {/* 草稿按 Ctrl/Cmd+S 时名称为空才走到这里：要求补一个请求名再落盘 */}
       <Modal
         open={saveNameOpen}
         onCancel={() => setSaveNameOpen(false)}
