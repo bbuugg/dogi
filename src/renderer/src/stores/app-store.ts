@@ -64,6 +64,15 @@ function fallbackFromMissingPlugin(
   return { ...ui, activeActivity: HOSTS_ACTIVITY_ID }
 }
 
+/**
+ * 插件列表变化（卸载 / 刷新）后，若插件管理页选中的插件已不在列表中，清空选中，
+ * 避免右侧详情停留在已卸载插件的残留数据上。
+ */
+function withPluginList(ui: UiState, list: PluginInfo[]): UiState {
+  if (!ui.activePluginId || list.some((p) => p.id === ui.activePluginId)) return ui
+  return { ...ui, activePluginId: null }
+}
+
 /** 重连中的旧会话 ID：其 onClosed 事件不应从布局摘掉面板（会被新会话原地替换） */
 const reconnectingIds = new Set<string>()
 
@@ -213,6 +222,8 @@ interface UiState {
   activeNoteId: string | null
   /** 脚本功能：当前正在编辑的脚本 id（null = 未选中） */
   activeScriptId: string | null
+  /** 插件管理功能：当前正在查看的插件 id（null = 未选中） */
+  activePluginId: string | null
   /** 侧边栏宽度（px） */
   sidebarWidth: number
   /** AI 助手面板宽度（px） */
@@ -356,6 +367,8 @@ interface AppStore {
   selectScript: (id: string | null) => void
   /** 选择要编辑的笔记（null 表示取消选择） */
   selectNote: (id: string | null) => void
+  /** 选择要查看的插件（null 表示取消选择） */
+  selectPlugin: (id: string | null) => void
   /** 打开/关闭 SSH 配置弹窗（editing=null 为新建；groupId 预设新建时的分组） */
   setSshDialog: (open: boolean, editing?: SshProfile | null, groupId?: string) => void
   /** 打开/关闭「运行脚本」对话框（可预设要运行的脚本） */
@@ -480,6 +493,7 @@ let shortcutWired = false
       collapsedActivities: {},
       activeNoteId: null,
       activeScriptId: null,
+      activePluginId: null,
       sidebarWidth: 240,
       aiPanelWidth: 350
     },
@@ -876,7 +890,8 @@ let shortcutWired = false
     },
 
     refreshPluginList: async () => {
-      set({ pluginList: await window.api.plugins.list() })
+      const list = await window.api.plugins.list()
+      set((s) => ({ pluginList: list, ui: withPluginList(s.ui, list) }))
     },
 
     togglePluginEnabled: async (id, enabled) => {
@@ -884,21 +899,29 @@ let shortcutWired = false
       const { loadPlugins } = await import('@/plugins/host')
       const plugins = await loadPlugins()
       // 当前正在查看的插件功能区因禁用而消失时，回到主机功能区
-      set((s) => ({ pluginList: list, plugins, ui: fallbackFromMissingPlugin(s.ui, plugins) }))
+      set((s) => ({
+        pluginList: list,
+        plugins,
+        ui: withPluginList(fallbackFromMissingPlugin(s.ui, plugins), list)
+      }))
     },
 
     uninstallPlugin: async (id) => {
       const list = await window.api.plugins.uninstall(id)
       const { loadPlugins } = await import('@/plugins/host')
       const plugins = await loadPlugins()
-      set((s) => ({ pluginList: list, plugins, ui: fallbackFromMissingPlugin(s.ui, plugins) }))
+      set((s) => ({
+        pluginList: list,
+        plugins,
+        ui: withPluginList(fallbackFromMissingPlugin(s.ui, plugins), list)
+      }))
     },
 
     installPlugin: async (sourcePath) => {
       const list = await window.api.plugins.install(sourcePath)
       const { loadPlugins } = await import('@/plugins/host')
       const plugins = await loadPlugins()
-      set({ pluginList: list, plugins })
+      set((s) => ({ pluginList: list, plugins, ui: withPluginList(s.ui, list) }))
     },
 
     reloadPlugins: async (id) => {
@@ -906,7 +929,11 @@ let shortcutWired = false
       const { loadPlugins } = await import('@/plugins/host')
       const plugins = await loadPlugins()
       // 当前查看的插件功能区若因重载消失，回到主机功能区
-      set((s) => ({ pluginList: list, plugins, ui: fallbackFromMissingPlugin(s.ui, plugins) }))
+      set((s) => ({
+        pluginList: list,
+        plugins,
+        ui: withPluginList(fallbackFromMissingPlugin(s.ui, plugins), list)
+      }))
     },
 
     registerPluginCommand: (pluginId, cmd) =>
@@ -989,6 +1016,10 @@ let shortcutWired = false
 
     selectNote: (id) => {
       set((s) => ({ ui: { ...s.ui, activeNoteId: id } }))
+    },
+
+    selectPlugin: (id) => {
+      set((s) => ({ ui: { ...s.ui, activePluginId: id } }))
     },
 
     refreshAiConfigs: async () => {

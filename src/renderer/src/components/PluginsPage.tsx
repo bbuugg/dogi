@@ -3,7 +3,16 @@ import { cn } from '@/lib/utils'
 import { useAppStore } from '@/stores/app-store'
 import type { PluginInfo } from '@shared/plugin'
 import { Button, Modal, Switch, Tag, message } from 'antd'
-import { Boxes, ExternalLink, Package, RefreshCw, RotateCw, Trash2, Upload } from 'lucide-react'
+import {
+  AlertCircle,
+  Boxes,
+  ExternalLink,
+  Package,
+  RefreshCw,
+  RotateCw,
+  Trash2,
+  Upload
+} from 'lucide-react'
 import { useState } from 'react'
 
 /** 统一把异常转成可提示的文本 */
@@ -17,9 +26,30 @@ const PERMISSION_LABEL: Record<string, string> = {
   fs: '文件读写'
 }
 
+/** 渲染端入口的可读描述 */
+function rendererLabel(info: PluginInfo): string {
+  if (!info.renderer) return '无界面（仅主进程逻辑）'
+  return typeof info.renderer === 'string' ? '内置视图（源码加载）' : '独立页面（webview）'
+}
+
+/** 详情里的一行「标签 : 值」 */
+function DetailRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex gap-3 text-xs">
+      <span className="w-20 shrink-0 text-muted-foreground">{label}</span>
+      <span className="min-w-0 flex-1 break-all text-foreground/90">{children}</span>
+    </div>
+  )
+}
+
+/**
+ * 插件详情页（主区域）：展示左侧 PluginsPanel 选中的插件。
+ * 选中插件存 store 的 ui.activePluginId；未选中时提示从左侧选择。
+ */
 export function PluginsPage() {
   const pluginList = useAppStore((s) => s.pluginList)
   const plugins = useAppStore((s) => s.plugins)
+  const activePluginId = useAppStore((s) => s.ui.activePluginId)
   const refreshPluginList = useAppStore((s) => s.refreshPluginList)
   const togglePluginEnabled = useAppStore((s) => s.togglePluginEnabled)
   const uninstallPlugin = useAppStore((s) => s.uninstallPlugin)
@@ -29,7 +59,12 @@ export function PluginsPage() {
 
   const [installing, setInstalling] = useState(false)
   const [reloading, setReloading] = useState(false)
+  const [reloadingOne, setReloadingOne] = useState(false)
   const [pendingUninstall, setPendingUninstall] = useState<PluginInfo | null>(null)
+
+  const info = pluginList.find((p) => p.id === activePluginId) ?? null
+  const view = info ? plugins.find((p) => p.pluginId === info.id) : undefined
+  const canOpen = Boolean(info?.enabled && view)
 
   const installFromFile = async () => {
     setInstalling(true)
@@ -44,6 +79,7 @@ export function PluginsPage() {
       await installPlugin(res.filePaths[0])
       const added = useAppStore.getState().pluginList.find((p) => !before.has(p.id))
       if (added) {
+        useAppStore.getState().selectPlugin(added.id)
         message.success(`插件「${added.name}」安装成功（${added.id}）`)
       } else {
         message.success('插件安装成功')
@@ -55,18 +91,21 @@ export function PluginsPage() {
     }
   }
 
-  const openPlugin = (info: PluginInfo) => {
-    const view = plugins.find((p) => p.pluginId === info.id)
-    if (!view) return
+  const openPlugin = () => {
+    if (!info || !view) return
     selectActivity(pluginActivityId(view.viewId))
   }
 
-  const reloadOne = async (info: PluginInfo) => {
+  const reloadOne = async () => {
+    if (!info) return
+    setReloadingOne(true)
     try {
       await reloadPlugins(info.id)
       message.success(`已重新加载「${info.name}」`)
     } catch (e) {
       message.error(`重新加载失败：${errText(e)}`)
+    } finally {
+      setReloadingOne(false)
     }
   }
 
@@ -82,7 +121,8 @@ export function PluginsPage() {
     }
   }
 
-  const toggleEnabled = async (info: PluginInfo, enabled: boolean) => {
+  const toggleEnabled = async (enabled: boolean) => {
+    if (!info) return
     try {
       await togglePluginEnabled(info.id, enabled)
       message.success(enabled ? `已启用「${info.name}」` : `已禁用「${info.name}」`)
@@ -103,6 +143,8 @@ export function PluginsPage() {
     }
   }
 
+  const busy = installing || reloading
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* 顶部工具条 */}
@@ -115,16 +157,20 @@ export function PluginsPage() {
         </div>
         <div className="flex items-center gap-2">
           <Button
-            icon={<RotateCw className={reloading || installing ? 'size-4 animate-spin' : 'size-4'} />}
-            loading={reloading || installing} type="text" onClick={() => void reloadAll()} disabled={reloading || installing}>
+            icon={<RotateCw className={busy ? 'size-4 animate-spin' : 'size-4'} />}
+            loading={busy}
+            type="text"
+            onClick={() => void reloadAll()}
+            disabled={busy}
+          >
             重新加载
           </Button>
           <Button
-            loading={installing || reloading}
+            loading={busy}
             icon={<RefreshCw className="size-4" />}
             type="text"
             onClick={() => void refreshPluginList()}
-            disabled={installing || reloading}
+            disabled={busy}
           >
             刷新
           </Button>
@@ -133,119 +179,161 @@ export function PluginsPage() {
             icon={<Upload className="size-4" />}
             variant="filled"
             onClick={() => void installFromFile()}
-            disabled={installing}>
+            disabled={installing}
+          >
             从文件安装
           </Button>
         </div>
       </div>
 
-      {/* 列表 */}
-      <div className="min-h-0 flex-1 overflow-auto px-4 py-2">
-        {pluginList.length === 0 ? (
+      {/* 详情区 */}
+      <div className="min-h-0 flex-1 overflow-auto px-5 pb-6">
+        {!info ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-muted-foreground">
             <Boxes className="size-12 opacity-30" />
-            <div className="text-sm">还没有安装插件</div>
-            <Button variant="filled" size="small" onClick={() => void installFromFile()} disabled={installing}>
-              <Upload className="size-4" />
-              从文件安装
-            </Button>
+            {pluginList.length === 0 ? (
+              <>
+                <div className="text-sm">还没有安装插件</div>
+                <Button
+                  variant="filled"
+                  size="small"
+                  onClick={() => void installFromFile()}
+                  disabled={installing}
+                >
+                  <Upload className="size-4" />
+                  从文件安装
+                </Button>
+              </>
+            ) : (
+              <>
+                <div className="text-sm">从左侧选择一个插件查看详情</div>
+                <div className="text-xs text-muted-foreground/70">
+                  在列表中可快速启用 / 禁用、打开插件界面
+                </div>
+              </>
+            )}
           </div>
         ) : (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {pluginList.map((info) => {
-              const hasView = Boolean(info.renderer)
-              const canOpen = hasView && info.enabled
-              return (
-                <div
-                  key={info.id}
-                  className={cn(
-                    'flex flex-col gap-2 rounded-lg border border-border/60 bg-card p-3',
-                    !info.enabled && 'opacity-60'
-                  )}
-                >
-                  {/* 顶部：图标 + 名称/版本/作者 + 启用开关 */}
-                  <div className="flex items-start gap-2.5">
-                    <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-secondary/60 text-lg">
-                      {info.icon ?? <Package className="size-5" />}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="truncate text-sm font-medium">{info.name}</span>
-                        <Tag className="m-0 text-[10px] font-normal" variant="outlined">
-                          v{info.version}
-                        </Tag>
-                        {!info.enabled && (
-                          <Tag className="m-0 border-0 text-[10px] font-normal" color="default">
-                            已禁用
-                          </Tag>
-                        )}
-                      </div>
-                      {info.author && (
-                        <div className="truncate text-[11px] text-muted-foreground">by {info.author}</div>
-                      )}
-                    </div>
-                    <Switch
-                      checked={info.enabled}
-                      onChange={(v) => void toggleEnabled(info, v)}
-                      aria-label="启用/禁用"
-                    />
-                  </div>
-
-                  {info.description && (
-                    <p className="line-clamp-2 text-xs text-muted-foreground">{info.description}</p>
-                  )}
-                  {info.error && (
-                    <p className="text-[11px] text-destructive">加载失败：{info.error}</p>
-                  )}
-
+          <div className="mx-auto flex w-full max-w-3xl flex-col gap-3">
+            {/* 概览卡片 */}
+            <div
+              className={cn(
+                'flex flex-col gap-3 rounded-lg border border-border/60 bg-card p-4',
+                !info.enabled && 'opacity-70'
+              )}
+            >
+              <div className="flex items-start gap-3">
+                <div className="flex size-12 shrink-0 items-center justify-center rounded-lg bg-secondary/60 text-2xl">
+                  {info.icon ?? <Package className="size-6" />}
+                </div>
+                <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-[10px] text-muted-foreground">权限</span>
-                    {(info.permissions ?? []).length === 0 ? (
-                      <span className="text-[10px] text-muted-foreground">无</span>
-                    ) : (
-                      info.permissions!.map((perm) => (
-                        <Tag key={perm} className="m-0 border-0 text-[10px] font-normal" color="default">
-                          {PERMISSION_LABEL[perm] ?? perm}
-                        </Tag>
-                      ))
+                    <span className="truncate text-[15px] font-semibold">{info.name}</span>
+                    <Tag className="m-0 text-[10px] font-normal" variant="outlined">
+                      v{info.version}
+                    </Tag>
+                    <Tag
+                      className="m-0 border-0 text-[10px] font-normal"
+                      color={info.enabled ? 'success' : 'default'}
+                    >
+                      {info.enabled ? '已启用' : '已禁用'}
+                    </Tag>
+                    {info.error && (
+                      <Tag className="m-0 border-0 text-[10px] font-normal" color="error">
+                        加载失败
+                      </Tag>
                     )}
                   </div>
-                  <div className="truncate text-[10px] text-muted-foreground">id: {info.id}</div>
-
-                  {/* 底部操作栏 */}
-                  <div className="mt-auto flex items-center gap-1 pt-2">
-                    <Button
-                      type="text"
-                      size="small"
-                      className="h-7 px-2 text-[11px]"
-                      onClick={() => openPlugin(info)}
-                      disabled={!canOpen}
-                    >
-                      <ExternalLink className="size-3.5" />
-                      打开
-                    </Button>
-                    <Button
-                      type="text"
-                      size="small"
-                      icon={<RotateCw className="size-3.5" />}
-                      className="h-7 w-7 p-0 text-muted-foreground"
-                      title="重新加载该插件（改动后无需重启）"
-                      onClick={() => void reloadOne(info)}
-                    />
-                    <Button
-                      type="text"
-                      size="small"
-                      icon={<Trash2 className="size-3.5" />}
-                      danger
-                      className="ml-auto h-7 px-2 text-[11px]"
-                      onClick={() => setPendingUninstall(info)}
-                    >
-                      卸载
-                    </Button>
+                  <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                    {info.author ? `by ${info.author}` : '未署名'}
                   </div>
                 </div>
-              )
-            })}
+                <div className="flex shrink-0 items-center gap-2">
+                  <span className="text-xs text-muted-foreground">
+                    {info.enabled ? '已启用' : '已禁用'}
+                  </span>
+                  <Switch checked={info.enabled} onChange={(v) => void toggleEnabled(v)} />
+                </div>
+              </div>
+
+              {info.description && (
+                <p className="text-xs leading-relaxed text-muted-foreground">{info.description}</p>
+              )}
+
+              {info.error && (
+                <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2">
+                  <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-destructive" />
+                  <div className="min-w-0 flex-1 text-[11px] break-all text-destructive">
+                    加载失败：{info.error}
+                  </div>
+                </div>
+              )}
+
+              {/* 操作栏 */}
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <Button
+                  type="primary"
+                  icon={<ExternalLink className="size-4" />}
+                  onClick={openPlugin}
+                  disabled={!canOpen}
+                  title={canOpen ? '打开插件界面' : '插件无界面或已被禁用'}
+                >
+                  打开插件界面
+                </Button>
+                <Button
+                  icon={<RotateCw className="size-4" />}
+                  loading={reloadingOne}
+                  onClick={() => void reloadOne()}
+                  title="重新加载该插件（改动后无需重启）"
+                >
+                  重新加载
+                </Button>
+                <Button
+                  icon={<Trash2 className="size-4" />}
+                  danger
+                  className="ml-auto"
+                  onClick={() => setPendingUninstall(info)}
+                >
+                  卸载
+                </Button>
+              </div>
+            </div>
+
+            {/* 详细信息 */}
+            <div className="flex flex-col gap-2.5 rounded-lg border border-border/60 bg-card p-4">
+              <h2 className="text-xs font-semibold text-foreground/90">详细信息</h2>
+              <DetailRow label="标识">{info.id}</DetailRow>
+              <DetailRow label="版本">v{info.version}</DetailRow>
+              <DetailRow label="作者">{info.author ?? '未署名'}</DetailRow>
+              <DetailRow label="渲染方式">{rendererLabel(info)}</DetailRow>
+              <DetailRow label="主进程入口">{info.main ?? '无'}</DetailRow>
+              <DetailRow label="权限">
+                {(info.permissions ?? []).length === 0 ? (
+                  '无'
+                ) : (
+                  <span className="flex flex-wrap items-center gap-1.5">
+                    {info.permissions!.map((perm) => (
+                      <Tag
+                        key={perm}
+                        className="m-0 border-0 text-[10px] font-normal"
+                        color="default"
+                      >
+                        {PERMISSION_LABEL[perm] ?? perm}
+                      </Tag>
+                    ))}
+                  </span>
+                )}
+              </DetailRow>
+              <DetailRow label="界面状态">
+                {!info.renderer
+                  ? '该插件不提供界面'
+                  : !info.enabled
+                    ? '已禁用，侧边栏不显示入口'
+                    : view
+                      ? '已加载，侧边栏可见入口'
+                      : '界面未加载'}
+              </DetailRow>
+            </div>
           </div>
         )}
       </div>

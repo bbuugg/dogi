@@ -3,6 +3,7 @@ import type { ComponentType } from 'react'
 import { FileCode2, Puzzle, Server, StickyNote } from 'lucide-react'
 import { HostsPanel } from '@/components/HostsPanel'
 import { NotesPanel } from '@/components/NotesPanel'
+import { PluginsPanel } from '@/components/PluginsPanel'
 import { ScriptsPanel } from '@/components/ScriptsPanel'
 import { useAppStore } from '@/stores/app-store'
 import {
@@ -65,6 +66,7 @@ export const BUILTIN_ACTIVITIES: Activity[] = [
     id: PLUGINS_ACTIVITY_ID,
     label: '插件管理',
     icon: Puzzle,
+    panel: PluginsPanel,
     view: 'plugins'
   }
 ]

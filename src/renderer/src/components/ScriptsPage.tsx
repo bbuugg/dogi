@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { CheckCircle2, FileCode2, Loader2, Play, Trash2 } from 'lucide-react'
 import MonacoEditor from '@/components/MonacoEditor'
-import { Button, Form, Input, Modal, message } from 'antd'
+import { Button, Input, Modal, message } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import type { ScriptEntry } from '@shared/types'
 
@@ -17,7 +17,6 @@ export function ScriptsPage() {
   const scripts = useAppStore((s) => s.scripts)
   const activeScriptId = useAppStore((s) => s.ui.activeScriptId)
   const refreshScripts = useAppStore((s) => s.refreshScripts)
-  const selectScript = useAppStore((s) => s.selectScript)
   const setRunScriptDialog = useAppStore((s) => s.setRunScriptDialog)
 
   const activeScript = scripts.find((sc) => sc.id === activeScriptId) ?? null
@@ -173,7 +172,7 @@ export function ScriptsPage() {
         </span>
         <Button
           icon={<Play className="size-4" />}
-          onClick={() => setRunScriptDialog(true, activeScriptId)}
+          onClick={() => setRunScriptDialog(true, activeScriptId ?? undefined)}
           title="选择主机并运行脚本"
         >
           运行
