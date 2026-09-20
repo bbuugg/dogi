@@ -27,9 +27,11 @@ import {
   X
 } from 'lucide-react'
 import {
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
+  type CSSProperties,
   type PointerEvent as ReactPointerEvent
 } from 'react'
 
@@ -328,6 +330,12 @@ function buildCollapsedLine(messages: AiChatMessage[]): string {
 /** 浮窗容器与面板组内容区的边距下限（px） */
 const FLOAT_MARGIN = 8
 
+/** 浮窗默认离容器底部的距离（px） */
+const DEFAULT_BOTTOM = 24
+
+/** 横条输入栏固定高度（px）：py-1.5×2 + 内容 h-8，锚点翻转/拖拽钳制都以此为准 */
+const BAR_HEIGHT = 44
+
 /**
  * 浮在终端之上的 AI 助手浮窗：展示并驱动 sessionId 所属会话的独立对话。
  *
@@ -379,7 +387,20 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const [modelSelectOpen, setModelSelectOpen] = useState(false)
   const [permMenuOpen, setPermMenuOpen] = useState(false)
   const rootRef = useRef<HTMLElement>(null)
+  const barRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  // 面板组内容区高度：用于「横条在上半区时卡片向下展开」的翻转判断与高度钳制
+  const [containerH, setContainerH] = useState<number | null>(null)
+
+  useEffect(() => {
+    const parent = rootRef.current?.parentElement
+    if (!parent) return
+    const update = () => setContainerH(parent.clientHeight)
+    update()
+    const ro = new ResizeObserver(update)
+    ro.observe(parent)
+    return () => ro.disconnect()
+  }, [])
   // 是否跟随底部：用户上翻阅读历史时暂停自动跟随，避免被强制拉回底部
   const nearBottomRef = useRef(true)
   const prevScrollTopRef = useRef(0)
@@ -426,9 +447,52 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const showList = !minimized
   const collapsedLine = buildCollapsedLine(messages)
 
+  // pos.y 语义恒为「横条底边距容器底部的距离」，翻转与否不改基准
+  const anchoredBottom = floatingPos ? floatingPos.y : DEFAULT_BOTTOM
+  // 横条上方是否有实体内容（列表 / 确认条 / 错误条）：只有这时才需要翻转
+  const hasUpperContent =
+    showList ||
+    (minimized && Boolean(pendingConfirm)) ||
+    (!showList && Boolean(aiError))
+  // 横条落在容器上半区（条顶边越过中线）：卡片整体向下展开，
+  // 否则列表/确认条向上长会超出容器顶边。两种模式的 maxHeight 都被
+  // 钳在横条所在侧的剩余空间内，内容超高时消息区自动压缩内部滚动。
+  const barNearTop =
+    containerH !== null && containerH - anchoredBottom - BAR_HEIGHT < containerH / 2
+  const flipped = hasUpperContent && barNearTop
+  // 翻转状态粘滞：收起瞬间若立刻切回 bottom 锚点，列表会在 200ms 收起动画期间
+  // 跳回横条上方收缩（向上弹一下）；展开时则需同步生效（layout 阶段 setState，
+  // 绘制前完成，不会闪现错锚点的一帧）。两种锚点下横条位置完全一致，
+  // 动画结束后再切换锚点是无感的。
+  const [flippedSticky, setFlippedSticky] = useState(false)
+  useLayoutEffect(() => {
+    if (flipped) {
+      setFlippedSticky(true)
+      return
+    }
+    const t = setTimeout(() => setFlippedSticky(false), 240)
+    return () => clearTimeout(t)
+  }, [flipped])
+  const asideStyle: CSSProperties = {
+    width: aiPanelWidth,
+    left: floatingPos ? floatingPos.x : '50%',
+    transform: floatingPos ? undefined : 'translateX(-50%)',
+    ...(flippedSticky && containerH !== null
+      ? {
+          top: containerH - anchoredBottom - BAR_HEIGHT,
+          maxHeight: anchoredBottom + BAR_HEIGHT - FLOAT_MARGIN
+        }
+      : {
+          bottom: anchoredBottom,
+          ...(containerH !== null
+            ? { maxHeight: containerH - anchoredBottom - FLOAT_MARGIN }
+            : {})
+        })
+  }
+
   /**
-   * 拖拽移动浮窗：以 pointerdown 时的 rect 为基准算偏移（浮窗用 left/bottom 定位，
-   * 列表向上展开时输入条不会跑位），并夹在面板组内容区内。落点在按钮/输入框等
+   * 拖拽移动浮窗：垂直位置以横条底边为基准（pos.y 语义在翻转/非翻转下一致，
+   * 列表展开收起时横条不会跑位），并夹在面板组内容区内。落点在按钮/输入框等
    * 交互控件上时不启动拖拽，否则会抢走它们的点击。
    */
   const startDrag = (e: ReactPointerEvent<HTMLElement>) => {
@@ -442,8 +506,9 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     if (!el || !parent) return
     const cRect = parent.getBoundingClientRect()
     const rect = el.getBoundingClientRect()
+    const barRect = barRef.current?.getBoundingClientRect() ?? rect
     const baseX = rect.left - cRect.left
-    const baseY = cRect.bottom - rect.bottom
+    const baseY = cRect.bottom - barRect.bottom
     const startX = e.clientX
     const startY = e.clientY
     if (!floatingPos) setAiFloatingPos({ x: baseX, y: baseY })
@@ -452,9 +517,10 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         FLOAT_MARGIN,
         Math.min(cRect.width - rect.width - FLOAT_MARGIN, baseX + ev.clientX - startX)
       )
+      // 只保证横条本体在容器内；卡片主体靠 flipped + maxHeight 自适应剩余空间
       const y = Math.max(
         FLOAT_MARGIN,
-        Math.min(cRect.height - rect.height - FLOAT_MARGIN, baseY - (ev.clientY - startY))
+        Math.min(cRect.height - BAR_HEIGHT - FLOAT_MARGIN, baseY - (ev.clientY - startY))
       )
       setAiFloatingPos({ x, y })
     }
@@ -478,19 +544,21 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   return (
     <aside
       ref={rootRef}
-      className="absolute z-20 flex select-none flex-col overflow-hidden rounded-xl border border-border bg-card/40 shadow-2xl backdrop-blur-md"
-      style={{
-        width: aiPanelWidth,
-        left: floatingPos ? floatingPos.x : '50%',
-        bottom: floatingPos ? floatingPos.y : 24,
-        transform: floatingPos ? undefined : 'translateX(-50%)'
-      }}
+      className={cn(
+        // 描边用 ring（box-shadow）而不是 border：border 会在锚点侧垫出 1px，
+        // 使 bottom/top 两套锚定公式对不上横条，展开/折叠时横条会微跳 2px
+        'absolute z-20 flex select-none flex-col overflow-hidden rounded-xl bg-card/40 shadow-2xl ring-1 ring-inset ring-border backdrop-blur-md',
+        // 上半区时反转主轴：DOM 里的「列表在上、横条在下」视觉上变为「横条在上、列表在下」
+        flippedSticky && 'flex-col-reverse'
+      )}
+      style={asideStyle}
     >
-      {/* 消息列表卡片展开/收起：grid 行轨道 0fr↔1fr 过渡（向上平滑生长），
-         不直接装卸载；收起时禁用交互，避免隐形内容截获点击/焦点 */}
+      {/* 消息列表卡片展开/收起：grid 行轨道 0fr↔1fr 过渡（沿横条对侧平滑生长），
+         不直接装卸载；收起时禁用交互，避免隐形内容截获点击/焦点。
+         min-h-0（不用 shrink-0）：maxHeight 钳制生效时让列表收缩，横条永不被挤出卡片 */}
       <div
         className={cn(
-          'grid shrink-0 transition-[grid-template-rows] duration-200 ease-out',
+          'grid min-h-0 transition-[grid-template-rows] duration-200 ease-out',
           showList ? 'grid-rows-[1fr]' : 'pointer-events-none grid-rows-[0fr]'
         )}
       >
@@ -530,7 +598,13 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             />
             <Button
               type="text"
-              icon={<ChevronDown className="size-4" />}
+              icon={
+                flippedSticky ? (
+                  <ChevronUp className="size-4" />
+                ) : (
+                  <ChevronDown className="size-4" />
+                )
+              }
               className="h-7 w-7 shrink-0 p-0 text-muted-foreground"
               title="最小化（收起为状态条）"
               onClick={() => sessionId && setAiMinimized(sessionId, true)}
@@ -648,7 +722,10 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           展开态下手柄与展开按钮隐藏（拖拽/收起由卡片头部承担）；
           折叠且有对话时仅输入框让位给一行状态条（Codex「思考中」风格），
           权限模式与发送/停止照常可用 */}
-      <div className="flex items-center gap-1 px-2 py-1.5">
+      <div
+        ref={barRef}
+        className="flex h-11 shrink-0 items-center gap-1 px-3"
+      >
         {/* 拖拽手柄：展开态随宽度过渡收为 0（拖拽由卡片头部承担），
            -mx-1 抵消父级 gap，收起后不留空隙 */}
         <span
@@ -743,7 +820,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           <Button
             type="text"
             size="small"
-            icon={<ChevronUp className="size-4" />}
+            // 箭头指向预示展开方向：横条在上半区时卡片向下展开
+            icon={barNearTop ? <ChevronDown className="size-4" /> : <ChevronUp className="size-4" />}
             title="展开对话"
             className="h-7 w-7 p-0 text-muted-foreground"
             onClick={() => sessionId && setAiMinimized(sessionId, false)}
