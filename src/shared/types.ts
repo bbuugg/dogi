@@ -224,6 +224,16 @@ export interface ApiHeaderPair {
 }
 
 /**
+ * 接口请求分组：侧边栏里的分组节点。
+ * 与 SshGroup 不同，这里不设颜色 —— 接口请求的分组只承担「归类 + 排序」。
+ */
+export interface ApiGroup {
+  id: string
+  name: string
+  createdAt: number
+}
+
+/**
  * 保存的接口请求：侧边栏列表项，同时是 PanelView 里「接口请求」标签的打开对象。
  * 一个请求 = 一个标签，所以这里不带「未保存草稿」的概念（新建即落盘）。
  */
@@ -235,6 +245,12 @@ export interface ApiRequestEntry {
   url: string
   headers: ApiHeaderPair[]
   body: string
+  /**
+   * 所属分组；undefined = 未分组。
+   * 只由 `api:arrange`（拖拽重排）改动 —— 普通的保存/新建不要碰它，
+   * 否则按 Ctrl/Cmd+S 会把请求从分组里踢出去。
+   */
+  groupId?: string
   createdAt: number
   updatedAt: number
 }

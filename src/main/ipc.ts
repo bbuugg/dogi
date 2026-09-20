@@ -214,6 +214,20 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   ipcMain.handle('api:list', () => storage.listApiRequests())
   ipcMain.handle('api:save', (_e, entry: ApiRequestEntry) => storage.saveApiRequest(entry))
   ipcMain.handle('api:delete', (_e, id: string) => storage.deleteApiRequest(id))
+  ipcMain.handle(
+    'api:arrange',
+    (
+      _e,
+      payload: { groupIds: string[]; requests: Array<{ id: string; groupId?: string }> }
+    ) => storage.arrangeApi(payload)
+  )
+  ipcMain.handle('api:groups:list', () => storage.listApiGroups())
+  ipcMain.handle('api:groups:save', (_e, input: { id?: string; name: string }) =>
+    storage.saveApiGroup(input)
+  )
+  ipcMain.handle('api:groups:delete', (_e, id: string, deleteRequests?: boolean) =>
+    storage.deleteApiGroup(id, deleteRequests)
+  )
   ipcMain.handle('api:history:list', () => storage.listApiHistory())
   ipcMain.handle('api:history:save', (_e, entries: ApiHistoryEntry[]) =>
     storage.saveApiHistory(entries)

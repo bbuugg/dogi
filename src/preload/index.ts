@@ -6,6 +6,7 @@ import type {
   AiModelConfig,
   AiSettings,
   AiStreamEvent,
+  ApiGroup,
   ApiHistoryEntry,
   ApiHttpRequest,
   ApiHttpResponse,
@@ -144,6 +145,21 @@ const api = {
     save: (entry: ApiRequestEntry): Promise<ApiRequestEntry[]> =>
       ipcRenderer.invoke('api:save', entry),
     remove: (id: string): Promise<ApiRequestEntry[]> => ipcRenderer.invoke('api:delete', id),
+    /** 拖拽排序 / 换组后的整体重排（数组顺序即显示顺序） */
+    arrange: (payload: {
+      groupIds: string[]
+      requests: Array<{ id: string; groupId?: string }>
+    }): Promise<{ groups: ApiGroup[]; requests: ApiRequestEntry[] }> =>
+      ipcRenderer.invoke('api:arrange', payload),
+    listGroups: (): Promise<ApiGroup[]> => ipcRenderer.invoke('api:groups:list'),
+    saveGroup: (input: { id?: string; name: string }): Promise<ApiGroup[]> =>
+      ipcRenderer.invoke('api:groups:save', input),
+    /** 删除分组；deleteRequests=true 时连同组内请求一起删除 */
+    removeGroup: (
+      id: string,
+      deleteRequests?: boolean
+    ): Promise<{ groups: ApiGroup[]; requests: ApiRequestEntry[] }> =>
+      ipcRenderer.invoke('api:groups:delete', id, deleteRequests),
     listHistory: (): Promise<ApiHistoryEntry[]> => ipcRenderer.invoke('api:history:list'),
     /** 覆盖写入整段历史（渲染端负责裁剪条数） */
     saveHistory: (entries: ApiHistoryEntry[]): Promise<ApiHistoryEntry[]> =>

@@ -55,37 +55,37 @@
 }
 
 /* antd Tree 根节点默认铺 colorBgContainer（浅色主题下是白色），侧边栏里要透出父容器底色 */
-.ssh-tree.ant-tree,
-.ssh-tree .ant-tree-list,
-.ssh-tree .ant-tree-list-holder {
+.side-tree.ant-tree,
+.side-tree .ant-tree-list,
+.side-tree .ant-tree-list-holder {
   background: transparent;
 }
 
 /*
- *主机树（侧边栏里的 antd Tree）：antd 默认按「页面级树」排版（14px 字号、
+ * 侧边栏里的 antd Tree（主机 / 接口请求共用）：antd 默认按「页面级树」排版（14px 字号、
  * 宽行高、大缩进），这里压到侧边栏密度，并让节点标题铺满整行以便右侧悬浮按钮靠右。
  */
-.ssh-tree .ant-tree-list-holder-inner {
+.side-tree .ant-tree-list-holder-inner {
   gap: 1px;
 }
 
-.ssh-tree .ant-tree-treenode {
+.side-tree .ant-tree-treenode {
   width: 100%;
   padding-bottom: 0;
   align-items: center;
 }
 
 /* 缩进宽度（antd Tree 无 indentUnit 属性，只能从样式压；切换箭头隐藏后靠它区分层级） */
-.ssh-tree .ant-tree-indent-unit {
+.side-tree .ant-tree-indent-unit {
   width: 14px;
 }
 
 /* 展开/折叠改为点击整行标题（GroupRow 自己处理），因此不显示切换箭头 */
-.ssh-tree .ant-tree-switcher {
+.side-tree .ant-tree-switcher {
   display: none;
 }
 
-.ssh-tree .ant-tree-node-content-wrapper {
+.side-tree .ant-tree-node-content-wrapper {
   display: flex;
   align-items: center;
   min-height: 30px;
@@ -93,7 +93,7 @@
   border-radius: var(--radius-md, 6px);
 }
 
-.ssh-tree .ant-tree-node-content-wrapper .ant-tree-title {
+.side-tree .ant-tree-node-content-wrapper .ant-tree-title {
   display: flex;
   flex: 1;
   min-width: 0;

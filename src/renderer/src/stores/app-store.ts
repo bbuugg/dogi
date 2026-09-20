@@ -7,6 +7,7 @@ import type {
   AiPermissionMode,
   AiSettings,
   AiStreamEvent,
+  ApiGroup,
   ApiHistoryEntry,
   ApiRequestEntry,
   ColorThemeName,
@@ -505,6 +506,8 @@ interface AppStore {
   // ---------- 接口请求 ----------
   /** 保存的接口请求（侧边栏列表；一个请求对应 PanelView 里的一个标签） */
   apiRequests: ApiRequestEntry[]
+  /** 接口请求分组（侧边栏里的分组节点，数组顺序即显示顺序） */
+  apiGroups: ApiGroup[]
   /** 请求历史（发送后自动记录，按时间倒序） */
   apiHistory: ApiHistoryEntry[]
 
@@ -611,6 +614,17 @@ interface AppStore {
   deleteScript: (id: string) => Promise<void>
   /** 刷新接口请求列表到 store */
   refreshApiRequests: () => Promise<void>
+  /** 刷新接口请求分组到 store */
+  refreshApiGroups: () => Promise<void>
+  /** 新建（不传 id）或重命名（传 id）接口请求分组 */
+  saveApiGroup: (input: { id?: string; name: string }) => Promise<void>
+  /** 删除分组；deleteRequests=true 时连同组内请求一起删除，否则组内请求回到「未分组」 */
+  deleteApiGroup: (id: string, deleteRequests?: boolean) => Promise<void>
+  /** 拖拽排序 / 换组后的整体重排：数组顺序即显示顺序 */
+  arrangeApi: (payload: {
+    groupIds: string[]
+    requests: Array<{ id: string; groupId?: string }>
+  }) => Promise<void>
   /**
    * 新建一条请求并返回其 id（不自动打开标签，由调用方决定）。
    * `seed` 用于预填内容（导入 cURL 走这条路），缺省就是一条空请求。
@@ -755,6 +769,7 @@ let shortcutWired = false
     scripts: [],
     notes: [],
     apiRequests: [],
+    apiGroups: [],
     apiHistory: [],
 
     preferences: { theme: 'system', colorTheme: 'neutral', customColor: '#3b82f6', terminalTheme: 'auto', copyOnSelect: true, rightClickPaste: true, commandPrediction: true, terminalFontSize: 13, localShell: 'default', minimizeToTray: true, monitorInterval: 2000 },
@@ -790,7 +805,7 @@ let shortcutWired = false
     monitors: {},
 
     bootstrap: async () => {
-      const [profiles, sshGroups, configs, settings, preferences, shells, scripts, notes, apiRequests, apiHistory, shortcuts] = await Promise.all([
+      const [profiles, sshGroups, configs, settings, preferences, shells, scripts, notes, apiRequests, apiGroups, apiHistory, shortcuts] = await Promise.all([
         window.api.ssh.list(),
         window.api.ssh.listGroups(),
         window.api.ai.listConfigs(),
@@ -800,6 +815,7 @@ let shortcutWired = false
         window.api.scripts.list(),
         window.api.notes.list(),
         window.api.apiClient.list(),
+        window.api.apiClient.listGroups(),
         window.api.apiClient.listHistory(),
         window.api.shortcuts.get()
       ])
@@ -816,6 +832,7 @@ let shortcutWired = false
         scripts,
         notes,
         apiRequests,
+        apiGroups,
         apiHistory,
         shortcuts
       })
@@ -1289,6 +1306,34 @@ let shortcutWired = false
 
     refreshApiRequests: async () => {
       set({ apiRequests: await window.api.apiClient.list() })
+    },
+
+    refreshApiGroups: async () => {
+      set({ apiGroups: await window.api.apiClient.listGroups() })
+    },
+
+    saveApiGroup: async (input) => {
+      set({ apiGroups: await window.api.apiClient.saveGroup(input) })
+    },
+
+    deleteApiGroup: async (id, deleteRequests) => {
+      // 组内请求可能被删除或回到「未分组」，两份数据一起刷新
+      const { groups, requests } = await window.api.apiClient.removeGroup(id, deleteRequests)
+      const alive = new Set(requests.map((r) => r.id))
+      set((s) => {
+        let patch: Partial<AppStore> = { apiGroups: groups, apiRequests: requests }
+        // 被删掉的请求若正在标签页里打开，一并关掉（与单条删除一致）
+        for (const tab of s.ui.panelTabs) {
+          if (tab.type !== 'api' || !tab.apiRequestId || alive.has(tab.apiRequestId)) continue
+          patch = { ...patch, ...closePlainTab({ ...s, ...patch } as AppStore, tab.id) }
+        }
+        return patch
+      })
+    },
+
+    arrangeApi: async (payload) => {
+      const { groups, requests } = await window.api.apiClient.arrange(payload)
+      set({ apiGroups: groups, apiRequests: requests })
     },
 
     createApiRequest: async (seed) => {

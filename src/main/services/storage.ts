@@ -4,6 +4,7 @@ import type {
   AiModelConfig,
   AiPermissionMode,
   AiSettings,
+  ApiGroup,
   ApiHistoryEntry,
   ApiRequestEntry,
   McpServerConfig,
@@ -26,6 +27,7 @@ interface StoreSchema {
   scripts: ScriptEntry[]
   notes: NoteEntry[]
   apiRequests: ApiRequestEntry[]
+  apiGroups: ApiGroup[]
   apiHistory: ApiHistoryEntry[]
   shortcuts: ShortcutConfig[]
   windowBounds?: { x?: number; y?: number; width: number; height: number }
@@ -61,6 +63,7 @@ class StorageService {
       scripts: [],
       notes: [],
       apiRequests: [],
+      apiGroups: [],
       apiHistory: [],
       shortcuts: DEFAULT_SHORTCUTS
     }
@@ -342,6 +345,92 @@ class StorageService {
       this.store.get('apiRequests').filter((r) => r.id !== id)
     )
     return this.listApiRequests()
+  }
+
+  /**
+   * 拖拽排序 / 换组后的整体重排：数组顺序即显示顺序。
+   * - groupIds：分组的目标顺序（未列出的分组按原相对顺序附在其后）；
+   * - requests：请求按目标顺序列出，groupId 为最终归属（undefined = 未分组）。
+   * 只改 groupId，不碰请求内容本身，也不刷新 updatedAt（列表里显示的是「最近编辑」时间，
+   * 拖一下顺序就跳成「刚刚」会很误导）。
+   */
+  arrangeApi(payload: {
+    groupIds: string[]
+    requests: Array<{ id: string; groupId?: string }>
+  }): { groups: ApiGroup[]; requests: ApiRequestEntry[] } {
+    const groups = this.store.get('apiGroups')
+    const groupById = new Map(groups.map((g) => [g.id, g]))
+    const ordered = payload.groupIds
+      .map((id) => groupById.get(id))
+      .filter((g): g is ApiGroup => Boolean(g))
+    for (const g of groups) {
+      if (!payload.groupIds.includes(g.id)) ordered.push(g)
+    }
+    this.store.set('apiGroups', ordered)
+
+    const requests = this.store.get('apiRequests')
+    const requestById = new Map(requests.map((r) => [r.id, r]))
+    const next: ApiRequestEntry[] = []
+    for (const item of payload.requests) {
+      const r = requestById.get(item.id)
+      if (!r) continue
+      next.push(r.groupId === item.groupId ? r : { ...r, groupId: item.groupId })
+    }
+    for (const r of requests) {
+      if (!next.some((x) => x.id === r.id)) next.push(r)
+    }
+    this.store.set('apiRequests', next)
+
+    return { groups: this.listApiGroups(), requests: this.listApiRequests() }
+  }
+
+  // ---------- 接口请求分组 ----------
+  listApiGroups(): ApiGroup[] {
+    return this.store.get('apiGroups')
+  }
+
+  /** 保存分组（upsert）：不传 id 视为新增 */
+  saveApiGroup(input: { id?: string; name: string }): ApiGroup[] {
+    const groups = this.store.get('apiGroups')
+    const prev = input.id ? groups.find((g) => g.id === input.id) : undefined
+    const group: ApiGroup = {
+      id: input.id || crypto.randomUUID(),
+      name: input.name.trim(),
+      createdAt: prev?.createdAt ?? Date.now()
+    }
+    this.store.set(
+      'apiGroups',
+      prev ? groups.map((g) => (g.id === group.id ? group : g)) : [...groups, group]
+    )
+    return this.listApiGroups()
+  }
+
+  /**
+   * 删除分组：默认只删分组本身，组内请求回到「未分组」；
+   * deleteRequests 为 true 时连同组内请求一起删除（由用户在弹出的确认框里勾选）。
+   * 两份数据一起返回 —— 渲染端无论如何都要同时更新它们。
+   */
+  deleteApiGroup(
+    id: string,
+    deleteRequests = false
+  ): { groups: ApiGroup[]; requests: ApiRequestEntry[] } {
+    const members = this.store
+      .get('apiRequests')
+      .filter((r) => r.groupId === id)
+      .map((r) => r.id)
+    const doomed = new Set(deleteRequests ? members : [])
+    this.store.set(
+      'apiGroups',
+      this.store.get('apiGroups').filter((g) => g.id !== id)
+    )
+    this.store.set(
+      'apiRequests',
+      this.store
+        .get('apiRequests')
+        .filter((r) => !doomed.has(r.id))
+        .map((r) => (r.groupId === id ? { ...r, groupId: undefined } : r))
+    )
+    return { groups: this.listApiGroups(), requests: this.listApiRequests() }
   }
 
   listApiHistory(): ApiHistoryEntry[] {

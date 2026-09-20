@@ -454,7 +454,7 @@ export function HostsPanel() {
           </div>
         ) : (
           <Tree
-            className="ssh-tree"
+            className="side-tree"
             treeData={treeData}
             selectable={false}
             blockNode

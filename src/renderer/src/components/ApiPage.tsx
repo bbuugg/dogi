@@ -93,9 +93,13 @@ export function ApiPage({ requestId }: { requestId: string }) {
   /**
    * 保存当前草稿 —— **唯一的落盘入口**，只有 Ctrl/Cmd+S 会走到这里。
    * 不做自动保存、不在切标签 / 关标签时偷偷写盘。
+   *
+   * groupId 必须从 store 里现取带回去：保存是「整条覆盖写」，漏了它按一次 Ctrl+S
+   * 就会把请求从分组里踢出去（分组归属只由侧边栏的拖拽重排改动）。
    */
   const saveNow = async (): Promise<void> => {
     try {
+      const current = useAppStore.getState().apiRequests.find((r) => r.id === requestId)
       await saveApiRequest({
         id: requestId,
         name: name.trim(),
@@ -103,6 +107,7 @@ export function ApiPage({ requestId }: { requestId: string }) {
         url: url.trim(),
         headers,
         body,
+        groupId: current?.groupId,
         createdAt: 0,
         updatedAt: 0
       })
