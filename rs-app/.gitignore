@@ -1,6 +1,0 @@
-node_modules/
-dist/
-src-tauri/target/
-src/renderer/public/monaco-editor/
-*.local
-.DS_Store
