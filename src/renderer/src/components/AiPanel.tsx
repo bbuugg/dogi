@@ -27,7 +27,6 @@ import {
   X
 } from 'lucide-react'
 import {
-  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -362,6 +361,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const clearAiMessages = useAppStore((s) => s.clearAiMessages)
   const setActiveAiConfig = useAppStore((s) => s.setActiveAiConfig)
   const setAiPermissionMode = useAppStore((s) => s.setAiPermissionMode)
+  const resolveAiConfirm = useAppStore((s) => s.resolveAiConfirm)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const setSessionAiOpen = useAppStore((s) => s.setSessionAiOpen)
   const aiPanelWidth = useAppStore((s) => s.ui.aiPanelWidth)
@@ -415,11 +415,6 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     const el = scrollRef.current
     if (el && nearBottomRef.current) el.scrollTop = el.scrollHeight
   }, [messages, aiStreaming, minimized])
-
-  // 确认模式下出现待批准请求：自动展开列表，免得批准按钮藏在最小化态里看不到
-  useEffect(() => {
-    if (pendingConfirm && sessionId) setAiMinimized(sessionId, false)
-  }, [pendingConfirm, sessionId, setAiMinimized])
 
   const hasConfig = Boolean(aiSettings.activeConfigId) && aiConfigs.length > 0
   const permissionMode: AiPermissionMode =
@@ -618,6 +613,37 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         </div>
       )}
 
+      {/* 折叠态收到待批准：不展开卡片，确认条直接挂在横条上方；
+          命令全文完整展示（自动换行、超高时内部滚动），不靠悬停 tooltip 阅读 */}
+      {minimized && pendingConfirm && (
+        <div className="border-b border-amber-500/30 bg-amber-500/10 px-2 py-1.5">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="size-3.5 shrink-0 text-amber-500" />
+            <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-amber-500">
+              {TOOL_LABELS[pendingConfirm.toolName] ?? pendingConfirm.toolName}
+            </span>
+            <Button
+              size="small"
+              type="primary"
+              className="h-6 shrink-0 px-2 text-xs"
+              onClick={() => void resolveAiConfirm(pendingConfirm.id, true)}
+            >
+              执行
+            </Button>
+            <Button
+              size="small"
+              className="h-6 shrink-0 px-2 text-xs"
+              onClick={() => void resolveAiConfirm(pendingConfirm.id, false)}
+            >
+              取消
+            </Button>
+          </div>
+          <pre className="mt-1 max-h-24 overflow-y-auto whitespace-pre-wrap break-all rounded bg-secondary/50 px-1.5 py-1 font-mono text-[11px] leading-4 text-muted-foreground">
+            {pendingConfirm.command}
+          </pre>
+        </div>
+      )}
+
       {/* 横条输入栏（始终显示）：拖拽手柄 · 权限模式图标 · 输入框/状态条 · 展开按钮 · 发送/停止；
           展开态下手柄与展开按钮隐藏（拖拽/收起由卡片头部承担）；
           折叠且有对话时仅输入框让位给一行状态条（Codex「思考中」风格），
@@ -704,7 +730,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                 : '请先在设置中配置模型'
             }
             variant="borderless"
-            className="min-w-0 flex-1 text-[13px]"
+            className="ai-bar-input min-w-0 flex-1 text-[13px]"
           />
         )}
         {/* 展开按钮：与手柄同样的宽度收拉动效，输入区变宽不跳变 */}
