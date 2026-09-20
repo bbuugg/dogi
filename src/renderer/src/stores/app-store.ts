@@ -211,6 +211,8 @@ interface UiState {
   collapsedActivities: Record<string, boolean>
   /** 笔记功能：当前正在编辑的笔记 id（null = 未选中） */
   activeNoteId: string | null
+  /** 脚本功能：当前正在编辑的脚本 id（null = 未选中） */
+  activeScriptId: string | null
   /** 侧边栏宽度（px） */
   sidebarWidth: number
   /** AI 助手面板宽度（px） */
@@ -350,6 +352,8 @@ interface AppStore {
   saveNote: (note: NoteEntry) => Promise<void>
   /** 删除笔记，若正被编辑则清空选中 */
   deleteNote: (id: string) => Promise<void>
+  /** 选择要编辑的脚本（null 表示取消选择） */
+  selectScript: (id: string | null) => void
   /** 选择要编辑的笔记（null 表示取消选择） */
   selectNote: (id: string | null) => void
   /** 打开/关闭 SSH 配置弹窗（editing=null 为新建；groupId 预设新建时的分组） */
@@ -475,6 +479,7 @@ let shortcutWired = false
       activeActivity: HOSTS_ACTIVITY_ID,
       collapsedActivities: {},
       activeNoteId: null,
+      activeScriptId: null,
       sidebarWidth: 240,
       aiPanelWidth: 350
     },
@@ -925,7 +930,19 @@ let shortcutWired = false
       set((s) => ({ ui: { ...s.ui, aiPanelWidth: width } })),
 
     refreshScripts: async () => {
-      set({ scripts: await window.api.scripts.list() })
+      const scripts = await window.api.scripts.list()
+      set((s) => ({
+        scripts,
+        ui: {
+          ...s.ui,
+          activeScriptId: s.ui.activeScriptId && scripts.some((sc) => sc.id === s.ui.activeScriptId)
+            ? s.ui.activeScriptId
+            : null
+        }
+      }))
+    },
+    selectScript: (id) => {
+      set((s) => ({ ui: { ...s.ui, activeScriptId: id } }))
     },
 
     refreshNotes: async () => {

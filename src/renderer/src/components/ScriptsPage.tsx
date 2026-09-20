@@ -1,56 +1,59 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { CheckCircle2, FileCode2, Loader2, Play, Trash2 } from 'lucide-react'
 import MonacoEditor from '@/components/MonacoEditor'
+import { Button, Form, Input, Modal, message } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import type { ScriptEntry } from '@shared/types'
-import { Button, Form, Input, Modal, message } from 'antd'
-import { Pencil, Play, Plus, Trash2 } from 'lucide-react'
-import { useState } from 'react'
 
-/** 脚本管理页：列出 / 新增 / 编辑 / 删除用户脚本（持久化到本地存储） */
+/** 自动保存防抖间隔（毫秒） */
+const AUTOSAVE_DELAY = 800
+
+/**
+ * 脚本编辑页（主区域）：标题 + Monaco 正文。
+ * 选中脚本存 store 的 ui.activeScriptId；正文/标题/描述改动后防抖自动保存，
+ * 也可手动 Ctrl+S（或点保存按钮）立即落盘，侧边栏列表随之刷新。
+ */
 export function ScriptsPage() {
   const scripts = useAppStore((s) => s.scripts)
+  const activeScriptId = useAppStore((s) => s.ui.activeScriptId)
   const refreshScripts = useAppStore((s) => s.refreshScripts)
+  const selectScript = useAppStore((s) => s.selectScript)
   const setRunScriptDialog = useAppStore((s) => s.setRunScriptDialog)
 
-  // null = 列表视图；非 null = 编辑/新增表单（持有待保存内容）
-  const [editing, setEditing] = useState<ScriptEntry | null>(null)
+  const activeScript = scripts.find((sc) => sc.id === activeScriptId) ?? null
+
+  // 本地草稿
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [content, setContent] = useState('')
   const [saving, setSaving] = useState(false)
-  /** 待确认删除的脚本（非 null 时弹出确认框） */
-  const [pendingDelete, setPendingDelete] = useState<ScriptEntry | null>(null)
+  const [dirty, setDirty] = useState(false)
 
-  const startAdd = () => {
-    setEditing({ id: '', name: '', content: '', createdAt: 0, updatedAt: 0 })
-    setName('')
-    setDescription('')
-    setContent('')
-  }
+  const draftRef = useRef({ name, description, content })
+  draftRef.current = { name, description, content }
+  const idRef = useRef<string | null>(activeScriptId)
+  idRef.current = activeScriptId
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingIdRef = useRef<string | null>(null)
 
-  const startEdit = (s: ScriptEntry) => {
-    setEditing(s)
-    setName(s.name)
-    setDescription(s.description ?? '')
-    setContent(s.content)
-  }
-
-  const cancel = () => setEditing(null)
-
-  const save = async () => {
-    if (!name.trim() || !content.trim()) return
+  /** 把指定 id 脚本的「当前草稿」落盘 */
+  const doSave = async (
+    id: string | null,
+    d: { name: string; description: string; content: string }
+  ): Promise<void> => {
+    if (!id) return
     setSaving(true)
     try {
       await window.api.scripts.save({
-        id: editing?.id || '',
-        name: name.trim(),
-        description: description.trim() || undefined,
-        content,
-        createdAt: editing?.createdAt ?? 0,
+        id,
+        name: d.name.trim() || '未命名脚本',
+        description: d.description.trim() || undefined,
+        content: d.content,
+        createdAt: 0,
         updatedAt: 0
       })
       await refreshScripts()
-      setEditing(null)
-      message.success('脚本已保存')
+      setDirty(false)
     } catch (e) {
       message.error(`保存失败：${e instanceof Error ? e.message : String(e)}`)
     } finally {
@@ -58,7 +61,55 @@ export function ScriptsPage() {
     }
   }
 
-  const confirmDelete = async () => {
+  const saveCurrent = () => doSave(idRef.current, draftRef.current)
+  const saveCurrentRef = useRef(saveCurrent)
+  saveCurrentRef.current = saveCurrent
+  const saveSnapshot = (id: string) => doSave(id, draftRef.current)
+
+  const markDirty = (id: string | null) => {
+    setDirty(true)
+    if (timerRef.current) clearTimeout(timerRef.current)
+    if (!id) return
+    pendingIdRef.current = id
+    timerRef.current = setTimeout(() => {
+      const pid = pendingIdRef.current
+      pendingIdRef.current = null
+      if (pid) void saveSnapshot(pid)
+    }, AUTOSAVE_DELAY)
+  }
+
+  /** 切换脚本：先冲刷旧脚本的待保存内容，再重置草稿 */
+  useEffect(() => {
+    if (timerRef.current) clearTimeout(timerRef.current)
+    const pendingId = pendingIdRef.current
+    pendingIdRef.current = null
+    if (pendingId && pendingId !== activeScriptId && draftRef.current.content) {
+      void saveSnapshot(pendingId)
+    }
+    setName(activeScript?.name ?? '')
+    setDescription(activeScript?.description ?? '')
+    setContent(activeScript?.content ?? '')
+    setDirty(false)
+  }, [activeScriptId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Ctrl/Cmd+S 立即保存 */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault()
+        void saveCurrentRef.current()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      if (timerRef.current) clearTimeout(timerRef.current)
+    }
+  }, [])
+
+  /** 删除确认 */
+  const [pendingDelete, setPendingDelete] = useState<ScriptEntry | null>(null)
+  const confirmDelete = useCallback(async () => {
     const target = pendingDelete
     if (!target) return
     setPendingDelete(null)
@@ -69,146 +120,91 @@ export function ScriptsPage() {
     } catch (e) {
       message.error(`删除失败：${e instanceof Error ? e.message : String(e)}`)
     }
+  }, [pendingDelete, refreshScripts])
+
+  if (!activeScript) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-muted-foreground">
+        <FileCode2 className="size-12 opacity-30" />
+        <div className="text-sm">从左侧选择一个脚本开始编辑</div>
+        <div className="text-xs text-muted-foreground/70">或点击「新建脚本」开始创建</div>
+      </div>
+    )
   }
 
   return (
     <div className="flex h-full flex-col bg-background">
-      <div className="flex items-center justify-between px-5 py-3">
-        <div>
-          <h1 className="text-base font-semibold">脚本管理</h1>
-          <p className="text-[11px] text-muted-foreground">
-            共 {scripts.length} 个脚本
-          </p>
-        </div>
-        <div className="ml-auto flex gap-2">
-          <Button
-            icon={<Play className="size-4" />}
-            variant="filled"
-            onClick={() => setRunScriptDialog(true)}
-            title="选择主机并运行脚本"
-          >
-            运行脚本
-          </Button>
-          <Button icon={<Plus className="size-4" />}
-            type="primary"
-            onClick={startAdd}
-          >
-            新增脚本
-          </Button>
-        </div>
+      {/* 工具栏：名称 + 描述 + 运行/删除 + 保存状态 */}
+      <div className="flex items-center gap-2 px-3 py-1.5">
+        <Input
+          value={name}
+          onChange={(e) => {
+            setName(e.target.value)
+            markDirty(activeScriptId)
+          }}
+          placeholder="脚本名称"
+          variant="borderless"
+          className="min-w-0 flex-1 text-[15px] font-semibold"
+        />
+        <Input
+          value={description}
+          onChange={(e) => {
+            setDescription(e.target.value)
+            markDirty(activeScriptId)
+          }}
+          placeholder="描述（可选）"
+          variant="borderless"
+          className="min-w-0 flex-[0.6] text-[13px] text-muted-foreground"
+        />
+        <span className="inline-flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+          {saving ? (
+            <>
+              <Loader2 className="size-3.5 animate-spin" />
+              保存中…
+            </>
+          ) : dirty ? (
+            '未保存'
+          ) : (
+            <>
+              <CheckCircle2 className="size-3.5 text-emerald-500" />
+              已保存
+            </>
+          )}
+        </span>
+        <Button
+          icon={<Play className="size-4" />}
+          onClick={() => setRunScriptDialog(true, activeScriptId)}
+          title="选择主机并运行脚本"
+        >
+          运行
+        </Button>
+        <Button
+          icon={<Trash2 className="size-4" />}
+          danger
+          onClick={() => setPendingDelete(activeScript)}
+          title="删除脚本"
+        >
+          删除
+        </Button>
+        <Button onClick={() => void saveCurrentRef.current()} loading={saving}>
+          保存
+        </Button>
       </div>
 
-      {/* 脚本内容属于「内容」，保持可选中复制 */}
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-2">
-        {scripts.length === 0 ? (
-          <div className="mx-auto mt-16 max-w-md rounded-md border border-dashed border-border px-3 py-10 text-center text-sm text-muted-foreground">
-            还没有脚本。
-            <br />
-            把常用命令保存下来，之后选择主机执行；也可在终端按 Ctrl+Shift+P
-            打开命令面板，选择「运行脚本」。
-            <div className="mt-4">
-              <Button icon={<Plus className="size-4" />} type="primary" onClick={startAdd}>
-                新增脚本
-              </Button>
-            </div>
-          </div>
-        ) : (
-          // 每行 3 个脚本卡片
-          <div className="mx-auto grid max-w-6xl grid-cols-3 gap-2">
-            {scripts.map((s) => (
-              <div
-                key={s.id}
-                onDoubleClick={() => setRunScriptDialog(true, s.id)}
-                className="group flex min-w-0 flex-col gap-1 rounded-md border border-border/60 px-3 py-2.5 hover:bg-secondary cursor-pointer"
-              >
-                <div className="flex items-start gap-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium">{s.name}</div>
-                    {s.description && (
-                      <div className="truncate text-xs text-muted-foreground">
-                        {s.description}
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex shrink-0 items-center gap-0.5">
-                    <Button
-                      type="text"
-                      icon={<Play className="size-4" />}
-                      size="small"
-                      className="w-7 p-0"
-                      title="选择主机运行"
-                      onClick={() => setRunScriptDialog(true, s.id)}
-                    />
-                    <Button
-                      icon={<Pencil className="size-4" />}
-                      type="text"
-                      size="small"
-                      className="w-7 p-0"
-                      title="编辑"
-                      onClick={() => startEdit(s)}
-                    />
-                    <Button
-                      type="text"
-                      icon={<Trash2 className="size-4 text-destructive" />}
-                      size="small"
-                      className="w-7 p-0"
-                      title="删除"
-                      onClick={() => setPendingDelete(s)}
-                    />
-                  </div>
-                </div>
-                <div className="truncate font-mono text-[11px] text-muted-foreground/80">
-                  {s.content.split('\n')[0] || ''}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+      {/* Monaco 编辑器主体 */}
+      <div className="min-h-0 flex-1 p-2">
+        <MonacoEditor
+          value={content}
+          onChange={(v) => {
+            setContent(v)
+            markDirty(activeScriptId)
+          }}
+          language="shell"
+          showLanguageSelector
+          showLineNumbersToggle
+          showWordWrapToggle
+        />
       </div>
-
-      {/* 新增 / 编辑脚本 */}
-      <Modal
-        open={editing !== null}
-        onCancel={cancel}
-        title={editing?.id ? '编辑脚本' : '新增脚本'}
-        okText="保存"
-        cancelText="取消"
-        onOk={() => void save()}
-        confirmLoading={saving}
-        okButtonProps={{ disabled: !name.trim() || !content.trim() }}
-        cancelButtonProps={{ disabled: saving }}
-        centered
-        width={640}
-        destroyOnHidden
-      >
-        <Form layout="vertical" requiredMark={false}>
-          <Form.Item label="名称" required>
-            <Input
-              value={name}
-              placeholder="例如：查看磁盘占用"
-              onChange={(e) => setName(e.target.value)}
-            />
-          </Form.Item>
-          <Form.Item label="描述（可选，用于搜索）">
-            <Input
-              value={description}
-              placeholder="例如：按大小列出当前目录前 10 个文件"
-              onChange={(e) => setDescription(e.target.value)}
-            />
-          </Form.Item>
-          <Form.Item label="脚本内容" required style={{ marginBottom: 0 }}>
-            <MonacoEditor
-              height={64 * 4}
-              value={content}
-              onChange={setContent}
-              language="shell"
-              showLanguageSelector
-              showLineNumbersToggle
-              showWordWrapToggle
-            />
-          </Form.Item>
-        </Form>
-      </Modal>
 
       {/* 删除确认 */}
       <Modal

@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { FileText, Plus, Trash2 } from 'lucide-react'
-import { Button, Modal, message } from 'antd'
+import { Button, Input, Modal, message } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'
 import type { NoteEntry } from '@shared/types'
@@ -38,12 +38,18 @@ export function NotesPanel() {
   /** 待确认删除的笔记（非 null 时弹出确认框） */
   const [pendingDelete, setPendingDelete] = useState<NoteEntry | null>(null)
   const [creating, setCreating] = useState(false)
+  const [search, setSearch] = useState('')
 
-  /** 最近编辑在前的稳定排序（依赖 store.notes，每次更新自动重排） */
-  const sorted = useMemo(
-    () => [...notes].sort((a, b) => b.updatedAt - a.updatedAt),
-    [notes]
-  )
+  /** 最近编辑在前，并按搜索过滤 */
+  const filtered = useMemo(() => {
+    const sorted = [...notes].sort((a, b) => b.updatedAt - a.updatedAt)
+    const q = search.trim().toLowerCase()
+    if (!q) return sorted
+    return sorted.filter(
+      (n) =>
+        n.title.toLowerCase().includes(q) || n.content.toLowerCase().includes(q)
+    )
+  }, [notes, search])
 
   const handleCreate = async () => {
     setCreating(true)
@@ -76,16 +82,32 @@ export function NotesPanel() {
         </Button>
       </div>
 
+      <div className="px-3 pb-2">
+        <Input
+          placeholder="搜索笔记…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          allowClear
+          size="small"
+        />
+      </div>
+
       <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
-        {sorted.length === 0 ? (
+        {filtered.length === 0 ? (
           <div className="mx-2 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
-            还没有笔记。
-            <br />
-            点击上方「新建笔记」开始记录。
+            {notes.length === 0 ? (
+              <>
+                还没有笔记。
+                <br />
+                点击上方「新建笔记」开始记录。
+              </>
+            ) : (
+              <>没有匹配「{search}」的笔记。</>
+            )}
           </div>
         ) : (
           <div className="flex flex-col gap-0.5">
-            {sorted.map((n) => {
+            {filtered.map((n) => {
               const active = n.id === activeNoteId
               return (
                 <div
