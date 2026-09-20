@@ -5,3 +5,4 @@ release
 .merkle-snapshot.json
 # 由 scripts/copy-monaco.cjs 生成的 Monaco 资源
 src/renderer/public/monaco-editor
+.workbuddy-ai

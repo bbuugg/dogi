@@ -25,11 +25,7 @@ import type { AppShortcutAction } from '@shared/types'
 import type { PluginInfo } from '@shared/plugin'
 import type { PluginViewInstance } from '@/plugins/host'
 import { DEFAULT_SHORTCUTS } from '@shared/shortcuts'
-import {
-  HOSTS_ACTIVITY_ID,
-  SCRIPTS_ACTIVITY_ID,
-  pluginViewIdOf
-} from '@/activity-ids'
+import { HOSTS_ACTIVITY_ID, SCRIPTS_ACTIVITY_ID } from '@/activity-ids'
 import { clampTerminalFontSize } from '@/lib/terminal-font'
 import { scriptToTerminalInput } from '@/lib/script'
 import { applyColorTheme } from '@/lib/theme'
@@ -44,6 +40,44 @@ import {
   type SplitDirectionInput
 } from '@/lib/pane-layout'
 
+/** PanelView 标签类型（终端会话也是其中一种，不再有独立的「终端」固定标签） */
+export type PanelTabType = 'terminal' | 'script' | 'note' | 'plugins' | 'plugin'
+
+/**
+ * PanelView 中打开的标签页。
+ *
+ * 标签 id 由身份推导（terminal-<sessionId> / script-<id> / note-<id> / plugins / plugin-<viewId>），
+ * 这样「是否已打开」只需比对 id，无需遍历业务字段。
+ */
+export interface PanelTab {
+  id: string
+  type: PanelTabType
+  title: string
+  closable: boolean
+  /** 所属面板组（分屏树的一个叶子） */
+  groupId: string
+  /** terminal：对应的终端会话 id */
+  sessionId?: string
+  scriptId?: string
+  noteId?: string
+  pluginViewId?: string
+}
+
+/**
+ * 面板组（分屏树的一个叶子）：一组平级标签页，同一时刻只显示激活的那个。
+ * 分屏、拖拽排序、跨组移动都作用在组与标签上（VS Code 编辑器组语义）。
+ */
+export interface PanelGroup {
+  id: string
+  tabIds: string[]
+  activeTabId: string | null
+}
+
+/** 终端标签 id：由会话 id 推导，重连换会话 id 时同步换标签 id */
+export function terminalTabId(sessionId: string): string {
+  return `terminal-${sessionId}`
+}
+
 /** 打开一个已保存的主机会话：主进程按主机类型（ssh / local）决定启动方式 */
 function openSession(profileId: string, cols = 80, rows = 24): Promise<SessionInfo> {
   return window.api.terminal.createFromProfile(profileId, cols, rows)
@@ -53,20 +87,8 @@ function openSession(profileId: string, cols = 80, rows = 24): Promise<SessionIn
 let fontSizeSaveTimer: number | undefined
 
 /**
- * 插件被禁用 / 卸载 / 重载后，若当前功能区指向的插件视图已不存在，回到主机功能区。
- */
-function fallbackFromMissingPlugin(
-  ui: UiState,
-  plugins: PluginViewInstance[]
-): UiState {
-  const viewId = pluginViewIdOf(ui.activeActivity)
-  if (!viewId || plugins.some((p) => p.viewId === viewId)) return ui
-  return { ...ui, activeActivity: HOSTS_ACTIVITY_ID }
-}
-
-/**
- * 插件列表变化（卸载 / 刷新）后，若插件管理页选中的插件已不在列表中，清空选中，
- * 避免右侧详情停留在已卸载插件的残留数据上。
+ * 插件列表变化（禁用 / 卸载 / 重载 / 刷新）后，若插件管理页选中的插件已不在列表中，
+ * 清空选中，避免右侧详情停留在已卸载插件的残留数据上。
  */
 function withPluginList(ui: UiState, list: PluginInfo[]): UiState {
   if (!ui.activePluginId || list.some((p) => p.id === ui.activePluginId)) return ui
@@ -126,30 +148,54 @@ function appendAssistantPart(
   return next
 }
 
-/** 从组中摘掉某会话；若组因此变空则返回被移除的组 ID */
-function withoutSession(
-  groups: Record<string, EditorGroup>,
-  id: string
-): { groups: Record<string, EditorGroup>; removedGroupId: string | null } {
-  const next: Record<string, EditorGroup> = { ...groups }
+/** 从所在组摘掉一个标签；若组因此变空则返回被移除的组 ID（连同其标签一起清理） */
+function withoutTab(
+  groups: Record<string, PanelGroup>,
+  tabs: PanelTab[],
+  tabId: string
+): { groups: Record<string, PanelGroup>; tabs: PanelTab[]; removedGroupId: string | null } {
+  const tab = tabs.find((t) => t.id === tabId)
+  if (!tab) return { groups, tabs, removedGroupId: null }
+  const nextTabs = tabs.filter((t) => t.id !== tabId)
+  const g = groups[tab.groupId]
+  if (!g) return { groups, tabs: nextTabs, removedGroupId: null }
+  const tabIds = g.tabIds.filter((x) => x !== tabId)
+  const next: Record<string, PanelGroup> = { ...groups }
   let removedGroupId: string | null = null
-  for (const gid of Object.keys(next)) {
-    const g = next[gid]
-    if (!g.sessionIds.includes(id)) continue
-    const sessionIds = g.sessionIds.filter((x) => x !== id)
-    if (sessionIds.length === 0) {
-      delete next[gid]
-      removedGroupId = gid
-    } else {
-      next[gid] = {
-        ...g,
-        sessionIds,
-        activeSessionId: g.activeSessionId === id ? sessionIds[sessionIds.length - 1] : g.activeSessionId
-      }
+  if (tabIds.length === 0) {
+    delete next[tab.groupId]
+    removedGroupId = tab.groupId
+  } else {
+    next[tab.groupId] = {
+      ...g,
+      tabIds,
+      activeTabId: g.activeTabId === tabId ? (tabIds[tabIds.length - 1] ?? null) : g.activeTabId
     }
-    break
   }
-  return { groups: next, removedGroupId }
+  return { groups: next, tabs: nextTabs, removedGroupId }
+}
+
+/**
+ * 重算焦点：优先保留原焦点组，组已消失则回退到布局里的第一个组。
+ * activeSessionId 只在激活标签是终端时改变（切到脚本/笔记标签不该让「当前终端」丢失）。
+ */
+function resolveFocus(
+  layout: PaneNode | null,
+  groups: Record<string, PanelGroup>,
+  tabs: PanelTab[],
+  preferGroupId: string | null,
+  prevSessionId: string | null
+): { activeGroupId: string | null; activeSessionId: string | null } {
+  const activeGroupId =
+    preferGroupId && groups[preferGroupId]
+      ? preferGroupId
+      : (firstGroupId(layout) ?? Object.keys(groups)[0] ?? null)
+  const g = activeGroupId ? groups[activeGroupId] : undefined
+  const tab = g?.activeTabId ? tabs.find((t) => t.id === g.activeTabId) : undefined
+  return {
+    activeGroupId,
+    activeSessionId: tab?.type === 'terminal' ? (tab.sessionId ?? prevSessionId) : prevSessionId
+  }
 }
 
 /** 关闭会话后统一维护：更新组、从布局摘掉空组、折叠单子节点、重选焦点 */
@@ -165,17 +211,24 @@ function applyTabClose(
     | 'monitors'
     | 'aiChats'
     | 'connectStages'
+    | 'ui'
   >,
   id: string
 ): Partial<AppStore> {
   const sessions = s.sessions.filter((x) => x.id !== id)
-  const { groups, removedGroupId } = withoutSession(s.groups, id)
+  const tab = s.ui.panelTabs.find((t) => t.type === 'terminal' && t.sessionId === id)
+  const { groups, tabs, removedGroupId } = tab
+    ? withoutTab(s.groups, s.ui.panelTabs, tab.id)
+    : { groups: s.groups, tabs: s.ui.panelTabs, removedGroupId: null }
   const layout = removedGroupId ? removeLeaf(s.layout, removedGroupId) : s.layout
-  const activeGroupId =
-    s.activeGroupId && groups[s.activeGroupId]
-      ? s.activeGroupId
-      : (firstGroupId(layout) ?? Object.keys(groups)[0] ?? null)
-  const activeSessionId = activeGroupId ? (groups[activeGroupId]?.activeSessionId ?? null) : null
+  // 关掉的若是当前会话，焦点回落到原组（或布局里的第一个组）
+  const focus = resolveFocus(
+    layout,
+    groups,
+    tabs,
+    s.activeGroupId,
+    s.activeSessionId === id ? null : s.activeSessionId
+  )
   const exited = new Set(s.exitedSessions)
   exited.delete(id)
   const monitors = { ...s.monitors }
@@ -190,17 +243,158 @@ function applyTabClose(
     sessions,
     groups,
     layout,
-    activeGroupId,
-    activeSessionId,
+    activeGroupId: focus.activeGroupId,
+    activeSessionId: focus.activeSessionId,
     exitedSessions: exited,
     monitors,
     aiChats,
-    connectStages
+    connectStages,
+    ui: { ...s.ui, panelTabs: tabs }
+  }
+}
+
+/**
+ * 新会话作为终端标签加入当前激活组（没有可用组时新建组并重置布局），并聚焦它。
+ * 打开连接、新建本地终端都走这里，保证「打开 = 在 PanelView 里多一个标签」。
+ */
+function attachSessionTab(s: AppStore, info: SessionInfo): Partial<AppStore> {
+  const tabs = [...s.ui.panelTabs]
+  const groups = { ...s.groups }
+  const base = {
+    id: terminalTabId(info.id),
+    type: 'terminal' as const,
+    title: info.title || '终端',
+    closable: true,
+    sessionId: info.id
+  }
+  let activeGroupId =
+    (s.activeGroupId && groups[s.activeGroupId] ? s.activeGroupId : null) ??
+    firstGroupId(s.layout)
+  if (!activeGroupId || !groups[activeGroupId]) {
+    const gid = genPaneId()
+    groups[gid] = { id: gid, tabIds: [base.id], activeTabId: base.id }
+    tabs.push({ ...base, groupId: gid })
+    return {
+      sessions: [...s.sessions, info],
+      groups,
+      layout: makeLeaf(gid),
+      activeGroupId: gid,
+      activeSessionId: info.id,
+      ui: { ...s.ui, panelTabs: tabs }
+    }
+  }
+  const g = groups[activeGroupId]
+  groups[activeGroupId] = { ...g, tabIds: [...g.tabIds, base.id], activeTabId: base.id }
+  tabs.push({ ...base, groupId: activeGroupId })
+  return {
+    sessions: [...s.sessions, info],
+    groups,
+    activeGroupId,
+    activeSessionId: info.id,
+    ui: { ...s.ui, panelTabs: tabs }
+  }
+}
+
+/** 聚焦一个已存在的标签（切换其所在组的激活标签 + 聚焦该组） */
+function focusTabPatch(s: AppStore, tab: PanelTab): Partial<AppStore> {
+  const g = s.groups[tab.groupId]
+  return {
+    activeGroupId: tab.groupId,
+    activeSessionId: tab.type === 'terminal' ? (tab.sessionId ?? s.activeSessionId) : s.activeSessionId,
+    groups:
+      g && g.activeTabId !== tab.id
+        ? { ...s.groups, [tab.groupId]: { ...g, activeTabId: tab.id } }
+        : s.groups
+  }
+}
+
+/** 关闭一个「非终端」标签（脚本/笔记/插件管理/插件视图）：摘掉标签与空组，并重算焦点 */
+function closePlainTab(s: AppStore, tabId: string): Partial<AppStore> {
+  const { groups, tabs, removedGroupId } = withoutTab(s.groups, s.ui.panelTabs, tabId)
+  const layout = removedGroupId ? removeLeaf(s.layout, removedGroupId) : s.layout
+  const focus = resolveFocus(layout, groups, tabs, s.activeGroupId, s.activeSessionId)
+  return {
+    groups,
+    layout,
+    activeGroupId: focus.activeGroupId,
+    activeSessionId: focus.activeSessionId,
+    ui: { ...s.ui, panelTabs: tabs }
+  }
+}
+
+/**
+ * 插件视图消失（卸载 / 禁用 / 重载）后，把指向它的插件标签一并关掉。
+ *
+ * 插件不再往活动栏挂条目，所以「插件没了」只剩标签这一处残留需要收拾：
+ * 留着只会停在「插件视图未加载」上。与脚本 / 笔记的删除同理，标签生命周期
+ * 跟着对象走。
+ */
+function closeMissingPluginTabs(
+  s: AppStore,
+  views: PluginViewInstance[]
+): Partial<AppStore> {
+  const alive = new Set(views.map((v) => v.viewId))
+  const stale = new Set(
+    s.ui.panelTabs
+      .filter((t) => t.type === 'plugin' && (!t.pluginViewId || !alive.has(t.pluginViewId)))
+      .map((t) => t.id)
+  )
+  if (stale.size === 0) return {}
+  const tabs = s.ui.panelTabs.filter((t) => !stale.has(t.id))
+  const groups: Record<string, PanelGroup> = {}
+  let layout = s.layout
+  for (const [id, g] of Object.entries(s.groups)) {
+    const tabIds = g.tabIds.filter((x) => !stale.has(x))
+    if (tabIds.length === 0) {
+      layout = removeLeaf(layout, id)
+      continue
+    }
+    groups[id] = {
+      ...g,
+      tabIds,
+      activeTabId:
+        g.activeTabId && stale.has(g.activeTabId)
+          ? (tabIds[tabIds.length - 1] ?? null)
+          : g.activeTabId
+    }
+  }
+  const focus = resolveFocus(layout, groups, tabs, s.activeGroupId, s.activeSessionId)
+  return {
+    groups,
+    layout,
+    activeGroupId: focus.activeGroupId,
+    activeSessionId: focus.activeSessionId,
+    ui: { ...s.ui, panelTabs: tabs }
+  }
+}
+
+/** 打开标签：已打开则聚焦，否则加入当前激活组（脚本/笔记/插件都走这里） */
+function addOrFocusTab(s: AppStore, tab: Omit<PanelTab, 'groupId'>): Partial<AppStore> {
+  const existing = s.ui.panelTabs.find((t) => t.id === tab.id)
+  if (existing) return focusTabPatch(s, existing)
+
+  let activeGroupId =
+    (s.activeGroupId && s.groups[s.activeGroupId] ? s.activeGroupId : null) ??
+    firstGroupId(s.layout)
+  if (!activeGroupId || !s.groups[activeGroupId]) {
+    const gid = genPaneId()
+    return {
+      groups: { ...s.groups, [gid]: { id: gid, tabIds: [tab.id], activeTabId: tab.id } },
+      layout: makeLeaf(gid),
+      activeGroupId: gid,
+      ui: { ...s.ui, panelTabs: [...s.ui.panelTabs, { ...tab, groupId: gid }] }
+    }
+  }
+  const g = s.groups[activeGroupId]
+  return {
+    groups: { ...s.groups, [activeGroupId]: { ...g, tabIds: [...g.tabIds, tab.id], activeTabId: tab.id } },
+    activeGroupId,
+    ui: { ...s.ui, panelTabs: [...s.ui.panelTabs, { ...tab, groupId: activeGroupId }] }
   }
 }
 
 interface UiState {
-  /** 各编辑器组是否打开其内置 AI 助手（key 为 groupId；AI 属于终端组而非全局） */
+  /** 各面板组是否打开其内置 AI 助手（key 为 groupId；AI 属于组而非全局） */
   aiOpenGroups: Record<string, boolean>
   settingsOpen: boolean
   /** 编辑中的 SSH 配置（null=新建，undefined=关闭）；groupId 为新建时预设的分组 */
@@ -218,23 +412,14 @@ interface UiState {
   activeActivity: string
   /** 各功能区的侧边栏是否折叠（key 为功能区 id；侧边栏属于功能区，互不影响） */
   collapsedActivities: Record<string, boolean>
-  /** 笔记功能：当前正在编辑的笔记 id（null = 未选中） */
-  activeNoteId: string | null
-  /** 脚本功能：当前正在编辑的脚本 id（null = 未选中） */
-  activeScriptId: string | null
   /** 插件管理功能：当前正在查看的插件 id（null = 未选中） */
   activePluginId: string | null
+  /** PanelView 中打开的标签页（扁平列表，按 groupId 归属到面板组） */
+  panelTabs: PanelTab[]
   /** 侧边栏宽度（px） */
   sidebarWidth: number
   /** AI 助手面板宽度（px） */
   aiPanelWidth: number
-}
-
-/** 编辑器组：承载多个会话（标签页），并指向当前激活的会话 */
-interface EditorGroup {
-  id: string
-  sessionIds: string[]
-  activeSessionId: string | null
 }
 
 interface AppStore {
@@ -244,11 +429,11 @@ interface AppStore {
   exitedSessions: Set<string>
   /**主机中的会话阶段（key 为 sessionId；连接就绪/失败/关闭后移除） */
   connectStages: Record<string, SshConnectProgress>
-  /** 分屏布局树：每个叶子承载一个编辑器组；null 表示尚无任何会话 */
+  /** 分屏布局树：每个叶子承载一个面板组；null 表示还没有任何标签页 */
   layout: PaneNode | null
-  /** 所有编辑器组，key 为组 ID */
-  groups: Record<string, EditorGroup>
-  /** 当前聚焦的组 ID（决定拆分/新建终端落在哪个组，以及监控/AI 的上下文） */
+  /** 所有面板组，key 为组 ID */
+  groups: Record<string, PanelGroup>
+  /** 当前聚焦的组 ID（决定新建标签落在哪个组，以及监控/AI 的上下文） */
   activeGroupId: string | null
 
   // ---------- SSH ----------
@@ -293,9 +478,9 @@ interface AppStore {
   monitors: Record<string, ServerMetrics>
 
   bootstrap: () => Promise<void>
-  /** 创建本地终端：不传 shellId 时使用偏好设置的默认本地终端 */
+  /** 新建本地终端标签（不传 shellId 时用偏好设置的默认本地终端），落在当前激活组 */
   createLocalSession: (shellId?: string) => Promise<void>
-  /** 连接一个已保存的主机（ssh 远程 / local 本地），返回新会话信息 */
+  /** 连接一个已保存的主机（ssh 远程 / local 本地）：作为新标签打开，返回新会话信息 */
   connectHost: (profile: SshProfile) => Promise<SessionInfo>
   /** 连接指定主机并在其上执行脚本：连接就绪后把脚本写入该会话，返回是否执行成功 */
   runScriptOnHost: (profile: SshProfile, script: ScriptEntry) => Promise<boolean>
@@ -303,15 +488,17 @@ interface AppStore {
   /** 会话结束后重连：按原类型/SSH 配置新建一个会话并替换旧的 */
   reconnectSession: (id: string) => Promise<void>
   setActiveSession: (id: string) => void
-  /** 聚焦某个编辑器组 */
+  /** 聚焦某个面板组 */
   setActiveGroup: (groupId: string) => void
-  /** 向当前激活组的上/下/左/右拆分出新组（镜像其会话类型） */
+  /** 向当前激活组的上/下/左/右拆分出新组（组内多标签则把激活标签拆过去） */
   splitActivePane: (direction: SplitDirectionInput) => Promise<void>
-  /** 将某个会话（标签）移动到目标组；源组若因此变空则从布局中移除 */
-  moveSessionToGroup: (sessionId: string, targetGroupId: string) => void
-  /** 组内重排：把 sessionId 移到组内 toIndex（相对重排前）位置 */
-  reorderSessions: (groupId: string, sessionId: string, toIndex: number) => void
-  /** 关闭整个组（含其全部会话） */
+  /** 把标签移到目标组（可指定插入位置）；源组若因此变空则从布局中移除 */
+  moveTabToGroup: (tabId: string, targetGroupId: string, index?: number) => void
+  /** 把标签拖到某组的边缘：在该方向新建组并放入该标签 */
+  splitTabToGroup: (tabId: string, targetGroupId: string, direction: SplitDirectionInput) => void
+  /** 组内重排：把 tabId 移到组内 toIndex（相对重排前）位置 */
+  reorderTabs: (groupId: string, tabId: string, toIndex: number) => void
+  /** 关闭整个组（含其全部标签；终端会话会被结束） */
   closeGroup: (groupId: string) => Promise<void>
   /** 拖拽分隔条时更新某分隔节点的权重 */
   resizeSplit: (splitId: string, sizes: number[]) => void
@@ -355,20 +542,32 @@ interface AppStore {
   setSidebarCollapsed: (collapsed: boolean) => void
   setAiPanelWidth: (width: number) => void
   refreshScripts: () => Promise<void>
+  /** 删除脚本，并关掉它的标签页 */
+  deleteScript: (id: string) => Promise<void>
   /** 刷新笔记列表到 store */
   refreshNotes: () => Promise<void>
-  /** 新建一篇空笔记并进入编辑（默认语言 markdown） */
+  /** 新建一篇空笔记并返回其 id（默认语言 markdown） */
   createNote: () => Promise<string>
-  /** 保存笔记（upsert）：新增时返回新 id，已有笔记原地更新 */
+  /** 保存笔记（upsert）：已有笔记原地更新 */
   saveNote: (note: NoteEntry) => Promise<void>
-  /** 删除笔记，若正被编辑则清空选中 */
+  /** 删除笔记，并关掉它的标签页 */
   deleteNote: (id: string) => Promise<void>
-  /** 选择要编辑的脚本（null 表示取消选择） */
-  selectScript: (id: string | null) => void
-  /** 选择要编辑的笔记（null 表示取消选择） */
-  selectNote: (id: string | null) => void
   /** 选择要查看的插件（null 表示取消选择） */
   selectPlugin: (id: string | null) => void
+  /** 在 PanelView 中打开脚本标签（已存在则激活） */
+  openScriptTab: (scriptId: string) => void
+  /** 在 PanelView 中打开笔记标签（已存在则激活） */
+  openNoteTab: (noteId: string) => void
+  /** 在 PanelView 中打开插件管理标签（已存在则激活） */
+  openPluginsTab: () => void
+  /** 在 PanelView 中打开插件视图标签（已存在则激活） */
+  openPluginTab: (viewId: string) => void
+  /** 激活 PanelView 中的指定标签 */
+  activatePanelTab: (id: string) => void
+  /** 关闭 PanelView 中的指定标签 */
+  closePanelTab: (id: string) => void
+  /** 更新 PanelView 标签标题 */
+  updatePanelTabTitle: (id: string, title: string) => void
   /** 打开/关闭 SSH 配置弹窗（editing=null 为新建；groupId 预设新建时的分组） */
   setSshDialog: (open: boolean, editing?: SshProfile | null, groupId?: string) => void
   /** 打开/关闭「运行脚本」对话框（可预设要运行的脚本） */
@@ -491,9 +690,8 @@ let shortcutWired = false
       commandPaletteOpen: false,
       activeActivity: HOSTS_ACTIVITY_ID,
       collapsedActivities: {},
-      activeNoteId: null,
-      activeScriptId: null,
       activePluginId: null,
+      panelTabs: [],
       sidebarWidth: 240,
       aiPanelWidth: 350
     },
@@ -559,59 +757,15 @@ let shortcutWired = false
 
     createLocalSession: async (shellId) => {
       const info = await window.api.terminal.createLocal(80, 24, shellId)
-      set((s) => {
-        const groups = { ...s.groups }
-        let activeGroupId = s.activeGroupId ?? firstGroupId(s.layout)
-        // 无可用组：新建一个组并放入布局（若已有布局则整体重置为该组）
-        if (!activeGroupId || !groups[activeGroupId]) {
-          const gid = genPaneId()
-          groups[gid] = { id: gid, sessionIds: [info.id], activeSessionId: info.id }
-          return {
-            sessions: [...s.sessions, info],
-            groups,
-            layout: makeLeaf(gid),
-            activeGroupId: gid,
-            activeSessionId: info.id
-          }
-        }
-        // 否则作为新标签页加入当前激活组（VS Code 行为）
-        const g = groups[activeGroupId]
-        groups[activeGroupId] = {
-          ...g,
-          sessionIds: [...g.sessionIds, info.id],
-          activeSessionId: info.id
-        }
-        return { sessions: [...s.sessions, info], groups, activeGroupId, activeSessionId: info.id }
-      })
-      // 切回终端功能区，避免在脚本管理页等其它页面新建后看不到终端
+      set((s) => attachSessionTab(s, info))
+      // 新建终端后：切到主机侧边栏，方便继续挑主机
       get().selectActivity(HOSTS_ACTIVITY_ID)
     },
 
     connectHost: async (profile) => {
       const info = await openSession(profile.id)
-      set((s) => {
-        const groups = { ...s.groups }
-        let activeGroupId = s.activeGroupId ?? firstGroupId(s.layout)
-        if (!activeGroupId || !groups[activeGroupId]) {
-          const gid = genPaneId()
-          groups[gid] = { id: gid, sessionIds: [info.id], activeSessionId: info.id }
-          return {
-            sessions: [...s.sessions, info],
-            groups,
-            layout: makeLeaf(gid),
-            activeGroupId: gid,
-            activeSessionId: info.id
-          }
-        }
-        const g = groups[activeGroupId]
-        groups[activeGroupId] = {
-          ...g,
-          sessionIds: [...g.sessionIds, info.id],
-          activeSessionId: info.id
-        }
-        return { sessions: [...s.sessions, info], groups, activeGroupId, activeSessionId: info.id }
-      })
-      // 连接后切回终端功能区（连接可能是在脚本管理页等其它页面发起的）
+      set((s) => attachSessionTab(s, info))
+      // 连接后：切到主机侧边栏
       get().selectActivity(HOSTS_ACTIVITY_ID)
       return info
     },
@@ -647,22 +801,26 @@ let shortcutWired = false
       // 关闭已退出的旧会话（onClosed 已被 reconnectingIds 屏蔽，不会摘掉组）
       await window.api.terminal.kill(id)
       set((s) => {
-        // 找到承载该会话的组，原地替换会话 ID（保留组与面板位置）
-        const groups = { ...s.groups }
-        let targetGid: string | null = null
-        for (const gid of Object.keys(groups)) {
-          if (groups[gid].sessionIds.includes(id)) {
-            targetGid = gid
-            break
-          }
-        }
-        if (targetGid) {
-          const g = groups[targetGid]
-          const wasActive = g.activeSessionId === id
-          groups[targetGid] = {
-            ...g,
-            sessionIds: g.sessionIds.map((x) => (x === id ? info.id : x)),
-            activeSessionId: wasActive ? info.id : g.activeSessionId
+        // 找到承载该会话的标签，原地替换会话 ID（保留组与标签位置）
+        const nextTabId = terminalTabId(info.id)
+        const tab = s.ui.panelTabs.find((t) => t.type === 'terminal' && t.sessionId === id)
+        const tabs = tab
+          ? s.ui.panelTabs.map((t) =>
+              t.id === tab.id ? { ...t, id: nextTabId, sessionId: info.id } : t
+            )
+          : s.ui.panelTabs
+        let groups = s.groups
+        if (tab) {
+          const g = s.groups[tab.groupId]
+          if (g) {
+            groups = {
+              ...s.groups,
+              [tab.groupId]: {
+                ...g,
+                tabIds: g.tabIds.map((x) => (x === tab.id ? nextTabId : x)),
+                activeTabId: g.activeTabId === tab.id ? nextTabId : g.activeTabId
+              }
+            }
           }
         }
         const sessions = s.sessions.filter((x) => x.id !== id).concat(info)
@@ -677,13 +835,12 @@ let shortcutWired = false
           aiChats[info.id] = aiChats[id]
           delete aiChats[id]
         }
-        const activeGroupId = targetGid ?? s.activeGroupId
-        const activeSessionId = targetGid ? groups[targetGid].activeSessionId : s.activeSessionId
         return {
           sessions,
           groups,
-          activeGroupId,
-          activeSessionId,
+          ui: { ...s.ui, panelTabs: tabs },
+          activeGroupId: tab?.groupId ?? s.activeGroupId,
+          activeSessionId: s.activeSessionId === id ? info.id : s.activeSessionId,
           exitedSessions: exited,
           monitors,
           aiChats
@@ -702,38 +859,31 @@ let shortcutWired = false
       }
       const g = s.groups[activeGroupId]
 
-      // 组内有多个会话：把当前激活会话「拎出来」放到该方向的新分组，不新建会话
-      if (g.sessionIds.length > 1) {
-        const movingId = g.activeSessionId ?? g.sessionIds[0]
-        set((st) => {
-          // 从原组摘掉该会话（原组仍留有其它会话，不会被移除）
-          const { groups: afterRemove } = withoutSession(st.groups, movingId)
-          const gid = genPaneId()
-          const groups = {
-            ...afterRemove,
-            [gid]: { id: gid, sessionIds: [movingId], activeSessionId: movingId }
-          }
-          const layout = st.layout
-            ? insertSibling(st.layout, activeGroupId, direction, makeLeaf(gid))
-            : makeLeaf(gid)
-          return { groups, layout, activeGroupId: gid, activeSessionId: movingId }
-        })
+      // 组内有多个标签：把当前激活标签「拎出来」放到该方向的新组，不新建会话
+      if (g.tabIds.length > 1) {
+        const movingId = g.activeTabId ?? g.tabIds[0]
+        get().splitTabToGroup(movingId, activeGroupId, direction)
         return
       }
 
-      // 组内只有一个会话：新建一个同类型会话并拆到该方向（原行为）
-      const src =
-        s.sessions.find((x) => x.id === g.activeSessionId) ??
-        s.sessions.find((x) => g.sessionIds.includes(x.id))
-      // 镜像当前组激活会话：绑定了主机（ssh / local 主机）的沿用其配置，纯本地会话新建默认 shell
+      // 组内只有一个标签：镜像它新建一个同类型会话并拆到该方向
+      const activeTab = g.activeTabId ? s.ui.panelTabs.find((t) => t.id === g.activeTabId) : undefined
+      const src = activeTab?.sessionId
+        ? s.sessions.find((x) => x.id === activeTab.sessionId)
+        : undefined
+      // 镜像当前标签：绑定了主机（ssh / local 主机）的沿用其配置，纯本地会话新建默认 shell
       const info: SessionInfo = src?.profileId
         ? await openSession(src.profileId)
         : await window.api.terminal.createLocal(80, 24)
       set((st) => {
         const gid = genPaneId()
-        const groups = {
-          ...st.groups,
-          [gid]: { id: gid, sessionIds: [info.id], activeSessionId: info.id }
+        const tab: PanelTab = {
+          id: terminalTabId(info.id),
+          type: 'terminal',
+          title: info.title || '终端',
+          closable: true,
+          groupId: gid,
+          sessionId: info.id
         }
         // 在激活组旁插入承载新组的叶子
         const layout = st.layout
@@ -741,73 +891,138 @@ let shortcutWired = false
           : makeLeaf(gid)
         return {
           sessions: [...st.sessions, info],
-          groups,
+          groups: { ...st.groups, [gid]: { id: gid, tabIds: [tab.id], activeTabId: tab.id } },
           layout,
           activeGroupId: gid,
-          activeSessionId: info.id
+          activeSessionId: info.id,
+          ui: { ...st.ui, panelTabs: [...st.ui.panelTabs, tab] }
         }
       })
     },
 
-    moveSessionToGroup: (sessionId, targetGroupId) =>
+    moveTabToGroup: (tabId, targetGroupId, index) =>
       set((s) => {
-        const srcGid = Object.keys(s.groups).find((k) =>
-          s.groups[k].sessionIds.includes(sessionId)
-        )
-        // 同组内拖动无需处理（当前不支持组内重排）；目标组必须存在
-        if (!srcGid || srcGid === targetGroupId || !s.groups[targetGroupId]) return {}
+        const tab = s.ui.panelTabs.find((t) => t.id === tabId)
+        // 同组内拖动由 reorderTabs 处理；目标组必须存在
+        if (!tab || tab.groupId === targetGroupId || !s.groups[targetGroupId]) return {}
 
-        // 先从源组摘掉该会话（源组变空会被记录为 removedGroupId）
-        const { groups: afterRemove, removedGroupId } = withoutSession(s.groups, sessionId)
+        // 先从源组摘掉该标签（源组变空会被记录为 removedGroupId）
+        const { groups: afterRemove, removedGroupId } = withoutTab(
+          s.groups,
+          s.ui.panelTabs,
+          tabId
+        )
         const target = afterRemove[targetGroupId]
         if (!target) return {}
 
+        const tabIds = [...target.tabIds]
+        const at = index === undefined ? tabIds.length : Math.max(0, Math.min(tabIds.length, index))
+        tabIds.splice(at, 0, tabId)
         const groups = {
           ...afterRemove,
-          [targetGroupId]: {
-            ...target,
-            sessionIds: [...target.sessionIds, sessionId],
-            activeSessionId: sessionId
+          [targetGroupId]: { ...target, tabIds, activeTabId: tabId }
+        }
+        const tabs = s.ui.panelTabs.map((t) =>
+          t.id === tabId ? { ...t, groupId: targetGroupId } : t
+        )
+        const layout = removedGroupId ? removeLeaf(s.layout, removedGroupId) : s.layout
+        return {
+          groups,
+          layout,
+          ui: { ...s.ui, panelTabs: tabs },
+          activeGroupId: targetGroupId,
+          activeSessionId:
+            tab.type === 'terminal' ? (tab.sessionId ?? s.activeSessionId) : s.activeSessionId
+        }
+      }),
+
+    splitTabToGroup: (tabId, targetGroupId, direction) =>
+      set((s) => {
+        const tab = s.ui.panelTabs.find((t) => t.id === tabId)
+        if (!tab || !s.groups[targetGroupId]) return {}
+
+        // 先在目标组旁插入承载新组的叶子，再把标签挪进新组
+        const gid = genPaneId()
+        const layout0 = s.layout
+          ? insertSibling(s.layout, targetGroupId, direction, makeLeaf(gid))
+          : makeLeaf(gid)
+        const groups: Record<string, PanelGroup> = {
+          ...s.groups,
+          [gid]: { id: gid, tabIds: [tabId], activeTabId: tabId }
+        }
+        // 从原组摘掉该标签；原组变空则连同叶子一起移除（若原组就是目标组，剩下的叶子仍留在布局里）
+        const src = groups[tab.groupId]
+        let removedGroupId: string | null = null
+        if (src) {
+          const tabIds = src.tabIds.filter((x) => x !== tabId)
+          if (tabIds.length === 0) {
+            delete groups[tab.groupId]
+            removedGroupId = tab.groupId
+          } else {
+            groups[tab.groupId] = {
+              ...src,
+              tabIds,
+              activeTabId:
+                src.activeTabId === tabId ? (tabIds[tabIds.length - 1] ?? null) : src.activeTabId
+            }
           }
         }
-        const layout = removedGroupId ? removeLeaf(s.layout, removedGroupId) : s.layout
-        return { groups, layout, activeGroupId: targetGroupId, activeSessionId: sessionId }
+        const layout = removedGroupId ? removeLeaf(layout0, removedGroupId) : layout0
+        return {
+          groups,
+          layout,
+          ui: {
+            ...s.ui,
+            panelTabs: s.ui.panelTabs.map((t) =>
+              t.id === tabId ? { ...t, groupId: gid } : t
+            )
+          },
+          activeGroupId: gid,
+          activeSessionId:
+            tab.type === 'terminal' ? (tab.sessionId ?? s.activeSessionId) : s.activeSessionId
+        }
       }),
 
     // 组内重排：toIndex 指重排前数组中的目标位，先取出后按移除偏移校正
-    reorderSessions: (groupId, sessionId, toIndex) =>
+    reorderTabs: (groupId, tabId, toIndex) =>
       set((s) => {
         const g = s.groups[groupId]
         if (!g) return {}
-        const arr = [...g.sessionIds]
-        const from = arr.indexOf(sessionId)
+        const arr = [...g.tabIds]
+        const from = arr.indexOf(tabId)
         if (from === -1) return {}
         arr.splice(from, 1)
         let idx = from < toIndex ? toIndex - 1 : toIndex
         idx = Math.max(0, Math.min(arr.length, idx))
-        arr.splice(idx, 0, sessionId)
-        return { groups: { ...s.groups, [groupId]: { ...g, sessionIds: arr } } }
+        arr.splice(idx, 0, tabId)
+        return { groups: { ...s.groups, [groupId]: { ...g, tabIds: arr } } }
       }),
 
     closeGroup: async (groupId) => {
-      const g = get().groups[groupId]
+      const s = get()
+      const g = s.groups[groupId]
       if (!g) return
-      await Promise.all(g.sessionIds.map((id) => window.api.terminal.kill(id)))
-      set((s) => {
-        const groups = { ...s.groups }
+      // 组内终端会话一并结束（非终端标签只关标签）
+      const sessionIds = g.tabIds
+        .map((id) => s.ui.panelTabs.find((t) => t.id === id)?.sessionId)
+        .filter((x): x is string => Boolean(x))
+      await Promise.all(sessionIds.map((id) => window.api.terminal.kill(id)))
+      set((st) => {
+        const groups = { ...st.groups }
         delete groups[groupId]
-        const layout = removeLeaf(s.layout, groupId)
-        const activeGroupId =
-          s.activeGroupId === groupId
-            ? (firstGroupId(layout) ?? Object.keys(groups)[0] ?? null)
-            : s.activeGroupId
-        const activeSessionId = activeGroupId
-          ? (groups[activeGroupId]?.activeSessionId ?? null)
-          : null
+        const tabs = st.ui.panelTabs.filter((t) => t.groupId !== groupId)
+        const layout = removeLeaf(st.layout, groupId)
+        const focus = resolveFocus(layout, groups, tabs, null, st.activeSessionId)
         // 组已移除：其 AI 面板开关状态一并清理
-        const aiOpenGroups = { ...s.ui.aiOpenGroups }
+        const aiOpenGroups = { ...st.ui.aiOpenGroups }
         delete aiOpenGroups[groupId]
-        return { groups, layout, activeGroupId, activeSessionId, ui: { ...s.ui, aiOpenGroups } }
+        return {
+          groups,
+          layout,
+          activeGroupId: focus.activeGroupId,
+          activeSessionId: focus.activeSessionId,
+          ui: { ...st.ui, panelTabs: tabs, aiOpenGroups }
+        }
       })
     },
 
@@ -816,21 +1031,22 @@ let shortcutWired = false
 
     setActiveSession: (id) =>
       set((s) => {
-        const gid = Object.keys(s.groups).find((k) => s.groups[k].sessionIds.includes(id))
-        if (!gid) return {}
-        const g = s.groups[gid]
-        const groups =
-          g.activeSessionId === id
-            ? s.groups
-            : { ...s.groups, [gid]: { ...g, activeSessionId: id } }
-        return { groups, activeGroupId: gid, activeSessionId: id }
+        // 终端标签 id 由会话 id 推导，直接定位并聚焦它
+        const tab = s.ui.panelTabs.find((t) => t.type === 'terminal' && t.sessionId === id)
+        if (!tab) return {}
+        return { activeSessionId: id, ...focusTabPatch(s, tab) }
       }),
 
     setActiveGroup: (groupId) =>
       set((s) => {
         const g = s.groups[groupId]
         if (!g) return {}
-        return { activeGroupId: groupId, activeSessionId: g.activeSessionId }
+        const tab = g.activeTabId ? s.ui.panelTabs.find((t) => t.id === g.activeTabId) : undefined
+        return {
+          activeGroupId: groupId,
+          activeSessionId:
+            tab?.type === 'terminal' ? (tab.sessionId ?? s.activeSessionId) : s.activeSessionId
+        }
       }),
 
     refreshProfiles: async () => {
@@ -886,7 +1102,7 @@ let shortcutWired = false
     loadPlugins: async () => {
       const { loadPlugins } = await import('@/plugins/host')
       const views = await loadPlugins()
-      set((s) => ({ plugins: views, ui: fallbackFromMissingPlugin(s.ui, views) }))
+      set((s) => ({ plugins: views, ...closeMissingPluginTabs(s, views) }))
     },
 
     refreshPluginList: async () => {
@@ -898,23 +1114,32 @@ let shortcutWired = false
       const list = await window.api.plugins.setEnabled(id, enabled)
       const { loadPlugins } = await import('@/plugins/host')
       const plugins = await loadPlugins()
-      // 当前正在查看的插件功能区因禁用而消失时，回到主机功能区
-      set((s) => ({
-        pluginList: list,
-        plugins,
-        ui: withPluginList(fallbackFromMissingPlugin(s.ui, plugins), list)
-      }))
+      set((s) => {
+        // 禁用会让插件视图消失，它开着的标签一并关掉
+        const closed = closeMissingPluginTabs(s, plugins)
+        return {
+          pluginList: list,
+          plugins,
+          ...closed,
+          // 关标签与清选中都要落在同一个 ui 上（后写覆盖前写，必须显式合并）
+          ui: withPluginList(closed.ui ?? s.ui, list)
+        }
+      })
     },
 
     uninstallPlugin: async (id) => {
       const list = await window.api.plugins.uninstall(id)
       const { loadPlugins } = await import('@/plugins/host')
       const plugins = await loadPlugins()
-      set((s) => ({
-        pluginList: list,
-        plugins,
-        ui: withPluginList(fallbackFromMissingPlugin(s.ui, plugins), list)
-      }))
+      set((s) => {
+        const closed = closeMissingPluginTabs(s, plugins)
+        return {
+          pluginList: list,
+          plugins,
+          ...closed,
+          ui: withPluginList(closed.ui ?? s.ui, list)
+        }
+      })
     },
 
     installPlugin: async (sourcePath) => {
@@ -928,12 +1153,15 @@ let shortcutWired = false
       const list = await window.api.plugins.reload(id)
       const { loadPlugins } = await import('@/plugins/host')
       const plugins = await loadPlugins()
-      // 当前查看的插件功能区若因重载消失，回到主机功能区
-      set((s) => ({
-        pluginList: list,
-        plugins,
-        ui: withPluginList(fallbackFromMissingPlugin(s.ui, plugins), list)
-      }))
+      set((s) => {
+        const closed = closeMissingPluginTabs(s, plugins)
+        return {
+          pluginList: list,
+          plugins,
+          ...closed,
+          ui: withPluginList(closed.ui ?? s.ui, list)
+        }
+      })
     },
 
     registerPluginCommand: (pluginId, cmd) =>
@@ -957,19 +1185,14 @@ let shortcutWired = false
       set((s) => ({ ui: { ...s.ui, aiPanelWidth: width } })),
 
     refreshScripts: async () => {
-      const scripts = await window.api.scripts.list()
-      set((s) => ({
-        scripts,
-        ui: {
-          ...s.ui,
-          activeScriptId: s.ui.activeScriptId && scripts.some((sc) => sc.id === s.ui.activeScriptId)
-            ? s.ui.activeScriptId
-            : null
-        }
-      }))
+      set({ scripts: await window.api.scripts.list() })
     },
-    selectScript: (id) => {
-      set((s) => ({ ui: { ...s.ui, activeScriptId: id } }))
+
+    deleteScript: async (id) => {
+      const scripts = await window.api.scripts.remove(id)
+      // 该脚本若正在标签页里打开，一并关掉（否则标签会停在已删除的脚本上，
+      // 且未落盘的自动保存可能把脚本又写回去）
+      set((s) => ({ scripts, ...closePlainTab(s, `script-${id}`) }))
     },
 
     refreshNotes: async () => {
@@ -987,39 +1210,100 @@ let shortcutWired = false
         updatedAt: 0
       })
       const created = list.find((n) => !prevIds.has(n.id))
-      const id = created?.id ?? null
-      set({
-        notes: list,
-        ui: { ...get().ui, activeNoteId: id }
-      })
-      return id ?? ''
+      set({ notes: list })
+      return created?.id ?? ''
     },
 
     saveNote: async (note) => {
-      const list = await window.api.notes.save(note)
-      set({
-        notes: list,
-        ui: { ...get().ui, activeNoteId: note.id || get().ui.activeNoteId }
-      })
+      set({ notes: await window.api.notes.save(note) })
     },
 
     deleteNote: async (id) => {
-      const list = await window.api.notes.remove(id)
-      set({
-        notes: list,
-        ui: {
-          ...get().ui,
-          activeNoteId: get().ui.activeNoteId === id ? null : get().ui.activeNoteId
-        }
-      })
-    },
-
-    selectNote: (id) => {
-      set((s) => ({ ui: { ...s.ui, activeNoteId: id } }))
+      const notes = await window.api.notes.remove(id)
+      // 该笔记若正在标签页里打开，一并关掉
+      set((s) => ({ notes, ...closePlainTab(s, `note-${id}`) }))
     },
 
     selectPlugin: (id) => {
       set((s) => ({ ui: { ...s.ui, activePluginId: id } }))
+    },
+
+    openScriptTab: (scriptId) => {
+      set((s) => {
+        const script = s.scripts.find((sc) => sc.id === scriptId)
+        return addOrFocusTab(s, {
+          id: `script-${scriptId}`,
+          type: 'script',
+          title: script?.name ?? '未命名脚本',
+          closable: true,
+          scriptId
+        })
+      })
+    },
+
+    openNoteTab: (noteId) => {
+      set((s) => {
+        const note = s.notes.find((n) => n.id === noteId)
+        return addOrFocusTab(s, {
+          id: `note-${noteId}`,
+          type: 'note',
+          title: note?.title ?? '未命名笔记',
+          closable: true,
+          noteId
+        })
+      })
+    },
+
+    openPluginsTab: () => {
+      set((s) =>
+        addOrFocusTab(s, {
+          id: 'plugins',
+          type: 'plugins',
+          title: '插件管理',
+          closable: true
+        })
+      )
+    },
+
+    openPluginTab: (viewId) => {
+      set((s) => {
+        const view = s.plugins.find((p) => p.viewId === viewId)
+        return addOrFocusTab(s, {
+          id: `plugin-${viewId}`,
+          type: 'plugin',
+          title: view?.name ?? '插件',
+          closable: true,
+          pluginViewId: viewId
+        })
+      })
+    },
+
+    activatePanelTab: (id) =>
+      set((s) => {
+        const tab = s.ui.panelTabs.find((t) => t.id === id)
+        if (!tab) return {}
+        return focusTabPatch(s, tab)
+      }),
+
+    closePanelTab: (id) => {
+      const s = get()
+      const tab = s.ui.panelTabs.find((t) => t.id === id)
+      if (!tab) return
+      // 终端标签：结束会话（applyTabClose 会同步摘掉标签与空组）
+      if (tab.type === 'terminal' && tab.sessionId) {
+        void get().closeSession(tab.sessionId)
+        return
+      }
+      set((st) => closePlainTab(st, id))
+    },
+
+    updatePanelTabTitle: (id, title) => {
+      set((s) => ({
+        ui: {
+          ...s.ui,
+          panelTabs: s.ui.panelTabs.map((t) => (t.id === id ? { ...t, title } : t))
+        }
+      }))
     },
 
     refreshAiConfigs: async () => {

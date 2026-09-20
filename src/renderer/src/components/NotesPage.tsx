@@ -9,15 +9,15 @@ const AUTOSAVE_DELAY = 800
 
 /**
  * 笔记编辑页（主区域）：标题 + 语言选择 + Monaco 正文。
- * 选中笔记存 store 的 ui.activeNoteId；正文/标题/语言改动后防抖自动保存，
+ * 通过 noteId prop 指定要编辑的笔记；正文/标题/语言改动后防抖自动保存，
  * 也可手动 Ctrl+S（或点保存按钮）立即落盘，侧边栏列表随之刷新。
  */
-export function NotesPage() {
+export function NotesPage({ noteId }: { noteId: string }) {
   const notes = useAppStore((s) => s.notes)
-  const activeNoteId = useAppStore((s) => s.ui.activeNoteId)
   const saveNote = useAppStore((s) => s.saveNote)
+  const updatePanelTabTitle = useAppStore((s) => s.updatePanelTabTitle)
 
-  const activeNote = notes.find((n) => n.id === activeNoteId) ?? null
+  const activeNote = notes.find((n) => n.id === noteId) ?? null
 
   // 本地草稿（编辑器是受控组件）：随选中笔记重置
   const [title, setTitle] = useState('')
@@ -29,8 +29,8 @@ export function NotesPage() {
   // 每次渲染同步最新草稿，供防抖定时器 / 快捷键读取最新值
   const draftRef = useRef({ title, content, language })
   draftRef.current = { title, content, language }
-  const idRef = useRef<string | null>(activeNoteId)
-  idRef.current = activeNoteId
+  const idRef = useRef<string | null>(noteId)
+  idRef.current = noteId
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   /** 当前挂起的防抖保存目标 id（切换笔记时据此把旧笔记的待保存内容冲刷掉） */
   const pendingIdRef = useRef<string | null>(null)
@@ -81,14 +81,14 @@ export function NotesPage() {
     if (timerRef.current) clearTimeout(timerRef.current)
     const pendingId = pendingIdRef.current
     pendingIdRef.current = null
-    if (pendingId && pendingId !== activeNoteId && draftRef.current.content) {
+    if (pendingId && pendingId !== noteId && draftRef.current.content) {
       void saveSnapshot(pendingId)
     }
     setTitle(activeNote?.title ?? '')
     setContent(activeNote?.content ?? '')
     setLanguage(activeNote?.language ?? 'markdown')
     setDirty(false)
-  }, [activeNoteId]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [noteId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Ctrl/Cmd+S 立即保存当前笔记 */
   useEffect(() => {
@@ -99,10 +99,23 @@ export function NotesPage() {
       }
     }
     window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  /**
+   * 关闭标签（组件卸载）时把待保存内容冲刷掉，避免丢掉最后一段输入；
+   * 笔记已被删除时跳过，避免把已删除的笔记又写回去。
+   */
+  useEffect(() => {
     return () => {
-      window.removeEventListener('keydown', onKey)
       if (timerRef.current) clearTimeout(timerRef.current)
+      const pendingId = pendingIdRef.current
+      pendingIdRef.current = null
+      if (!pendingId) return
+      const exists = useAppStore.getState().notes.some((n) => n.id === pendingId)
+      if (exists) void doSave(pendingId, draftRef.current)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   if (!activeNote) {
@@ -123,7 +136,9 @@ export function NotesPage() {
           value={title}
           onChange={(e) => {
             setTitle(e.target.value)
-            markDirty(activeNoteId)
+            // 标签标题跟随笔记标题
+            updatePanelTabTitle(`note-${noteId}`, e.target.value.trim() || '未命名笔记')
+            markDirty(noteId)
           }}
           placeholder="笔记标题"
           variant="borderless"
@@ -155,12 +170,12 @@ export function NotesPage() {
           value={content}
           onChange={(v) => {
             setContent(v)
-            markDirty(activeNoteId)
+            markDirty(noteId)
           }}
           language={language}
           onLanguageChange={(lang) => {
             setLanguage(lang)
-            markDirty(activeNoteId)
+            markDirty(noteId)
           }}
           showLanguageSelector
           showLineNumbersToggle

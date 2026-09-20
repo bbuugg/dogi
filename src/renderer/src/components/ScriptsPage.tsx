@@ -10,16 +10,16 @@ const AUTOSAVE_DELAY = 800
 
 /**
  * 脚本编辑页（主区域）：标题 + Monaco 正文。
- * 选中脚本存 store 的 ui.activeScriptId；正文/标题/描述改动后防抖自动保存，
+ * 通过 scriptId prop 指定要编辑的脚本；正文/标题/描述改动后防抖自动保存，
  * 也可手动 Ctrl+S（或点保存按钮）立即落盘，侧边栏列表随之刷新。
  */
-export function ScriptsPage() {
+export function ScriptsPage({ scriptId }: { scriptId: string }) {
   const scripts = useAppStore((s) => s.scripts)
-  const activeScriptId = useAppStore((s) => s.ui.activeScriptId)
   const refreshScripts = useAppStore((s) => s.refreshScripts)
   const setRunScriptDialog = useAppStore((s) => s.setRunScriptDialog)
+  const updatePanelTabTitle = useAppStore((s) => s.updatePanelTabTitle)
 
-  const activeScript = scripts.find((sc) => sc.id === activeScriptId) ?? null
+  const activeScript = scripts.find((sc) => sc.id === scriptId) ?? null
 
   // 本地草稿
   const [name, setName] = useState('')
@@ -30,8 +30,8 @@ export function ScriptsPage() {
 
   const draftRef = useRef({ name, description, content })
   draftRef.current = { name, description, content }
-  const idRef = useRef<string | null>(activeScriptId)
-  idRef.current = activeScriptId
+  const idRef = useRef<string | null>(scriptId)
+  idRef.current = scriptId
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingIdRef = useRef<string | null>(null)
 
@@ -82,14 +82,14 @@ export function ScriptsPage() {
     if (timerRef.current) clearTimeout(timerRef.current)
     const pendingId = pendingIdRef.current
     pendingIdRef.current = null
-    if (pendingId && pendingId !== activeScriptId && draftRef.current.content) {
+    if (pendingId && pendingId !== scriptId && draftRef.current.content) {
       void saveSnapshot(pendingId)
     }
     setName(activeScript?.name ?? '')
     setDescription(activeScript?.description ?? '')
     setContent(activeScript?.content ?? '')
     setDirty(false)
-  }, [activeScriptId]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [scriptId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Ctrl/Cmd+S 立即保存 */
   useEffect(() => {
@@ -100,10 +100,24 @@ export function ScriptsPage() {
       }
     }
     window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  /**
+   * 关闭标签（组件卸载）时把待保存内容冲刷掉：
+   * 否则「输入后 800ms 内关掉标签」会丢掉最后一段输入。
+   * 脚本已被删除时跳过，避免把已删除的脚本又写回去。
+   */
+  useEffect(() => {
     return () => {
-      window.removeEventListener('keydown', onKey)
       if (timerRef.current) clearTimeout(timerRef.current)
+      const pendingId = pendingIdRef.current
+      pendingIdRef.current = null
+      if (!pendingId) return
+      const exists = useAppStore.getState().scripts.some((sc) => sc.id === pendingId)
+      if (exists) void doSave(pendingId, draftRef.current)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   /** 删除确认 */
@@ -139,7 +153,9 @@ export function ScriptsPage() {
           value={name}
           onChange={(e) => {
             setName(e.target.value)
-            markDirty(activeScriptId)
+            // 标签标题跟随脚本名，避免改完名后标签仍是旧名字
+            updatePanelTabTitle(`script-${scriptId}`, e.target.value.trim() || '未命名脚本')
+            markDirty(scriptId)
           }}
           placeholder="脚本名称"
           variant="borderless"
@@ -149,7 +165,7 @@ export function ScriptsPage() {
           value={description}
           onChange={(e) => {
             setDescription(e.target.value)
-            markDirty(activeScriptId)
+            markDirty(scriptId)
           }}
           placeholder="描述（可选）"
           variant="borderless"
@@ -172,7 +188,7 @@ export function ScriptsPage() {
         </span>
         <Button
           icon={<Play className="size-4" />}
-          onClick={() => setRunScriptDialog(true, activeScriptId ?? undefined)}
+          onClick={() => setRunScriptDialog(true, scriptId)}
           title="选择主机并运行脚本"
         >
           运行
@@ -196,7 +212,7 @@ export function ScriptsPage() {
           value={content}
           onChange={(v) => {
             setContent(v)
-            markDirty(activeScriptId)
+            markDirty(scriptId)
           }}
           language="shell"
           showLanguageSelector

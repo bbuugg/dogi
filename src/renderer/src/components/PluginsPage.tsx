@@ -1,4 +1,3 @@
-import { pluginActivityId } from '@/activity-ids'
 import { cn } from '@/lib/utils'
 import { useAppStore } from '@/stores/app-store'
 import type { PluginInfo } from '@shared/plugin'
@@ -55,7 +54,7 @@ export function PluginsPage() {
   const uninstallPlugin = useAppStore((s) => s.uninstallPlugin)
   const installPlugin = useAppStore((s) => s.installPlugin)
   const reloadPlugins = useAppStore((s) => s.reloadPlugins)
-  const selectActivity = useAppStore((s) => s.selectActivity)
+  const openPluginTab = useAppStore((s) => s.openPluginTab)
 
   const [installing, setInstalling] = useState(false)
   const [reloading, setReloading] = useState(false)
@@ -93,7 +92,7 @@ export function PluginsPage() {
 
   const openPlugin = () => {
     if (!info || !view) return
-    selectActivity(pluginActivityId(view.viewId))
+    openPluginTab(view.viewId)
   }
 
   const reloadOne = async () => {

@@ -25,14 +25,19 @@ function previewOf(content: string): string {
 }
 
 /**
- * 脚本侧边栏：列出全部脚本（最近更新在前），支持搜索 / 新建 / 选中 / 删除 / 直接运行。
- * 选中状态存在 store 的 ui.activeScriptId，右侧 ScriptsPage 据此加载编辑器。
+ * 脚本侧边栏：列出全部脚本（最近更新在前），支持搜索 / 新建 / 打开 / 删除 / 直接运行。
+ * 点击即在 PanelView 中打开该脚本的标签页；列表高亮跟随「当前激活组的激活标签」。
  */
 export function ScriptsPanel() {
   const scripts = useAppStore((s) => s.scripts)
-  const activeScriptId = useAppStore((s) => s.ui.activeScriptId)
+  /** 当前激活组的激活标签 id（用于列表高亮） */
+  const activeTabId = useAppStore((s) => {
+    const gid = s.activeGroupId
+    return gid ? (s.groups[gid]?.activeTabId ?? null) : null
+  })
   const refreshScripts = useAppStore((s) => s.refreshScripts)
-  const selectScript = useAppStore((s) => s.selectScript)
+  const deleteScript = useAppStore((s) => s.deleteScript)
+  const openScriptTab = useAppStore((s) => s.openScriptTab)
   const setRunScriptDialog = useAppStore((s) => s.setRunScriptDialog)
 
   const [search, setSearch] = useState('')
@@ -66,7 +71,7 @@ export function ScriptsPanel() {
       const created = list.find((sc) => !prevIds.has(sc.id))
       if (created) {
         await refreshScripts()
-        selectScript(created.id)
+        openScriptTab(created.id)
       }
     } catch (e) {
       message.error(`新建失败：${e instanceof Error ? e.message : String(e)}`)
@@ -80,8 +85,7 @@ export function ScriptsPanel() {
     if (!target) return
     setPendingDelete(null)
     try {
-      await window.api.scripts.remove(target.id)
-      await refreshScripts()
+      await deleteScript(target.id)
       message.success(`已删除「${target.name}」`)
     } catch (e) {
       message.error(`删除失败：${e instanceof Error ? e.message : String(e)}`)
@@ -127,11 +131,11 @@ export function ScriptsPanel() {
         ) : (
           <div className="flex flex-col gap-0.5">
             {filtered.map((s) => {
-              const active = s.id === activeScriptId
+              const active = activeTabId === `script-${s.id}`
               return (
                 <div
                   key={s.id}
-                  onClick={() => selectScript(s.id)}
+                  onClick={() => openScriptTab(s.id)}
                   className={cn(
                     'group flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5',
                     active

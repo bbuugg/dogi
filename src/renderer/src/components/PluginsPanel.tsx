@@ -3,7 +3,6 @@ import { AlertCircle, ExternalLink, Trash2, Upload } from 'lucide-react'
 import { Button, Input, Modal, Switch, message } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import { cn } from '@/lib/utils'
-import { pluginActivityId } from '@/activity-ids'
 import type { PluginInfo } from '@shared/plugin'
 
 /** 统一把异常转成可提示的文本 */
@@ -14,13 +13,17 @@ function errText(e: unknown): string {
 /**
  * 插件侧边栏：列出全部插件（启用在前），支持搜索 / 安装 / 选中 / 启用禁用 / 打开 / 卸载。
  * 选中状态存在 store 的 ui.activePluginId，右侧 PluginsPage 据此展示插件详情。
+ *
+ * 行内布局：第一行是图标 + 信息 + 启停开关（开关常驻，任何时刻都能直接切）；
+ * 第二行是「打开 / 卸载」，鼠标悬浮时展开（0fr → 1fr 过渡，不改变未悬浮项的间距）。
  */
 export function PluginsPanel() {
   const pluginList = useAppStore((s) => s.pluginList)
   const activePluginId = useAppStore((s) => s.ui.activePluginId)
   const plugins = useAppStore((s) => s.plugins)
   const selectPlugin = useAppStore((s) => s.selectPlugin)
-  const selectActivity = useAppStore((s) => s.selectActivity)
+  const openPluginsTab = useAppStore((s) => s.openPluginsTab)
+  const openPluginTab = useAppStore((s) => s.openPluginTab)
   const togglePluginEnabled = useAppStore((s) => s.togglePluginEnabled)
   const uninstallPlugin = useAppStore((s) => s.uninstallPlugin)
   const installPlugin = useAppStore((s) => s.installPlugin)
@@ -75,7 +78,7 @@ export function PluginsPanel() {
   const openPlugin = (info: PluginInfo) => {
     const view = plugins.find((p) => p.pluginId === info.id)
     if (!view) return
-    selectActivity(pluginActivityId(view.viewId))
+    openPluginTab(view.viewId)
   }
 
   const toggleEnabled = async (info: PluginInfo, enabled: boolean) => {
@@ -144,36 +147,38 @@ export function PluginsPanel() {
               return (
                 <div
                   key={p.id}
-                  onClick={() => selectPlugin(p.id)}
+                  onClick={() => {
+                    selectPlugin(p.id)
+                    openPluginsTab()
+                  }}
                   className={cn(
-                    'group flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5',
+                    'group flex cursor-pointer flex-col rounded-md px-2 py-1.5',
                     active
                       ? 'bg-primary/10 text-foreground'
                       : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
                     !p.enabled && 'opacity-60'
                   )}
                 >
-                  <span className="mt-0.5 flex size-4 shrink-0 items-center justify-center text-[13px] leading-none">
-                    {p.icon ?? '🔌'}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1">
-                      <span className="truncate text-[13px] font-medium">{p.name}</span>
-                      {p.error && <AlertCircle className="size-3 shrink-0 text-destructive" />}
+                  {/* 第一行：图标 + 信息 + 启停开关（开关常驻，不随悬浮变化） */}
+                  <div className="flex items-start gap-2">
+                    <span className="mt-0.5 flex size-4 shrink-0 items-center justify-center text-[13px] leading-none">
+                      {p.icon ?? '🔌'}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1">
+                        <span className="truncate text-[13px] font-medium">{p.name}</span>
+                        {p.error && <AlertCircle className="size-3 shrink-0 text-destructive" />}
+                      </div>
+                      <div className="truncate text-[11px] text-muted-foreground/80">
+                        {p.description || `v${p.version}`}
+                      </div>
+                      <div className="truncate text-[10px] text-muted-foreground/60">
+                        v{p.version}
+                        {!p.enabled && ' · 已禁用'}
+                        {p.error && ' · 加载失败'}
+                      </div>
                     </div>
-                    <div className="truncate text-[11px] text-muted-foreground/80">
-                      {p.description || `v${p.version}`}
-                    </div>
-                    <div className="truncate text-[10px] text-muted-foreground/60">
-                      v{p.version}
-                      {!p.enabled && ' · 已禁用'}
-                      {p.error && ' · 加载失败'}
-                    </div>
-                  </div>
-
-                  {/* 右侧：常态显示启用开关，悬浮时换成「打开 / 卸载」操作 */}
-                  <div className="relative mt-0.5 flex h-5 w-8 shrink-0 items-center justify-end">
-                    <span className="flex items-center group-hover:invisible">
+                    <span className="mt-0.5 flex h-5 shrink-0 items-center">
                       <Switch
                         size="small"
                         checked={p.enabled}
@@ -182,30 +187,40 @@ export function PluginsPanel() {
                         aria-label="启用/禁用"
                       />
                     </span>
-                    <div className="invisible absolute right-0 top-1/2 flex -translate-y-1/2 items-center gap-0.5 group-hover:visible">
-                      <Button
-                        type="text"
-                        size="small"
-                        icon={<ExternalLink className="size-3.5" />}
-                        className="h-5 w-5 p-0"
-                        title="打开插件界面"
-                        disabled={!p.enabled || !view}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          openPlugin(p)
-                        }}
-                      />
-                      <Button
-                        type="text"
-                        size="small"
-                        icon={<Trash2 className="size-3.5 text-destructive" />}
-                        className="h-5 w-5 p-0"
-                        title="卸载插件"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setPendingUninstall(p)
-                        }}
-                      />
+                  </div>
+
+                  {/* 第二行：打开 / 卸载，鼠标悬浮时展开
+                      （0fr → 1fr 过渡到内容高度，列表不会先跳一下再回位） */}
+                  <div className="grid grid-rows-[0fr] transition-[grid-template-rows] duration-150 group-hover:grid-rows-[1fr]">
+                    <div className="overflow-hidden">
+                      <div className="flex items-center justify-end gap-1 pt-1">
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<ExternalLink className="size-3.5" />}
+                          className="h-6 px-1.5 text-xs"
+                          disabled={!p.enabled || !view}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            openPlugin(p)
+                          }}
+                        >
+                          打开
+                        </Button>
+                        <Button
+                          type="text"
+                          size="small"
+                          danger
+                          icon={<Trash2 className="size-3.5" />}
+                          className="h-6 px-1.5 text-xs"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setPendingUninstall(p)
+                          }}
+                        >
+                          卸载
+                        </Button>
+                      </div>
                     </div>
                   </div>
                 </div>

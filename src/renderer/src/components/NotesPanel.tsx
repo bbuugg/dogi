@@ -25,15 +25,19 @@ function previewOf(content: string): string {
 }
 
 /**
- * 笔记侧边栏：列出全部笔记（最近编辑在前），支持新建 / 选中 / 删除。
- * 选中状态存在 store 的 ui.activeNoteId，右侧 NotesPage 据此加载正文。
+ * 笔记侧边栏：列出全部笔记（最近编辑在前），支持新建 / 打开 / 删除。
+ * 点击即在 PanelView 中打开该笔记的标签页；列表高亮跟随「当前激活组的激活标签」。
  */
 export function NotesPanel() {
   const notes = useAppStore((s) => s.notes)
-  const activeNoteId = useAppStore((s) => s.ui.activeNoteId)
+  /** 当前激活组的激活标签 id（用于列表高亮） */
+  const activeTabId = useAppStore((s) => {
+    const gid = s.activeGroupId
+    return gid ? (s.groups[gid]?.activeTabId ?? null) : null
+  })
   const createNote = useAppStore((s) => s.createNote)
   const deleteNote = useAppStore((s) => s.deleteNote)
-  const selectNote = useAppStore((s) => s.selectNote)
+  const openNoteTab = useAppStore((s) => s.openNoteTab)
 
   /** 待确认删除的笔记（非 null 时弹出确认框） */
   const [pendingDelete, setPendingDelete] = useState<NoteEntry | null>(null)
@@ -54,7 +58,8 @@ export function NotesPanel() {
   const handleCreate = async () => {
     setCreating(true)
     try {
-      await createNote()
+      const id = await createNote()
+      if (id) openNoteTab(id)
     } catch (e) {
       message.error(`新建失败：${e instanceof Error ? e.message : String(e)}`)
     } finally {
@@ -107,11 +112,11 @@ export function NotesPanel() {
         ) : (
           <div className="flex flex-col gap-0.5">
             {filtered.map((n) => {
-              const active = n.id === activeNoteId
+              const active = activeTabId === `note-${n.id}`
               return (
                 <div
                   key={n.id}
-                  onClick={() => selectNote(n.id)}
+                  onClick={() => openNoteTab(n.id)}
                   className={cn(
                     'group flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5',
                     active
