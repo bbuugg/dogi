@@ -650,17 +650,25 @@ class StorageService {
       ? configs.map((c) => (c.id === config.id ? config : c))
       : [...configs, config]
     this.store.set('aiConfigs', next)
+    // 尚无有效激活配置（首次添加 / 之前激活的被删）：自动激活刚保存的这条，
+    // 否则新建后 AI 面板仍处「未选中」状态、发不出消息
+    const settings = this.getAiSettings()
+    const activeValid =
+      settings.activeConfigId && next.some((c) => c.id === settings.activeConfigId)
+    if (!activeValid) {
+      this.store.set('aiSettings', { ...settings, activeConfigId: config.id })
+    }
     return this.listAiConfigs()
   }
 
   deleteAiConfig(id: string): AiModelConfig[] {
-    this.store.set(
-      'aiConfigs',
-      this.store.get('aiConfigs').filter((c) => c.id !== id)
-    )
+    const remaining = this.store.get('aiConfigs').filter((c) => c.id !== id)
+    this.store.set('aiConfigs', remaining)
     const settings = this.getAiSettings()
+    // 删除的是当前激活配置：自动切到剩余第一个（没有则置空），
+    // 避免 activeConfigId 悬空指向已删项导致面板切换失效
     if (settings.activeConfigId === id) {
-      this.store.set('aiSettings', { ...settings, activeConfigId: undefined })
+      this.store.set('aiSettings', { ...settings, activeConfigId: remaining[0]?.id })
     }
     return this.listAiConfigs()
   }
@@ -674,7 +682,13 @@ class StorageService {
     const { autoApprove, ...rest } = stored
     const permissionMode: AiPermissionMode =
       rest.permissionMode ?? (autoApprove === false ? 'confirm' : 'full')
-    return { ...DEFAULT_AI_SETTINGS, ...rest, permissionMode }
+    const settings: AiSettings = { ...DEFAULT_AI_SETTINGS, ...rest, permissionMode }
+    // 校正悬空的 activeConfigId（指向已删除的配置）：回退到剩余第一个，
+    // 否则面板下拉框匹配不到 option、既显示空白又切不动
+    if (settings.activeConfigId && !this.store.get('aiConfigs').some((c) => c.id === settings.activeConfigId)) {
+      settings.activeConfigId = this.store.get('aiConfigs')[0]?.id
+    }
+    return settings
   }
 
   saveAiSettings(settings: Partial<AiSettings>): AiSettings {

@@ -497,13 +497,19 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
    */
   const startDrag = (e: ReactPointerEvent<HTMLElement>) => {
     if (e.button !== 0) return
-    if ((e.target as HTMLElement).closest('button, input, textarea, .ant-select')) return
+    const target = e.target as HTMLElement
+    const el = rootRef.current
+    // antd 的 Select 下拉、Dropdown 菜单都 portal 到 body：它们的事件会顺着 **React 树**
+    // 冒泡回卡片头部这个 onPointerDown，但 DOM 上并不属于浮窗。若不放行，点下拉选项会被
+    // 当成拖拽——既把弹层关掉，又 preventDefault 掉后续 mousedown/click，
+    // 选项永远选不中（表现就是「模型切换切不过去」）。所以只认浮窗自己的 DOM。
+    if (!el || !el.contains(target)) return
+    if (target.closest('button, input, textarea, .ant-select')) return
     setModelSelectOpen(false)
     setPermMenuOpen(false)
     e.preventDefault()
-    const el = rootRef.current
-    const parent = el?.parentElement
-    if (!el || !parent) return
+    const parent = el.parentElement
+    if (!parent) return
     const cRect = parent.getBoundingClientRect()
     const rect = el.getBoundingClientRect()
     const barRect = barRef.current?.getBoundingClientRect() ?? rect
@@ -574,9 +580,13 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               size="small"
               variant="borderless"
               className="min-w-0 flex-1"
-              value={aiSettings.activeConfigId ?? ''}
+              value={
+                aiConfigs.some((c) => c.id === aiSettings.activeConfigId)
+                  ? aiSettings.activeConfigId
+                  : undefined
+              }
               onChange={(v) => void setActiveAiConfig(v)}
-              placeholder="选择模型"
+              placeholder="请选择模型"
               popupMatchSelectWidth={false}
               open={modelSelectOpen}
               onOpenChange={setModelSelectOpen}
@@ -662,7 +672,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                     pendingConfirm={pendingConfirm}
                   />
                 ))}
-                {aiError && <p className="text-xs text-destructive">{aiError}</p>}
+                {aiError && <p className="text-xs text-destructive px-3">{aiError}</p>}
               </div>
             </div>
             {/* 不在底部时显示：一键滚动到底部 */}

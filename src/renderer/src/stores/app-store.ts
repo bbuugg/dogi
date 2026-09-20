@@ -724,6 +724,8 @@ interface AppStore {
   /** 打开/关闭「运行脚本」对话框（可预设要运行的脚本） */
   setRunScriptDialog: (open: boolean, scriptId?: string) => void
   refreshAiConfigs: () => Promise<void>
+  /** 重新拉取 AI 设置（删除/新建配置后同步 activeConfigId，避免渲染端悬空） */
+  refreshAiSettings: () => Promise<void>
   setActiveAiConfig: (id: string) => Promise<void>
   saveAiSettings: (patch: Partial<AiSettings>) => Promise<void>
   setAiPermissionMode: (mode: AiPermissionMode) => Promise<void>
@@ -1625,6 +1627,10 @@ let shortcutWired = false
       set({ aiConfigs: await window.api.ai.listConfigs() })
     },
 
+    refreshAiSettings: async () => {
+      set({ aiSettings: await window.api.ai.getSettings() })
+    },
+
     setActiveAiConfig: async (id) => {
       const settings = await window.api.ai.saveSettings({ activeConfigId: id })
       set({ aiSettings: settings })
@@ -1823,6 +1829,40 @@ let shortcutWired = false
           }
         })
         // 兜底：该对话已结束但仍有其挂起确认时按取消处理，避免主进程工具悬挂
+        for (const c of Object.values(get().pendingConfirms)) {
+          if (c.requestId === requestId) void get().resolveAiConfirm(c.id, false)
+        }
+        return
+      }
+      if (event.type === 'error') {
+        // 报错即视为本轮对话结束：立刻复位 streaming，不依赖后续 finish 事件。
+        // 否则遇到快速失败（如额度不足）且 finish 因竞态丢失时，输入会永久卡在生成中。
+        aiRequestSessions.delete(requestId)
+        set((s) => {
+          const chat = s.aiChats[sid]
+          if (!chat) return {}
+          const messages = [...chat.messages]
+          const last = messages[messages.length - 1]
+          if (last?.role === 'assistant') {
+            messages[messages.length - 1] = {
+              ...last,
+              parts: appendAssistantPart(last.parts, event)
+            }
+          }
+          return {
+            aiChats: {
+              ...s.aiChats,
+              [sid]: {
+                ...chat,
+                messages,
+                streaming: false,
+                requestId: null,
+                // 错误已内联到该条助手消息（⚠️），不再另设横幅，避免重复显示
+                error: null
+              }
+            }
+          }
+        })
         for (const c of Object.values(get().pendingConfirms)) {
           if (c.requestId === requestId) void get().resolveAiConfirm(c.id, false)
         }

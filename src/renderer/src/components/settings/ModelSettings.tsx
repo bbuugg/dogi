@@ -83,6 +83,7 @@ export function ModelSettings() {
   const aiConfigs = useAppStore((s) => s.aiConfigs)
   const activeConfigId = useAppStore((s) => s.aiSettings.activeConfigId)
   const refreshAiConfigs = useAppStore((s) => s.refreshAiConfigs)
+  const refreshAiSettings = useAppStore((s) => s.refreshAiSettings)
   const setActiveAiConfig = useAppStore((s) => s.setActiveAiConfig)
 
   const [editing, setEditing] = useState<FormState | null>(null)
@@ -116,6 +117,8 @@ export function ModelSettings() {
         updatedAt: 0
       })
       await refreshAiConfigs()
+      // 首次保存会自动激活新配置，同步回渲染端
+      await refreshAiSettings()
       setEditing(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -128,6 +131,9 @@ export function ModelSettings() {
     if (!window.confirm(`确定删除模型配置「${config.name}」吗？`)) return
     await window.api.ai.deleteConfig(config.id)
     await refreshAiConfigs()
+    // 主进程已重选激活项（或删除最后一项后置空），同步回渲染端，
+    // 否则 activeConfigId 悬空会让 AI 面板无法切换模型
+    await refreshAiSettings()
   }
 
   // ---------- 编辑表单 ----------
