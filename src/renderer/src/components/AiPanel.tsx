@@ -491,8 +491,15 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         transform: floatingPos ? undefined : 'translateX(-50%)'
       }}
     >
-      {showList && (
-        <>
+      {/* 消息列表卡片展开/收起：grid 行轨道 0fr↔1fr 过渡（向上平滑生长），
+         不直接装卸载；收起时禁用交互，避免隐形内容截获点击/焦点 */}
+      <div
+        className={cn(
+          'grid shrink-0 transition-[grid-template-rows] duration-200 ease-out',
+          showList ? 'grid-rows-[1fr]' : 'pointer-events-none grid-rows-[0fr]'
+        )}
+      >
+        <div className="min-h-0 overflow-hidden">
           {/* 卡片头部：拖拽手柄 + 模型选择 + 操作（整行可拖动） */}
           <div
             onPointerDown={startDrag}
@@ -547,7 +554,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             <div
               ref={scrollRef}
               onScroll={handleListScroll}
-              className="max-h-[40vh] min-h-16 overflow-y-auto select-text"
+              className="max-h-[40vh] min-h-48 overflow-y-auto select-text"
               style={{ overflowAnchor: 'none' }}
             >
               <div className="space-y-3 p-3">
@@ -601,8 +608,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               </button>
             )}
           </div>
-        </>
-      )}
+        </div>
+      </div>
 
       {/* 列表收起时错误也要可见 */}
       {!showList && aiError && (
@@ -616,15 +623,18 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           折叠且有对话时仅输入框让位给一行状态条（Codex「思考中」风格），
           权限模式与发送/停止照常可用 */}
       <div className="flex items-center gap-1 px-2 py-1.5">
-        {minimized && (
-          <span
-            onPointerDown={startDrag}
-            title="拖拽移动"
-            className="shrink-0 cursor-move touch-none rounded p-1 text-muted-foreground/50 transition-colors hover:text-foreground"
-          >
-            <GripVertical className="size-4" />
-          </span>
-        )}
+        {/* 拖拽手柄：展开态随宽度过渡收为 0（拖拽由卡片头部承担），
+           -mx-1 抵消父级 gap，收起后不留空隙 */}
+        <span
+          onPointerDown={startDrag}
+          title="拖拽移动"
+          className={cn(
+            'flex shrink-0 cursor-move touch-none items-center justify-center overflow-hidden rounded text-muted-foreground/50 transition-all duration-200 ease-out hover:text-foreground',
+            minimized ? 'w-7 opacity-100' : 'pointer-events-none -mx-1 w-0 opacity-0'
+          )}
+        >
+          <GripVertical className="size-4 shrink-0" />
+        </span>
         <Dropdown
           trigger={['click']}
           placement="topLeft"
@@ -697,16 +707,22 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             className="min-w-0 flex-1 text-[13px]"
           />
         )}
-        {minimized && (
+        {/* 展开按钮：与手柄同样的宽度收拉动效，输入区变宽不跳变 */}
+        <span
+          className={cn(
+            'block shrink-0 overflow-hidden transition-all duration-200 ease-out',
+            minimized ? 'w-7 opacity-100' : 'pointer-events-none -mx-1 w-0 opacity-0'
+          )}
+        >
           <Button
             type="text"
             size="small"
             icon={<ChevronUp className="size-4" />}
             title="展开对话"
-            className="h-7 w-7 shrink-0 p-0 text-muted-foreground"
+            className="h-7 w-7 p-0 text-muted-foreground"
             onClick={() => sessionId && setAiMinimized(sessionId, false)}
           />
-        )}
+        </span>
         {aiStreaming ? (
           <Button
             type="text"
