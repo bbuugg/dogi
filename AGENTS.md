@@ -108,6 +108,14 @@
 - 无 GUI 截图环境时用 CDP 验证：启动加 `--remote-debugging-port=9333`，`curl http://127.0.0.1:9333/json/list` 取页面 WebSocket，`Runtime.evaluate` 驱动 UI。复杂表达式务必写成脚本文件执行（`node -e` 多层转义易错）。
 - 旧 Electron 实例会残留并占用调试端口，验证前先 `taskkill //F //IM electron.exe`，以 page id 变化确认是新实例。
 
+### 17. ACP 联调「prompt 挂起」先查权限模式，别怀疑 Web Streams
+
+- **触发信号**：外部 ACP agent（如 SDK 示例 agent.js）在应用里 `session.prompt()` 迟迟不 resolve，主进程日志停在「session ready」。
+- **根因/约束**：示例/真实 agent 会在回合中发起 `session/request_permission` 请求并**等待客户端响应**；应用处于 `permissionMode: 'confirm'` 且无人批准确认卡时，整轮 prompt 都不会返回。SDK 的 `ActiveSession.prompt()` 要等回合结束才 resolve，事件队列在此之前只会积压。
+- **正确做法**：① 联调用 `permissionMode: 'full'` 或让确认卡自动批准；② `acp-agent.ts` 的 runTurn **不要 await prompt**——先 `session.prompt(text).catch(() => undefined)` 发出，立即用 `session.nextUpdate()` 流式消费（错误同样经 updates 队列由 `nextUpdate()` 抛出），这样权限等待期间 UI 也能看到已产生的文本/工具事件；③ 进程/连接关闭会使 updates 队列 fail，`nextUpdate()` 抛错即可走异常路径。
+- **验证方式**：`scripts/verify-acp-e2e.mjs`（run/abort）+ `verify-acp-confirm.mjs`（确认卡广播→批准→回合完成）。
+- **已知安全区**：完整 Electron 主进程作为 ACP 客户端 + 纯 Node agent（codex-acp 即此形态）通信正常；仅当 agent 自身也以完整 Electron 运行时协议会挂（真实场景不会出现）。
+
 ### 16. did-finish-load 里 setZoomFactor 会让隐藏窗口永不显示
 
 - **触发信号**：构建（`electron .` 加载 out/renderer）后进程在任务管理器里活着，但窗口不出现；dev（`VITE_DEV_SERVER_URL`）一切正常。

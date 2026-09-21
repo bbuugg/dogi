@@ -462,11 +462,44 @@ export interface McpServerConfig {
  */
 export type AiPermissionMode = 'full' | 'confirm'
 
+/**
+ * AI Agent 后端：
+ * - ai-sdk：内置 AI SDK 驱动（复用模型配置），工具由应用自己提供
+ * - acp：连接外部 ACP agent（如 codex-acp），应用作为 ACP 客户端
+ */
+export type AgentBackend = 'ai-sdk' | 'acp'
+
+/** ACP 后端的外部 agent 启动配置（stdio 通信） */
+export interface AcpAgentConfig {
+  id: string
+  /** 显示名称，如 Codex CLI / Gemini CLI */
+  name: string
+  /** 可执行文件（绝对路径或 PATH 可解析名；Windows 下 npm 脚本需 .cmd 后缀） */
+  command: string
+  args: string[]
+}
+
+/** 本地 PATH 中检测到的已知 ACP agent */
+export interface DetectedAcpAgent {
+  /** 展示名称 */
+  name: string
+  /** 可执行命令（PATH 可解析名） */
+  command: string
+  /** 建议的启动参数（如 gemini -> ["--acp"]） */
+  args: string[]
+  /** 解析到的绝对路径 */
+  path: string
+}
+
 export interface AiSettings {
   activeConfigId?: string
   /** AI 执行终端命令的权限模式；在对话输入框处实时切换 */
   permissionMode: AiPermissionMode
   systemPrompt?: string
+  /** 预定义的 ACP agent 配置（设置页维护，工作区在 AI Agent 模型下拉处选择） */
+  acpAgents?: AcpAgentConfig[]
+  /** 当前 ACP 后端使用的配置 id（缺省取 acpAgents[0]） */
+  activeAcpId?: string
 }
 
 /** 主进程向渲染进程发起的命令执行确认请求 */
@@ -537,6 +570,8 @@ export interface AgentWorkspace {
   name: string
   /** 绝对路径 */
   path: string
+  /** 该工作区使用的 Agent 后端（每会话独立，在模型下拉处切换）；缺省 ai-sdk */
+  backend?: AgentBackend
   createdAt: number
   updatedAt: number
 }
@@ -551,6 +586,7 @@ export interface AgentChatMessage {
 
 export type AgentMessagePart =
   | { type: 'text'; text: string }
+  | { type: 'reasoning'; text: string }
   | {
       type: 'tool-call'
       toolCallId: string
@@ -571,9 +607,10 @@ export interface AgentChatRequest {
   history: AgentChatMessage[]
 }
 
-/** Agent 流事件（形状与 AiStreamEvent 一致） */
+/** Agent 流事件（形状与 AiStreamEvent 一致；reasoning-delta 为思考内容增量） */
 export type AgentStreamEvent =
   | { type: 'text-delta'; delta: string }
+  | { type: 'reasoning-delta'; delta: string }
   | { type: 'tool-call'; toolCallId: string; toolName: string; input: unknown }
   | {
       type: 'tool-result'

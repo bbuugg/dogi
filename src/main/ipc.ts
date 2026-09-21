@@ -6,6 +6,8 @@ import { storage } from './services/storage'
 import { detectShells } from './services/shells'
 import { aiService } from './services/ai'
 import { agentService } from './services/agent'
+import { acpAgentService } from './services/acp-agent'
+import { detectInstalledAcpAgents } from './services/acp-detect'
 import { mcpManager } from './services/mcp'
 import { pluginHost } from './services/plugins'
 import { executeHttp } from './services/http'
@@ -295,6 +297,27 @@ export function registerIpc(win: () => BrowserWindow | null): void {
     'ai:settings:save',
     (_e, settings: Partial<import('@shared/types').AiSettings>) => storage.saveAiSettings(settings)
   )
+  ipcMain.handle('ai:detectAcpAgents', () => detectInstalledAcpAgents())
+  // 拉取 OpenAI 兼容接口的模型列表（GET {baseURL}/models），供设置页「拉取远程模型」使用
+  ipcMain.handle(
+    'ai:listRemoteModels',
+    async (_e, input: { baseURL: string; apiKey?: string }) => {
+      const base = input.baseURL.trim().replace(/\/+$/, '')
+      if (!/^https?:\/\//i.test(base)) {
+        throw new Error('Base URL 需以 http(s):// 开头，如 https://api.xxx.com/v1')
+      }
+      const res = await fetch(`${base}/models`, {
+        headers: input.apiKey ? { Authorization: `Bearer ${input.apiKey}` } : undefined
+      })
+      if (!res.ok) throw new Error(`拉取失败（HTTP ${res.status}）`)
+      const body = (await res.json()) as unknown
+      const list = Array.isArray(body) ? body : (body as { data?: unknown }).data
+      const ids = (Array.isArray(list) ? list : [])
+        .map((m) => (typeof m === 'string' ? m : (m as { id?: unknown }).id))
+        .filter((v): v is string => typeof v === 'string' && v.length > 0)
+      return [...new Set(ids)]
+    }
+  )
   ipcMain.handle('ai:chat', async (_e, req: import('@shared/types').AiChatRequest) =>
     aiService.chat(req)
   )
@@ -329,19 +352,35 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   ipcMain.handle('agent:workspaces:delete', (_e, id: string) =>
     storage.deleteAgentWorkspace(id)
   )
-  ipcMain.handle('agent:chat', async (_e, req: AgentChatRequest) => agentService.chat(req))
-  ipcMain.handle('agent:abort', (_e, requestId: string) => agentService.abort(requestId))
+  ipcMain.handle('agent:chat', async (_e, req: AgentChatRequest) => {
+    // 后端按工作区（会话）独立：acp 走外部 agent 连接，其余走内置 AI SDK
+    const ws = storage.getAgentWorkspace(req.workspaceId)
+    return (ws?.backend === 'acp' ? acpAgentService : agentService).chat(req)
+  })
+  ipcMain.handle('agent:abort', (_e, requestId: string) => {
+    agentService.abort(requestId)
+    acpAgentService.abort(requestId)
+  })
   agentService.on('chat-event', (requestId: string, event: AgentStreamEvent) =>
+    broadcast(win, 'agent:chat-event', { requestId, event })
+  )
+  acpAgentService.on('chat-event', (requestId: string, event: AgentStreamEvent) =>
     broadcast(win, 'agent:chat-event', { requestId, event })
   )
   agentService.setConfirmSink({
     request: (req) => broadcast(win, 'agent:confirm', req),
     resolved: (id) => broadcast(win, 'agent:confirm-resolved', { id })
   })
+  acpAgentService.setConfirmSink({
+    request: (req) => broadcast(win, 'agent:confirm', req),
+    resolved: (id) => broadcast(win, 'agent:confirm-resolved', { id })
+  })
   ipcMain.handle(
     'agent:confirm:resolve',
-    (_e, payload: { id: string; approved: boolean }) =>
+    (_e, payload: { id: string; approved: boolean }) => {
       agentService.resolveConfirm(payload.id, payload.approved)
+      acpAgentService.resolveConfirm(payload.id, payload.approved)
+    }
   )
 
   // ---------- MCP ----------

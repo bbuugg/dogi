@@ -3,6 +3,7 @@ import { useAppStore } from '@/stores/app-store'
 import { Input } from 'antd'
 import { ModelSettings } from './ModelSettings'
 import { McpSettings } from './McpSettings'
+import { AcpAgentSettings } from './AcpAgentSettings'
 
 /** 系统提示词区块（从原「偏好」迁移而来） */
 function SystemPromptSection() {
@@ -38,8 +39,9 @@ function SystemPromptSection() {
 }
 
 /**
- * AI 配置总入口：整合「模型配置」「MCP 服务」「系统提示词」三个子模块，
+ * AI 配置总入口：整合「模型配置」「ACP agent」「MCP 服务」「系统提示词」，
  * 在设置对话框中作为一个标签页呈现。
+ * 工作区使用内置 AI SDK 还是外部 ACP agent，在 AI Agent 输入框的模型下拉处按会话切换。
  */
 export function AiConfigSettings() {
   return (
@@ -52,6 +54,19 @@ export function AiConfigSettings() {
           </p>
         </div>
         <ModelSettings />
+      </section>
+
+      <div className="h-px w-full bg-border" />
+
+      <section className="space-y-3">
+        <div>
+          <span className="text-sm font-medium text-foreground">ACP agent</span>
+          <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+            预定义外部 ACP agent（如 Codex / Gemini CLI）的启动配置，工作区在 AI Agent
+            输入框的模型下拉处按会话选择使用。
+          </p>
+        </div>
+        <AcpAgentSettings />
       </section>
 
       <div className="h-px w-full bg-border" />

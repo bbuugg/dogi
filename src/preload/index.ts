@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import type {
+  AgentBackend,
   AgentChatRequest,
   AgentConfirmRequest,
   AgentStreamEvent,
@@ -16,6 +17,7 @@ import type {
   ApiHttpResponse,
   ApiRequestEntry,
   AppInfo,
+  DetectedAcpAgent,
   McpServerConfig,
   McpToolInfo,
   NoteEntry,
@@ -114,6 +116,12 @@ const api = {
     getSettings: (): Promise<AiSettings> => ipcRenderer.invoke('ai:settings:get'),
     saveSettings: (settings: Partial<AiSettings>): Promise<AiSettings> =>
       ipcRenderer.invoke('ai:settings:save', settings),
+    /** 检测本机 PATH 中已安装的 ACP agent */
+    detectAcpAgents: (): Promise<DetectedAcpAgent[]> =>
+      ipcRenderer.invoke('ai:detectAcpAgents'),
+    /** 拉取 OpenAI 兼容接口的模型列表（GET {baseURL}/models） */
+    listRemoteModels: (input: { baseURL: string; apiKey?: string }): Promise<string[]> =>
+      ipcRenderer.invoke('ai:listRemoteModels', input),
     chat: (req: AiChatRequest): Promise<{ requestId: string }> =>
       ipcRenderer.invoke('ai:chat', req),
     abort: (requestId: string): Promise<void> =>
@@ -133,9 +141,12 @@ const api = {
   agent: {
     listWorkspaces: (): Promise<AgentWorkspace[]> =>
       ipcRenderer.invoke('agent:workspaces:list'),
-    saveWorkspace: (input: { id?: string; name: string; path: string }): Promise<
-      AgentWorkspace[]
-    > => ipcRenderer.invoke('agent:workspaces:save', input),
+    saveWorkspace: (input: {
+      id?: string
+      name: string
+      path: string
+      backend?: AgentBackend
+    }): Promise<AgentWorkspace[]> => ipcRenderer.invoke('agent:workspaces:save', input),
     deleteWorkspace: (id: string): Promise<AgentWorkspace[]> =>
       ipcRenderer.invoke('agent:workspaces:delete', id),
     chat: (req: AgentChatRequest): Promise<{ requestId: string }> =>

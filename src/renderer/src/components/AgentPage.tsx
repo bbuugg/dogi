@@ -8,6 +8,7 @@ import {
   FolderOpen,
   Loader2,
   Send,
+  Settings,
   ShieldCheck,
   Square,
   Terminal,
@@ -23,6 +24,10 @@ import type {
   AgentMessagePart,
   AiPermissionMode
 } from '@shared/types'
+
+/** 模型下拉里 ACP 后端的特殊选项值 */
+const ACP_OPTION = '__acp__'
+const ACP_MANAGE_OPTION = '__acp-manage__'
 
 /** Agent 工具的中文展示名 */
 const AGENT_TOOL_LABELS: Record<string, string> = {
@@ -258,7 +263,7 @@ function MessageBubble({
     <div className="space-y-1">
       {units.map((unit, i) =>
         unit.kind === 'text' ? (
-          <div key={i} className="px-3 py-2">
+          <div key={i} className="py-2">
             <AiMarkdown content={unit.text} />
             {streaming && i === units.length - 1 && (
               <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-primary align-middle" />
@@ -279,17 +284,15 @@ function MessageBubble({
         </div>
       )}
       {!streaming && hasText && (
-        <div className="px-3">
-          <button
-            type="button"
-            onClick={() => void copyRaw()}
-            title="复制原文（Markdown）"
-            className="inline-flex items-center gap-1 rounded p-1 text-[10px] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-          >
-            {copied ? <Check className="size-3 text-green-500" /> : <Copy className="size-3" />}
-            {copied ? '已复制' : '复制'}
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={() => void copyRaw()}
+          title="复制原文（Markdown）"
+          className="inline-flex items-center gap-1 rounded p-1 text-[10px] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+        >
+          {copied ? <Check className="size-3 text-green-500" /> : <Copy className="size-3" />}
+          {copied ? '已复制' : '复制'}
+        </button>
       )}
     </div>
   )
@@ -309,8 +312,20 @@ export function AgentPage() {
   const active = activeId ? workspaces.find((w) => w.id === activeId) : undefined
   const aiSettings = useAppStore((s) => s.aiSettings)
   const aiConfigs = useAppStore((s) => s.aiConfigs)
-  const hasConfig = Boolean(aiSettings.activeConfigId) && aiConfigs.length > 0
+  const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
+  const acpAgents = aiSettings.acpAgents ?? []
+  // ACP 后端当前使用的预置配置（设置页维护，下拉处切换）
+  const activeAcp = acpAgents.find((a) => a.id === aiSettings.activeAcpId) ?? acpAgents[0]
+  // 后端按工作区（会话）独立：默认内置 AI SDK，可在模型下拉处切到外部 ACP agent
+  const backend = active?.backend ?? 'ai-sdk'
+  // ACP 后端无需模型配置（agent 自带模型），只需有可用的预置配置
+  const hasConfig =
+    backend === 'acp'
+      ? Boolean(activeAcp)
+      : Boolean(aiSettings.activeConfigId) && aiConfigs.length > 0
   const setActiveAiConfig = useAppStore((s) => s.setActiveAiConfig)
+  const setAgentWorkspaceBackend = useAppStore((s) => s.setAgentWorkspaceBackend)
+  const saveAiSettings = useAppStore((s) => s.saveAiSettings)
   const setAiPermissionMode = useAppStore((s) => s.setAiPermissionMode)
   const permissionMode: AiPermissionMode =
     aiSettings.permissionMode === 'confirm' ? 'confirm' : 'full'
@@ -336,6 +351,53 @@ export function AgentPage() {
   const [input, setInput] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
   const nearBottomRef = useRef(true)
+
+  /** 模型下拉选中值：ACP 后端显示预置配置，内置后端显示模型配置 */
+  const modelSelectValue =
+    backend === 'acp'
+      ? activeAcp
+        ? `acp:${activeAcp.id}`
+        : ACP_OPTION
+      : aiConfigs.some((c) => c.id === aiSettings.activeConfigId)
+        ? aiSettings.activeConfigId
+        : undefined
+
+  const handleModelSelect = (value: string) => {
+    if (!activeId) return
+    if (value === ACP_MANAGE_OPTION) {
+      // 预置配置在设置页统一维护
+      setSettingsOpen(true, 'ai')
+      return
+    }
+    if (value === ACP_OPTION || value.startsWith('acp:')) {
+      void setAgentWorkspaceBackend(activeId, 'acp')
+      if (value.startsWith('acp:')) void saveAiSettings({ activeAcpId: value.slice(4) })
+      return
+    }
+    void setActiveAiConfig(value)
+    void setAgentWorkspaceBackend(activeId, 'ai-sdk')
+  }
+
+  const modelOptions = [
+    ...aiConfigs.map((c) => ({
+      value: c.id,
+      label: `${c.name}（${c.model}）`
+    })),
+    { type: 'divider' as const, key: 'acp-divider' },
+    ...acpAgents.map((a) => ({
+      value: `acp:${a.id}`,
+      label: a.name,
+      icon: <Bot className="size-3.5" />
+    })),
+    ...(activeAcp
+      ? []
+      : [{ value: ACP_OPTION, label: '外部 ACP agent', icon: <Bot className="size-3.5" /> }]),
+    {
+      value: ACP_MANAGE_OPTION,
+      label: acpAgents.length ? '管理 ACP agent…' : '配置 ACP agent…',
+      icon: <Settings className="size-3.5" />
+    }
+  ]
 
   useLayoutEffect(() => {
     const el = scrollRef.current
@@ -466,7 +528,9 @@ export function AgentPage() {
                 placeholder={
                   hasConfig
                     ? `在「${active.name}」中描述你的任务…（Enter 发送 · Shift+Enter 换行）`
-                    : '请先在设置中配置 AI 模型'
+                    : backend === 'acp'
+                      ? '请先在设置中配置 ACP agent（AI 配置页）'
+                      : '请先在设置中配置 AI 模型'
                 }
                 autoSize={{ minRows: 2, maxRows: 8 }}
                 variant="borderless"
@@ -479,19 +543,12 @@ export function AgentPage() {
                     size="small"
                     variant="borderless"
                     placement="topLeft"
-                    className="max-w-48 min-w-0"
-                    value={
-                      aiConfigs.some((c) => c.id === aiSettings.activeConfigId)
-                        ? aiSettings.activeConfigId
-                        : undefined
-                    }
-                    onChange={(v) => void setActiveAiConfig(v)}
+                    className="max-w-56 min-w-0"
+                    value={modelSelectValue}
+                    onChange={(v) => handleModelSelect(v)}
                     placeholder="选择模型"
                     popupMatchSelectWidth={false}
-                    options={aiConfigs.map((c) => ({
-                      value: c.id,
-                      label: `${c.name}（${c.model}）`
-                    }))}
+                    options={modelOptions}
                   />
                   <Dropdown
                     trigger={['click']}

@@ -1,6 +1,7 @@
 import Store from 'electron-store'
 import { safeStorage } from 'electron'
 import type {
+  AgentBackend,
   AgentWorkspace,
   AiModelConfig,
   AiPermissionMode,
@@ -682,11 +683,32 @@ class StorageService {
     // 兼容旧版 autoApprove 布尔配置：关闭自动执行 -> 确认模式
     const stored = (this.store.get('aiSettings') ?? {}) as Partial<AiSettings> & {
       autoApprove?: boolean
+      /** 旧版单 ACP 配置（v0.1 时代），迁移为预定义列表 */
+      acpAgent?: { command: string; args: string[] }
+      /** 旧版全局 Agent 后端开关（早已迁移为按工作区），迁移时清掉 */
+      agentBackend?: string
     }
-    const { autoApprove, ...rest } = stored
+    const { autoApprove, acpAgent: legacyAcp, agentBackend: _legacyBackend, ...rest } = stored
     const permissionMode: AiPermissionMode =
       rest.permissionMode ?? (autoApprove === false ? 'confirm' : 'full')
     const settings: AiSettings = { ...DEFAULT_AI_SETTINGS, ...rest, permissionMode }
+    // 迁移旧版单 ACP 配置（acpAgent）为预定义列表，并写回存储只迁移一次
+    if (legacyAcp?.command && !settings.acpAgents?.length) {
+      settings.acpAgents = [
+        {
+          id: crypto.randomUUID(),
+          name: '外部 ACP agent',
+          command: legacyAcp.command,
+          args: legacyAcp.args ?? []
+        }
+      ]
+      settings.activeAcpId = settings.acpAgents[0].id
+      this.store.set('aiSettings', settings)
+    }
+    // 校正悬空的 activeAcpId（指向已删除的配置）：回退到剩余第一个
+    if (settings.activeAcpId && !settings.acpAgents?.some((a) => a.id === settings.activeAcpId)) {
+      settings.activeAcpId = settings.acpAgents?.[0]?.id
+    }
     // 校正悬空的 activeConfigId（指向已删除的配置）：回退到剩余第一个，
     // 否则面板下拉框匹配不到 option、既显示空白又切不动
     if (settings.activeConfigId && !this.store.get('aiConfigs').some((c) => c.id === settings.activeConfigId)) {
@@ -711,7 +733,12 @@ class StorageService {
   }
 
   /** 保存工作区（upsert）；相同 path 视为同一工作区，改名即更新 */
-  saveAgentWorkspace(input: { id?: string; name: string; path: string }): AgentWorkspace[] {
+  saveAgentWorkspace(input: {
+    id?: string
+    name: string
+    path: string
+    backend?: AgentBackend
+  }): AgentWorkspace[] {
     const workspaces = this.store.get('agentWorkspaces')
     const now = Date.now()
     const byPath = workspaces.find((w) => w.path === input.path)
@@ -720,7 +747,12 @@ class StorageService {
     const next = target
       ? workspaces.map((w) =>
           w === target
-            ? { ...w, name: input.name.trim() || w.name, updatedAt: now }
+            ? {
+                ...w,
+                name: input.name.trim() || w.name,
+                backend: input.backend ?? w.backend,
+                updatedAt: now
+              }
             : w
         )
       : [
@@ -729,6 +761,7 @@ class StorageService {
             id: crypto.randomUUID(),
             name: input.name.trim(),
             path: input.path,
+            backend: input.backend,
             createdAt: now,
             updatedAt: now
           }

@@ -1,5 +1,5 @@
 import type { McpServerConfig } from '@shared/types'
-import { Button, Input, Switch, Tag } from 'antd'
+import { Button, Input, Modal, Switch, Tag } from 'antd'
 import { Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
@@ -35,6 +35,7 @@ function toForm(server: McpServerConfig | null): FormState {
 export function McpSettings() {
   const [servers, setServers] = useState<McpStatus[]>([])
   const [editing, setEditing] = useState<FormState | null>(null)
+  const [saving, setSaving] = useState(false)
   const [toolInfo, setToolInfo] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -46,28 +47,50 @@ export function McpSettings() {
   const patch = (partial: Partial<FormState>) =>
     setEditing((f) => (f ? { ...f, ...partial } : f))
 
+  const openCreate = () => {
+    setError(null)
+    setEditing({ ...EMPTY })
+  }
+  const openEdit = (server: McpStatus) => {
+    setError(null)
+    setEditing(toForm(server))
+  }
+  const closeModal = () => {
+    if (saving) return
+    setEditing(null)
+    setError(null)
+  }
+
   const handleSave = async () => {
     if (!editing) return
     if (!editing.name.trim() || !editing.command.trim()) {
       setError('请填写名称与启动命令')
       return
     }
-    const env: Record<string, string> = {}
-    for (const line of editing.env.split('\n')) {
-      const idx = line.indexOf('=')
-      if (idx > 0) env[line.slice(0, idx).trim()] = line.slice(idx + 1).trim()
-    }
-    await window.api.mcp.save({
-      id: editing.id,
-      name: editing.name.trim(),
-      command: editing.command.trim(),
-      args: editing.args.split(/\s+/).filter(Boolean),
-      env,
-      enabled: editing.enabled
-    })
-    setEditing(null)
+    setSaving(true)
     setError(null)
-    await load()
+    try {
+      const env: Record<string, string> = {}
+      for (const line of editing.env.split('\n')) {
+        const idx = line.indexOf('=')
+        if (idx > 0) env[line.slice(0, idx).trim()] = line.slice(idx + 1).trim()
+      }
+      await window.api.mcp.save({
+        id: editing.id,
+        name: editing.name.trim(),
+        command: editing.command.trim(),
+        args: editing.args.split(/\s+/).filter(Boolean),
+        env,
+        enabled: editing.enabled
+      })
+      setEditing(null)
+      setError(null)
+      await load()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSaving(false)
+    }
   }
 
   const handleDelete = async (server: McpStatus) => {
@@ -97,68 +120,6 @@ export function McpSettings() {
     }
   }
 
-  if (editing) {
-    return (
-      <div className="space-y-3">
-        <div className="grid grid-cols-2 gap-3">
-          <div className="grid gap-1.5">
-            <span className="text-xs font-medium text-foreground">服务名称</span>
-            <Input
-              placeholder="如：filesystem"
-              value={editing.name}
-              onChange={(e) => patch({ name: e.target.value })}
-            />
-          </div>
-          <div className="flex items-center gap-2 pt-5">
-            <Switch
-              checked={editing.enabled}
-              onChange={(v) => patch({ enabled: v })}
-              id="mcp-enabled"
-            />
-            <label htmlFor="mcp-enabled" className="text-xs font-medium text-foreground">
-              启用
-            </label>
-          </div>
-        </div>
-        <div className="grid gap-1.5">
-          <span className="text-xs font-medium text-foreground">启动命令</span>
-          <Input
-            placeholder="如：npx 或 node 或 D:\tools\server.exe"
-            value={editing.command}
-            onChange={(e) => patch({ command: e.target.value })}
-          />
-        </div>
-        <div className="grid gap-1.5">
-          <span className="text-xs font-medium text-foreground">参数（空格分隔）</span>
-          <Input
-            placeholder="如：-y @modelcontextprotocol/server-filesystem D:\data"
-            value={editing.args}
-            onChange={(e) => patch({ args: e.target.value })}
-          />
-        </div>
-        <div className="grid gap-1.5">
-          <span className="text-xs font-medium text-foreground">环境变量（每行 KEY=VALUE）</span>
-          <Input.TextArea
-            rows={3}
-            className="font-mono text-xs"
-            placeholder={'API_TOKEN=xxx\nDEBUG=1'}
-            value={editing.env}
-            onChange={(e) => patch({ env: e.target.value })}
-          />
-        </div>
-        {error && <p className="text-xs text-destructive">{error}</p>}
-        <div className="flex justify-end gap-2">
-          <Button type="text" onClick={() => setEditing(null)}>
-            取消
-          </Button>
-          <Button type="primary" onClick={() => void handleSave()}>
-            保存
-          </Button>
-        </div>
-      </div>
-    )
-  }
-
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
@@ -171,7 +132,7 @@ export function McpSettings() {
             size="small" type="text" onClick={() => void handleListTools()}>
             检查工具
           </Button>
-          <Button type='text' icon={<Plus className="size-4" />} size="small" variant="filled" onClick={() => setEditing({ ...EMPTY })}>
+          <Button type="text" icon={<Plus className="size-4" />} size="small" variant="filled" onClick={openCreate}>
             新建
           </Button>
         </div>
@@ -215,7 +176,7 @@ export function McpSettings() {
             icon={<Pencil className="size-3.5" />}
             className="w-7 p-0"
             title="编辑"
-            onClick={() => setEditing(toForm(server))}
+            onClick={() => openEdit(server)}
           >
             编辑
           </Button>
@@ -237,6 +198,71 @@ export function McpSettings() {
           {toolInfo}
         </pre>
       )}
+
+      <Modal
+        title={editing?.id ? '编辑 MCP 服务' : '新建 MCP 服务'}
+        open={editing !== null}
+        onCancel={closeModal}
+        onOk={() => void handleSave()}
+        confirmLoading={saving}
+        okText="保存"
+        cancelText="取消"
+        width={520}
+        centered
+        destroyOnHidden
+      >
+        {editing && (
+          <div className="space-y-3 pt-1">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="grid gap-1.5">
+                <span className="text-xs font-medium text-foreground">服务名称</span>
+                <Input
+                  placeholder="如：filesystem"
+                  value={editing.name}
+                  onChange={(e) => patch({ name: e.target.value })}
+                />
+              </div>
+              <div className="flex items-center gap-2 pt-5">
+                <Switch
+                  checked={editing.enabled}
+                  onChange={(v) => patch({ enabled: v })}
+                  id="mcp-enabled"
+                />
+                <label htmlFor="mcp-enabled" className="text-xs font-medium text-foreground">
+                  启用
+                </label>
+              </div>
+            </div>
+            <div className="grid gap-1.5">
+              <span className="text-xs font-medium text-foreground">启动命令</span>
+              <Input
+                placeholder="如：npx 或 node 或 D:\tools\server.exe"
+                value={editing.command}
+                onChange={(e) => patch({ command: e.target.value })}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <span className="text-xs font-medium text-foreground">参数（空格分隔）</span>
+              <Input
+                placeholder="如：-y @modelcontextprotocol/server-filesystem D:\data"
+                value={editing.args}
+                onChange={(e) => patch({ args: e.target.value })}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <span className="text-xs font-medium text-foreground">环境变量（每行 KEY=VALUE）</span>
+              <Input.TextArea
+                rows={3}
+                className="font-mono text-xs"
+                placeholder={'API_TOKEN=xxx\nDEBUG=1'}
+                value={editing.env}
+                onChange={(e) => patch({ env: e.target.value })}
+              />
+            </div>
+            {error && <p className="text-xs text-destructive">{error}</p>}
+          </div>
+        )}
+      </Modal>
     </div>
   )
 }

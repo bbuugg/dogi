@@ -15,11 +15,11 @@ const MENU: Array<{
   desc: string
   icon: typeof Bot
 }> = [
-  { value: 'prefs', label: '偏好', desc: '应用主题', icon: SlidersHorizontal },
-  { value: 'terminal', label: '终端', desc: '配色与外观', icon: TerminalSquare },
-  { value: 'shortcuts', label: '快捷键', desc: '应用内快捷键设置', icon: Keyboard },
-  { value: 'ai', label: 'AI 配置', desc: '模型、MCP 服务与提示词', icon: Bot },
-]
+    { value: 'prefs', label: '偏好', desc: '应用主题', icon: SlidersHorizontal },
+    { value: 'terminal', label: '终端', desc: '配色与外观', icon: TerminalSquare },
+    { value: 'shortcuts', label: '快捷键', desc: '应用内快捷键设置', icon: Keyboard },
+    { value: 'ai', label: 'AI 配置', desc: '模型、MCP 服务与提示词', icon: Bot },
+  ]
 
 export function SettingsDialog() {
   const settingsOpen = useAppStore((s) => s.ui.settingsOpen)
@@ -35,6 +35,7 @@ export function SettingsDialog() {
       centered
       width={880}
       destroyOnHidden
+      mask={{ closable: false }}
       // 弹窗高度固定在 70vh：header 由 antd 固定，body 收内容并内部滚动（无滚动条）
       styles={{
         container: { height: '70vh', minHeight: 380, display: 'flex', flexDirection: 'column' },

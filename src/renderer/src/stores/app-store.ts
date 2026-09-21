@@ -21,6 +21,7 @@ import type {
   AgentConfirmRequest,
   AgentStreamEvent,
   AgentWorkspace,
+  AgentBackend,
   AiChatMessage,
   AiConfirmRequest,
   AiMessagePart,
@@ -918,8 +919,15 @@ interface AppStore {
   /** 重新拉取 Agent 工作区列表 */
   loadAgentWorkspaces: () => Promise<void>
   /** 保存工作区（同名路径视为更新）；返回最新列表 */
-  saveAgentWorkspace: (input: { id?: string; name: string; path: string }) => Promise<void>
+  saveAgentWorkspace: (input: {
+    id?: string
+    name: string
+    path: string
+    backend?: AgentBackend
+  }) => Promise<void>
   deleteAgentWorkspace: (id: string) => Promise<void>
+  /** 切换工作区的 Agent 后端（内置 AI SDK / 外部 ACP agent），每会话独立 */
+  setAgentWorkspaceBackend: (id: string, backend: AgentBackend) => Promise<void>
   /** 选中工作区（Agent 对话绑定它） */
   selectAgentWorkspace: (id: string) => void
   /** 在当前选中的工作区发起 Agent 对话 */
@@ -2194,6 +2202,18 @@ let shortcutWired = false
         // 首次添加时自动选中
         activeAgentWorkspaceId: s.activeAgentWorkspaceId ?? workspaces[0]?.id ?? null
       }))
+    },
+
+    setAgentWorkspaceBackend: async (id, backend) => {
+      const ws = get().agentWorkspaces.find((w) => w.id === id)
+      if (!ws) return
+      const workspaces = await window.api.agent.saveWorkspace({
+        id,
+        name: ws.name,
+        path: ws.path,
+        backend
+      })
+      set({ agentWorkspaces: workspaces })
     },
 
     deleteAgentWorkspace: async (id) => {

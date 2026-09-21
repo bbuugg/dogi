@@ -4,6 +4,7 @@ import { app, BrowserWindow, Menu, nativeTheme, Tray, webContents } from 'electr
 import { registerIpc, openExternalSafe } from './ipc'
 import { pluginHost } from './services/plugins'
 import { storage } from './services/storage'
+import { acpAgentService } from './services/acp-agent'
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
@@ -288,6 +289,7 @@ app.on('before-quit', () => {
 app.on('will-quit', () => {
   tray?.destroy()
   tray = null
+  acpAgentService.dispose()
 })
 
 app.on('window-all-closed', () => {
