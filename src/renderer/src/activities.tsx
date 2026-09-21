@@ -1,19 +1,17 @@
 import type { ComponentType } from 'react'
-import { Bot, FileCode2, Globe, Puzzle, Server, StickyNote } from 'lucide-react'
+import { Bot, Globe, Puzzle, Server, StickyNote } from 'lucide-react'
 import { AgentPanel } from '@/components/AgentPanel'
 import { ApiPanel } from '@/components/ApiPanel'
 import { HostsPanel } from '@/components/HostsPanel'
 import { NotesPanel } from '@/components/NotesPanel'
 import { PluginsPanel } from '@/components/PluginsPanel'
-import { ScriptsPanel } from '@/components/ScriptsPanel'
 import { useAppStore } from '@/stores/app-store'
 import {
   AGENT_ACTIVITY_ID,
   API_ACTIVITY_ID,
   HOSTS_ACTIVITY_ID,
   NOTES_ACTIVITY_ID,
-  PLUGINS_ACTIVITY_ID,
-  SCRIPTS_ACTIVITY_ID
+  PLUGINS_ACTIVITY_ID
 } from '@/activity-ids'
 
 /**
@@ -27,6 +25,9 @@ import {
  *
  * 插件不再贡献功能区：安装的插件不会往活动栏挂条目，插件视图只在 PanelView 里
  * 以标签页形式打开（入口在插件管理面板的「打开」按钮）。
+ *
+ * 脚本同样没有独立功能区：它只服务于主机，作为「主机」侧边栏的下半区分区存在
+ * （见 components/HostsPanel.tsx 与 section-ids.ts），入口走 store.openScriptsSection()。
  */
 export interface Activity {
   /** 唯一 id，存于 ui.activeActivity */
@@ -51,12 +52,6 @@ export const BUILTIN_ACTIVITIES: Activity[] = [
     label: 'AI Agent',
     icon: Bot,
     panel: AgentPanel
-  },
-  {
-    id: SCRIPTS_ACTIVITY_ID,
-    label: '脚本管理',
-    icon: FileCode2,
-    panel: ScriptsPanel
   },
   {
     id: NOTES_ACTIVITY_ID,

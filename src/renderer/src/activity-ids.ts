@@ -11,7 +11,6 @@
  * 里以标签页形式打开（入口是插件管理面板的「打开」按钮）。
  */
 export const HOSTS_ACTIVITY_ID = 'hosts'
-export const SCRIPTS_ACTIVITY_ID = 'scripts'
 export const NOTES_ACTIVITY_ID = 'notes'
 export const API_ACTIVITY_ID = 'api'
 export const PLUGINS_ACTIVITY_ID = 'plugins'

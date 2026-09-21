@@ -23,8 +23,7 @@ import type { AppShortcutAction, ScriptEntry } from '@shared/types'
 import {
   API_ACTIVITY_ID,
   NOTES_ACTIVITY_ID,
-  PLUGINS_ACTIVITY_ID,
-  SCRIPTS_ACTIVITY_ID
+  PLUGINS_ACTIVITY_ID
 } from '@/activity-ids'
 
 /**
@@ -76,6 +75,7 @@ export function CommandPalette() {
   const createLocalSession = useAppStore((s) => s.createLocalSession)
   const connectHost = useAppStore((s) => s.connectHost)
   const selectActivity = useAppStore((s) => s.selectActivity)
+  const openScriptsSection = useAppStore((s) => s.openScriptsSection)
   const openNewApiDraft = useAppStore((s) => s.openNewApiDraft)
   /** 插件列表（含启用状态）与已加载的插件视图实例（只有启用且加载成功的插件才有视图） */
   const pluginList = useAppStore((s) => s.pluginList)
@@ -158,7 +158,7 @@ export function CommandPalette() {
       icon: ListPlus,
       run: () => {
         close()
-        selectActivity(SCRIPTS_ACTIVITY_ID)
+        openScriptsSection()
       }
     },
     {
@@ -523,7 +523,7 @@ export function CommandPalette() {
               className="h-7"
               onClick={() => {
                 close()
-                selectActivity(SCRIPTS_ACTIVITY_ID)
+                openScriptsSection()
               }}
             >
               管理脚本

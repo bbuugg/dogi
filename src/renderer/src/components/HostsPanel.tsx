@@ -28,6 +28,14 @@ import {
   type TreeDataNode
 } from 'antd'
 import { resolveSshColor, tintText } from '@/lib/ssh-color'
+import { ScriptsPanel } from '@/components/ScriptsPanel'
+import {
+  SectionContent,
+  SectionHeader,
+  SectionShell,
+  StackedSections
+} from '@/components/StackedSections'
+import { HOSTS_LIST_SECTION_ID } from '@/section-ids'
 
 
 /** 树节点 key 前缀：g: 分组（g: 空 id 表示「未分组」伪分组）、p: 连接 */
@@ -197,11 +205,27 @@ function ColorDot({
 }
 
 /**
- * 「主机」功能区面板：本地终端入口 +主机列表。
+ * 「主机」功能区侧边栏：上下两个可折叠分区的组合。
+ *
+ * 上半区是主机列表（HostsSection），下半区是脚本列表（ScriptsPanel）——
+ * 脚本只服务于主机，所以不再占用独立的功能区图标。
+ * 两个分区各自的展开/收起、空间分配与最小高度约束由 StackedSections 统一负责。
+ */
+export function HostsPanel() {
+  return (
+    <StackedSections>
+      <HostsSection />
+      <ScriptsPanel />
+    </StackedSections>
+  )
+}
+
+/**
+ * 主机分区：本地终端入口 + 主机列表。
  * 结构用 antd Tree（分组可折叠），拖拽用 react-dnd：
  * 连接可跨组拖动并调整顺序，分组可拖动排序，「未分组」固定在首位。
  */
-export function HostsPanel() {
+function HostsSection() {
   const profiles = useAppStore((s) => s.profiles)
   const sshGroups = useAppStore((s) => s.sshGroups)
   const connectHost = useAppStore((s) => s.connectHost)
@@ -450,61 +474,67 @@ export function HostsPanel() {
   const noMatch = searching && treeData.length === 0
 
   return (
-    <div className="flex h-full flex-col">
-      {/* 主机（左侧标题 + 右侧新建分组 / 新建主机，与「脚本」「笔记」面板同款） */}
-      <div className="mb-1 flex items-center justify-between gap-1 px-3 py-2">
-        <span className="text-sm font-medium text-muted-foreground">主机 ({profiles.length})</span>
-        <div className="flex items-center gap-1">
-          <Button
-            type="text"
-            size="small"
-            className="px-0.5 text-muted-foreground"
-            title="新建分组"
-            icon={<FolderPlus className="size-3.5" />}
-            onClick={() => setGroupEdit({ name: '' })}
-          />
-          <Button
-            type="text"
-            size="small"
-            className="px-0.5 text-muted-foreground"
-            title="新建主机"
-            icon={<Plus className="size-3.5" />}
-            onClick={() => setSshDialog(true, null)}
+    <SectionShell id={HOSTS_LIST_SECTION_ID} grow={2} minHeight={200}>
+      {/* 标题栏：整条点击可收起/展开；右侧是新建分组 / 新建主机（与「脚本」「笔记」面板同款） */}
+      <SectionHeader
+        id={HOSTS_LIST_SECTION_ID}
+        title="主机"
+        count={profiles.length}
+        extra={
+          <>
+            <Button
+              type="text"
+              size="small"
+              className="px-0.5 text-muted-foreground"
+              title="新建分组"
+              icon={<FolderPlus className="size-3.5" />}
+              onClick={() => setGroupEdit({ name: '' })}
+            />
+            <Button
+              type="text"
+              size="small"
+              className="px-0.5 text-muted-foreground"
+              title="新建主机"
+              icon={<Plus className="size-3.5" />}
+              onClick={() => setSshDialog(true, null)}
+            />
+          </>
+        }
+      />
+
+      <SectionContent id={HOSTS_LIST_SECTION_ID}>
+        <div className="px-3 pb-2">
+          <Input
+            placeholder="搜索主机…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            allowClear
           />
         </div>
-      </div>
 
-      <div className="px-3 pb-2">
-        <Input
-          placeholder="搜索主机…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          allowClear
-        />
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
-        {isEmpty ? (
-          <div className="mx-2 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
-            还没有主机
-            <br />
-            点击右上角 + 添加
-          </div>
-        ) : noMatch ? (
-          <div className="mx-2 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
-            没有匹配「{search}」的主机。
-          </div>
-        ) : (
-          <Tree
-            className="side-tree"
-            treeData={treeData}
-            selectable={false}
-            blockNode
-            expandedKeys={effectiveExpanded}
-            onExpand={(keys) => setExpandedKeys(keys.map(String))}
-          />
-        )}
-      </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+          {isEmpty ? (
+            <div className="mx-2 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
+              还没有主机
+              <br />
+              点击右上角 + 添加
+            </div>
+          ) : noMatch ? (
+            <div className="mx-2 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
+              没有匹配「{search}」的主机。
+            </div>
+          ) : (
+            <Tree
+              className="side-tree"
+              treeData={treeData}
+              selectable={false}
+              blockNode
+              expandedKeys={effectiveExpanded}
+              onExpand={(keys) => setExpandedKeys(keys.map(String))}
+            />
+          )}
+        </div>
+      </SectionContent>
 
       {/* 新建 / 重命名分组 */}
       <Modal
@@ -582,7 +612,7 @@ export function HostsPanel() {
           将从列表中移除，该操作不可撤销。
         </p>
       </Modal>
-    </div>
+    </SectionShell>
   )
 }
 

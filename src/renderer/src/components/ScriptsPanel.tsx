@@ -5,6 +5,8 @@ import { cn } from 'cn'
 import { ChevronDown, ChevronRight, ChevronsLeft, FileCode2, FolderPlus, Pencil, Play, Plus, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useDrag, useDrop } from 'react-dnd'
+import { SectionContent, SectionHeader, SectionShell } from '@/components/StackedSections'
+import { HOSTS_LIST_SECTION_ID, HOSTS_SCRIPTS_SECTION_ID } from '@/section-ids'
 
 /** 树节点 key 前缀：g: 分组、s: 脚本 */
 const GROUP_KEY_PREFIX = 'g:'
@@ -109,7 +111,13 @@ function DropLine({ after }: { after: boolean }) {
 }
 
 /**
- * 脚本侧边栏：脚本按分组列出，支持搜索 / 新建 / 打开 / 删除 / 直接运行。
+ * 脚本分区：脚本按分组列出，支持搜索 / 新建 / 打开 / 删除 / 直接运行。
+ *
+ * 脚本只服务于主机，所以它不再占独立的功能区图标，而是作为
+ * 主机侧边栏（HostsPanel）下半区的可折叠分区存在（见 StackedSections）：
+ * 收起后只剩标题栏，主机分区随之吃掉空出来的高度。
+ * 展开时顶部有一条拖拽条（resizableAbove），可自由拖动调整脚本区高度。
+ *
  * 分组与拖拽与「主机」「接口请求」「笔记」面板同一套模型（react-dnd + Block）：
  * 脚本可跨组拖动并调整顺序，分组可拖动排序，「未分组」的脚本平铺在最后。
  * 列表顺序就是存储顺序（不再按 updatedAt 排序）—— 否则拖完立刻被时间戳打乱。
@@ -384,61 +392,73 @@ export function ScriptsPanel() {
   const noMatch = searching && treeData.length === 0
 
   return (
-    <div className="flex h-full flex-col">
-      {/* 脚本（左侧 tab 名 + 右侧新建分组 / 新建，与「主机」面板同款） */}
-      <div className="mb-1 flex items-center justify-between gap-1 px-3 py-2">
-        <span className="text-sm font-medium text-muted-foreground">脚本 ({scripts.length})</span>
-        <div className="flex items-center gap-1">
-          <Button
-            type="text"
-            size="small"
-            className="px-0.5 text-muted-foreground"
-            title="新建分组"
-            icon={<FolderPlus className="size-3.5" />}
-            onClick={() => setGroupEdit({ name: '' })}
-          />
-          <Button
-            type="text"
-            size="small"
-            className="px-0.5 text-muted-foreground"
-            title="新建脚本"
-            icon={<Plus className="size-3.5" />}
-            onClick={() => void handleCreate()}
+    <SectionShell
+      id={HOSTS_SCRIPTS_SECTION_ID}
+      grow={1}
+      minHeight={180}
+      // 展开时与上方的主机分区互相让位：拖动条改的是本分区高度
+      resizableAbove={HOSTS_LIST_SECTION_ID}
+    >
+      {/* 标题栏：整条点击可收起/展开；右侧是新建分组 / 新建脚本（与「主机」分区同款） */}
+      <SectionHeader
+        id={HOSTS_SCRIPTS_SECTION_ID}
+        title="脚本"
+        count={scripts.length}
+        extra={
+          <>
+            <Button
+              type="text"
+              size="small"
+              className="px-0.5 text-muted-foreground"
+              title="新建分组"
+              icon={<FolderPlus className="size-3.5" />}
+              onClick={() => setGroupEdit({ name: '' })}
+            />
+            <Button
+              type="text"
+              size="small"
+              className="px-0.5 text-muted-foreground"
+              title="新建脚本"
+              icon={<Plus className="size-3.5" />}
+              onClick={() => void handleCreate()}
+            />
+          </>
+        }
+      />
+
+      <SectionContent id={HOSTS_SCRIPTS_SECTION_ID}>
+        <div className="px-3 pb-2">
+          <Input
+            placeholder="搜索脚本…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            allowClear
           />
         </div>
-      </div>
 
-      <div className="px-3 pb-2">
-        <Input
-          placeholder="搜索脚本…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          allowClear
-        />
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
-        {isEmpty ? (
-          <div className="mx-2 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
-            还没有脚本。
-            <br />
-            点击右上角 + 新建，或新建分组归类。
-          </div>
-        ) : noMatch ? (
-          <div className="mx-2 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
-            没有匹配「{search}」的脚本。
-          </div>
-        ) : (
-          <Tree
-            className="side-tree"
-            treeData={treeData}
-            selectable={false}
-            blockNode
-            expandedKeys={effectiveExpanded}
-            onExpand={(keys) => setExpandedKeys(keys.map(String))}
-          />
-        )}
-      </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+          {isEmpty ? (
+            <div className="mx-2 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
+              还没有脚本。
+              <br />
+              点击右上角 + 新建，或新建分组归类。
+            </div>
+          ) : noMatch ? (
+            <div className="mx-2 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
+              没有匹配「{search}」的脚本。
+            </div>
+          ) : (
+            <Tree
+              className="side-tree"
+              treeData={treeData}
+              selectable={false}
+              blockNode
+              expandedKeys={effectiveExpanded}
+              onExpand={(keys) => setExpandedKeys(keys.map(String))}
+            />
+          )}
+        </div>
+      </SectionContent>
 
       {/* 新建 / 重命名分组 */}
       <Modal
@@ -512,7 +532,7 @@ export function ScriptsPanel() {
           「{pendingDelete?.name}」将被永久删除，该操作不可撤销。
         </p>
       </Modal>
-    </div>
+    </SectionShell>
   )
 }
 

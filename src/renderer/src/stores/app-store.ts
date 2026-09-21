@@ -1,4 +1,5 @@
 import { HOSTS_ACTIVITY_ID } from '@/activity-ids'
+import { HOSTS_SCRIPTS_SECTION_ID } from '@/section-ids'
 import { parseCurl } from '@/lib/api-client'
 import {
   firstGroupId,
@@ -587,6 +588,22 @@ interface UiState {
   activeActivity: string
   /** 各功能区的侧边栏是否折叠（key 为功能区 id；侧边栏属于功能区，互不影响） */
   collapsedActivities: Record<string, boolean>
+  /**
+   * 侧边栏内各「可折叠纵向分区」是否收起（key 为分区 id，见 section-ids.ts）。
+   *
+   * 与 collapsedActivities 同一思路：状态放 store 而不是组件里，
+   * 这样分区所在的组件重挂载（切换功能区等）后折叠态仍然保持；
+   * 通用容器见 components/StackedSections.tsx。
+   */
+  collapsedSections: Record<string, boolean>
+  /**
+   * 侧边栏内各「可拖拽分区」的高度（px，key 为分区 id，见 section-ids.ts）。
+   *
+   * 有值 = 用户拖过，该分区高度固定为它（不再参与剩余空间分配）；
+   * 无值 = 按 SectionShell 的 flex 权重自动分配（默认状态）。
+   * 声明了 `resizableAbove` 的分区才可能被写入。
+   */
+  sectionHeights: Record<string, number>
   /** 插件管理功能：当前正在查看的插件 id（null = 未选中） */
   activePluginId: string | null
   /** PanelView 中打开的标签页（扁平列表，按 groupId 归属到面板组） */
@@ -781,6 +798,17 @@ interface AppStore {
   setSidebarWidth: (width: number) => void
   /** 折叠/展开「当前功能区」自己的侧边栏（侧边栏属于功能区，互不影响） */
   setSidebarCollapsed: (collapsed: boolean) => void
+  /** 折叠/展开侧边栏内的某个纵向分区（分区 id 见 section-ids.ts） */
+  setSectionCollapsed: (id: string, collapsed: boolean) => void
+  /** 设置可拖拽分区的高度（px，由分区间拖拽条写入，见 StackedSections 的 SectionResizer） */
+  setSectionHeight: (id: string, height: number) => void
+  /**
+   * 定位到「脚本」分区：切回主机功能区并展开侧边栏与脚本分区。
+   *
+   * 脚本不再是独立功能区（只服务于主机，见 section-ids.ts），
+   * 凡是原先「跳到脚本功能区」的入口（状态栏菜单、命令面板）都改走这里。
+   */
+  openScriptsSection: () => void
   setAiPanelWidth: (width: number) => void
   /** 设置 AI 助手浮窗展开高度（px，含输入横条） */
   setAiPanelHeight: (height: number) => void
@@ -1064,6 +1092,8 @@ let shortcutWired = false
       commandPaletteOpen: false,
       activeActivity: HOSTS_ACTIVITY_ID,
       collapsedActivities: {},
+      collapsedSections: {},
+      sectionHeights: {},
       activePluginId: null,
       panelTabs: [],
       sidebarWidth: 240,
@@ -1562,6 +1592,29 @@ let shortcutWired = false
         ui: {
           ...s.ui,
           collapsedActivities: { ...s.ui.collapsedActivities, [s.ui.activeActivity]: collapsed }
+        }
+      })),
+
+    // 分区按 id 记忆（而不是「当前分区」）：同一侧边栏里的几个分区互不影响
+    setSectionCollapsed: (id, collapsed) =>
+      set((s) => ({
+        ui: { ...s.ui, collapsedSections: { ...s.ui.collapsedSections, [id]: collapsed } }
+      })),
+
+    // 拖动过程中每帧都会调用，只写这一格，避免拖拽引发整棵侧边栏之外的组件重渲染
+    setSectionHeight: (id, height) =>
+      set((s) => ({
+        ui: { ...s.ui, sectionHeights: { ...s.ui.sectionHeights, [id]: Math.round(height) } }
+      })),
+
+    // 一次性把「主机功能区 + 侧边栏 + 脚本分区」三层展开打开，任何一层折叠都不至于点了没反应
+    openScriptsSection: () =>
+      set((s) => ({
+        ui: {
+          ...s.ui,
+          activeActivity: HOSTS_ACTIVITY_ID,
+          collapsedActivities: { ...s.ui.collapsedActivities, [HOSTS_ACTIVITY_ID]: false },
+          collapsedSections: { ...s.ui.collapsedSections, [HOSTS_SCRIPTS_SECTION_ID]: false }
         }
       })),
 

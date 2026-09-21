@@ -140,3 +140,12 @@
 - **根因/约束**：`type: 'divider'` 是 antd 5.10 给 Select options 加的写法，antd 6 已移除支持，该项会被当作普通 option 渲染（无 value 无 label → 空行）。**Dropdown 的 menu items 里的 divider 仍受支持**，两者别混。
 - **正确做法**：Select options 需要分组时用 `{ label: '组名', options: [...] }` 结构（渲染为组头）；不要用 divider。
 - **验证方式**：打开下拉，`.ant-select-item-option` 的 textContent 不应有空串；`rg "type: 'divider'" src` 中出现在 Select options 里的都是漏网之鱼（Dropdown menu 里的合法）。
+
+### 20. 脚本没有独立功能区；侧边栏纵向分区统一用 StackedSections
+
+- **触发信号**：想给脚本单加一个活动栏图标、或写 `selectActivity('scripts')` / 找 `SCRIPTS_ACTIVITY_ID` 跳转脚本列表。
+- **根因/约束**：脚本只服务于主机，已从活动栏摘除（`SCRIPTS_ACTIVITY_ID` 常量已删除），改为「主机」侧边栏的下半区分区（上半区是主机列表，两区都可独立收起/展开）。折叠状态存在 `ui.collapsedSections`，key 见 `src/renderer/src/section-ids.ts`。
+- **正确做法**：跳转脚本用 `useAppStore((s) => s.openScriptsSection)`（一次展开「主机功能区 + 侧边栏 + 脚本分区」三层）。侧边栏内任何「上下分区、各自可折叠」的布局都用 `components/StackedSections.tsx`：`<StackedSections>` + `<SectionShell id grow minHeight>` + `<SectionHeader>` + `<SectionContent>`，分区 id 以「功能区.分区名」注册到 `section-ids.ts`。
+- **空间规则（别改成裸 flex）**：折叠的分区只占标题栏（`shrink-0`，不加 flex 简写），展开的分区 `flex: <grow> 1 0` + `min-height`；这样上面的分区收起时下面的自动上移补位，展开时也压不到 `minHeight` 以下。`SectionContent` 收起时用 `display:none` 而**不卸载**，否则面板里的搜索词、分组展开态会被重置。
+- **可拖拽高度**：分区声明 `resizableAbove={上方分区 id}` 后，顶部会多一条横向拖拽条（`SectionResizer`，绝对定位压在边界线上、不占布局高度），拖过的高度写入 `ui.sectionHeights`，此后该分区用 `flex: 0 0 <H>px`（剩余空间全归上方）。拖拽条只在「上下两个分区都展开」时存在——上方收起时下方本就要吃满剩余空间，固定高度反而会留白，所以那种情况下自动回到弹性分配。拖动时 `max = 容器高度 - 上方分区的 inline minHeight`（上方那份数字直接从 DOM 读，别在调用方再传一遍）。
+- **验证方式**：收起「主机」分区后脚本分区应紧贴其标题栏下方并占满剩余高度；展开后脚本停在底部且高度不低于 180px（`getComputedStyle` 的 `minHeight`）；拖动两者之间的横线，脚本高度随之变化且上方主机不被压到 200px 以下，收起再展开后高度保持。

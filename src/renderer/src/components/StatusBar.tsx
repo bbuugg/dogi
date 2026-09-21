@@ -1,7 +1,4 @@
-import {
-  PLUGINS_ACTIVITY_ID,
-  SCRIPTS_ACTIVITY_ID
-} from '@/activity-ids'
+import { PLUGINS_ACTIVITY_ID } from '@/activity-ids'
 import { useAppStore } from '@/stores/app-store'
 import { Button, Popover } from 'antd'
 import { Boxes, Command as CommandIcon, ListPlus, Menu, Plus, Settings } from 'lucide-react'
@@ -37,6 +34,7 @@ export function StatusBar({ children, right }: { children?: ReactNode; right?: R
 function MenuButton() {
   const setCommandPaletteOpen = useAppStore((s) => s.setCommandPaletteOpen)
   const selectActivity = useAppStore((s) => s.selectActivity)
+  const openScriptsSection = useAppStore((s) => s.openScriptsSection)
   const setSshDialog = useAppStore((s) => s.setSshDialog)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const [open, setOpen] = useState(false)
@@ -69,7 +67,7 @@ function MenuButton() {
             <CommandIcon className="size-3.5 text-muted-foreground" /> 命令面板
             <span className={hint}>Ctrl+Shift+P</span>
           </button>
-          <button type="button" className={menuItem} onClick={run(() => selectActivity(SCRIPTS_ACTIVITY_ID))}>
+          <button type="button" className={menuItem} onClick={run(openScriptsSection)}>
             <ListPlus className="size-3.5 text-muted-foreground" /> 管理脚本
           </button>
           <button type="button" className={menuItem} onClick={run(() => selectActivity(PLUGINS_ACTIVITY_ID))}>
