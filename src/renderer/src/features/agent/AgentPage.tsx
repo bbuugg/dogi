@@ -17,7 +17,6 @@ import {
   ChevronRight,
   ChevronUp,
   Code2,
-  Copy,
   ExternalLink,
   FolderOpen,
   Loader2,
@@ -30,6 +29,7 @@ import {
 } from 'lucide-react'
 import { useAppStore } from '@/stores/app-store'
 import { AiMarkdown } from '@/features/agent/AiMarkdown'
+import { MessageCopyButton } from '@/features/agent/MessageCopyButton'
 import { TerminalView } from '@/features/terminal/TerminalView'
 import { cn } from 'cn'
 import type {
@@ -319,7 +319,15 @@ function ReasoningPanel({ text, streaming }: { text: string; streaming: boolean 
   )
 }
 
-/** 单条消息：用户气泡 / 助手（Markdown + 工具卡） */
+/** 取消息里的文本段拼成字符串（sep 用于把多段隔开：用户原文不留空行，Markdown 留空行） */
+function textOf(parts: AgentChatMessage['parts'], sep: string): string {
+  return parts
+    .filter((p) => p.type === 'text')
+    .map((p) => (p.type === 'text' ? p.text : ''))
+    .join(sep)
+}
+
+/** 单条消息：用户气泡 / 助手（Markdown + 工具卡），两者都可选中、都可一键复制 */
 function MessageBubble({
   message,
   streaming,
@@ -329,39 +337,22 @@ function MessageBubble({
   streaming?: boolean
   pendingConfirm: AgentConfirmRequest | null
 }) {
-  const [copied, setCopied] = useState(false)
-
   if (message.role === 'user') {
-    const text = message.parts
-      .filter((p) => p.type === 'text')
-      .map((p) => (p.type === 'text' ? p.text : ''))
-      .join('')
+    const text = textOf(message.parts, '')
     return (
-      <div className="flex justify-end">
-        <div className="max-w-[85%] whitespace-pre-wrap rounded-lg rounded-br-sm bg-primary px-3 py-2 text-[13px] text-white">
+      <div className="flex flex-col items-end gap-1">
+        {/* 选中态用半透明白：主色底 + 白字下，浏览器的默认蓝色选区会把字压得看不清 */}
+        <div className="max-w-[85%] selection:bg-white/25 whitespace-pre-wrap rounded-lg rounded-br-sm bg-primary px-3 py-2 text-[13px] text-white">
           {text}
         </div>
+        <MessageCopyButton text={text} />
       </div>
     )
   }
 
   const units = buildRenderUnits(message.parts)
-  const hasText = units.some((u) => u.kind === 'text')
-  const copyRaw = async () => {
-    const raw = message.parts
-      .filter((p) => p.type === 'text')
-      .map((p) => (p.type === 'text' ? p.text : ''))
-      .join('\n\n')
-      .trim()
-    if (!raw) return
-    try {
-      await navigator.clipboard.writeText(raw)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    } catch {
-      // 忽略
-    }
-  }
+  // 复制的是 Markdown 源码而不是渲染后的文本：代码块、链接等结构才能保留
+  const rawText = textOf(message.parts, '\n\n').trim()
 
   return (
     <div className="space-y-1">
@@ -393,17 +384,8 @@ function MessageBubble({
           <Loader2 className="size-3.5 animate-spin" /> 思考中...
         </div>
       )}
-      {!streaming && hasText && (
-        <button
-          type="button"
-          onClick={() => void copyRaw()}
-          title="复制原文（Markdown）"
-          className="inline-flex items-center gap-1 rounded p-1 text-[10px] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-        >
-          {copied ? <Check className="size-3 text-green-500" /> : <Copy className="size-3" />}
-          {copied ? '已复制' : '复制'}
-        </button>
-      )}
+      {/* 生成中就露出复制按钮没有意义（内容还在变），一轮结束再显示 */}
+      {!streaming && <MessageCopyButton text={rawText} title="复制原文（Markdown）" />}
     </div>
   )
 }
@@ -829,7 +811,7 @@ export function AgentPage() {
       <div
         ref={scrollRef}
         onScroll={handleListScroll}
-        className="agent-scroll min-h-0 flex-1 overflow-y-auto py-4"
+        className="agent-scroll min-h-0 flex-1 select-text overflow-y-auto py-4"
       >
         {!active ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
