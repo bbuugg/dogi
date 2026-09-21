@@ -14,6 +14,7 @@ export { buildAgentTools }
 /** Agent 消息（渲染端历史的结构化镜像，与 @shared/types.AiChatMessage 同构） */
 export type AgentMessagePart =
   | { type: 'text'; text: string }
+  | { type: 'reasoning'; text: string }
   | { type: 'tool-call'; toolCallId: string; toolName: string; input: unknown }
   | {
       type: 'tool-result'
@@ -30,9 +31,10 @@ export interface AgentHistoryMessage {
   createdAt: number
 }
 
-/** 流事件（与 @shared/types.AiStreamEvent 同构） */
+/** 流事件（与 @shared/types.AiStreamEvent 同构；reasoning-delta 为思考内容增量） */
 export type AgentStreamEvent =
   | { type: 'text-delta'; delta: string }
+  | { type: 'reasoning-delta'; delta: string }
   | { type: 'tool-call'; toolCallId: string; toolName: string; input: unknown }
   | {
       type: 'tool-result'
@@ -100,6 +102,10 @@ export function adaptAgentPart(
   switch (part.type) {
     case 'text-delta':
       return { type: 'text-delta', delta: String(part.text ?? '') }
+    case 'reasoning':
+      // fullStream 的 reasoning part 同时带累积 text 与本次增量 textDelta，
+      // 用 textDelta 避免渲染端重复累积
+      return { type: 'reasoning-delta', delta: String(part.textDelta ?? part.text ?? '') }
     case 'tool-call':
       return {
         type: 'tool-call',

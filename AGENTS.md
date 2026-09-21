@@ -58,6 +58,7 @@
 
 - **约束**：项目已彻底移除 shadcn/ui（`src/renderer/src/components/ui/**` 与 `@radix-ui/*`、`radix-ui`、`vaul`、`sonner`、`class-variance-authority`、`clsx`、`tailwind-merge`、`shadcn`、`tw-animate-css` 依赖全部删除），组件一律用 antd 6。
 - **正确做法**：新增界面直接 `import { Button, Input, Modal, ... } from 'antd'`。全局通知用 `message` / `notification`（主题与中文由 `AntdProvider.tsx` 的 `holderRender` 接管）；`Select` 用 `options` + `onChange`（不是 `onValueChange`）；`Switch` 用 `onChange`（不是 `onCheckedChange`）；`Textarea` 用 `Input.TextArea`；`ContextMenu` 用 `<Dropdown trigger={['contextMenu']}>`。
+- **弹窗/确认一律用 antd 组件**：`Modal` / `Modal.confirm` / `Popconfirm` / `Dropdown` / `message` / `notification` 均可，按交互场景自选（行内小确认用 Popconfirm，居中/危险操作用 Modal.confirm）。**禁止原生 `window.confirm` / `alert`**——原生弹窗不跟随主题且会阻塞渲染进程。
 - **保留项**：`index.css` 里的 shadcn 语义变量（`--background/--foreground/--primary/--muted/--border/--sidebar*` 等）必须留着——它们既被全项目的 Tailwind 类名使用，也是 `AntdProvider` 映射 antd token 的来源。
 - **插件侧**：宿主通过 `activate(api)` 注入 `api.antd`（antd 全量模块）与 `api.cn`、`api.icons`、`api.MonacoEditor`，插件不得自行 import 依赖。
 
@@ -68,6 +69,7 @@
 - `createOpenAI()` 已无 `compatibility` 选项（v2/v3 有），OpenAI 兼容接口直接传 `baseURL` 即可。
 - **`provider(modelId)` 默认走 Responses API（/v1/responses），不是 chat/completions**：第三方兼容网关（Ollama/vLLM/one-api 等）普遍没实现该接口而报 404。需要 Chat Completions 时必须显式 `provider.chat(modelId)`；本项目通过 `AiModelConfig.apiStyle` 切换（见 `ai.ts` 的 `resolveModel`），`openai-compatible` kind 默认 `chat-completions`。
 - fullStream 事件字段：`text-delta` 是 `part.text`（v4 是 `textDelta`）、工具是 `input/output`（v4 是 `args/result`）。适配层见 `src/main/services/ai.ts` 的 `adaptPart`。
+- fullStream 的 `reasoning` part 同时带累积 `text` 与增量 `textDelta`：下发渲染端必须用 `textDelta`（渲染端自会累积），否则重复拼接。Agent 侧适配见 `packages/ai-agent/src/agent.ts` 的 `adaptAgentPart`，事件 `reasoning-delta` → part `{ type: 'reasoning', text }`；ACP 侧 `agent_thought_chunk` 同样映射为 `reasoning-delta`（见 `src/main/services/acp-agent.ts`）。
 - MCP 客户端已不在 `ai` 主包（v4 时代的 `experimental_createMCPClient` 已移除），用官方 `@modelcontextprotocol/sdk` 自行管理（见 `src/main/services/mcp.ts`），工具用 `dynamicTool + jsonSchema` 包装。
 - streamText 默认单步，自动工具循环需 `stopWhen: stepCountIs(N)`。
 

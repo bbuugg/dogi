@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { CloudDownload, Pencil, Plus, Star, Trash2 } from 'lucide-react'
 import type { AiApiStyle, AiModelConfig, AiProviderKind } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
-import { Button, Input, Modal, Select, Tag } from 'antd'
+import { Button, Input, Modal, Popconfirm, Select, Tag } from 'antd'
 
 const KIND_LABELS: Record<AiProviderKind, string> = {
   openai: 'OpenAI',
@@ -174,7 +174,6 @@ export function ModelSettings() {
   }
 
   const handleDelete = async (config: AiModelConfig) => {
-    if (!window.confirm(`确定删除模型配置「${config.name}」吗？`)) return
     await window.api.ai.deleteConfig(config.id)
     await refreshAiConfigs()
     // 主进程已重选激活项（或删除最后一项后置空），同步回渲染端，
@@ -239,14 +238,22 @@ export function ModelSettings() {
               title="编辑"
               onClick={() => openEdit(config)}
             />
-            <Button
-              icon={<Trash2 className="size-3.5" />}
-              size="small"
-              type="text"
-              className="w-7 p-0"
-              title="删除"
-              onClick={() => void handleDelete(config)}
-            />
+            <Popconfirm
+              title="删除模型配置"
+              description={`确定删除模型配置「${config.name}」吗？`}
+              okText="删除"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => handleDelete(config)}
+            >
+              <Button
+                icon={<Trash2 className="size-3.5" />}
+                size="small"
+                type="text"
+                className="w-7 p-0"
+                title="删除"
+              />
+            </Popconfirm>
           </div>
         ))}
       </div>

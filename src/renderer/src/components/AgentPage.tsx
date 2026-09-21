@@ -3,7 +3,9 @@ import { Button, Dropdown, Input, Select, Tooltip } from 'antd'
 import {
   Ban,
   Bot,
+  Brain,
   Check,
+  ChevronRight,
   Copy,
   FolderOpen,
   Loader2,
@@ -70,15 +72,25 @@ interface ToolUnit {
   result?: ToolResultPart
 }
 
-type RenderUnit = ToolUnit | { kind: 'text'; text: string }
+type RenderUnit =
+  | ToolUnit
+  | { kind: 'text'; text: string }
+  | { kind: 'reasoning'; text: string }
 
-/** 把消息 parts 整理为渲染单元：文本独立成块；tool-call 与对应 tool-result 按 toolCallId 合并 */
+/** 把消息 parts 整理为渲染单元：文本独立成块；reasoning 连续合并为一块；tool-call 与对应 tool-result 按 toolCallId 合并 */
 function buildRenderUnits(parts: AgentMessagePart[]): RenderUnit[] {
   const units: RenderUnit[] = []
   const toolsById = new Map<string, ToolUnit>()
   for (const part of parts) {
     if (part.type === 'text') {
       units.push({ kind: 'text', text: part.text })
+    } else if (part.type === 'reasoning') {
+      const last = units[units.length - 1]
+      if (last?.kind === 'reasoning') {
+        last.text += part.text
+      } else {
+        units.push({ kind: 'reasoning', text: part.text })
+      }
     } else if (part.type === 'tool-call') {
       const unit: ToolUnit = { kind: 'tool', call: part }
       toolsById.set(part.toolCallId, unit)
@@ -215,6 +227,82 @@ function ToolPartCard({
   )
 }
 
+/**
+ * 思考过程面板（参考 ainav/sdk 的 ReasoningPanel）：
+ * - 流式：spinner + 「思考中」高亮 + 单行实时预览（自动滚动），不显示箭头；
+ * - 完成：脑图标 + 「思考过程」，右侧箭头可展开/收起完整内容；
+ * - 展开体流式期间自动吸底（用户上滚则暂停跟随）。
+ */
+function ReasoningPanel({ text, streaming }: { text: string; streaming: boolean }) {
+  const [open, setOpen] = useState(false)
+  const lineRef = useRef<HTMLDivElement>(null)
+  const bodyRef = useRef<HTMLDivElement>(null)
+  const stick = useRef(true)
+
+  // 流式时单行预览自动滚到最新内容
+  useEffect(() => {
+    if (streaming && lineRef.current) {
+      lineRef.current.scrollTop = lineRef.current.scrollHeight
+    }
+  }, [text, streaming])
+
+  // 展开体流式时自动吸底（用户上滚则暂停跟随）
+  useEffect(() => {
+    if (streaming && open && bodyRef.current && stick.current) {
+      bodyRef.current.scrollTop = bodyRef.current.scrollHeight
+    }
+  }, [text, streaming, open])
+
+  return (
+    <div className="my-1.5 rounded-md border border-border/70 bg-muted/30 text-xs">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-muted-foreground hover:text-foreground"
+      >
+        {streaming ? (
+          <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />
+        ) : (
+          <Brain className="size-3.5 shrink-0 text-muted-foreground" />
+        )}
+        <span
+          className={cn('shrink-0 font-medium', streaming && 'text-primary')}
+        >
+          {streaming ? '思考中' : '思考过程'}
+        </span>
+        {!open && streaming && (
+          <span
+            ref={lineRef}
+            className="min-w-0 flex-1 overflow-hidden whitespace-nowrap font-mono text-[10px] text-muted-foreground"
+          >
+            {text}
+          </span>
+        )}
+        {!streaming && (
+          <ChevronRight
+            className={cn(
+              'ml-auto size-3.5 shrink-0 text-muted-foreground/60 transition-transform',
+              open && 'rotate-90'
+            )}
+          />
+        )}
+      </button>
+      {open && (
+        <div
+          ref={bodyRef}
+          onScroll={() => {
+            const el = bodyRef.current
+            if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 24
+          }}
+          className="max-h-60 overflow-y-auto whitespace-pre-wrap border-t border-border/70 px-2 py-1.5 text-[11px] leading-relaxed text-muted-foreground"
+        >
+          {text}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** 单条消息：用户气泡 / 助手（Markdown + 工具卡） */
 function MessageBubble({
   message,
@@ -269,6 +357,12 @@ function MessageBubble({
               <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-primary align-middle" />
             )}
           </div>
+        ) : unit.kind === 'reasoning' ? (
+          <ReasoningPanel
+            key={i}
+            text={unit.text}
+            streaming={!!streaming && i === units.length - 1}
+          />
         ) : (
           <ToolPartCard
             key={i}

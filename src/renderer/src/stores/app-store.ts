@@ -229,6 +229,13 @@ function appendAgentPart(parts: AgentChatMessage['parts'], event: AgentStreamEve
     } else {
       next.push({ type: 'text', text: event.delta })
     }
+  } else if (event.type === 'reasoning-delta') {
+    const last = next[next.length - 1]
+    if (last?.type === 'reasoning') {
+      next[next.length - 1] = { type: 'reasoning', text: last.text + event.delta }
+    } else {
+      next.push({ type: 'reasoning', text: event.delta })
+    }
   } else if (event.type === 'tool-call') {
     next.push({
       type: 'tool-call',

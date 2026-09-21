@@ -1,5 +1,5 @@
 import type { McpServerConfig } from '@shared/types'
-import { Button, Input, Modal, Switch, Tag } from 'antd'
+import { Button, Input, Modal, Popconfirm, Switch, Tag } from 'antd'
 import { Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
@@ -94,7 +94,6 @@ export function McpSettings() {
   }
 
   const handleDelete = async (server: McpStatus) => {
-    if (!window.confirm(`确定删除 MCP 服务「${server.name}」吗？`)) return
     await window.api.mcp.remove(server.id)
     await load()
   }
@@ -180,16 +179,24 @@ export function McpSettings() {
           >
             编辑
           </Button>
-          <Button
-            size="small"
-            type="text"
-            className="w-7 p-0"
-            icon={<Trash2 className="size-3.5" />}
-            title="删除"
-            onClick={() => void handleDelete(server)}
+          <Popconfirm
+            title="删除 MCP 服务"
+            description={`确定删除 MCP 服务「${server.name}」吗？`}
+            okText="删除"
+            cancelText="取消"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => handleDelete(server)}
           >
-            删除
-          </Button>
+            <Button
+              size="small"
+              type="text"
+              className="w-7 p-0"
+              icon={<Trash2 className="size-3.5" />}
+              title="删除"
+            >
+              删除
+            </Button>
+          </Popconfirm>
         </div>
       ))}
 

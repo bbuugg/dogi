@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Pencil, Plus, ScanSearch, Star, Trash2 } from 'lucide-react'
 import type { AcpAgentConfig, DetectedAcpAgent } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
-import { Button, Input, Modal } from 'antd'
+import { Button, Input, Modal, Popconfirm } from 'antd'
 
 interface FormState {
   id: string
@@ -88,7 +88,6 @@ export function AcpAgentSettings() {
   }
 
   const handleDelete = async (config: AcpAgentConfig) => {
-    if (!window.confirm(`确定删除 ACP agent 配置「${config.name}」吗？`)) return
     await commit(acpAgents.filter((a) => a.id !== config.id))
   }
 
@@ -218,14 +217,22 @@ export function AcpAgentSettings() {
             title="编辑"
             onClick={() => openEdit(config)}
           />
-          <Button
-            icon={<Trash2 className="size-3.5" />}
-            size="small"
-            type="text"
-            className="w-7 p-0"
-            title="删除"
-            onClick={() => void handleDelete(config)}
-          />
+          <Popconfirm
+            title="删除 ACP agent 配置"
+            description={`确定删除 ACP agent 配置「${config.name}」吗？`}
+            okText="删除"
+            cancelText="取消"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => handleDelete(config)}
+          >
+            <Button
+              icon={<Trash2 className="size-3.5" />}
+              size="small"
+              type="text"
+              className="w-7 p-0"
+              title="删除"
+            />
+          </Popconfirm>
         </div>
       ))}
 

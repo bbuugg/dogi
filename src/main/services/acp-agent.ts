@@ -114,6 +114,11 @@ function toStreamEvent(update: SessionUpdate): AgentStreamEvent | null {
       return update.content.type === 'text'
         ? { type: 'text-delta', delta: update.content.text }
         : null
+    case 'agent_thought_chunk':
+      // agent 的思考过程（如 codex-acp 的 thinking 输出），渲染端显示为推理面板
+      return update.content.type === 'text'
+        ? { type: 'reasoning-delta', delta: update.content.text }
+        : null
     case 'tool_call':
       return {
         type: 'tool-call',

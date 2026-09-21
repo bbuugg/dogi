@@ -41,16 +41,16 @@ export interface Activity {
 
 export const BUILTIN_ACTIVITIES: Activity[] = [
   {
-    id: AGENT_ACTIVITY_ID,
-    label: 'AI Agent',
-    icon: Bot,
-    panel: AgentPanel
-  },
-  {
     id: HOSTS_ACTIVITY_ID,
     label: '主机',
     icon: Server,
     panel: HostsPanel
+  },
+  {
+    id: AGENT_ACTIVITY_ID,
+    label: 'AI Agent',
+    icon: Bot,
+    panel: AgentPanel
   },
   {
     id: SCRIPTS_ACTIVITY_ID,
