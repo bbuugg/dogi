@@ -125,3 +125,18 @@
 - **正确做法**：zoom 复位只放在 ① 窗口创建后（loadFile 之前，无害）；② `ready-to-show` 里 `show()` 之后；③ `did-finish-load` 里仅当 `mainWindow.isVisible()` 时执行（reload 场景）。见 `src/main/index.ts` createWindow。
 - **验证方式**：`npm run build` 后 `electron .` 应出现窗口；也可用 Win32 `EnumWindows + IsWindowVisible` 脚本断言主窗口 `visible=True`。
 - **排查技巧**：这种"进程在、无窗口"的问题，主进程 stderr 往往完全干净（err.log 空）。给 main 加 `console.error` 诊断事件时序（did-finish-load / ready-to-show / 强制 show）是最快定位手段。
+
+### 18. spawn 外部 GUI 程序时 windowsHide: true 会隐藏窗口
+
+- **触发信号**：`opener.ts` 的 `openFileManagerAt` 返回 `{ ok: true }` 但资源管理器窗口不出现；IDE/外部终端同理。
+- **根因/约束**：`windowsHide: true` 会设置 `STARTF_USESHOWWINDOW | SW_HIDE`，explorer.exe 等 GUI 程序会**继承该显示标志**，spawn 成功但新窗口被隐藏（无任何报错）。
+- **正确做法**：打开外部 GUI 程序（explorer / IDE / 终端窗口）时不要传 `windowsHide: true`，只用 `{ detached: true, stdio: 'ignore' }` + `unref()`。见 `src/main/services/opener.ts` 的 `launch`。
+- **验证方式**：调用前后对比 `Get-Process explorer | ? MainWindowHandle -ne 0` 的窗口列表，应有新增窗口（或用 MainWindowHandle 从 0 → 非 0 断言）。
+- **注意**：PowerShell 里 taskkill 用单斜杠 `taskkill /F /IM electron.exe`；双斜杠（Git Bash 转义语法）在 PowerShell 下无效、静默失败，导致旧实例残留占用调试端口。
+
+### 19. antd 6 Select 的 options 不再支持 type:'divider'
+
+- **触发信号**：模型下拉（Agent 输入框左下角）里出现一个空白的选项行，Dropdown 菜单里的 divider 则正常。
+- **根因/约束**：`type: 'divider'` 是 antd 5.10 给 Select options 加的写法，antd 6 已移除支持，该项会被当作普通 option 渲染（无 value 无 label → 空行）。**Dropdown 的 menu items 里的 divider 仍受支持**，两者别混。
+- **正确做法**：Select options 需要分组时用 `{ label: '组名', options: [...] }` 结构（渲染为组头）；不要用 divider。
+- **验证方式**：打开下拉，`.ant-select-item-option` 的 textContent 不应有空串；`rg "type: 'divider'" src` 中出现在 Select options 里的都是漏网之鱼（Dropdown menu 里的合法）。

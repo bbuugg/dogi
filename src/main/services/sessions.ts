@@ -61,13 +61,15 @@ class LocalSession implements InternalSession {
     shell: { command: string; args?: string[]; title: string },
     profileId?: string,
     /** 终端启动后自动执行的命令 */
-    autoCommand?: string
+    autoCommand?: string,
+    /** 终端工作目录，缺省为用户主目录 */
+    cwd?: string
   ) {
     this.proc = pty.spawn(shell.command, shell.args ?? [], {
       name: TERM_TYPE,
       cols,
       rows,
-      cwd: os.homedir(),
+      cwd: cwd ?? os.homedir(),
       // 传 null 让 onData 返回原始 Buffer，保留 ZMODEM 等二进制协议的字节保真
       encoding: null,
       env: { ...stripUndefined(process.env), TERM: TERM_TYPE, COLORTERM: 'truecolor' }
@@ -410,7 +412,7 @@ class SessionManager extends EventEmitter {
     return this.lastActiveId
   }
 
-  createLocal(cols = 80, rows = 24, shellId?: string): SessionInfo {
+  createLocal(cols = 80, rows = 24, shellId?: string, cwd?: string): SessionInfo {
     const id = crypto.randomUUID()
     const shell = resolveLocalShell(shellId)
     const session = new LocalSession(
@@ -421,7 +423,10 @@ class SessionManager extends EventEmitter {
         onData: (data) => this.handleData(id, data),
         onExit: (code) => this.handleExit(id, code)
       },
-      { command: shell.command, args: shell.args, title: shell.title }
+      { command: shell.command, args: shell.args, title: shell.title },
+      undefined,
+      undefined,
+      cwd
     )
     this.attach(id, session)
     return { ...session.info }

@@ -9,6 +9,7 @@ import { agentService } from './services/agent'
 import { acpAgentService } from './services/acp-agent'
 import { detectInstalledAcpAgents } from './services/acp-detect'
 import { mcpManager } from './services/mcp'
+import { listInstalledIdes, openFileManagerAt, openIdeWith, openTerminalAt } from './services/opener'
 import { pluginHost } from './services/plugins'
 import { executeHttp } from './services/http'
 import { wsService } from './services/ws'
@@ -96,10 +97,10 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   ipcMain.handle('terminal:listShells', () => detectShells())
   ipcMain.handle(
     'terminal:createLocal',
-    (_e, cols?: number, rows?: number, shellId?: string) => {
+    (_e, cols?: number, rows?: number, shellId?: string, cwd?: string) => {
       // 未显式指定 shell 时使用偏好设置中的默认本地终端（'default' = 平台默认）
       const id = shellId || storage.getPreferences().localShell
-      return sessionManager.createLocal(cols, rows, id)
+      return sessionManager.createLocal(cols, rows, id, cwd)
     }
   )
   ipcMain.handle('terminal:createSsh', (_e, profileId: string, cols?: number, rows?: number) => {
@@ -468,4 +469,10 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   }))
   // 终端中点击链接时使用：按安全协议过滤后由系统默认程序打开
   ipcMain.handle('app:openExternal', (_e, url: string) => openExternalSafe(url))
+
+  // ---------- 系统打开（文件管理器 / 终端 / IDE，平台差异见 opener.ts） ----------
+  ipcMain.handle('shell:openFileManager', (_e, dir: string) => openFileManagerAt(dir))
+  ipcMain.handle('shell:openTerminal', (_e, dir: string) => openTerminalAt(dir))
+  ipcMain.handle('shell:listIdes', () => listInstalledIdes())
+  ipcMain.handle('shell:openIde', (_e, ideId: string, dir: string) => openIdeWith(ideId, dir))
 }

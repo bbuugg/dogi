@@ -649,6 +649,22 @@ export interface AppInfo {
   platform: string
 }
 
+/** 系统已安装 IDE 的启动信息（由主进程按平台探测：Windows/macOS/Linux 路径与 PATH 命令） */
+export interface IdeInfo {
+  id: string
+  name: string
+  /** 可直接 spawn 的命令（完整路径，或 PATH 内命令名） */
+  command: string
+  /** 固定前置参数（如 macOS 的 open -a <app>）；打开目录时在末尾追加目录参数 */
+  args?: string[]
+}
+
+/** 系统打开操作的结果（openFileManager / openTerminal / openIde 共用） */
+export interface OpenResult {
+  ok: boolean
+  error?: string
+}
+
 /** 单块磁盘/分区的使用情况 */
 export interface DiskUsage {
   mount: string

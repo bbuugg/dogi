@@ -18,10 +18,12 @@ import type {
   ApiRequestEntry,
   AppInfo,
   DetectedAcpAgent,
+  IdeInfo,
   McpServerConfig,
   McpToolInfo,
   NoteEntry,
   NoteGroup,
+  OpenResult,
   Preferences,
   ScriptEntry,
   ScriptGroup,
@@ -58,8 +60,8 @@ const api = {
     list: (): Promise<SessionInfo[]> => ipcRenderer.invoke('terminal:list'),
     /** 检测本地可用 shell（含平台默认 id） */
     listShells: (): Promise<ShellDetectResult> => ipcRenderer.invoke('terminal:listShells'),
-    createLocal: (cols?: number, rows?: number, shellId?: string): Promise<SessionInfo> =>
-      ipcRenderer.invoke('terminal:createLocal', cols, rows, shellId),
+    createLocal: (cols?: number, rows?: number, shellId?: string, cwd?: string): Promise<SessionInfo> =>
+      ipcRenderer.invoke('terminal:createLocal', cols, rows, shellId, cwd),
     createSsh: (profileId: string, cols?: number, rows?: number): Promise<SessionInfo> =>
       ipcRenderer.invoke('terminal:createSsh', profileId, cols, rows),
     /** 按主机配置创建会话：主进程根据主机类型（ssh/local）决定启动方式 */
@@ -346,6 +348,16 @@ const api = {
   dialog: {
     open: (options: unknown): Promise<{ canceled: boolean; filePaths: string[] }> =>
       ipcRenderer.invoke('dialog:open', options)
+  },
+  /** 系统打开：文件管理器 / 终端 / 已安装 IDE（平台差异由主进程处理） */
+  shell: {
+    openFileManager: (dir: string): Promise<OpenResult> =>
+      ipcRenderer.invoke('shell:openFileManager', dir),
+    openTerminal: (dir: string): Promise<OpenResult> =>
+      ipcRenderer.invoke('shell:openTerminal', dir),
+    listIdes: (): Promise<IdeInfo[]> => ipcRenderer.invoke('shell:listIdes'),
+    openIde: (ideId: string, dir: string): Promise<OpenResult> =>
+      ipcRenderer.invoke('shell:openIde', ideId, dir)
   }
 }
 

@@ -1,12 +1,24 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Button, Dropdown, Input, Select, Tooltip } from 'antd'
+import {
+  type PointerEvent as ReactPointerEvent,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState
+} from 'react'
+import { Button, Dropdown, Input, Select, Tooltip, message } from 'antd'
+import type { MenuProps } from 'antd'
 import {
   Ban,
   Bot,
   Brain,
   Check,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
+  Code2,
   Copy,
+  ExternalLink,
   FolderOpen,
   Loader2,
   Send,
@@ -14,17 +26,21 @@ import {
   ShieldCheck,
   Square,
   Terminal,
-  Trash2,
   X
 } from 'lucide-react'
 import { useAppStore } from '@/stores/app-store'
 import { AiMarkdown } from '@/components/AiMarkdown'
+import { TerminalView } from '@/components/TerminalView'
 import { cn } from 'cn'
 import type {
   AgentChatMessage,
   AgentConfirmRequest,
   AgentMessagePart,
-  AiPermissionMode
+  AiPermissionMode,
+  IdeInfo,
+  OpenResult,
+  SessionInfo,
+  ShellProfile
 } from '@shared/types'
 
 /** 模型下拉里 ACP 后端的特殊选项值 */
@@ -395,6 +411,91 @@ function MessageBubble({
 /** 稳定的空消息数组：避免每次渲染新引用导致滚动 effect 误触发 */
 const NO_MESSAGES: AgentChatMessage[] = []
 
+/** Agent 工作区内嵌终端：标题栏（路径 + 折叠/关闭），主体复用 TerminalView，高度可拖拽调整 */
+function EmbeddedTerminal({
+  session,
+  path,
+  onClose
+}: {
+  session: SessionInfo
+  path: string
+  onClose: () => void
+}) {
+  const [collapsed, setCollapsed] = useState(false)
+  const [height, setHeight] = useState(200)
+
+  // 拖拽标题栏上方的分隔条调整终端高度（TerminalView 的 ResizeObserver 会自动重新 fit）；
+  // 终端位于页面底部，向上拖 = 面板变高，所以高度增量取 deltaY 的相反数
+  const startDrag = (e: ReactPointerEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    const startY = e.clientY
+    const startHeight = height
+    const move = (ev: PointerEvent) => {
+      const next = startHeight - (ev.clientY - startY)
+      setHeight(Math.max(96, Math.min(480, next)))
+    }
+    const up = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+    document.body.style.cursor = 'row-resize'
+    document.body.style.userSelect = 'none'
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+
+  return (
+    <div className="shrink-0 border-t border-border/70 bg-background">
+      {/* 高度拖拽条：位于终端标题栏（横条）上方 */}
+      <div
+        onPointerDown={startDrag}
+        title="拖动调整高度"
+        className="group/resize relative z-10 -my-1 h-2 shrink-0 cursor-row-resize"
+      >
+        <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-border transition-colors group-hover/resize:bg-primary" />
+      </div>
+      <div className="flex h-8 shrink-0 items-center gap-1.5 px-3">
+        <Terminal className="size-3.5 shrink-0 text-muted-foreground" />
+        <span
+          className="min-w-0 truncate font-mono text-[11px] text-muted-foreground"
+          title={path}
+        >
+          终端 · {path}
+        </span>
+        <div className="ml-auto flex items-center gap-0.5">
+          <Tooltip title={collapsed ? '展开终端' : '收起终端'}>
+            <Button
+              type="text"
+              size="small"
+              className="px-1.5 text-muted-foreground"
+              icon={collapsed ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}
+              onClick={() => setCollapsed((v) => !v)}
+            />
+          </Tooltip>
+          <Tooltip title="关闭终端">
+            <Button
+              type="text"
+              size="small"
+              className="px-1.5 text-muted-foreground"
+              icon={<X className="size-3.5" />}
+              onClick={onClose}
+            />
+          </Tooltip>
+        </div>
+      </div>
+      {/* 折叠用 hidden 而非卸载：xterm 重建会丢会话输出（terminal:data 无回放） */}
+      <div
+        className={cn('px-2 pb-2', collapsed && 'hidden')}
+        style={collapsed ? undefined : { height }}
+      >
+        <TerminalView session={session} isActive />
+      </div>
+    </div>
+  )
+}
+
 /**
  * Agent 主界面：类 Claude Code 的工作区编程助手。
  * 上方是对话流（文本 + 工具卡），底部大输入框，Enter 发送 / Shift+Enter 换行。
@@ -439,12 +540,132 @@ export function AgentPage() {
   })
   const sendAgentMessage = useAppStore((s) => s.sendAgentMessage)
   const abortAgent = useAppStore((s) => s.abortAgent)
-  const clearAgentMessages = useAppStore((s) => s.clearAgentMessages)
   const selectAgentWorkspace = useAppStore((s) => s.selectAgentWorkspace)
 
   const [input, setInput] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
   const nearBottomRef = useRef(true)
+
+  // 内嵌终端（在输入框下方）：绑定打开时的工作区目录，切换工作区不影响已开的终端
+  const [term, setTerm] = useState<{ session: SessionInfo; path: string } | null>(null)
+  const closeEmbeddedTerminal = useCallback(() => {
+    setTerm((cur) => {
+      if (cur) void window.api.terminal.kill(cur.session.id)
+      return null
+    })
+  }, [])
+
+  // 已探测到的 IDE 列表（打开下拉里展示；探测失败仅静默降级）
+  const [ides, setIdes] = useState<IdeInfo[]>([])
+  const [idesLoaded, setIdesLoaded] = useState(false)
+  useEffect(() => {
+    if (idesLoaded) return
+    let alive = true
+    void window.api.shell.listIdes().then((list) => {
+      if (!alive) return
+      setIdes(list)
+      setIdesLoaded(true)
+    })
+    return () => {
+      alive = false
+    }
+  }, [idesLoaded])
+
+  // 可用终端列表（终端按钮右侧下拉：选择用哪个终端打开）
+  const [shells, setShells] = useState<ShellProfile[]>([])
+  const [shellsLoaded, setShellsLoaded] = useState(false)
+  useEffect(() => {
+    if (shellsLoaded) return
+    let alive = true
+    void window.api.terminal.listShells().then((res) => {
+      if (!alive) return
+      setShells(res.shells)
+      setShellsLoaded(true)
+    })
+    return () => {
+      alive = false
+    }
+  }, [shellsLoaded])
+
+  const handleOpen = useCallback(
+    async (action: () => Promise<OpenResult>, successText: string) => {
+      const r = await action()
+      if (r.ok) {
+        message.success(successText)
+      } else {
+        message.error(r.error ?? '打开失败')
+      }
+    },
+    []
+  )
+
+  /** 「打开」下拉菜单：文件管理器 / 已探测到的 IDE（终端是独立按钮，见顶栏） */
+  const openMenuItems: MenuProps['items'] = [
+    {
+      key: 'file-manager',
+      icon: <FolderOpen className="size-3.5" />,
+      label: '打开文件管理器'
+    },
+    ...(ides.length > 0
+      ? [
+          { type: 'divider' as const },
+          ...ides.map((ide) => ({
+            key: `ide:${ide.id}`,
+            icon: <Code2 className="size-3.5" />,
+            label: `用 ${ide.name} 打开`
+          }))
+        ]
+      : [])
+  ]
+
+  const handleOpenMenuClick: MenuProps['onClick'] = async ({ key, domEvent }) => {
+    if (!active) return
+    domEvent.stopPropagation()
+    const dir = active.path
+    if (key === 'file-manager') {
+      await handleOpen(() => window.api.shell.openFileManager(dir), `已打开：${dir}`)
+    } else if (key.startsWith('ide:')) {
+      const ide = ides.find((i) => i.id === key.slice(4))
+      if (!ide) return
+      await handleOpen(() => window.api.shell.openIde(ide.id, dir), `已用 ${ide.name} 打开：${dir}`)
+    }
+  }
+
+  /** 终端按钮：在输入框下方内嵌显示/关闭终端（在当前工作区目录启动） */
+  const handleToggleTerminal = useCallback(async () => {
+    if (term) {
+      closeEmbeddedTerminal()
+      return
+    }
+    if (!active) return
+    try {
+      const session = await window.api.terminal.createLocal(undefined, undefined, undefined, active.path)
+      setTerm({ session, path: active.path })
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '终端打开失败')
+    }
+  }, [term, active, closeEmbeddedTerminal])
+
+  /** 终端下拉：选择用哪个终端（shell）打开；已打开时切换为新 shell */
+  const shellMenuItems: MenuProps['items'] = shells.map((s) => ({
+    key: s.id,
+    icon: <Terminal className="size-3.5" />,
+    label: s.name
+  }))
+
+  const handleShellSelect: MenuProps['onClick'] = async ({ key, domEvent }) => {
+    if (!active) return
+    domEvent.stopPropagation()
+    const shell = shells.find((s) => s.id === key)
+    if (!shell) return
+    if (term) void window.api.terminal.kill(term.session.id)
+    try {
+      const session = await window.api.terminal.createLocal(undefined, undefined, shell.id, active.path)
+      setTerm({ session, path: active.path })
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '终端打开失败')
+    }
+  }
 
   /** 模型下拉选中值：ACP 后端显示预置配置，内置后端显示模型配置 */
   const modelSelectValue =
@@ -472,24 +693,36 @@ export function AgentPage() {
     void setAgentWorkspaceBackend(activeId, 'ai-sdk')
   }
 
+  // antd 6 的 Select 不再支持 options 里的 type:'divider'（会渲染成空选项行），改用分组
   const modelOptions = [
-    ...aiConfigs.map((c) => ({
-      value: c.id,
-      label: `${c.name}（${c.model}）`
-    })),
-    { type: 'divider' as const, key: 'acp-divider' },
-    ...acpAgents.map((a) => ({
-      value: `acp:${a.id}`,
-      label: a.name,
-      icon: <Bot className="size-3.5" />
-    })),
-    ...(activeAcp
-      ? []
-      : [{ value: ACP_OPTION, label: '外部 ACP agent', icon: <Bot className="size-3.5" /> }]),
+    ...(aiConfigs.length > 0
+      ? [
+          {
+            label: 'AI 模型',
+            options: aiConfigs.map((c) => ({
+              value: c.id,
+              label: `${c.name}（${c.model}）`
+            }))
+          }
+        ]
+      : []),
     {
-      value: ACP_MANAGE_OPTION,
-      label: acpAgents.length ? '管理 ACP agent…' : '配置 ACP agent…',
-      icon: <Settings className="size-3.5" />
+      label: 'Agent',
+      options: [
+        ...acpAgents.map((a) => ({
+          value: `acp:${a.id}`,
+          label: a.name,
+          icon: <Bot className="size-3.5" />
+        })),
+        ...(activeAcp
+          ? []
+          : [{ value: ACP_OPTION, label: '外部 ACP agent', icon: <Bot className="size-3.5" /> }]),
+        {
+          value: ACP_MANAGE_OPTION,
+          label: acpAgents.length ? '管理 ACP agent…' : '配置 ACP agent…',
+          icon: <Settings className="size-3.5" />
+        }
+      ]
     }
   ]
 
@@ -537,17 +770,46 @@ export function AgentPage() {
           </>
         )}
         <div className="flex items-center gap-0.5">
-          {workspaces.length > 0 && activeId && (
-            <Tooltip title="清空当前工作区的对话">
-              <Button
-                type="text"
-                size="small"
-                className="px-1.5 text-muted-foreground"
-                icon={<Trash2 className="size-3.5" />}
-                disabled={messages.length === 0 || streaming}
-                onClick={() => void clearAgentMessages()}
-              />
-            </Tooltip>
+          {active && (
+            <>
+              <Tooltip title={term ? '关闭终端' : '打开终端'}>
+                <Button
+                  type="text"
+                  size="small"
+                  className="px-1.5 text-muted-foreground"
+                  icon={<Terminal className="size-3.5" />}
+                  onClick={() => void handleToggleTerminal()}
+                />
+              </Tooltip>
+              <Tooltip title="选择用哪个终端打开">
+                <Dropdown
+                  trigger={['click']}
+                  placement="bottomRight"
+                  menu={{ items: shellMenuItems, onClick: handleShellSelect }}
+                >
+                  <Button
+                    type="text"
+                    size="small"
+                    className="px-0.5 text-muted-foreground"
+                    icon={<ChevronDown className="size-3" />}
+                  />
+                </Dropdown>
+              </Tooltip>
+              <Tooltip title="打开工作区目录">
+                <Dropdown
+                  trigger={['click']}
+                  placement="bottomRight"
+                  menu={{ items: openMenuItems, onClick: handleOpenMenuClick }}
+                >
+                  <Button
+                    type="text"
+                    size="small"
+                    className="px-1.5 text-muted-foreground"
+                    icon={<ExternalLink className="size-3.5" />}
+                  />
+                </Dropdown>
+              </Tooltip>
+            </>
           )}
         </div>
       </div>
@@ -581,7 +843,7 @@ export function AgentPage() {
             </div>
           </div>
         ) : (
-          <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4">
+          <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-2">
             {messages.map((m, i) => (
               <MessageBubble
                 key={m.id}
@@ -706,6 +968,15 @@ export function AgentPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* 内嵌终端：位于输入框下方 */}
+      {active && term && (
+        <EmbeddedTerminal
+          session={term.session}
+          path={term.path}
+          onClose={closeEmbeddedTerminal}
+        />
       )}
     </div>
   )
