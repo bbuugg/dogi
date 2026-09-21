@@ -1,4 +1,21 @@
-import { create } from 'zustand'
+import { HOSTS_ACTIVITY_ID } from '@/activity-ids'
+import { parseCurl } from '@/lib/api-client'
+import {
+  firstGroupId,
+  genPaneId,
+  insertSibling,
+  makeLeaf,
+  removeLeaf,
+  updateSizes,
+  type PaneNode,
+  type SplitDirectionInput
+} from '@/lib/pane-layout'
+import { scriptToTerminalInput } from '@/lib/script'
+import { clampTerminalFontSize } from '@/lib/terminal-font'
+import { applyColorTheme } from '@/lib/theme'
+import type { PluginViewInstance } from '@/plugins/host'
+import type { PluginInfo } from '@shared/plugin'
+import { DEFAULT_SHORTCUTS, findShortcutByEvent } from '@shared/shortcuts'
 import type {
   AiChatMessage,
   AiConfirmRequest,
@@ -11,15 +28,16 @@ import type {
   ApiHistoryEntry,
   ApiProtocol,
   ApiRequestEntry,
+  AppShortcutAction,
   ColorThemeName,
   NoteEntry,
   NoteGroup,
   Preferences,
+  ScriptEntry,
+  ScriptGroup,
   ServerMetrics,
   SessionInfo,
   ShellDetectResult,
-  ScriptEntry,
-  ScriptGroup,
   ShortcutConfig,
   SshConnectProgress,
   SshGroup,
@@ -27,25 +45,7 @@ import type {
   TerminalThemeName,
   ThemeMode
 } from '@shared/types'
-import type { AppShortcutAction } from '@shared/types'
-import type { PluginInfo } from '@shared/plugin'
-import type { PluginViewInstance } from '@/plugins/host'
-import { DEFAULT_SHORTCUTS, findShortcutByEvent } from '@shared/shortcuts'
-import { HOSTS_ACTIVITY_ID, SCRIPTS_ACTIVITY_ID } from '@/activity-ids'
-import { clampTerminalFontSize } from '@/lib/terminal-font'
-import { parseCurl } from '@/lib/api-client'
-import { scriptToTerminalInput } from '@/lib/script'
-import { applyColorTheme } from '@/lib/theme'
-import {
-  firstGroupId,
-  genPaneId,
-  insertSibling,
-  makeLeaf,
-  removeLeaf,
-  updateSizes,
-  type PaneNode,
-  type SplitDirectionInput
-} from '@/lib/pane-layout'
+import { create } from 'zustand'
 
 /** PanelView 标签类型（终端会话也是其中一种，不再有独立的「终端」固定标签） */
 export type PanelTabType = 'terminal' | 'script' | 'note' | 'api' | 'plugins' | 'plugin'
