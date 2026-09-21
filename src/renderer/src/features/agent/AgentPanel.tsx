@@ -1,9 +1,18 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Input, Modal, message } from 'antd'
-import { Folder, FolderOpen, FolderPlus, Pencil, Plus, Trash2 } from 'lucide-react'
+import {
+  ChevronRight,
+  Folder,
+  FolderPlus,
+  MessageSquare,
+  MessageSquarePlus,
+  Pencil,
+  Plus,
+  Trash2
+} from 'lucide-react'
 import { useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'
-import type { AgentWorkspace } from '@shared/types'
+import type { AgentConversation, AgentWorkspace } from '@shared/types'
 
 /** 新建 / 重命名工作区表单 */
 interface WorkspaceEdit {
@@ -20,19 +29,64 @@ function defaultName(path: string): string {
 }
 
 /**
- * Agent 侧边栏：工作区列表（选中即作为 Agent 对话的绑定目录）。
- * 支持新建（选目录）/ 重命名 / 删除；选中项在主区域 AgentPage 展示对话。
+ * Agent 侧边栏：工作区 + 其下的会话列表（两层）。
+ *
+ * 一个工作区（绑定的本地目录）下可以有多个会话，每个会话是独立的消息历史与
+ * Agent 上下文（ACP 后端的 agent session 也按会话隔离）。
+ * 工作区行可展开/收起，展开后列出该工作区的会话：点击即切换，行尾可重命名 / 删除。
+ *
+ * 布局与交互对齐「主机 / 脚本」侧边栏，但这里只有两层、不需要拖拽排序。
  */
 export function AgentPanel() {
   const workspaces = useAppStore((s) => s.agentWorkspaces)
-  const activeId = useAppStore((s) => s.activeAgentWorkspaceId)
+  const conversations = useAppStore((s) => s.agentConversations)
+  const activeWorkspaceId = useAppStore((s) => s.activeAgentWorkspaceId)
+  const activeConversationId = useAppStore((s) => s.activeAgentConversationId)
   const selectAgentWorkspace = useAppStore((s) => s.selectAgentWorkspace)
+  const selectAgentConversation = useAppStore((s) => s.selectAgentConversation)
+  const createAgentConversation = useAppStore((s) => s.createAgentConversation)
+  const renameAgentConversation = useAppStore((s) => s.renameAgentConversation)
+  const deleteAgentConversation = useAppStore((s) => s.deleteAgentConversation)
   const saveAgentWorkspace = useAppStore((s) => s.saveAgentWorkspace)
   const deleteAgentWorkspace = useAppStore((s) => s.deleteAgentWorkspace)
 
+  /** 展开的工作区 id（收起后其会话列表隐藏） */
+  const [expanded, setExpanded] = useState<string[]>([])
   const [edit, setEdit] = useState<WorkspaceEdit | null>(null)
   const [pendingDelete, setPendingDelete] = useState<AgentWorkspace | null>(null)
+  /** 待重命名的会话（id 为空表示不处于重命名中） */
+  const [convRename, setConvRename] = useState<{ id: string; title: string } | null>(null)
+  const [pendingConvDelete, setPendingConvDelete] = useState<AgentConversation | null>(null)
   const [picking, setPicking] = useState(false)
+
+  /**
+   * 切换到**另一个**工作区时把它展开（从别处切过来也能立刻看到它的会话）。
+   *
+   * 只在 activeWorkspaceId 真的变化时动手：否则用户在同一工作区上手动收起后，
+   * 任何一次重渲染都会把它又撑开。
+   */
+  const prevActiveRef = useRef<string | null>(null)
+  useEffect(() => {
+    const changed = activeWorkspaceId !== prevActiveRef.current
+    prevActiveRef.current = activeWorkspaceId
+    if (!activeWorkspaceId || !changed) return
+    setExpanded((prev) => (prev.includes(activeWorkspaceId) ? prev : [...prev, activeWorkspaceId]))
+  }, [activeWorkspaceId])
+
+  /** 按工作区归类会话，组内按最近更新排序（最近在用的在最上面） */
+  const byWorkspace = useMemo(() => {
+    const map = new Map<string, AgentConversation[]>()
+    for (const c of conversations) {
+      const list = map.get(c.workspaceId) ?? []
+      list.push(c)
+      map.set(c.workspaceId, list)
+    }
+    for (const list of map.values()) list.sort((a, b) => b.updatedAt - a.updatedAt)
+    return map
+  }, [conversations])
+
+  const toggleExpand = (id: string) =>
+    setExpanded((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
 
   /** 打开系统目录选择框，回填路径（选了路径才允许保存） */
   const pickDir = async () => {
@@ -82,7 +136,31 @@ export function AgentPanel() {
     }
   }
 
-  const active = activeId ? workspaces.find((w) => w.id === activeId) : undefined
+  const submitConvRename = async () => {
+    const target = convRename
+    if (!target) return
+    setConvRename(null)
+    try {
+      await renameAgentConversation(target.id, target.title)
+    } catch (err) {
+      message.error(`重命名失败：${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  const confirmConvDelete = async () => {
+    const target = pendingConvDelete
+    if (!target) return
+    setPendingConvDelete(null)
+    try {
+      await deleteAgentConversation(target.id)
+    } catch (err) {
+      message.error(`删除失败：${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  /** 行尾小按钮统一样式：平时隐形，hover 所在行才浮现 */
+  const rowAction =
+    'rounded p-0.5 opacity-0 transition-opacity hover:bg-foreground/10 group-hover:opacity-100'
 
   return (
     <div className="flex h-full flex-col">
@@ -112,64 +190,147 @@ export function AgentPanel() {
         ) : (
           <div className="flex flex-col gap-0.5">
             {workspaces.map((w) => {
-              const isActive = w.id === activeId
+              const isActiveWs = w.id === activeWorkspaceId
+              const isExpanded = expanded.includes(w.id)
+              const list = byWorkspace.get(w.id) ?? []
               return (
-                <div
-                  key={w.id}
-                  onClick={() => selectAgentWorkspace(w.id)}
-                  className={cn(
-                    'group flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1.5 text-xs transition-colors',
-                    isActive
-                      ? 'bg-primary/15 text-foreground'
-                      : 'text-muted-foreground hover:bg-foreground/5 hover:text-foreground'
+                <div key={w.id}>
+                  <div
+                    onClick={() => {
+                      // 点整行 = 选中该工作区 + 切换它的会话列表展开状态，
+                      // 不必非得去点左边那个箭头
+                      selectAgentWorkspace(w.id)
+                      toggleExpand(w.id)
+                    }}
+                    className={cn(
+                      'group flex cursor-pointer items-center gap-1 rounded-md px-1.5 py-2 text-sm transition-colors',
+                      isActiveWs
+                        ? 'bg-primary/15 text-foreground'
+                        : 'text-muted-foreground hover:bg-foreground/5 hover:text-foreground'
+                    )}
+                    title={w.path}
+                  >
+                    <button
+                      type="button"
+                      title={isExpanded ? '收起会话' : '展开会话'}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        toggleExpand(w.id)
+                      }}
+                      className="shrink-0 rounded p-0.5 hover:bg-foreground/10"
+                    >
+                      <ChevronRight
+                        className={cn('size-4 transition-transform', isExpanded && 'rotate-90')}
+                      />
+                    </button>
+                    <Folder
+                      className={cn(
+                        'size-4 shrink-0',
+                        isActiveWs ? 'text-primary' : 'text-muted-foreground'
+                      )}
+                    />
+                    <span className="min-w-0 flex-1 truncate">{w.name}</span>
+                    <button
+                      type="button"
+                      title="新建会话"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        createAgentConversation(w.id)
+                        if (!isExpanded) toggleExpand(w.id)
+                      }}
+                      className={rowAction}
+                    >
+                      <MessageSquarePlus className="size-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      title="重命名工作区"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setEdit({ id: w.id, name: w.name, path: w.path })
+                      }}
+                      className={rowAction}
+                    >
+                      <Pencil className="size-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      title="删除工作区"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setPendingDelete(w)
+                      }}
+                      className={cn(rowAction, 'hover:bg-destructive/10 hover:text-destructive')}
+                    >
+                      <Trash2 className="size-3.5" />
+                    </button>
+                  </div>
+
+                  {/* 会话列表：嵌在工作区下方，左侧一条竖线表示从属关系 */}
+                  {isExpanded && (
+                    <div className="mt-0.5 ml-3.5 flex flex-col gap-0.5 border-l border-border/60 pl-1.5">
+                      {list.length === 0 && (
+                        <div className="px-1.5 py-1.5 text-xs text-muted-foreground/60">
+                          还没有会话，点右侧的「新建会话」图标开始
+                        </div>
+                      )}
+                      {list.map((c) => {
+                        const isActiveConv = c.id === activeConversationId && isActiveWs
+                        return (
+                          <div
+                            key={c.id}
+                            onClick={() => {
+                              selectAgentWorkspace(w.id)
+                              selectAgentConversation(c.id)
+                            }}
+                            className={cn(
+                              'group flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1.5 text-sm transition-colors',
+                              isActiveConv
+                                ? 'bg-primary/15 text-foreground'
+                                : 'text-muted-foreground hover:bg-foreground/5 hover:text-foreground'
+                            )}
+                            title={c.title}
+                          >
+                            <MessageSquare
+                              className={cn(
+                                'size-4 shrink-0',
+                                isActiveConv ? 'text-primary' : 'text-muted-foreground/70'
+                              )}
+                            />
+                            <span className="min-w-0 flex-1 truncate">{c.title}</span>
+                            <button
+                              type="button"
+                              title="重命名会话"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setConvRename({ id: c.id, title: c.title })
+                              }}
+                              className={rowAction}
+                            >
+                              <Pencil className="size-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              title="删除会话"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setPendingConvDelete(c)
+                              }}
+                              className={cn(rowAction, 'hover:bg-destructive/10 hover:text-destructive')}
+                            >
+                              <Trash2 className="size-3.5" />
+                            </button>
+                          </div>
+                        )
+                      })}
+                    </div>
                   )}
-                  title={w.path}
-                >
-                  <Folder
-                    className={cn('size-3.5 shrink-0', isActive ? 'text-primary' : 'text-muted-foreground')}
-                  />
-                  <span className="min-w-0 flex-1 truncate">{w.name}</span>
-                  <span className="text-[10px] text-muted-foreground/60">Agent</span>
-                  <button
-                    type="button"
-                    title="重命名"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      setEdit({ id: w.id, name: w.name, path: w.path })
-                    }}
-                    className="rounded p-0.5 opacity-0 transition-opacity hover:bg-foreground/10 group-hover:opacity-100"
-                  >
-                    <Pencil className="size-3" />
-                  </button>
-                  <button
-                    type="button"
-                    title="删除"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      setPendingDelete(w)
-                    }}
-                    className="rounded p-0.5 opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
-                  >
-                    <Trash2 className="size-3" />
-                  </button>
                 </div>
               )
             })}
           </div>
         )}
       </div>
-
-      {/* 当前选中工作区摘要（无选中时不显示） */}
-      {active && (
-        <div className="border-t border-border/60 px-3 py-2">
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <FolderOpen className="size-3.5 shrink-0" />
-            <span className="min-w-0 flex-1 truncate" title={active.path}>
-              {active.path}
-            </span>
-          </div>
-        </div>
-      )}
 
       {/* 新建 / 重命名工作区 */}
       <Modal
@@ -215,7 +376,46 @@ export function AgentPanel() {
         </div>
       </Modal>
 
-      {/* 删除确认 */}
+      {/* 重命名会话 */}
+      <Modal
+        open={convRename !== null}
+        onCancel={() => setConvRename(null)}
+        title="重命名会话"
+        okText="保存"
+        cancelText="取消"
+        centered
+        width={400}
+        destroyOnHidden
+        onOk={() => void submitConvRename()}
+      >
+        <Input
+          autoFocus
+          placeholder="会话标题"
+          value={convRename?.title ?? ''}
+          onChange={(e) => setConvRename((v) => (v ? { ...v, title: e.target.value } : v))}
+          onPressEnter={() => void submitConvRename()}
+        />
+      </Modal>
+
+      {/* 删除会话确认 */}
+      <Modal
+        open={pendingConvDelete !== null}
+        onCancel={() => setPendingConvDelete(null)}
+        title="删除会话？"
+        okText="删除"
+        cancelText="取消"
+        okButtonProps={{ danger: true }}
+        onOk={() => void confirmConvDelete()}
+        centered
+        width={420}
+        destroyOnHidden
+      >
+        <p className="text-sm text-muted-foreground">
+          「{pendingConvDelete?.title}」的对话记录将被删除，该操作不可撤销。
+        </p>
+      </Modal>
+
+      {/* 删除工作区确认 */}
       <Modal
         open={pendingDelete !== null}
         onCancel={() => setPendingDelete(null)}
@@ -229,7 +429,7 @@ export function AgentPanel() {
         destroyOnHidden
       >
         <p className="text-sm text-muted-foreground">
-          「{pendingDelete?.name}」及其对话记录将被移除（不会删除目录中的文件）。
+          「{pendingDelete?.name}」及其全部会话都将被移除（不会删除目录中的文件）。
         </p>
       </Modal>
     </div>

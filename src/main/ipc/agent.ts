@@ -2,7 +2,7 @@ import { ipcMain } from 'electron'
 import { agentService } from '../services/ai/agent'
 import { acpAgentService } from '../services/ai/acp-agent'
 import { storage } from '../services/storage'
-import type { AgentChatRequest, AgentStreamEvent } from '@shared/types'
+import type { AgentChatMessage, AgentChatRequest, AgentStreamEvent } from '@shared/types'
 import type { IpcContext } from './shared'
 
 /**
@@ -21,6 +21,19 @@ export function registerAgentIpc(ctx: IpcContext): void {
   )
   ipcMain.handle('agent:workspaces:delete', (_e, id: string) =>
     storage.deleteAgentWorkspace(id)
+  )
+
+  // ---------- 会话（一个工作区下可以有多个） ----------
+  ipcMain.handle('agent:conversations:list', () => storage.listAgentConversations())
+  ipcMain.handle(
+    'agent:conversations:save',
+    (
+      _e,
+      input: { id?: string; workspaceId: string; title?: string; messages?: AgentChatMessage[] }
+    ) => storage.saveAgentConversation(input)
+  )
+  ipcMain.handle('agent:conversations:delete', (_e, id: string) =>
+    storage.deleteAgentConversation(id)
   )
 
   ipcMain.handle('agent:chat', async (_e, req: AgentChatRequest) => {

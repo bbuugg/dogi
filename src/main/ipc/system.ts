@@ -55,4 +55,9 @@ export function registerSystemIpc(ctx: IpcContext): void {
   }))
   // 终端中点击链接时使用：按安全协议过滤后由系统默认程序打开
   ipcMain.handle('app:openExternal', (_e, url: string) => openExternalSafe(url))
+
+  // ---------- 首屏就绪 ----------
+  // 渲染端把「数据加载完 + 主题已应用」告诉主进程，主进程据此撤下启动画面。
+  // 用 send / on 而非 invoke：一次性单向通知，不需要回值。
+  ipcMain.on('app:ready', () => ctx.onRendererReady())
 }

@@ -584,6 +584,24 @@ export interface AgentChatMessage {
   createdAt: number
 }
 
+/**
+ * Agent 会话：一个工作区下可以有多个独立会话。
+ *
+ * 消息随会话一起持久化 —— 会话列表的意义就是能随时切回去接着聊，
+ * 而 ACP 后端的 agent 上下文按会话隔离（见 services/ai/acp-agent.ts）。
+ */
+export interface AgentConversation {
+  id: string
+  /** 所属工作区 id */
+  workspaceId: string
+  /** 标题（默认由首条用户消息截断生成，可重命名） */
+  title: string
+  /** 该会话的完整消息历史 */
+  messages: AgentChatMessage[]
+  createdAt: number
+  updatedAt: number
+}
+
 export type AgentMessagePart =
   | { type: 'text'; text: string }
   | { type: 'reasoning'; text: string }
@@ -601,9 +619,11 @@ export type AgentMessagePart =
       isError?: boolean
     }
 
-/** 发起 Agent 对话的请求体：绑定一个工作区（工具全部作用于该目录） */
+/** 发起 Agent 对话的请求体：绑定一个工作区（工具全部作用于该目录）+ 一个会话 */
 export interface AgentChatRequest {
   workspaceId: string
+  /** 会话 id：ACP 后端据此复用 / 新建独立的 agent session（不同会话不共享上下文） */
+  conversationId: string
   history: AgentChatMessage[]
 }
 

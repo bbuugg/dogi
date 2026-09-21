@@ -190,3 +190,26 @@
 - **正确做法**：插件渲染端只有一种形态 —— `plugin.json` 里 `renderer: "xxx.js"`（插件目录内的 ESM 源码文件名）。链路是：`pluginHost.getRendererCode()` 读源码 → 渲染端 blob URL 动态 `import` → 调用 `activate(api)` 注册视图。插件**不写 HTML、不写 preload**，界面直接用宿主注入的 `api.antd` / `api.icons` / `api.MonacoEditor` / `api.cn` 编写（见 `features/plugins/host.ts` 的 `RendererHostApi`）。要新增插件，照 `plugins/redis-client/` 的结构写即可（它只有 `plugin.json` + `main.js` + `renderer.js`）。
 - **本次一并删除的设施**：`plugin:webviewInfo` 通道与 `window.api.plugins.webviewInfo`、`PluginRenderer` 的联合类型、`PluginViewInstance.renderType/webviewEntry/webviewPreload`、`PanelView` 的 `PluginWebviewTab`、主进程 `webviewTag: true` 与「Toggle Webview Devtools」菜单、`scripts/build-plugins.mjs`、`scripts/create-plugin.mjs`、npm 脚本 `build:plugins` / `create:plugin`。
 - **验证方式**：`rg -i webview src scripts plugins` 应零命中（`node_modules/` 与 `out/` 里 monaco 自身的代码除外）；`npm run typecheck` 与三端构建通过；`plugins/redis-client` 能正常打开即为回归通过。
+
+### 24. Agent 是「工作区 → 多个会话」两层；消息只有一份真源
+
+- **触发信号**：要给 Agent 加对话相关能力（历史列表、导出、按会话统计），或发现消息在 store 里有维护两遍的迹象。
+- **根因/约束**：侧边栏 `AgentPanel` 是两层结构 —— 工作区（绑定的本地目录）可展开，下面列出它的**会话**（`AgentConversation`）。每个会话有独立的 `messages` 与 agent 上下文。三条硬约束：
+  1. **消息只有一份真源**：渲染端 `agentConversations`（含 messages）；`agentRuns: Record<conversationId, AgentRunState>` 只放 streaming / requestId / error。别再往 agentRuns 里塞 messages（旧形态 `agentChats` 就是一份消息两处维护）。
+  2. **落盘时机是「发消息时 + 一轮结束（finish / error）时」**，不是每个 token —— 每个 part 都写盘会让长回复反复序列化整段历史。新建的空会话只存在于内存，发出首条消息才写盘。
+  3. **ACP 后端的常驻连接按 conversationId 缓存**（`sessions: Map<conversationId, ConversationAcpSession>`，见 `services/ai/acp-agent.ts`）：同一工作区的两个会话必须各有独立 agent 上下文，共用连接会让两个会话串味。`AgentChatRequest` 因此带 `conversationId`。
+- **正确做法**：会话 CRUD 走 `agent:conversations:list/save/delete` 三个通道（save 返回**单个**会话，不回传全量 —— 会话带完整历史、体量可能很大）。切工作区用 `selectAgentWorkspace`，它会自动定位该工作区最近更新的会话、一个都没有就现建一个空会话；一切"当前会话"的判断读 `activeAgentConversationId`，不要再用 workspaceId 去索引消息。删除会话 / 工作区前先 `abortAgent(id)` 停掉在跑的请求，否则主进程的 agent 进程会变成孤儿。
+- **验证方式**：`rg "agentChats" src` 应无命中；同一工作区开两个会话分别对话，ACP 后端下应看到两个独立的 agent 进程（`disconnect` 一个不影响另一个）；重启应用后会话列表与消息仍在。
+
+### 25. 启动画面：主窗口要等「主题已应用」再显示
+
+- **触发信号**：启动时先看到一帧黑色 / 默认配色，再跳成设置里的配色；或想改主窗口的显示时机。
+- **根因/约束**：`index.html` 里的 `<html class="dark">` 是静态硬编码，而用户选的**配色主题**（`data-color-theme` / 自定义强调色）要等渲染端 `bootstrap()` 异步拿到 preferences 后由 `applyColorTheme()` 才应用。而主窗口原来的显示时机是 `ready-to-show` —— **它只代表「首帧已产出」，不代表主题已应用**，于是那一帧就被用户看到了。
+- **正确做法**：
+  - 主进程先亮启动画面（`createSplashWindow()`：360×240 无边框小窗，内容是 data URL 内联的 HTML，不引任何脚本）。**logo 用 `resolveIconPath()` 那张应用图标**（与窗口/托盘同一个文件），经 `nativeImage.createFromPath().toDataURL()` 内联；整段 HTML 走 `data:text/html;base64,...` 加载 —— 页面里嵌着图标的 data URL（含 `+ / =`），逐个转义不如一次 base64 省事。取不到图标时退回渐变方块（`splashLogoDataUrl()` 返回 null）。
+  - 渲染端在 `bootstrap()` 里「数据进 store + `applyColorTheme()` 之后」调 `window.api.app.ready()`（`ipcMain.on('app:ready')` → `IpcContext.onRendererReady`）。
+  - 主进程 `markRendererReady()` 收到后再压 `SPLASH_MIN_MS`(450ms) 才 `revealMainWindow()`，并且**必须同时满足 `ready-to-show` 已触发**，否则 show 出来的是一张空窗。先 show 主窗口、后销毁 splash，避免「两个窗口都没了」的瞬间。
+  - `SPLASH_TIMEOUT_MS`(8s) 兜底：渲染端永不报就绪（加载报错）也要放出主窗口，不能永远停在启动画面。重建窗口时 `rendererReady` / `windowReadyToShow` / `mainWindowRevealed` 三个标志都要复位。
+  - 复位 zoom 只能在 `show()` 之后（见第 16 条）。
+  - ⚠️ **不要用 `requestAnimationFrame` 等「渲染完这一帧」再报就绪**：此时窗口还是 `show: false`，Chromium 会节流甚至完全不触发隐藏窗口的 rAF，反而可能永远卡在启动画面。
+- **验证方式**：主进程会打印 `[splash] 启动画面已显示` 与 `[splash] 主窗口已显示，撤下启动画面`；两者之间应夹着 bootstrap / 插件加载的日志。用 `Start-Process electron.exe -ArgumentList '.' -RedirectStandardOutput out.log` 即可捕获（`Get-Process | ? MainWindowHandle` 那种采样不可靠：一个进程有多个顶层窗口时只返回其中一个）。

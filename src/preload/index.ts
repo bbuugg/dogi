@@ -2,8 +2,10 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import type {
   AgentBackend,
+  AgentChatMessage,
   AgentChatRequest,
   AgentConfirmRequest,
+  AgentConversation,
   AgentStreamEvent,
   AgentWorkspace,
   AiChatRequest,
@@ -151,6 +153,18 @@ const api = {
     }): Promise<AgentWorkspace[]> => ipcRenderer.invoke('agent:workspaces:save', input),
     deleteWorkspace: (id: string): Promise<AgentWorkspace[]> =>
       ipcRenderer.invoke('agent:workspaces:delete', id),
+    /** 全部会话（含消息历史），渲染端按 workspaceId 归到各工作区下 */
+    listConversations: (): Promise<AgentConversation[]> =>
+      ipcRenderer.invoke('agent:conversations:list'),
+    /** 新建（不传 id）或更新会话，返回保存后的那一个（不回传全量列表） */
+    saveConversation: (input: {
+      id?: string
+      workspaceId: string
+      title?: string
+      messages?: AgentChatMessage[]
+    }): Promise<AgentConversation> => ipcRenderer.invoke('agent:conversations:save', input),
+    deleteConversation: (id: string): Promise<void> =>
+      ipcRenderer.invoke('agent:conversations:delete', id),
     chat: (req: AgentChatRequest): Promise<{ requestId: string }> =>
       ipcRenderer.invoke('agent:chat', req),
     abort: (requestId: string): Promise<void> => ipcRenderer.invoke('agent:abort', requestId),
@@ -267,7 +281,12 @@ const api = {
     platform: process.platform,
     info: (): Promise<AppInfo> => ipcRenderer.invoke('app:info'),
     /** 用系统默认程序打开外部链接（主进程会按安全协议过滤，避免弹窗） */
-    openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url)
+    openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url),
+    /**
+     * 首屏就绪通知（数据加载完 + 主题已应用）：主进程收到后才撤下启动画面、
+     * 显示主窗口，用户因此看不到主窗口「先默认配色、再变成设置配色」的闪烁。
+     */
+    ready: (): void => ipcRenderer.send('app:ready')
   },
   shortcuts: {
     /** 读取当前快捷键配置（动作 -> accelerator） */

@@ -2,6 +2,8 @@ import Store from 'electron-store'
 import { safeStorage } from 'electron'
 import type {
   AgentBackend,
+  AgentChatMessage,
+  AgentConversation,
   AgentWorkspace,
   AiModelConfig,
   AiPermissionMode,
@@ -37,6 +39,7 @@ interface StoreSchema {
   apiHistory: ApiHistoryEntry[]
   shortcuts: ShortcutConfig[]
   agentWorkspaces: AgentWorkspace[]
+  agentConversations: AgentConversation[]
   windowBounds?: { x?: number; y?: number; width: number; height: number }
 }
 
@@ -76,7 +79,8 @@ class StorageService {
       apiGroups: [],
       apiHistory: [],
       shortcuts: DEFAULT_SHORTCUTS,
-      agentWorkspaces: []
+      agentWorkspaces: [],
+      agentConversations: []
     }
   })
 
@@ -773,7 +777,54 @@ class StorageService {
   deleteAgentWorkspace(id: string): AgentWorkspace[] {
     const next = this.store.get('agentWorkspaces').filter((w) => w.id !== id)
     this.store.set('agentWorkspaces', next)
+    // 工作区没了，它的会话也一并清掉，避免留下永远看不到的孤儿数据
+    this.store.set(
+      'agentConversations',
+      this.store.get('agentConversations').filter((c) => c.workspaceId !== id)
+    )
     return next
+  }
+
+  // ---------- Agent 会话 ----------
+  listAgentConversations(): AgentConversation[] {
+    return this.store.get('agentConversations')
+  }
+
+  /**
+   * 保存会话（upsert）：不传 id 视为新建。
+   *
+   * 返回保存后的**单个**会话而不是全量列表 —— 会话带完整消息历史、体量可能很大，
+   * 全量返回会让每次保存都把所有会话再传一遍。
+   */
+  saveAgentConversation(input: {
+    id?: string
+    workspaceId: string
+    title?: string
+    messages?: AgentChatMessage[]
+  }): AgentConversation {
+    const conversations = this.store.get('agentConversations')
+    const now = Date.now()
+    const prev = input.id ? conversations.find((c) => c.id === input.id) : undefined
+    const conversation: AgentConversation = {
+      id: input.id || crypto.randomUUID(),
+      workspaceId: input.workspaceId,
+      title: input.title ?? prev?.title ?? '新会话',
+      messages: input.messages ?? prev?.messages ?? [],
+      createdAt: prev?.createdAt ?? now,
+      updatedAt: now
+    }
+    const next = prev
+      ? conversations.map((c) => (c.id === conversation.id ? conversation : c))
+      : [...conversations, conversation]
+    this.store.set('agentConversations', next)
+    return conversation
+  }
+
+  deleteAgentConversation(id: string): void {
+    this.store.set(
+      'agentConversations',
+      this.store.get('agentConversations').filter((c) => c.id !== id)
+    )
   }
 
   // ---------- MCP servers ----------

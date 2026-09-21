@@ -20,6 +20,7 @@ import { DEFAULT_SHORTCUTS, findShortcutByEvent } from '@shared/shortcuts'
 import type {
   AgentChatMessage,
   AgentConfirmRequest,
+  AgentConversation,
   AgentStreamEvent,
   AgentWorkspace,
   AgentBackend,
@@ -204,21 +205,104 @@ function emptyAiChat(): AiChatState {
 /** requestId -> sessionId：把流式事件路由到发起对话的那个会话 */
 const aiRequestSessions = new Map<string, string>()
 
-/** 单个工作区独立的 Agent 对话状态 */
-export interface AgentChatState {
-  messages: AgentChatMessage[]
+/**
+ * 单个会话的运行时状态。
+ *
+ * 消息本身存在 `agentConversations` 里（唯一真源，也是落盘的那份），
+ * 这里只放「这一轮跑到哪了」—— 两者分开，避免同一份消息维护两遍。
+ */
+export interface AgentRunState {
   streaming: boolean
   /** 进行中的对话请求 id（用于事件路由与中止） */
   requestId: string | null
   error: string | null
 }
 
-function emptyAgentChat(): AgentChatState {
-  return { messages: [], streaming: false, requestId: null, error: null }
+function emptyAgentRun(): AgentRunState {
+  return { streaming: false, requestId: null, error: null }
 }
 
-/** requestId -> workspaceId：把 Agent 流式事件路由到发起对话的工作区 */
-const agentRequestWorkspaces = new Map<string, string>()
+/** requestId -> conversationId：把 Agent 流式事件路由到发起对话的那个会话 */
+const agentRequestConversations = new Map<string, string>()
+
+/** 会话默认标题（用户没命名、也没发过消息时显示） */
+const DEFAULT_CONVERSATION_TITLE = '新会话'
+
+/** 由首条用户消息生成会话标题：取首行、截断到 30 字 */
+function titleFromMessage(text: string): string {
+  const firstLine = text.split('\n')[0].trim()
+  if (!firstLine) return DEFAULT_CONVERSATION_TITLE
+  return firstLine.length > 30 ? `${firstLine.slice(0, 30)}…` : firstLine
+}
+
+/** 新建一个内存态会话（落盘时机见 persistConversation） */
+function newConversation(workspaceId: string): AgentConversation {
+  const now = Date.now()
+  return {
+    id: crypto.randomUUID(),
+    workspaceId,
+    title: DEFAULT_CONVERSATION_TITLE,
+    messages: [],
+    createdAt: now,
+    updatedAt: now
+  }
+}
+
+/** 取某工作区最近更新的会话（没有则 null） */
+function latestConversation(
+  conversations: AgentConversation[],
+  workspaceId: string
+): AgentConversation | null {
+  let best: AgentConversation | null = null
+  for (const c of conversations) {
+    if (c.workspaceId !== workspaceId) continue
+    if (!best || c.updatedAt > best.updatedAt) best = c
+  }
+  return best
+}
+
+/**
+ * 选中某工作区要展示的会话：优先最近更新的那个，一个都没有就现建一个空会话 ——
+ * 保证「点开工作区就能直接输入」，不用先手动新建。
+ */
+function ensureConversation(
+  conversations: AgentConversation[],
+  workspaceId: string
+): { conversations: AgentConversation[]; activeId: string | null } {
+  if (!workspaceId) return { conversations, activeId: null }
+  const latest = latestConversation(conversations, workspaceId)
+  if (latest) return { conversations, activeId: latest.id }
+  const created = newConversation(workspaceId)
+  return { conversations: [...conversations, created], activeId: created.id }
+}
+
+/** 修改某个会话（浅合并），同时把 updatedAt 推到当前时刻 */
+function patchConversation(
+  conversations: AgentConversation[],
+  id: string,
+  patch: Partial<AgentConversation>
+): AgentConversation[] {
+  return conversations.map((c) => (c.id === id ? { ...c, ...patch, updatedAt: Date.now() } : c))
+}
+
+/**
+ * 把会话当前内容写盘。
+ *
+ * 只写不读回：调用期间流式输出可能又追加了 part，用主进程的返回值覆盖本地会丢内容。
+ */
+async function persistConversation(
+  conversations: AgentConversation[],
+  id: string
+): Promise<void> {
+  const conversation = conversations.find((c) => c.id === id)
+  if (!conversation) return
+  await window.api.agent.saveConversation({
+    id: conversation.id,
+    workspaceId: conversation.workspaceId,
+    title: conversation.title,
+    messages: conversation.messages
+  })
+}
 
 /** Agent 回复生成中的占位 assistant 消息尾部追加 part */
 function appendAgentPart(parts: AgentChatMessage['parts'], event: AgentStreamEvent) {
@@ -701,10 +785,19 @@ interface AppStore {
 
   // ---------- AI Agent（工作区编程助手） ----------
   agentWorkspaces: AgentWorkspace[]
-  /** 当前选中的工作区 id（Agent 对话绑定它） */
+  /** 当前选中的工作区 id */
   activeAgentWorkspaceId: string | null
-  /** 每个工作区独立的 Agent 对话（key 为 workspaceId） */
-  agentChats: Record<string, AgentChatState>
+  /**
+   * 全部会话（含消息历史）。一个工作区下可以有多个会话，`workspaceId` 决定归属。
+   *
+   * 这是消息的唯一真源，也是落盘的那份；新建的空会话先只存在于内存，
+   * 等真的发出第一条消息（或改标题）才写盘，避免留下一堆空记录。
+   */
+  agentConversations: AgentConversation[]
+  /** 当前选中的会话 id（主区域 AgentPage 展示它） */
+  activeAgentConversationId: string | null
+  /** 各会话的运行时状态（key 为 conversationId） */
+  agentRuns: Record<string, AgentRunState>
   /** Agent 确认模式下等待用户处理的命令执行请求（key 为确认 id） */
   agentPendingConfirms: Record<string, AgentConfirmRequest>
 
@@ -963,12 +1056,22 @@ interface AppStore {
   deleteAgentWorkspace: (id: string) => Promise<void>
   /** 切换工作区的 Agent 后端（内置 AI SDK / 外部 ACP agent），每会话独立 */
   setAgentWorkspaceBackend: (id: string, backend: AgentBackend) => Promise<void>
-  /** 选中工作区（Agent 对话绑定它） */
+  /** 选中工作区：自动定位到它最近更新的会话（一个都没有则新建一个空会话） */
   selectAgentWorkspace: (id: string) => void
-  /** 在当前选中的工作区发起 Agent 对话 */
-  sendAgentMessage: (text: string) => Promise<void>
-  abortAgent: () => Promise<void>
+  /** 新建会话（默认建在当前工作区下）并选中；仅内存，发出首条消息后才落盘 */
+  createAgentConversation: (workspaceId?: string) => void
+  /** 选中会话（AgentPage 切换到它的消息） */
+  selectAgentConversation: (id: string) => void
+  /** 重命名会话（立即落盘） */
+  renameAgentConversation: (id: string, title: string) => Promise<void>
+  /** 删除会话；删的是当前会话时自动切到同工作区的下一个 */
+  deleteAgentConversation: (id: string) => Promise<void>
+  /** 清空当前会话的消息（保留会话本身） */
   clearAgentMessages: () => void
+  /** 在当前选中的会话发起 Agent 对话 */
+  sendAgentMessage: (text: string) => Promise<void>
+  /** 中止对话；不传则中止当前选中的会话 */
+  abortAgent: (conversationId?: string) => Promise<void>
   handleAgentEvent: (requestId: string, event: AgentStreamEvent) => void
   /** 回复 Agent 命令执行确认：approved=true 执行，false 取消 */
   resolveAgentConfirm: (id: string, approved: boolean) => Promise<void>
@@ -1075,7 +1178,9 @@ let shortcutWired = false
 
     agentWorkspaces: [],
     activeAgentWorkspaceId: null,
-    agentChats: {},
+    agentConversations: [],
+    activeAgentConversationId: null,
+    agentRuns: {},
     agentPendingConfirms: {},
 
     plugins: [],
@@ -1108,7 +1213,7 @@ let shortcutWired = false
     monitors: {},
 
     bootstrap: async () => {
-      const [profiles, sshGroups, configs, settings, preferences, shells, scripts, scriptGroups, notes, noteGroups, apiRequests, apiGroups, apiHistory, shortcuts, agentWorkspaces] = await Promise.all([
+      const [profiles, sshGroups, configs, settings, preferences, shells, scripts, scriptGroups, notes, noteGroups, apiRequests, apiGroups, apiHistory, shortcuts, agentWorkspaces, agentConversations] = await Promise.all([
         window.api.ssh.list(),
         window.api.ssh.listGroups(),
         window.api.ai.listConfigs(),
@@ -1123,11 +1228,14 @@ let shortcutWired = false
         window.api.apiClient.listGroups(),
         window.api.apiClient.listHistory(),
         window.api.shortcuts.get(),
-        window.api.agent.listWorkspaces()
+        window.api.agent.listWorkspaces(),
+        window.api.agent.listConversations()
       ])
       // 配色必须在偏好写进 store 之前落到 html 上：antd 的 token 是在 store 更新引发的那次
       // 重渲染里从 CSS 变量读出来的，晚一步就会永远停在默认中性配色（直到用户手动切换）
       applyColorTheme(preferences.colorTheme, preferences.customColor)
+      // 选中第一个工作区，并定位到它最近更新的会话（一个都没有就现建一个空会话）
+      const initial = ensureConversation(agentConversations, agentWorkspaces[0]?.id ?? '')
       set({
         profiles,
         sshGroups,
@@ -1144,8 +1252,16 @@ let shortcutWired = false
         apiHistory,
         shortcuts,
         agentWorkspaces,
-        activeAgentWorkspaceId: agentWorkspaces[0]?.id ?? null
+        agentConversations: initial.conversations,
+        activeAgentWorkspaceId: agentWorkspaces[0]?.id ?? null,
+        activeAgentConversationId: initial.activeId
       })
+      // 首屏数据与配色都已就位：告诉主进程可以撤下启动画面、显示主窗口了。
+      // 刻意不用 requestAnimationFrame 等「渲染完这一帧」——此时窗口还是 show:false，
+      // 隐藏窗口的 rAF 会被 Chromium 节流甚至不触发，可能反而永远卡在启动画面；
+      // 主进程那边另有 ~450ms 的延迟，足够 React 把真实 UI 画出来。
+      // 放在插件加载之前：插件是后台能力，不该拖着启动画面不放。
+      window.api.app.ready()
       // 运行时加载外部插件（扫描 userData/plugins 并收集视图）
       const { loadPlugins } = await import('@/features/plugins/host')
       const pluginViews = await loadPlugins()
@@ -2241,27 +2357,46 @@ let shortcutWired = false
     // ---------- AI Agent ----------
 
     loadAgentWorkspaces: async () => {
-      const workspaces = await window.api.agent.listWorkspaces()
+      const [workspaces, conversations] = await Promise.all([
+        window.api.agent.listWorkspaces(),
+        window.api.agent.listConversations()
+      ])
       set((s) => {
         // 选中项失效（工作区被删）时回退到第一个
         const activeValid =
           s.activeAgentWorkspaceId && workspaces.some((w) => w.id === s.activeAgentWorkspaceId)
+        const workspaceId = activeValid ? s.activeAgentWorkspaceId! : (workspaces[0]?.id ?? null)
+        // 选中的会话仍存在就保留，否则重新定位到该工作区最近的会话
+        const conversationValid =
+          s.activeAgentConversationId !== null &&
+          conversations.some((c) => c.id === s.activeAgentConversationId)
+        const ensured = conversationValid
+          ? { conversations, activeId: s.activeAgentConversationId }
+          : ensureConversation(conversations, workspaceId ?? '')
         return {
           agentWorkspaces: workspaces,
-          activeAgentWorkspaceId: activeValid
-            ? s.activeAgentWorkspaceId
-            : (workspaces[0]?.id ?? null)
+          agentConversations: ensured.conversations,
+          activeAgentWorkspaceId: workspaceId,
+          activeAgentConversationId: ensured.activeId
         }
       })
     },
 
     saveAgentWorkspace: async (input) => {
       const workspaces = await window.api.agent.saveWorkspace(input)
-      set((s) => ({
-        agentWorkspaces: workspaces,
-        // 首次添加时自动选中
-        activeAgentWorkspaceId: s.activeAgentWorkspaceId ?? workspaces[0]?.id ?? null
-      }))
+      set((s) => {
+        // 已经有选中的工作区就只更新列表，不动当前会话
+        if (s.activeAgentWorkspaceId) return { agentWorkspaces: workspaces }
+        // 首次添加时自动选中，并给它备好一个会话
+        const first = workspaces[0]?.id ?? null
+        const ensured = ensureConversation(s.agentConversations, first ?? '')
+        return {
+          agentWorkspaces: workspaces,
+          activeAgentWorkspaceId: first,
+          agentConversations: ensured.conversations,
+          activeAgentConversationId: ensured.activeId
+        }
+      })
     },
 
     setAgentWorkspaceBackend: async (id, backend) => {
@@ -2277,22 +2412,89 @@ let shortcutWired = false
     },
 
     deleteAgentWorkspace: async (id) => {
+      // 该工作区下正在跑的会话先停掉，否则它们的主进程 agent 进程会变成孤儿
+      for (const c of get().agentConversations) {
+        if (c.workspaceId !== id) continue
+        if ((get().agentRuns[c.id] ?? emptyAgentRun()).requestId) await get().abortAgent(c.id)
+      }
       const workspaces = await window.api.agent.deleteWorkspace(id)
-      set((s) => ({
-        agentWorkspaces: workspaces,
-        activeAgentWorkspaceId:
+      set((s) => {
+        // 主进程已级联删掉该工作区的会话，本地同步一份
+        const conversations = s.agentConversations.filter((c) => c.workspaceId !== id)
+        const workspaceId =
           s.activeAgentWorkspaceId === id ? (workspaces[0]?.id ?? null) : s.activeAgentWorkspaceId
-      }))
+        const ensured = ensureConversation(conversations, workspaceId ?? '')
+        return {
+          agentWorkspaces: workspaces,
+          agentConversations: ensured.conversations,
+          activeAgentWorkspaceId: workspaceId,
+          activeAgentConversationId: ensured.activeId
+        }
+      })
     },
 
-    selectAgentWorkspace: (id) => set({ activeAgentWorkspaceId: id }),
+    selectAgentWorkspace: (id) =>
+      set((s) => {
+        const ensured = ensureConversation(s.agentConversations, id)
+        return {
+          activeAgentWorkspaceId: id,
+          agentConversations: ensured.conversations,
+          activeAgentConversationId: ensured.activeId
+        }
+      }),
+
+    createAgentConversation: (workspaceId) =>
+      set((s) => {
+        const wid = workspaceId ?? s.activeAgentWorkspaceId
+        if (!wid) return {}
+        const created = newConversation(wid)
+        // 新会话排在前面，符合「最近在用」的直觉
+        return {
+          activeAgentWorkspaceId: wid,
+          agentConversations: [created, ...s.agentConversations],
+          activeAgentConversationId: created.id
+        }
+      }),
+
+    selectAgentConversation: (id) => set({ activeAgentConversationId: id }),
+
+    renameAgentConversation: async (id, title) => {
+      const next = title.trim() || DEFAULT_CONVERSATION_TITLE
+      set((s) => ({
+        agentConversations: patchConversation(s.agentConversations, id, { title: next })
+      }))
+      await persistConversation(get().agentConversations, id)
+    },
+
+    deleteAgentConversation: async (id) => {
+      // 正在流式输出就先中止，否则主进程那个会话的 agent 进程会变成孤儿
+      if ((get().agentRuns[id] ?? emptyAgentRun()).requestId) await get().abortAgent(id)
+      await window.api.agent.deleteConversation(id)
+      set((s) => {
+        const conversations = s.agentConversations.filter((c) => c.id !== id)
+        const { [id]: _removed, ...runs } = s.agentRuns
+        if (s.activeAgentConversationId !== id) {
+          return { agentConversations: conversations, agentRuns: runs }
+        }
+        // 删的正是当前会话：切到同工作区剩下的最近一个，没有就现建
+        const ensured = ensureConversation(conversations, s.activeAgentWorkspaceId ?? '')
+        return {
+          agentConversations: ensured.conversations,
+          agentRuns: runs,
+          activeAgentConversationId: ensured.activeId
+        }
+      })
+    },
 
     sendAgentMessage: async (text) => {
       const trimmed = text.trim()
       const wid = get().activeAgentWorkspaceId
-      if (!wid || !trimmed) return
-      const chat = get().agentChats[wid] ?? emptyAgentChat()
-      if (chat.streaming) return
+      const cid = get().activeAgentConversationId
+      if (!wid || !cid || !trimmed) return
+      const conversation = get().agentConversations.find((c) => c.id === cid)
+      if (!conversation) return
+      if ((get().agentRuns[cid] ?? emptyAgentRun()).streaming) return
+
       const now = Date.now()
       const userMsg: AgentChatMessage = {
         id: `u-${now}`,
@@ -2306,125 +2508,152 @@ let shortcutWired = false
         parts: [],
         createdAt: now + 1
       }
-      const history = [...chat.messages, userMsg]
+      const history = [...conversation.messages, userMsg]
+      // 首条消息顺手定标题，省得用户手动命名（之后可在会话列表里改）
+      const title =
+        conversation.messages.length === 0 ? titleFromMessage(trimmed) : conversation.title
+
       set((s) => ({
-        agentChats: {
-          ...s.agentChats,
-          [wid]: { ...chat, messages: [...history, assistantMsg], streaming: true, error: null }
-        }
+        agentConversations: patchConversation(s.agentConversations, cid, {
+          messages: [...history, assistantMsg],
+          title
+        }),
+        agentRuns: { ...s.agentRuns, [cid]: { streaming: true, requestId: null, error: null } }
       }))
+      // 用户消息与标题立刻落盘：这一轮即便失败 / 应用被关，输入也不会丢
+      void persistConversation(get().agentConversations, cid)
 
       try {
-        const { requestId } = await window.api.agent.chat({ workspaceId: wid, history })
-        agentRequestWorkspaces.set(requestId, wid)
-        set((s) => {
-          const c = s.agentChats[wid]
-          if (!c) return {}
-          return { agentChats: { ...s.agentChats, [wid]: { ...c, requestId } } }
+        const { requestId } = await window.api.agent.chat({
+          workspaceId: wid,
+          conversationId: cid,
+          history
         })
+        agentRequestConversations.set(requestId, cid)
+        set((s) => ({
+          agentRuns: {
+            ...s.agentRuns,
+            [cid]: { ...(s.agentRuns[cid] ?? emptyAgentRun()), requestId }
+          }
+        }))
       } catch (err) {
-        set((s) => {
-          const c = s.agentChats[wid]
-          if (!c) return {}
-          return {
-            agentChats: {
-              ...s.agentChats,
-              [wid]: {
-                ...c,
-                streaming: false,
-                requestId: null,
-                error: err instanceof Error ? err.message : String(err)
-              }
+        set((s) => ({
+          agentRuns: {
+            ...s.agentRuns,
+            [cid]: {
+              ...(s.agentRuns[cid] ?? emptyAgentRun()),
+              streaming: false,
+              requestId: null,
+              error: err instanceof Error ? err.message : String(err)
             }
           }
-        })
+        }))
       }
     },
 
-    abortAgent: async () => {
-      const wid = get().activeAgentWorkspaceId
-      if (!wid) return
-      const chat = get().agentChats[wid]
-      const requestId = chat?.requestId ?? null
+    abortAgent: async (conversationId) => {
+      // 不传时中止当前选中的那个；删除会话 / 工作区时会显式指定，避免留下孤儿请求
+      const cid = conversationId ?? get().activeAgentConversationId
+      if (!cid) return
+      const requestId = (get().agentRuns[cid] ?? emptyAgentRun()).requestId
       if (!requestId) return
-      agentRequestWorkspaces.delete(requestId)
+      agentRequestConversations.delete(requestId)
       // 只清属于本次请求的确认卡
       for (const c of Object.values(get().agentPendingConfirms)) {
         if (c.requestId === requestId) void get().resolveAgentConfirm(c.id, false)
       }
       await window.api.agent.abort(requestId)
       set((s) => ({
-        agentChats: s.agentChats[wid]
-          ? { ...s.agentChats, [wid]: { ...s.agentChats[wid], streaming: false, requestId: null } }
-          : s.agentChats
+        agentRuns: {
+          ...s.agentRuns,
+          [cid]: { ...(s.agentRuns[cid] ?? emptyAgentRun()), streaming: false, requestId: null }
+        }
       }))
     },
 
     clearAgentMessages: () => {
-      const wid = get().activeAgentWorkspaceId
-      if (!wid) return
-      const chat = get().agentChats[wid]
-      if (chat?.requestId) agentRequestWorkspaces.delete(chat.requestId)
-      set((s) => ({ agentChats: { ...s.agentChats, [wid]: emptyAgentChat() } }))
+      const cid = get().activeAgentConversationId
+      if (!cid) return
+      const requestId = (get().agentRuns[cid] ?? emptyAgentRun()).requestId
+      if (requestId) agentRequestConversations.delete(requestId)
+      set((s) => ({
+        agentConversations: patchConversation(s.agentConversations, cid, { messages: [] }),
+        agentRuns: { ...s.agentRuns, [cid]: emptyAgentRun() }
+      }))
+      void persistConversation(get().agentConversations, cid)
     },
 
     handleAgentEvent: (requestId, event) => {
-      // 路由到发起该对话的工作区（不依赖当前选中）
-      const wid = agentRequestWorkspaces.get(requestId)
-      if (!wid) return
+      // 路由到发起该对话的会话（不依赖当前选中）
+      const cid = agentRequestConversations.get(requestId)
+      if (!cid) return
+
+      /** 把事件追加到会话最后一条 assistant 消息上 */
+      const appendToLast = (
+        messages: AgentChatMessage[],
+        ev: AgentStreamEvent
+      ): AgentChatMessage[] => {
+        const next = [...messages]
+        const last = next[next.length - 1]
+        if (last?.role === 'assistant') {
+          next[next.length - 1] = { ...last, parts: appendAgentPart(last.parts, ev) }
+        }
+        return next
+      }
+
       if (event.type === 'finish') {
-        agentRequestWorkspaces.delete(requestId)
-        set((s) => {
-          const chat = s.agentChats[wid]
-          if (!chat) return {}
-          return {
-            agentChats: { ...s.agentChats, [wid]: { ...chat, streaming: false, requestId: null } }
+        agentRequestConversations.delete(requestId)
+        set((s) => ({
+          agentRuns: {
+            ...s.agentRuns,
+            [cid]: { ...(s.agentRuns[cid] ?? emptyAgentRun()), streaming: false, requestId: null }
           }
-        })
+        }))
+        // 整轮结束才落盘：中途每个 part 都写盘会让长回复反复序列化同一段历史
+        void persistConversation(get().agentConversations, cid)
         // 兜底：该对话已结束但仍有其挂起确认时按取消处理，避免主进程工具悬挂
         for (const c of Object.values(get().agentPendingConfirms)) {
           if (c.requestId === requestId) void get().resolveAgentConfirm(c.id, false)
         }
         return
       }
+
       if (event.type === 'error') {
         // 报错即视为本轮对话结束：立刻复位 streaming，不依赖后续 finish 事件
-        agentRequestWorkspaces.delete(requestId)
+        agentRequestConversations.delete(requestId)
         set((s) => {
-          const chat = s.agentChats[wid]
-          if (!chat) return {}
-          const messages = [...chat.messages]
-          const last = messages[messages.length - 1]
-          if (last?.role === 'assistant') {
-            messages[messages.length - 1] = {
-              ...last,
-              parts: appendAgentPart(last.parts, event)
-            }
-          }
+          const conversation = s.agentConversations.find((c) => c.id === cid)
+          if (!conversation) return {}
           return {
-            agentChats: {
-              ...s.agentChats,
-              [wid]: { ...chat, messages, streaming: false, requestId: null, error: null }
+            agentConversations: patchConversation(s.agentConversations, cid, {
+              messages: appendToLast(conversation.messages, event)
+            }),
+            agentRuns: {
+              ...s.agentRuns,
+              [cid]: {
+                ...(s.agentRuns[cid] ?? emptyAgentRun()),
+                streaming: false,
+                requestId: null,
+                error: null
+              }
             }
           }
         })
+        void persistConversation(get().agentConversations, cid)
         for (const c of Object.values(get().agentPendingConfirms)) {
           if (c.requestId === requestId) void get().resolveAgentConfirm(c.id, false)
         }
         return
       }
+
       set((s) => {
-        const chat = s.agentChats[wid]
-        if (!chat) return {}
-        const messages = [...chat.messages]
-        const last = messages[messages.length - 1]
-        if (last?.role === 'assistant') {
-          messages[messages.length - 1] = {
-            ...last,
-            parts: appendAgentPart(last.parts, event)
-          }
+        const conversation = s.agentConversations.find((c) => c.id === cid)
+        if (!conversation) return {}
+        return {
+          agentConversations: patchConversation(s.agentConversations, cid, {
+            messages: appendToLast(conversation.messages, event)
+          })
         }
-        return { agentChats: { ...s.agentChats, [wid]: { ...chat, messages } } }
       })
     },
 

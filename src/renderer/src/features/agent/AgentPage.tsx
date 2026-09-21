@@ -527,10 +527,15 @@ export function AgentPage() {
   const permissionMeta =
     AGENT_PERMISSION_MODES.find((m) => m.value === permissionMode) ?? AGENT_PERMISSION_MODES[0]
   const PermissionIcon = permissionMeta.icon
-  const chat = useAppStore((s) => (activeId ? s.agentChats[activeId] : undefined))
-  const messages = chat?.messages ?? NO_MESSAGES
-  const streaming = chat?.streaming ?? false
-  const error = chat?.error ?? null
+  // 消息来自当前会话（唯一真源），流式/错误等运行时状态另存 agentRuns
+  const conversationId = useAppStore((s) => s.activeAgentConversationId)
+  const conversation = useAppStore((s) =>
+    conversationId ? s.agentConversations.find((c) => c.id === conversationId) : undefined
+  )
+  const run = useAppStore((s) => (conversationId ? s.agentRuns[conversationId] : undefined))
+  const messages = conversation?.messages ?? NO_MESSAGES
+  const streaming = run?.streaming ?? false
+  const error = run?.error ?? null
   const pendingConfirm = useAppStore((s) => {
     if (!activeId) return null
     for (const c of Object.values(s.agentPendingConfirms)) {
@@ -540,7 +545,7 @@ export function AgentPage() {
   })
   const sendAgentMessage = useAppStore((s) => s.sendAgentMessage)
   const abortAgent = useAppStore((s) => s.abortAgent)
-  const selectAgentWorkspace = useAppStore((s) => s.selectAgentWorkspace)
+  const setSidebarCollapsed = useAppStore((s) => s.setSidebarCollapsed)
 
   const [input, setInput] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -738,15 +743,15 @@ export function AgentPage() {
   }
 
   const handleSend = () => {
-    if (streaming || !input.trim() || !hasConfig || !activeId) return
+    if (streaming || !input.trim() || !hasConfig || !conversationId) return
     void sendAgentMessage(input)
     setInput('')
   }
 
-  // 切换工作区后把输入焦点还给页面（若输入框有焦点则保留）
+  // 换了工作区或会话后清空草稿，避免把上一段的输入带进新对话
   useEffect(() => {
     setInput('')
-  }, [activeId])
+  }, [activeId, conversationId])
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
@@ -756,12 +761,17 @@ export function AgentPage() {
           <>
             <FolderOpen className="size-4 shrink-0 text-primary" />
             <span className="shrink-0 text-sm font-medium">{active.name}</span>
-            <span
-              className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground"
-              title={active.path}
-            >
-              {active.path}
-            </span>
+            {conversation && (
+              <>
+                <span className="shrink-0 text-muted-foreground/40">/</span>
+                <span
+                  className="max-w-44 shrink-0 truncate text-xs text-muted-foreground"
+                  title={conversation.title}
+                >
+                  {conversation.title}
+                </span>
+              </>
+            )}
           </>
         ) : (
           <>
@@ -769,7 +779,8 @@ export function AgentPage() {
             <span className="text-sm text-muted-foreground">AI Agent</span>
           </>
         )}
-        <div className="flex items-center gap-0.5">
+        {/* 右侧操作区靠右：顶栏中间不再显示工作区路径 */}
+        <div className="ml-auto flex items-center gap-0.5">
           {active && (
             <>
               <Tooltip title={term ? '关闭终端' : '打开终端'}>
@@ -828,8 +839,8 @@ export function AgentPage() {
               <br />
               阅读 / 编辑文件、搜索代码并执行命令。
             </div>
-            <Button type="primary" onClick={() => selectAgentWorkspace('')}>
-              选择工作区
+            <Button type="primary" onClick={() => setSidebarCollapsed(false)}>
+              打开工作区面板
             </Button>
           </div>
         ) : messages.length === 0 && !streaming ? (

@@ -80,9 +80,15 @@ interface PendingConfirm {
   timer: ReturnType<typeof setTimeout>
 }
 
-/** 一个工作区的常驻 ACP 连接与会话 */
-interface WorkspaceAcpSession {
+/**
+ * 一个**会话**的常驻 ACP 连接与会话。
+ *
+ * 按 conversationId 而不是 workspaceId 缓存：同一个工作区下的多个会话必须各有
+ * 独立的 agent 上下文，共用一个连接会让两个会话互相串味。
+ */
+interface ConversationAcpSession {
   workspaceId: string
+  conversationId: string
   workspaceName: string
   proc: ChildProcess
   /** connectWith 的连接生命周期 promise（op 挂起直到连接关闭） */
@@ -145,14 +151,16 @@ function toStreamEvent(update: SessionUpdate): AgentStreamEvent | null {
 
 class AcpAgentService extends EventEmitter {
   private confirmSink: AgentConfirmSink | null = null
-  private sessions = new Map<string, WorkspaceAcpSession>()
-  /** 每工作区的 turn 串行链：前一轮结束才启动下一轮 */
+  /** key 为 conversationId（同一工作区的不同会话各有一条常驻连接） */
+  private sessions = new Map<string, ConversationAcpSession>()
+  /** 每会话的 turn 串行链：前一轮结束才启动下一轮 */
   private turnChains = new Map<string, Promise<unknown>>()
   private pendingConfirms = new Map<string, PendingConfirm>()
   /** 确认请求串行链（与 agent.ts 一致） */
   private confirmChain: Promise<unknown> = Promise.resolve()
   private abortedRequests = new Set<string>()
-  private requestWorkspaces = new Map<string, string>()
+  /** requestId -> 归属：事件路由与中止都要按会话定位到具体连接 */
+  private requestTargets = new Map<string, { workspaceId: string; conversationId: string }>()
 
   setConfirmSink(sink: AgentConfirmSink | null): void {
     this.confirmSink = sink
@@ -242,12 +250,13 @@ class AcpAgentService extends EventEmitter {
       return { requestId }
     }
 
-    this.requestWorkspaces.set(requestId, workspace.id)
-    const chain = (this.turnChains.get(workspace.id) ?? Promise.resolve()).then(() =>
-      this.runTurn(requestId, workspace, acpAgent, text)
+    const conversationId = req.conversationId
+    this.requestTargets.set(requestId, { workspaceId: workspace.id, conversationId })
+    const chain = (this.turnChains.get(conversationId) ?? Promise.resolve()).then(() =>
+      this.runTurn(requestId, workspace, conversationId, acpAgent, text)
     )
     this.turnChains.set(
-      workspace.id,
+      conversationId,
       chain.catch(() => undefined)
     )
     return { requestId }
@@ -257,14 +266,15 @@ class AcpAgentService extends EventEmitter {
   private async runTurn(
     requestId: string,
     workspace: AgentWorkspace,
+    conversationId: string,
     acpAgent: AcpAgentConfig,
     text: string
   ): Promise<void> {
-    console.error('[acp-agent] runTurn start', requestId, workspace.id)
+    console.error('[acp-agent] runTurn start', requestId, conversationId)
     try {
-      const session = await this.ensureSession(workspace, acpAgent)
+      const session = await this.ensureSession(workspace, conversationId, acpAgent)
       console.error('[acp-agent] session ready', session.sessionId)
-      const ws = this.sessions.get(workspace.id)
+      const ws = this.sessions.get(conversationId)
       if (ws) ws.currentRequestId = requestId
       // 不 await prompt：会话更新（文本/工具/权限）通过 nextUpdate() 流式消费，
       // prompt 的拒绝同样会经 updates 队列由 nextUpdate() 抛出
@@ -296,34 +306,39 @@ class AcpAgentService extends EventEmitter {
     } finally {
       this.clearPendingConfirms(requestId)
       this.abortedRequests.delete(requestId)
-      this.requestWorkspaces.delete(requestId)
-      const ws = this.sessions.get(workspace.id)
+      this.requestTargets.delete(requestId)
+      const ws = this.sessions.get(conversationId)
       if (ws) ws.currentRequestId = null
     }
   }
 
-  /** 懒创建工作区的常驻 ACP 连接与会话；进程已死时重建 */
+  /** 懒创建会话的常驻 ACP 连接；进程已死时重建 */
   private async ensureSession(
     workspace: AgentWorkspace,
+    conversationId: string,
     acpAgent: AcpAgentConfig
   ): Promise<ActiveSession> {
-    const existing = this.sessions.get(workspace.id)
+    const existing = this.sessions.get(conversationId)
     if (existing && !existing.closed && existing.proc.exitCode === null) {
       return existing.sessionReady
     }
-    if (existing) this.teardown(workspace.id)
+    if (existing) this.teardown(conversationId)
 
-    const ws = this.createSession(workspace, acpAgent)
-    this.sessions.set(workspace.id, ws)
+    const ws = this.createSession(workspace, conversationId, acpAgent)
+    this.sessions.set(conversationId, ws)
     try {
       return await ws.sessionReady
     } catch (err) {
-      this.teardown(workspace.id)
+      this.teardown(conversationId)
       throw err
     }
   }
 
-  private createSession(workspace: AgentWorkspace, acpAgent: AcpAgentConfig): WorkspaceAcpSession {
+  private createSession(
+    workspace: AgentWorkspace,
+    conversationId: string,
+    acpAgent: AcpAgentConfig
+  ): ConversationAcpSession {
     let closeConnection: () => void = () => {}
     let resolveSession!: (s: ActiveSession) => void
     let rejectSession!: (err: unknown) => void
@@ -331,8 +346,9 @@ class AcpAgentService extends EventEmitter {
       resolveSession = resolve
       rejectSession = reject
     })
-    const ws: WorkspaceAcpSession = {
+    const ws: ConversationAcpSession = {
       workspaceId: workspace.id,
+      conversationId,
       workspaceName: workspace.name,
       proc: spawnAgentProcess(acpAgent, workspace.path),
       connection: Promise.resolve(),
@@ -358,11 +374,11 @@ class AcpAgentService extends EventEmitter {
     proc.on('exit', (code) => {
       ws.closed = true
       ws.closeConnection()
-      if (this.sessions.get(workspace.id) === ws) {
-        this.sessions.delete(workspace.id)
+      if (this.sessions.get(conversationId) === ws) {
+        this.sessions.delete(conversationId)
         if (!this.abortedRequests.size) {
           // 非主动中止的意外退出：把仍在等待的用户请求标记为失败
-          this.failActiveTurns(workspace.id, `ACP agent 已退出（code=${code ?? 'unknown'}）`)
+          this.failActiveTurns(conversationId, `ACP agent 已退出（code=${code ?? 'unknown'}）`)
         }
       }
     })
@@ -401,20 +417,20 @@ class AcpAgentService extends EventEmitter {
     return ws
   }
 
-  /** 移除工作区的常驻连接：杀进程并触发 connectWith 返回 */
-  private teardown(workspaceId: string): void {
-    const ws = this.sessions.get(workspaceId)
+  /** 移除会话的常驻连接：杀进程并触发 connectWith 返回 */
+  private teardown(conversationId: string): void {
+    const ws = this.sessions.get(conversationId)
     if (!ws) return
-    this.sessions.delete(workspaceId)
+    this.sessions.delete(conversationId)
     killProcessTree(ws.proc)
     ws.closeConnection()
     if (ws.currentRequestId) this.abortedRequests.add(ws.currentRequestId)
   }
 
-  /** 工作区意外断开时，把正在进行的 turn 标记为失败 */
-  private failActiveTurns(workspaceId: string, message: string): void {
-    for (const [requestId, wid] of this.requestWorkspaces) {
-      if (wid !== workspaceId) continue
+  /** 会话的连接意外断开时，把正在进行的 turn 标记为失败 */
+  private failActiveTurns(conversationId: string, message: string): void {
+    for (const [requestId, target] of this.requestTargets) {
+      if (target.conversationId !== conversationId) continue
       this.emitEvent(requestId, { type: 'error', message })
       this.emitEvent(requestId, { type: 'finish', finishReason: 'error' })
     }
@@ -422,7 +438,7 @@ class AcpAgentService extends EventEmitter {
 
   /** ACP 权限请求：full 模式自动放行，confirm 模式弹确认卡 */
   private async handlePermission(
-    ws: WorkspaceAcpSession,
+    ws: ConversationAcpSession,
     params: RequestPermissionRequest
   ): Promise<RequestPermissionResponse> {
     const { toolCall, options } = params
@@ -454,19 +470,19 @@ class AcpAgentService extends EventEmitter {
     return { outcome: { outcome: 'selected', optionId } }
   }
 
-  /** 中止对话：杀掉该工作区的 agent 进程（会话作废，下次自动重建） */
+  /** 中止对话：杀掉该会话的 agent 进程（会话作废，下次自动重建） */
   abort(requestId: string): void {
     this.clearPendingConfirms(requestId)
-    const workspaceId = this.requestWorkspaces.get(requestId)
-    if (!workspaceId) return
+    const target = this.requestTargets.get(requestId)
+    if (!target) return
     this.abortedRequests.add(requestId)
-    this.teardown(workspaceId)
+    this.teardown(target.conversationId)
   }
 
   /** 应用退出时清理所有常驻 agent 进程 */
   dispose(): void {
-    for (const workspaceId of [...this.sessions.keys()]) {
-      this.teardown(workspaceId)
+    for (const conversationId of [...this.sessions.keys()]) {
+      this.teardown(conversationId)
     }
   }
 
