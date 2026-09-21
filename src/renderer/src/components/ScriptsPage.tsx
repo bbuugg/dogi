@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { CheckCircle2, FileCode2, Loader2, Play, Save, Trash2 } from 'lucide-react'
+import { FileCode2, Pencil, Play, Save, Trash2 } from 'lucide-react'
 import MonacoEditor from '@/components/MonacoEditor'
 import { Button, Input, Modal, message } from 'antd'
-import { useAppStore } from '@/stores/app-store'
+import { editorSaveKey, useAppStore } from '@/stores/app-store'
 import type { ScriptEntry } from '@shared/types'
 
 /** 自动保存防抖间隔（毫秒） */
@@ -18,6 +18,7 @@ export function ScriptsPage({ scriptId }: { scriptId: string }) {
   const refreshScripts = useAppStore((s) => s.refreshScripts)
   const setRunScriptDialog = useAppStore((s) => s.setRunScriptDialog)
   const updatePanelTabTitle = useAppStore((s) => s.updatePanelTabTitle)
+  const setEditorSaveStatus = useAppStore((s) => s.setEditorSaveStatus)
 
   const activeScript = scripts.find((sc) => sc.id === scriptId) ?? null
 
@@ -120,6 +121,33 @@ export function ScriptsPage({ scriptId }: { scriptId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  /** 把保存状态投影到 store，供底部状态栏的 EditorSaveStatus 显示 */
+  useEffect(() => {
+    setEditorSaveStatus(editorSaveKey('script', scriptId), saving ? 'saving' : dirty ? 'dirty' : 'saved')
+  }, [scriptId, saving, dirty, setEditorSaveStatus])
+
+  /** 名称 / 描述编辑弹窗（null = 关闭） */
+  const [metaEdit, setMetaEdit] = useState<{ name: string; description: string } | null>(null)
+
+  /** 提交名称 / 描述：直接落盘（这两项不再走自动保存） */
+  const submitMetaEdit = async (): Promise<void> => {
+    const target = metaEdit
+    if (!target) return
+    const nextName = target.name.trim() || '未命名脚本'
+    const nextDesc = target.description.trim()
+    setName(nextName)
+    setDescription(nextDesc)
+    // 标签标题跟随脚本名，避免改完名后标签仍是旧名字
+    updatePanelTabTitle(`script-${scriptId}`, nextName)
+    setMetaEdit(null)
+    if (timerRef.current) clearTimeout(timerRef.current)
+    await doSave(scriptId, {
+      name: nextName,
+      description: nextDesc,
+      content: draftRef.current.content
+    })
+  }
+
   /** 删除确认 */
   const [pendingDelete, setPendingDelete] = useState<ScriptEntry | null>(null)
   const confirmDelete = useCallback(async () => {
@@ -147,55 +175,36 @@ export function ScriptsPage({ scriptId }: { scriptId: string }) {
 
   return (
     <div className="flex h-full flex-col bg-background">
-      {/* 工具栏：名称 + 描述 + 运行/删除 + 保存状态 */}
+      {/* 工具栏：名称（文本 + 紧邻的编辑按钮，弹窗改名称/描述）+ 运行/删除/保存。
+          保存状态不在这里，改由底部状态栏显示（见 EditorSaveStatus）。 */}
       <div className="flex items-center gap-2 px-3 py-1.5">
-        <Input
-          value={name}
-          onChange={(e) => {
-            setName(e.target.value)
-            // 标签标题跟随脚本名，避免改完名后标签仍是旧名字
-            updatePanelTabTitle(`script-${scriptId}`, e.target.value.trim() || '未命名脚本')
-            markDirty(scriptId)
-          }}
-          placeholder="脚本名称"
-          variant="borderless"
-          className="min-w-0 flex-1 text-[15px] font-semibold"
-        />
-        <Input
-          value={description}
-          onChange={(e) => {
-            setDescription(e.target.value)
-            markDirty(scriptId)
-          }}
-          placeholder="描述（可选）"
-          variant="borderless"
-          className="min-w-0 flex-[0.6] text-[13px] text-muted-foreground"
-        />
-        <span className="inline-flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
-          {saving ? (
-            <>
-              <Loader2 className="size-3.5 animate-spin" />
-              保存中…
-            </>
-          ) : dirty ? (
-            '未保存'
-          ) : (
-            <>
-              <CheckCircle2 className="size-3.5 text-emerald-500" />
-              已保存
-            </>
+        <div className="flex min-w-0 flex-1 items-center gap-1.5">
+          <span className="min-w-0 truncate text-[15px] font-semibold">{name || '未命名脚本'}</span>
+          <Button
+            type="text"
+            size="small"
+            className="shrink-0 px-1 text-muted-foreground"
+            icon={<Pencil className="size-3.5" />}
+            title="编辑名称与描述"
+            onClick={() => setMetaEdit({ name, description })}
+          />
+          {description.trim() && (
+            <span
+              className="min-w-0 truncate text-[13px] text-muted-foreground"
+              title={description}
+            >
+              {description}
+            </span>
           )}
-        </span>
+        </div>
         <Button
           type='text'
-          size='small'
           icon={<Play className="size-4" />}
           onClick={() => setRunScriptDialog(true, scriptId)}
           title="选择主机并运行脚本"
         />
         <Button
           type='text'
-          size='small'
           icon={<Trash2 className="size-4" />}
           danger
           onClick={() => setPendingDelete(activeScript)}
@@ -203,7 +212,6 @@ export function ScriptsPage({ scriptId }: { scriptId: string }) {
         />
         <Button
           type='text'
-          size='small'
           icon={<Save className="size-4" />}
           onClick={() => void saveCurrentRef.current()} loading={saving}
         />
@@ -223,6 +231,41 @@ export function ScriptsPage({ scriptId }: { scriptId: string }) {
           showWordWrapToggle
         />
       </div>
+
+      {/* 名称 / 描述编辑 */}
+      <Modal
+        open={metaEdit !== null}
+        onCancel={() => setMetaEdit(null)}
+        title="编辑脚本信息"
+        okText="保存"
+        cancelText="取消"
+        centered
+        width={440}
+        destroyOnHidden
+        okButtonProps={{ disabled: !metaEdit?.name.trim() }}
+        onOk={() => void submitMetaEdit()}
+      >
+        <div className="flex flex-col gap-3">
+          <div>
+            <div className="mb-1 text-xs text-muted-foreground">名称</div>
+            <Input
+              autoFocus
+              value={metaEdit?.name ?? ''}
+              onChange={(e) => setMetaEdit((m) => (m ? { ...m, name: e.target.value } : m))}
+              placeholder="脚本名称"
+              onPressEnter={() => void submitMetaEdit()}
+            />
+          </div>
+          <div>
+            <div className="mb-1 text-xs text-muted-foreground">描述（可选）</div>
+            <Input
+              value={metaEdit?.description ?? ''}
+              onChange={(e) => setMetaEdit((m) => (m ? { ...m, description: e.target.value } : m))}
+              placeholder="描述（可选）"
+            />
+          </div>
+        </div>
+      </Modal>
 
       {/* 删除确认 */}
       <Modal

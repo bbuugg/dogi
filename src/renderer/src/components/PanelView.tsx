@@ -226,7 +226,7 @@ function PanelGroupView({ groupId }: { groupId: string }) {
   const moveTabToGroup = useAppStore((s) => s.moveTabToGroup)
   const splitTabToGroup = useAppStore((s) => s.splitTabToGroup)
   const reorderTabs = useAppStore((s) => s.reorderTabs)
-  const closeGroup = useAppStore((s) => s.closeGroup)
+  const requestCloseGroup = useAppStore((s) => s.requestCloseGroup)
   // AI 助手属于终端页面：以本组「激活标签对应的会话」为 key。
   // 同组内切标签即换实例 —— 切到脚本/笔记时没有终端会话，面板自动收起，
   // 切回原来的终端标签时它自己那份开关状态还在。
@@ -334,7 +334,7 @@ function PanelGroupView({ groupId }: { groupId: string }) {
           <button
             type="button"
             title="关闭整个组"
-            onClick={() => void closeGroup(groupId)}
+            onClick={() => requestCloseGroup(groupId)}
             className="flex w-8 shrink-0 items-center justify-center border-l border-border/60 text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
           >
             <X className="size-3.5" />
@@ -450,8 +450,8 @@ function PanelTabItem({
   const setActiveSession = useAppStore((s) => s.setActiveSession)
   const activatePanelTab = useAppStore((s) => s.activatePanelTab)
   const splitTabToGroup = useAppStore((s) => s.splitTabToGroup)
-  const closePanelTab = useAppStore((s) => s.closePanelTab)
-  const closeGroup = useAppStore((s) => s.closeGroup)
+  const requestClosePanelTab = useAppStore((s) => s.requestClosePanelTab)
+  const requestCloseGroup = useAppStore((s) => s.requestCloseGroup)
   const reorderTabs = useAppStore((s) => s.reorderTabs)
   const moveTabToGroup = useAppStore((s) => s.moveTabToGroup)
   const innerRef = useRef<HTMLDivElement | null>(null)
@@ -554,9 +554,9 @@ function PanelTabItem({
             if (tabCount === 1) return
             splitTabToGroup(tab.id, groupId, key.slice('split-'.length) as SplitDirectionInput)
           } else if (key === 'close-tab') {
-            closePanelTab(tab.id)
+            requestClosePanelTab(tab.id)
           } else if (key === 'close-group') {
-            void closeGroup(groupId)
+            requestCloseGroup(groupId)
           }
         }
       }}
@@ -605,7 +605,7 @@ function PanelTabItem({
             <button
               onClick={(e) => {
                 e.stopPropagation()
-                closePanelTab(tab.id)
+                requestClosePanelTab(tab.id)
               }}
               className="ml-0.5 rounded p-0.5 opacity-0 transition-opacity hover:bg-foreground/10 group-hover/tab:opacity-100"
               title="关闭标签"

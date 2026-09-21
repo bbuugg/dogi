@@ -16,7 +16,7 @@ export const STATUS_ITEM_CLASS =
  *
  * 自身只放「全局菜单」这一项，其余内容都由外部传入：
  * - `children`：追加在左侧（菜单之后），如服务器指标条；
- * - `right`：右侧区域（原「命令面板」按钮的位置），如终端打开时的 AI 助手开关。
+ * - `right`：右侧区域（原「命令面板」按钮的位置），如编辑页保存状态、终端打开时的 AI 助手开关。
  * 终端连接状态已内联到终端标签页中展示，不再占用状态栏。
  */
 export function StatusBar({ children, right }: { children?: ReactNode; right?: ReactNode }) {
@@ -42,7 +42,7 @@ function MenuButton() {
   const [open, setOpen] = useState(false)
 
   const menuItem =
-    'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs whitespace-nowrap transition-colors hover:bg-secondary'
+    'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm whitespace-nowrap transition-colors hover:bg-secondary'
   const hint = 'ml-auto pl-3 text-sm text-muted-foreground'
   /** 执行后关闭菜单 */
   const run = (fn: () => void) => () => {
@@ -60,7 +60,7 @@ function MenuButton() {
       destroyOnHidden
       styles={{ container: { padding: 0 }, content: { padding: 4 } }}
       content={
-        <div className="flex w-46 flex-col gap-0.5">
+        <div className="flex w-54 flex-col gap-0.5">
           <button
             type="button"
             className={menuItem}

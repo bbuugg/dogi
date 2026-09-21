@@ -172,7 +172,7 @@ const MonacoEditor: FC<MonacoEditorProps> = ({
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
       {/* Toolbar */}
-      <div className="flex shrink-0 items-center justify-between gap-2 bg-muted/40 px-2 py-1">
+      <div className="flex shrink-0 items-center justify-between gap-2 px-2 py-1">
         {/* Left side */}
         <div className="flex min-w-0 items-center gap-1.5">
           {showLanguageSelector ? (

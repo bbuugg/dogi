@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { CheckCircle2, FileText, Loader2 } from 'lucide-react'
+import { FileText, Save } from 'lucide-react'
 import MonacoEditor from '@/components/MonacoEditor'
 import { Button, Input, message } from 'antd'
-import { useAppStore } from '@/stores/app-store'
+import { editorSaveKey, useAppStore } from '@/stores/app-store'
 
 /** 自动保存防抖间隔（毫秒）：停止输入后挂起 */
 const AUTOSAVE_DELAY = 800
@@ -16,6 +16,7 @@ export function NotesPage({ noteId }: { noteId: string }) {
   const notes = useAppStore((s) => s.notes)
   const saveNote = useAppStore((s) => s.saveNote)
   const updatePanelTabTitle = useAppStore((s) => s.updatePanelTabTitle)
+  const setEditorSaveStatus = useAppStore((s) => s.setEditorSaveStatus)
 
   const activeNote = notes.find((n) => n.id === noteId) ?? null
 
@@ -118,6 +119,11 @@ export function NotesPage({ noteId }: { noteId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  /** 把保存状态投影到 store，供底部状态栏的 EditorSaveStatus 显示 */
+  useEffect(() => {
+    setEditorSaveStatus(editorSaveKey('note', noteId), saving ? 'saving' : dirty ? 'dirty' : 'saved')
+  }, [noteId, saving, dirty, setEditorSaveStatus])
+
   if (!activeNote) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-muted-foreground">
@@ -130,7 +136,7 @@ export function NotesPage({ noteId }: { noteId: string }) {
 
   return (
     <div className="flex h-full flex-col bg-background">
-      {/* 工具栏：标题 + 语言选择 + 保存状态 */}
+      {/* 工具栏：标题 + 保存按钮。保存状态不在这里，改由底部状态栏显示（见 EditorSaveStatus）。 */}
       <div className="flex items-center gap-2 px-3 py-1.5">
         <Input
           value={title}
@@ -144,24 +150,12 @@ export function NotesPage({ noteId }: { noteId: string }) {
           variant="borderless"
           className="min-w-0 flex-1 text-[15px] font-semibold"
         />
-        <span className="inline-flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
-          {saving ? (
-            <>
-              <Loader2 className="size-3.5 animate-spin" />
-              保存中…
-            </>
-          ) : dirty ? (
-            '未保存'
-          ) : (
-            <>
-              <CheckCircle2 className="size-3.5 text-emerald-500" />
-              已保存
-            </>
-          )}
-        </span>
-        <Button onClick={() => void saveCurrentRef.current()} loading={saving}>
-          保存
-        </Button>
+        <Button
+          type='text'
+          icon={<Save className='size-4' />}
+          onClick={() => void saveCurrentRef.current()}
+          loading={saving}
+        />
       </div>
 
       {/* Monaco 编辑器主体 */}

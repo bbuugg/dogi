@@ -72,7 +72,7 @@ export function SettingsDialog() {
         </nav>
 
         {/* 右侧内容 */}
-        <div className="no-scrollbar min-w-0 flex-1 overflow-y-auto p-5">
+        <div className="no-scrollbar min-w-0 flex-1 overflow-y-auto p-4">
           {settingsTab === 'ai' && <AiConfigSettings />}
           {settingsTab === 'terminal' && <TerminalSettings />}
           {settingsTab === 'prefs' && <PrefSettings />}

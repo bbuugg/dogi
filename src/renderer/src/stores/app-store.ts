@@ -49,6 +49,26 @@ import {
 /** PanelView 标签类型（终端会话也是其中一种，不再有独立的「终端」固定标签） */
 export type PanelTabType = 'terminal' | 'script' | 'note' | 'api' | 'plugins' | 'plugin'
 
+/** 编辑页（脚本 / 笔记）的保存状态，由页面自己投影到底部状态栏 */
+export type EditorSaveState = 'saving' | 'dirty' | 'saved'
+
+/**
+ * 状态栏保存状态的键。
+ *
+ * 脚本 id 与笔记 id 来自两张不同的表、理论上可能撞车，所以带上类型前缀区分。
+ */
+export const editorSaveKey = (kind: 'script' | 'note', id: string): string => `${kind}:${id}`
+
+/**
+ * 等待二次确认的关闭操作。
+ *
+ * 用户开了「关闭标签前二次确认」（`Preferences.confirmCloseTab`）时，
+ * 关闭入口不直接关，而是挂到这里，由 `TabCloseConfirm` 弹框后再真正执行。
+ */
+export type PendingTabClose =
+  | { kind: 'tab'; tabId: string; label: string }
+  | { kind: 'group'; groupId: string; count: number }
+
 /**
  * PanelView 中打开的标签页。
  *
@@ -499,6 +519,18 @@ interface UiState {
   aiPanelHeight: number
   /** AI 助手浮窗位置（相对面板组内容区：x=左边距、y=下边距；null=默认底部居中） */
   aiFloatingPos: { x: number; y: number } | null
+  /**
+   * 各编辑页的保存状态（key 见 `editorSaveKey`），显示在底部状态栏（见 EditorSaveStatus）。
+   *
+   * 脚本页 / 笔记页自己维护草稿与自动保存，「保存中/未保存/已保存」只是把它投影到状态栏；
+   * 按实体隔离，多个脚本或笔记标签同时打开时互不干扰（每个页面只写自己那一格）。
+   */
+  editorSaveStatus: Record<string, EditorSaveState>
+  /**
+   * 等待二次确认的关闭操作（null = 没有待确认的关闭）。
+   * 只在 `Preferences.confirmCloseTab` 开启时才会被写入，弹框见 TabCloseConfirm。
+   */
+  pendingTabClose: PendingTabClose | null
 }
 
 interface AppStore {
@@ -726,8 +758,22 @@ interface AppStore {
   activatePanelTab: (id: string) => void
   /** 关闭 PanelView 中的指定标签 */
   closePanelTab: (id: string) => void
+  /**
+   * 请求关闭标签：**用户入口一律走这个**，别直接调 `closePanelTab`。
+   * 开了「关闭标签前二次确认」时先挂起等弹框，否则立即关闭。
+   * （`closePanelTab` 保留为「无条件关闭」，供保存草稿后关标签之类的程序化场景使用。）
+   */
+  requestClosePanelTab: (id: string) => void
+  /** 请求关闭整个面板组：同 `requestClosePanelTab`，也走二次确认 */
+  requestCloseGroup: (groupId: string) => void
+  /** 取消待确认的关闭（弹框点「取消」） */
+  cancelPendingTabClose: () => void
+  /** 确认待确认的关闭；dontAskAgain=true 时顺手把「二次确认」设置关掉 */
+  confirmPendingTabClose: (dontAskAgain: boolean) => Promise<void>
   /** 更新 PanelView 标签标题 */
   updatePanelTabTitle: (id: string, title: string) => void
+  /** 上报某个编辑页（脚本 / 笔记）的保存状态（由状态栏的 EditorSaveStatus 读取，key 见 `editorSaveKey`） */
+  setEditorSaveStatus: (key: string, state: EditorSaveState) => void
   /** 打开/关闭 SSH 配置弹窗（editing=null 为新建；groupId 预设新建时的分组） */
   setSshDialog: (open: boolean, editing?: SshProfile | null, groupId?: string) => void
   /** 打开/关闭「运行脚本」对话框（可预设要运行的脚本） */
@@ -748,6 +794,8 @@ interface AppStore {
   setCommandPrediction: (enabled: boolean) => Promise<void>
   /** 关闭窗口时是否最小化到系统托盘（持久化到偏好设置） */
   setMinimizeToTray: (enabled: boolean) => Promise<void>
+  /** 关闭标签页前是否二次确认（持久化到偏好设置；确认框里勾「以后都不再提示」会把它关掉） */
+  setConfirmCloseTab: (enabled: boolean) => Promise<void>
   /** 设置本地终端默认 shell（持久化到偏好设置） */
   setLocalShell: (shellId: string) => Promise<void>
   setTerminalFontSize: (size: number) => Promise<void>
@@ -833,7 +881,7 @@ let shortcutWired = false
     apiGroups: [],
     apiHistory: [],
 
-    preferences: { theme: 'system', colorTheme: 'neutral', customColor: '#3b82f6', terminalTheme: 'auto', copyOnSelect: true, rightClickPaste: true, commandPrediction: true, terminalFontSize: 13, localShell: 'default', minimizeToTray: true, monitorInterval: 2000 },
+    preferences: { theme: 'system', colorTheme: 'neutral', customColor: '#3b82f6', terminalTheme: 'auto', copyOnSelect: true, rightClickPaste: true, commandPrediction: true, terminalFontSize: 13, localShell: 'default', minimizeToTray: true, monitorInterval: 2000, confirmCloseTab: true },
 
     shortcuts: DEFAULT_SHORTCUTS,
 
@@ -863,7 +911,9 @@ let shortcutWired = false
       sidebarWidth: 240,
       aiPanelWidth: 380,
       aiPanelHeight: 440,
-      aiFloatingPos: null
+      aiFloatingPos: null,
+      editorSaveStatus: {},
+      pendingTabClose: null
     },
 
     monitors: {},
@@ -1627,6 +1677,49 @@ let shortcutWired = false
       set((st) => closePlainTab(st, id))
     },
 
+    requestClosePanelTab: (id) => {
+      const s = get()
+      const tab = s.ui.panelTabs.find((t) => t.id === id)
+      if (!tab) return
+      // 没开二次确认就直接关，保持原来的手感
+      if (!s.preferences.confirmCloseTab) {
+        get().closePanelTab(id)
+        return
+      }
+      set((st) => ({
+        ui: { ...st.ui, pendingTabClose: { kind: 'tab', tabId: id, label: tab.title } }
+      }))
+    },
+
+    requestCloseGroup: (groupId) => {
+      const s = get()
+      const group = s.groups[groupId]
+      if (!group) return
+      if (!s.preferences.confirmCloseTab) {
+        void get().closeGroup(groupId)
+        return
+      }
+      set((st) => ({
+        ui: {
+          ...st.ui,
+          pendingTabClose: { kind: 'group', groupId, count: group.tabIds.length }
+        }
+      }))
+    },
+
+    cancelPendingTabClose: () =>
+      set((st) => (st.ui.pendingTabClose ? { ui: { ...st.ui, pendingTabClose: null } } : {})),
+
+    confirmPendingTabClose: async (dontAskAgain) => {
+      const pending = get().ui.pendingTabClose
+      if (!pending) return
+      // 先收起弹框再执行关闭：关闭会改 groups / panelTabs，别让弹框停在半途的状态上
+      set((st) => ({ ui: { ...st.ui, pendingTabClose: null } }))
+      if (dontAskAgain) await get().setConfirmCloseTab(false)
+      if (pending.kind === 'tab') get().closePanelTab(pending.tabId)
+      else await get().closeGroup(pending.groupId)
+    },
+
     updatePanelTabTitle: (id, title) => {
       set((s) => ({
         ui: {
@@ -1635,6 +1728,13 @@ let shortcutWired = false
         }
       }))
     },
+
+    setEditorSaveStatus: (key, state) =>
+      set((s) => {
+        // 状态没变就不写，避免自动保存期间的无谓重渲染
+        if (s.ui.editorSaveStatus[key] === state) return {}
+        return { ui: { ...s.ui, editorSaveStatus: { ...s.ui.editorSaveStatus, [key]: state } } }
+      }),
 
     refreshAiConfigs: async () => {
       set({ aiConfigs: await window.api.ai.listConfigs() })
@@ -1714,6 +1814,12 @@ let shortcutWired = false
     setMinimizeToTray: async (enabled) => {
       set((s) => ({ preferences: { ...s.preferences, minimizeToTray: enabled } }))
       const preferences = await window.api.prefs.save({ minimizeToTray: enabled })
+      set({ preferences })
+    },
+
+    setConfirmCloseTab: async (enabled) => {
+      set((s) => ({ preferences: { ...s.preferences, confirmCloseTab: enabled } }))
+      const preferences = await window.api.prefs.save({ confirmCloseTab: enabled })
       set({ preferences })
     },
 

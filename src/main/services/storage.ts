@@ -49,7 +49,8 @@ const DEFAULT_PREFERENCES: Preferences = {
   terminalFontSize: 13,
   localShell: 'default',
   minimizeToTray: true,
-  monitorInterval: 2000
+  monitorInterval: 2000,
+  confirmCloseTab: true
 }
 
 /** 密钥类字段加密前缀（safeStorage 密文 base64） */

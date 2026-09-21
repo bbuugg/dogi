@@ -22,6 +22,8 @@ export function PrefSettings() {
   const setColorTheme = useAppStore((s) => s.setColorTheme)
   const minimizeToTray = useAppStore((s) => s.preferences.minimizeToTray)
   const setMinimizeToTray = useAppStore((s) => s.setMinimizeToTray)
+  const confirmCloseTab = useAppStore((s) => s.preferences.confirmCloseTab)
+  const setConfirmCloseTab = useAppStore((s) => s.setConfirmCloseTab)
   const customColor = preferences.customColor
   const customActive = preferences.colorTheme === 'custom'
 
@@ -40,6 +42,23 @@ export function PrefSettings() {
           id="minimize-to-tray"
           checked={minimizeToTray}
           onChange={(v) => void setMinimizeToTray(v)}
+        />
+      </div>
+
+      <div className="flex items-start justify-between gap-4 rounded-md">
+        <div>
+          <label htmlFor="confirm-close-tab" className="font-medium text-foreground">
+            关闭标签前二次确认
+          </label>
+          <p className="mt-1 text-xs leading-4 text-muted-foreground">
+            关闭标签或整个面板组时先弹确认框。在确认框里勾选「以后都不再提示」会自动关掉这个开关，
+            需要时再从这里打开。
+          </p>
+        </div>
+        <Switch
+          id="confirm-close-tab"
+          checked={confirmCloseTab}
+          onChange={(v) => void setConfirmCloseTab(v)}
         />
       </div>
 

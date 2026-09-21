@@ -62,6 +62,11 @@ export interface Preferences {
   minimizeToTray: boolean
   /** 服务器指标采集间隔（毫秒），缺省 2000 */
   monitorInterval: number
+  /**
+   * 关闭标签页前二次确认，缺省开启。
+   * 在确认框里勾选「以后都不再提示」会自动把它改成 false（可在设置里重新打开）。
+   */
+  confirmCloseTab: boolean
 }
 
 /** 检测到的本地可用 shell */
