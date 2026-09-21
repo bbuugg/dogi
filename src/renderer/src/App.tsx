@@ -2,7 +2,9 @@ import { editorSaveKey, useAppStore } from '@/stores/app-store'
 import { TitleBar } from '@/components/TitleBar'
 import { Sidebar } from '@/components/Sidebar'
 import { ActivityBar } from '@/components/ActivityBar'
+import { AgentPage } from '@/components/AgentPage'
 import { useActiveActivity } from '@/activities'
+import { AGENT_ACTIVITY_ID } from '@/activity-ids'
 import { MonitorBadge } from '@/components/MonitorBadge'
 import { EditorSaveStatus } from '@/components/EditorSaveStatus'
 import { AiStatusButton } from '@/components/AiStatusButton'
@@ -47,7 +49,9 @@ export default function App() {
       return editorSaveKey(tab.apiProtocol === 'ws' ? 'ws' : 'api', tab.apiRequestId)
     return null
   })
-  const { sidebarVisible } = useActiveActivity()
+  const { activity, sidebarVisible } = useActiveActivity()
+  /** AI Agent 功能区：主区域不显示终端面板树，整页是对话 + 大输入框 */
+  const isAgentActive = activity.id === AGENT_ACTIVITY_ID
 
   return (
     <AntdProvider>
@@ -79,7 +83,7 @@ export default function App() {
           )}
 
           <main className="relative flex min-w-0 flex-1 flex-col">
-            <PanelView />
+            {isAgentActive ? <AgentPage /> : <PanelView />}
           </main>
         </div>
 

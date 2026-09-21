@@ -528,6 +528,77 @@ export type AiStreamEvent =
   | { type: 'finish'; finishReason: string }
   | { type: 'error'; message: string }
 
+// ---------- AI Agent（工作区编程/运维助手） ----------
+
+/** Agent 工作区：绑定的本地目录，工具只能在工作区内读写与执行命令 */
+export interface AgentWorkspace {
+  id: string
+  /** 展示名（默认取目录名，可改） */
+  name: string
+  /** 绝对路径 */
+  path: string
+  createdAt: number
+  updatedAt: number
+}
+
+/** Agent 聊天消息（与 AiChatMessage 同构，part 形状一致） */
+export interface AgentChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  parts: AgentMessagePart[]
+  createdAt: number
+}
+
+export type AgentMessagePart =
+  | { type: 'text'; text: string }
+  | {
+      type: 'tool-call'
+      toolCallId: string
+      toolName: string
+      input: unknown
+    }
+  | {
+      type: 'tool-result'
+      toolCallId: string
+      toolName: string
+      output: unknown
+      isError?: boolean
+    }
+
+/** 发起 Agent 对话的请求体：绑定一个工作区（工具全部作用于该目录） */
+export interface AgentChatRequest {
+  workspaceId: string
+  history: AgentChatMessage[]
+}
+
+/** Agent 流事件（形状与 AiStreamEvent 一致） */
+export type AgentStreamEvent =
+  | { type: 'text-delta'; delta: string }
+  | { type: 'tool-call'; toolCallId: string; toolName: string; input: unknown }
+  | {
+      type: 'tool-result'
+      toolCallId: string
+      toolName: string
+      output: unknown
+      isError?: boolean
+    }
+  | { type: 'finish'; finishReason: string }
+  | { type: 'error'; message: string }
+
+/** Agent 确认模式下 execute_command 执行前的主进程请示 */
+export interface AgentConfirmRequest {
+  /** 确认请求 id，回复时原样带回 */
+  id: string
+  /** 所属 Agent 对话请求 id */
+  requestId: string
+  toolCallId: string
+  toolName: string
+  /** 待执行的命令 */
+  command: string
+  workspaceId?: string
+  workspaceName?: string
+}
+
 export interface McpToolInfo {
   serverName: string
   name: string

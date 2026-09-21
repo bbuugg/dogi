@@ -1,5 +1,6 @@
 import type { ComponentType } from 'react'
-import { FileCode2, Globe, Puzzle, Server, StickyNote } from 'lucide-react'
+import { Bot, FileCode2, Globe, Puzzle, Server, StickyNote } from 'lucide-react'
+import { AgentPanel } from '@/components/AgentPanel'
 import { ApiPanel } from '@/components/ApiPanel'
 import { HostsPanel } from '@/components/HostsPanel'
 import { NotesPanel } from '@/components/NotesPanel'
@@ -7,6 +8,7 @@ import { PluginsPanel } from '@/components/PluginsPanel'
 import { ScriptsPanel } from '@/components/ScriptsPanel'
 import { useAppStore } from '@/stores/app-store'
 import {
+  AGENT_ACTIVITY_ID,
   API_ACTIVITY_ID,
   HOSTS_ACTIVITY_ID,
   NOTES_ACTIVITY_ID,
@@ -38,6 +40,12 @@ export interface Activity {
 }
 
 export const BUILTIN_ACTIVITIES: Activity[] = [
+  {
+    id: AGENT_ACTIVITY_ID,
+    label: 'AI Agent',
+    icon: Bot,
+    panel: AgentPanel
+  },
   {
     id: HOSTS_ACTIVITY_ID,
     label: '主机',

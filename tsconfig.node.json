@@ -18,7 +18,8 @@
     "emitDeclarationOnly": false,
     "outDir": "node_modules/.tsbuild/node",
     "paths": {
-      "@shared/*": ["./src/shared/*"]
+      "@shared/*": ["./src/shared/*"],
+      "@opsdesk/ai-agent": ["./packages/ai-agent/src/index.ts"]
     }
   },
   "include": [

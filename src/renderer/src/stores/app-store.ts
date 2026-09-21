@@ -17,6 +17,10 @@ import type { PluginViewInstance } from '@/plugins/host'
 import type { PluginInfo } from '@shared/plugin'
 import { DEFAULT_SHORTCUTS, findShortcutByEvent } from '@shared/shortcuts'
 import type {
+  AgentChatMessage,
+  AgentConfirmRequest,
+  AgentStreamEvent,
+  AgentWorkspace,
   AiChatMessage,
   AiConfirmRequest,
   AiMessagePart,
@@ -197,6 +201,56 @@ function emptyAiChat(): AiChatState {
 
 /** requestId -> sessionId：把流式事件路由到发起对话的那个会话 */
 const aiRequestSessions = new Map<string, string>()
+
+/** 单个工作区独立的 Agent 对话状态 */
+export interface AgentChatState {
+  messages: AgentChatMessage[]
+  streaming: boolean
+  /** 进行中的对话请求 id（用于事件路由与中止） */
+  requestId: string | null
+  error: string | null
+}
+
+function emptyAgentChat(): AgentChatState {
+  return { messages: [], streaming: false, requestId: null, error: null }
+}
+
+/** requestId -> workspaceId：把 Agent 流式事件路由到发起对话的工作区 */
+const agentRequestWorkspaces = new Map<string, string>()
+
+/** Agent 回复生成中的占位 assistant 消息尾部追加 part */
+function appendAgentPart(parts: AgentChatMessage['parts'], event: AgentStreamEvent) {
+  const next = [...parts]
+  if (event.type === 'text-delta') {
+    const last = next[next.length - 1]
+    if (last?.type === 'text') {
+      next[next.length - 1] = { type: 'text', text: last.text + event.delta }
+    } else {
+      next.push({ type: 'text', text: event.delta })
+    }
+  } else if (event.type === 'tool-call') {
+    next.push({
+      type: 'tool-call',
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      input: event.input
+    })
+  } else if (event.type === 'tool-result') {
+    next.push({
+      type: 'tool-result',
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      output: event.output,
+      isError: event.isError
+    })
+  } else if (event.type === 'error') {
+    next.push({
+      type: 'text',
+      text: `⚠️ ${event.message}`
+    })
+  }
+  return next
+}
 
 /** AI 回复生成中的占位 assistant 消息尾部追加 part */
 function appendAssistantPart(
@@ -620,6 +674,15 @@ interface AppStore {
   /** 确认模式下等待用户处理的命令执行请求（key 为确认 id；各会话实例独立弹卡） */
   pendingConfirms: Record<string, AiConfirmRequest>
 
+  // ---------- AI Agent（工作区编程助手） ----------
+  agentWorkspaces: AgentWorkspace[]
+  /** 当前选中的工作区 id（Agent 对话绑定它） */
+  activeAgentWorkspaceId: string | null
+  /** 每个工作区独立的 Agent 对话（key 为 workspaceId） */
+  agentChats: Record<string, AgentChatState>
+  /** Agent 确认模式下等待用户处理的命令执行请求（key 为确认 id） */
+  agentPendingConfirms: Record<string, AgentConfirmRequest>
+
   // ---------- UI ----------
   ui: UiState
 
@@ -852,6 +915,20 @@ interface AppStore {
   abortAi: (sessionId: string) => Promise<void>
   clearAiMessages: (sessionId: string) => void
   handleAiEvent: (requestId: string, event: AiStreamEvent) => void
+  /** 重新拉取 Agent 工作区列表 */
+  loadAgentWorkspaces: () => Promise<void>
+  /** 保存工作区（同名路径视为更新）；返回最新列表 */
+  saveAgentWorkspace: (input: { id?: string; name: string; path: string }) => Promise<void>
+  deleteAgentWorkspace: (id: string) => Promise<void>
+  /** 选中工作区（Agent 对话绑定它） */
+  selectAgentWorkspace: (id: string) => void
+  /** 在当前选中的工作区发起 Agent 对话 */
+  sendAgentMessage: (text: string) => Promise<void>
+  abortAgent: () => Promise<void>
+  clearAgentMessages: () => void
+  handleAgentEvent: (requestId: string, event: AgentStreamEvent) => void
+  /** 回复 Agent 命令执行确认：approved=true 执行，false 取消 */
+  resolveAgentConfirm: (id: string, approved: boolean) => Promise<void>
 }
 
 let listenersBound = false
@@ -901,6 +978,22 @@ let shortcutWired = false
         return { pendingConfirms: next }
       })
     })
+    // ---------- AI Agent 事件 ----------
+    window.api.agent.onChatEvent(({ requestId, event }) => {
+      get().handleAgentEvent(requestId, event)
+    })
+    window.api.agent.onConfirmRequest((req) => {
+      set((s) => ({ agentPendingConfirms: { ...s.agentPendingConfirms, [req.id]: req } }))
+    })
+    // 确认已有结论（超时 / 中止等非用户路径）：移除对应卡片
+    window.api.agent.onConfirmResolved(({ id }) => {
+      set((s) => {
+        if (!(id in s.agentPendingConfirms)) return {}
+        const next = { ...s.agentPendingConfirms }
+        delete next[id]
+        return { agentPendingConfirms: next }
+      })
+    })
     window.api.monitor.onData(({ sessionId, metrics }) => {
       set((s) => ({ monitors: { ...s.monitors, [sessionId]: metrics } }))
     })
@@ -937,6 +1030,11 @@ let shortcutWired = false
     aiChats: {},
     pendingConfirms: {},
 
+    agentWorkspaces: [],
+    activeAgentWorkspaceId: null,
+    agentChats: {},
+    agentPendingConfirms: {},
+
     plugins: [],
     pluginList: [],
     pluginCommands: {},
@@ -965,7 +1063,7 @@ let shortcutWired = false
     monitors: {},
 
     bootstrap: async () => {
-      const [profiles, sshGroups, configs, settings, preferences, shells, scripts, scriptGroups, notes, noteGroups, apiRequests, apiGroups, apiHistory, shortcuts] = await Promise.all([
+      const [profiles, sshGroups, configs, settings, preferences, shells, scripts, scriptGroups, notes, noteGroups, apiRequests, apiGroups, apiHistory, shortcuts, agentWorkspaces] = await Promise.all([
         window.api.ssh.list(),
         window.api.ssh.listGroups(),
         window.api.ai.listConfigs(),
@@ -979,7 +1077,8 @@ let shortcutWired = false
         window.api.apiClient.list(),
         window.api.apiClient.listGroups(),
         window.api.apiClient.listHistory(),
-        window.api.shortcuts.get()
+        window.api.shortcuts.get(),
+        window.api.agent.listWorkspaces()
       ])
       // 配色必须在偏好写进 store 之前落到 html 上：antd 的 token 是在 store 更新引发的那次
       // 重渲染里从 CSS 变量读出来的，晚一步就会永远停在默认中性配色（直到用户手动切换）
@@ -998,7 +1097,9 @@ let shortcutWired = false
         apiRequests,
         apiGroups,
         apiHistory,
-        shortcuts
+        shortcuts,
+        agentWorkspaces,
+        activeAgentWorkspaceId: agentWorkspaces[0]?.id ?? null
       })
       // 运行时加载外部插件（扫描 userData/plugins 并收集视图）
       const { loadPlugins } = await import('@/plugins/host')
@@ -2067,6 +2168,195 @@ let shortcutWired = false
         }
         return { aiChats: { ...s.aiChats, [sid]: { ...chat, messages } } }
       })
+    },
+
+    // ---------- AI Agent ----------
+
+    loadAgentWorkspaces: async () => {
+      const workspaces = await window.api.agent.listWorkspaces()
+      set((s) => {
+        // 选中项失效（工作区被删）时回退到第一个
+        const activeValid =
+          s.activeAgentWorkspaceId && workspaces.some((w) => w.id === s.activeAgentWorkspaceId)
+        return {
+          agentWorkspaces: workspaces,
+          activeAgentWorkspaceId: activeValid
+            ? s.activeAgentWorkspaceId
+            : (workspaces[0]?.id ?? null)
+        }
+      })
+    },
+
+    saveAgentWorkspace: async (input) => {
+      const workspaces = await window.api.agent.saveWorkspace(input)
+      set((s) => ({
+        agentWorkspaces: workspaces,
+        // 首次添加时自动选中
+        activeAgentWorkspaceId: s.activeAgentWorkspaceId ?? workspaces[0]?.id ?? null
+      }))
+    },
+
+    deleteAgentWorkspace: async (id) => {
+      const workspaces = await window.api.agent.deleteWorkspace(id)
+      set((s) => ({
+        agentWorkspaces: workspaces,
+        activeAgentWorkspaceId:
+          s.activeAgentWorkspaceId === id ? (workspaces[0]?.id ?? null) : s.activeAgentWorkspaceId
+      }))
+    },
+
+    selectAgentWorkspace: (id) => set({ activeAgentWorkspaceId: id }),
+
+    sendAgentMessage: async (text) => {
+      const trimmed = text.trim()
+      const wid = get().activeAgentWorkspaceId
+      if (!wid || !trimmed) return
+      const chat = get().agentChats[wid] ?? emptyAgentChat()
+      if (chat.streaming) return
+      const now = Date.now()
+      const userMsg: AgentChatMessage = {
+        id: `u-${now}`,
+        role: 'user',
+        parts: [{ type: 'text', text: trimmed }],
+        createdAt: now
+      }
+      const assistantMsg: AgentChatMessage = {
+        id: `a-${now}`,
+        role: 'assistant',
+        parts: [],
+        createdAt: now + 1
+      }
+      const history = [...chat.messages, userMsg]
+      set((s) => ({
+        agentChats: {
+          ...s.agentChats,
+          [wid]: { ...chat, messages: [...history, assistantMsg], streaming: true, error: null }
+        }
+      }))
+
+      try {
+        const { requestId } = await window.api.agent.chat({ workspaceId: wid, history })
+        agentRequestWorkspaces.set(requestId, wid)
+        set((s) => {
+          const c = s.agentChats[wid]
+          if (!c) return {}
+          return { agentChats: { ...s.agentChats, [wid]: { ...c, requestId } } }
+        })
+      } catch (err) {
+        set((s) => {
+          const c = s.agentChats[wid]
+          if (!c) return {}
+          return {
+            agentChats: {
+              ...s.agentChats,
+              [wid]: {
+                ...c,
+                streaming: false,
+                requestId: null,
+                error: err instanceof Error ? err.message : String(err)
+              }
+            }
+          }
+        })
+      }
+    },
+
+    abortAgent: async () => {
+      const wid = get().activeAgentWorkspaceId
+      if (!wid) return
+      const chat = get().agentChats[wid]
+      const requestId = chat?.requestId ?? null
+      if (!requestId) return
+      agentRequestWorkspaces.delete(requestId)
+      // 只清属于本次请求的确认卡
+      for (const c of Object.values(get().agentPendingConfirms)) {
+        if (c.requestId === requestId) void get().resolveAgentConfirm(c.id, false)
+      }
+      await window.api.agent.abort(requestId)
+      set((s) => ({
+        agentChats: s.agentChats[wid]
+          ? { ...s.agentChats, [wid]: { ...s.agentChats[wid], streaming: false, requestId: null } }
+          : s.agentChats
+      }))
+    },
+
+    clearAgentMessages: () => {
+      const wid = get().activeAgentWorkspaceId
+      if (!wid) return
+      const chat = get().agentChats[wid]
+      if (chat?.requestId) agentRequestWorkspaces.delete(chat.requestId)
+      set((s) => ({ agentChats: { ...s.agentChats, [wid]: emptyAgentChat() } }))
+    },
+
+    handleAgentEvent: (requestId, event) => {
+      // 路由到发起该对话的工作区（不依赖当前选中）
+      const wid = agentRequestWorkspaces.get(requestId)
+      if (!wid) return
+      if (event.type === 'finish') {
+        agentRequestWorkspaces.delete(requestId)
+        set((s) => {
+          const chat = s.agentChats[wid]
+          if (!chat) return {}
+          return {
+            agentChats: { ...s.agentChats, [wid]: { ...chat, streaming: false, requestId: null } }
+          }
+        })
+        // 兜底：该对话已结束但仍有其挂起确认时按取消处理，避免主进程工具悬挂
+        for (const c of Object.values(get().agentPendingConfirms)) {
+          if (c.requestId === requestId) void get().resolveAgentConfirm(c.id, false)
+        }
+        return
+      }
+      if (event.type === 'error') {
+        // 报错即视为本轮对话结束：立刻复位 streaming，不依赖后续 finish 事件
+        agentRequestWorkspaces.delete(requestId)
+        set((s) => {
+          const chat = s.agentChats[wid]
+          if (!chat) return {}
+          const messages = [...chat.messages]
+          const last = messages[messages.length - 1]
+          if (last?.role === 'assistant') {
+            messages[messages.length - 1] = {
+              ...last,
+              parts: appendAgentPart(last.parts, event)
+            }
+          }
+          return {
+            agentChats: {
+              ...s.agentChats,
+              [wid]: { ...chat, messages, streaming: false, requestId: null, error: null }
+            }
+          }
+        })
+        for (const c of Object.values(get().agentPendingConfirms)) {
+          if (c.requestId === requestId) void get().resolveAgentConfirm(c.id, false)
+        }
+        return
+      }
+      set((s) => {
+        const chat = s.agentChats[wid]
+        if (!chat) return {}
+        const messages = [...chat.messages]
+        const last = messages[messages.length - 1]
+        if (last?.role === 'assistant') {
+          messages[messages.length - 1] = {
+            ...last,
+            parts: appendAgentPart(last.parts, event)
+          }
+        }
+        return { agentChats: { ...s.agentChats, [wid]: { ...chat, messages } } }
+      })
+    },
+
+    resolveAgentConfirm: async (id, approved) => {
+      // 本地立即移除卡片（主进程也会广播 resolved，幂等无害）
+      set((s) => {
+        if (!(id in s.agentPendingConfirms)) return {}
+        const next = { ...s.agentPendingConfirms }
+        delete next[id]
+        return { agentPendingConfirms: next }
+      })
+      await window.api.agent.resolveConfirm(id, approved)
     }
   }
 })

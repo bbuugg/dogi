@@ -1,6 +1,7 @@
 import Store from 'electron-store'
 import { safeStorage } from 'electron'
 import type {
+  AgentWorkspace,
   AiModelConfig,
   AiPermissionMode,
   AiSettings,
@@ -34,6 +35,7 @@ interface StoreSchema {
   apiGroups: ApiGroup[]
   apiHistory: ApiHistoryEntry[]
   shortcuts: ShortcutConfig[]
+  agentWorkspaces: AgentWorkspace[]
   windowBounds?: { x?: number; y?: number; width: number; height: number }
 }
 
@@ -72,7 +74,8 @@ class StorageService {
       apiRequests: [],
       apiGroups: [],
       apiHistory: [],
-      shortcuts: DEFAULT_SHORTCUTS
+      shortcuts: DEFAULT_SHORTCUTS,
+      agentWorkspaces: []
     }
   })
 
@@ -695,6 +698,48 @@ class StorageService {
   saveAiSettings(settings: Partial<AiSettings>): AiSettings {
     const next = { ...this.getAiSettings(), ...settings }
     this.store.set('aiSettings', next)
+    return next
+  }
+
+  // ---------- Agent 工作区 ----------
+  listAgentWorkspaces(): AgentWorkspace[] {
+    return this.store.get('agentWorkspaces')
+  }
+
+  getAgentWorkspace(id: string): AgentWorkspace | undefined {
+    return this.store.get('agentWorkspaces').find((w) => w.id === id)
+  }
+
+  /** 保存工作区（upsert）；相同 path 视为同一工作区，改名即更新 */
+  saveAgentWorkspace(input: { id?: string; name: string; path: string }): AgentWorkspace[] {
+    const workspaces = this.store.get('agentWorkspaces')
+    const now = Date.now()
+    const byPath = workspaces.find((w) => w.path === input.path)
+    const prev = input.id ? workspaces.find((w) => w.id === input.id) : undefined
+    const target = byPath ?? prev
+    const next = target
+      ? workspaces.map((w) =>
+          w === target
+            ? { ...w, name: input.name.trim() || w.name, updatedAt: now }
+            : w
+        )
+      : [
+          ...workspaces,
+          {
+            id: crypto.randomUUID(),
+            name: input.name.trim(),
+            path: input.path,
+            createdAt: now,
+            updatedAt: now
+          }
+        ]
+    this.store.set('agentWorkspaces', next)
+    return next
+  }
+
+  deleteAgentWorkspace(id: string): AgentWorkspace[] {
+    const next = this.store.get('agentWorkspaces').filter((w) => w.id !== id)
+    this.store.set('agentWorkspaces', next)
     return next
   }
 

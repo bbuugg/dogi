@@ -5,12 +5,15 @@ import { monitorService } from './services/monitor'
 import { storage } from './services/storage'
 import { detectShells } from './services/shells'
 import { aiService } from './services/ai'
+import { agentService } from './services/agent'
 import { mcpManager } from './services/mcp'
 import { pluginHost } from './services/plugins'
 import { executeHttp } from './services/http'
 import { wsService } from './services/ws'
 import { app } from 'electron'
 import type {
+  AgentChatRequest,
+  AgentStreamEvent,
   AiModelConfig,
   AiStreamEvent,
   ApiHistoryEntry,
@@ -314,6 +317,31 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   // 会话关闭：销毁其 AI 助手实例（每个终端会话一个独立实例）
   sessionManager.on('closed', ({ sessionId }: { sessionId: string }) =>
     aiService.disposeSession(sessionId)
+  )
+
+  // ---------- AI Agent（工作区编程/运维助手） ----------
+  ipcMain.handle('agent:workspaces:list', () => storage.listAgentWorkspaces())
+  ipcMain.handle(
+    'agent:workspaces:save',
+    (_e, input: { id?: string; name: string; path: string }) =>
+      storage.saveAgentWorkspace(input)
+  )
+  ipcMain.handle('agent:workspaces:delete', (_e, id: string) =>
+    storage.deleteAgentWorkspace(id)
+  )
+  ipcMain.handle('agent:chat', async (_e, req: AgentChatRequest) => agentService.chat(req))
+  ipcMain.handle('agent:abort', (_e, requestId: string) => agentService.abort(requestId))
+  agentService.on('chat-event', (requestId: string, event: AgentStreamEvent) =>
+    broadcast(win, 'agent:chat-event', { requestId, event })
+  )
+  agentService.setConfirmSink({
+    request: (req) => broadcast(win, 'agent:confirm', req),
+    resolved: (id) => broadcast(win, 'agent:confirm-resolved', { id })
+  })
+  ipcMain.handle(
+    'agent:confirm:resolve',
+    (_e, payload: { id: string; approved: boolean }) =>
+      agentService.resolveConfirm(payload.id, payload.approved)
   )
 
   // ---------- MCP ----------

@@ -1,0 +1,28 @@
+{
+  "name": "@opsdesk/ai-agent",
+  "version": "0.1.0",
+  "description": "OpsDesk AI Agent 核心：工作区文件与命令工具集（npm workspace 包，源码被主进程直接打包）",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "ai": "^7.0.99",
+    "zod": "^4.6.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^7.0.2"
+  }
+}

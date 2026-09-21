@@ -1,0 +1,561 @@
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Button, Dropdown, Input, Select, Tooltip } from 'antd'
+import {
+  Ban,
+  Bot,
+  Check,
+  Copy,
+  FolderOpen,
+  Loader2,
+  Send,
+  ShieldCheck,
+  Square,
+  Terminal,
+  Trash2,
+  X
+} from 'lucide-react'
+import { useAppStore } from '@/stores/app-store'
+import { AiMarkdown } from '@/components/AiMarkdown'
+import { cn } from 'cn'
+import type {
+  AgentChatMessage,
+  AgentConfirmRequest,
+  AgentMessagePart,
+  AiPermissionMode
+} from '@shared/types'
+
+/** Agent 工具的中文展示名 */
+const AGENT_TOOL_LABELS: Record<string, string> = {
+  list_files: '列出目录',
+  read_file: '读取文件',
+  write_file: '写入文件',
+  edit_file: '编辑文件',
+  search_files: '搜索文件',
+  execute_command: '执行命令'
+}
+
+/** 命令执行权限模式（与终端 AI 助手同一份配置 aiSettings.permissionMode） */
+const AGENT_PERMISSION_MODES: Array<{
+  value: AiPermissionMode
+  label: string
+  icon: typeof ShieldCheck
+  hint: string
+}> = [
+    {
+      value: 'full',
+      label: '自动执行',
+      icon: Terminal,
+      hint: 'Agent 执行命令无需逐条确认'
+    },
+    {
+      value: 'confirm',
+      label: '需确认',
+      icon: ShieldCheck,
+      hint: 'Agent 执行每条命令前都需要你确认，可随时取消'
+    }
+  ]
+
+type ToolCallPart = Extract<AgentMessagePart, { type: 'tool-call' }>
+type ToolResultPart = Extract<AgentMessagePart, { type: 'tool-result' }>
+
+/** 工具渲染单元：一次调用及其结果合为一处展示 */
+interface ToolUnit {
+  kind: 'tool'
+  call: ToolCallPart
+  result?: ToolResultPart
+}
+
+type RenderUnit = ToolUnit | { kind: 'text'; text: string }
+
+/** 把消息 parts 整理为渲染单元：文本独立成块；tool-call 与对应 tool-result 按 toolCallId 合并 */
+function buildRenderUnits(parts: AgentMessagePart[]): RenderUnit[] {
+  const units: RenderUnit[] = []
+  const toolsById = new Map<string, ToolUnit>()
+  for (const part of parts) {
+    if (part.type === 'text') {
+      units.push({ kind: 'text', text: part.text })
+    } else if (part.type === 'tool-call') {
+      const unit: ToolUnit = { kind: 'tool', call: part }
+      toolsById.set(part.toolCallId, unit)
+      units.push(unit)
+    } else if (part.type === 'tool-result') {
+      const unit = toolsById.get(part.toolCallId)
+      if (unit) {
+        unit.result = part
+      } else {
+        // 无对应调用的孤儿结果：兜底成完整工具单元，保证结果不丢
+        units.push({
+          kind: 'tool',
+          call: {
+            type: 'tool-call',
+            toolCallId: part.toolCallId,
+            toolName: part.toolName,
+            input: null
+          },
+          result: part
+        })
+      }
+    }
+  }
+  return units
+}
+
+/** 工具调用状态：待批准（确认模式等待用户）/ 调用中 / 已完成 / 失败 / 已取消 */
+type ToolStatus = 'pending' | 'running' | 'done' | 'error' | 'cancelled'
+
+const TOOL_STATUS_META: Record<
+  ToolStatus,
+  { label: string; icon: typeof Loader2; cls: string; spin?: boolean }
+> = {
+  pending: { label: '待批准', icon: ShieldCheck, cls: 'text-amber-500' },
+  running: { label: '调用中', icon: Loader2, cls: 'text-muted-foreground', spin: true },
+  done: { label: '已完成', icon: Check, cls: 'text-green-500' },
+  error: { label: '失败', icon: X, cls: 'text-destructive' },
+  cancelled: { label: '已取消', icon: Ban, cls: 'text-muted-foreground' }
+}
+
+/** 工具调用卡片：参数与结果同卡展示，头部带状态；待批准时确认按钮就在卡内 */
+function ToolPartCard({
+  unit,
+  streaming,
+  pendingConfirm
+}: {
+  unit: ToolUnit
+  streaming: boolean
+  pendingConfirm: AgentConfirmRequest | null
+}) {
+  const resolveAgentConfirm = useAppStore((s) => s.resolveAgentConfirm)
+  const { call, result } = unit
+  // 本工具对应的待批准确认（确认模式下）
+  const confirm = pendingConfirm?.toolCallId === call.toolCallId ? pendingConfirm : null
+  const status: ToolStatus = confirm
+    ? 'pending'
+    : result
+      ? result.isError
+        ? 'error'
+        : 'done'
+      : streaming
+        ? 'running'
+        : 'cancelled'
+  const meta = TOOL_STATUS_META[status]
+  const StatusIcon = meta.icon
+  const label = AGENT_TOOL_LABELS[call.toolName] ?? call.toolName
+  const inputText = call.input ? JSON.stringify(call.input, null, 1) : ''
+  const outputText =
+    typeof result?.output === 'string'
+      ? result.output.slice(0, 2000)
+      : result?.output
+        ? JSON.stringify(result.output).slice(0, 2000)
+        : ''
+
+  return (
+    <details className="my-1.5 rounded-md border border-border/70 text-xs" open={!!confirm}>
+      <summary className="flex cursor-pointer items-center gap-1.5 px-2 py-1.5 text-muted-foreground hover:text-foreground">
+        <StatusIcon
+          className={cn('size-3.5 shrink-0', meta.cls, meta.spin && 'animate-spin')}
+        />
+        <span className={cn('shrink-0 font-medium', meta.cls)}>{meta.label}</span>
+        <span className="shrink-0 text-muted-foreground/50">·</span>
+        <span className="shrink-0 font-medium">{label}</span>
+        {inputText && (
+          <span className="min-w-0 flex-1 truncate font-mono text-[10px]">
+            {inputText.replace(/\s+/g, ' ').slice(0, 80)}
+          </span>
+        )}
+      </summary>
+      <div className="border-t border-border/70 px-2 py-1.5">
+        {inputText && (
+          <pre className="mb-1 overflow-x-auto whitespace-pre-wrap font-mono text-[10px] text-muted-foreground">
+            {inputText}
+          </pre>
+        )}
+        {outputText && (
+          <pre
+            className={cn(
+              'max-h-72 overflow-auto whitespace-pre-wrap font-mono text-[10px]',
+              result?.isError && 'text-destructive'
+            )}
+          >
+            {outputText}
+          </pre>
+        )}
+        {confirm && (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="text-[10px] text-muted-foreground">
+              是否允许在工作区「{confirm.workspaceName}」执行？
+            </span>
+            <div className="ml-auto flex gap-1.5">
+              <Button
+                type="text"
+                size="small"
+                danger
+                icon={<Ban className="size-3.5" />}
+                onClick={() => void resolveAgentConfirm(confirm.id, false)}
+              >
+                拒绝
+              </Button>
+              <Button
+                type="primary"
+                size="small"
+                icon={<Check className="size-3.5" />}
+                onClick={() => void resolveAgentConfirm(confirm.id, true)}
+              >
+                允许
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+    </details>
+  )
+}
+
+/** 单条消息：用户气泡 / 助手（Markdown + 工具卡） */
+function MessageBubble({
+  message,
+  streaming,
+  pendingConfirm
+}: {
+  message: AgentChatMessage
+  streaming?: boolean
+  pendingConfirm: AgentConfirmRequest | null
+}) {
+  const [copied, setCopied] = useState(false)
+
+  if (message.role === 'user') {
+    const text = message.parts
+      .filter((p) => p.type === 'text')
+      .map((p) => (p.type === 'text' ? p.text : ''))
+      .join('')
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[85%] whitespace-pre-wrap rounded-lg rounded-br-sm bg-primary px-3 py-2 text-[13px] text-white">
+          {text}
+        </div>
+      </div>
+    )
+  }
+
+  const units = buildRenderUnits(message.parts)
+  const hasText = units.some((u) => u.kind === 'text')
+  const copyRaw = async () => {
+    const raw = message.parts
+      .filter((p) => p.type === 'text')
+      .map((p) => (p.type === 'text' ? p.text : ''))
+      .join('\n\n')
+      .trim()
+    if (!raw) return
+    try {
+      await navigator.clipboard.writeText(raw)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // 忽略
+    }
+  }
+
+  return (
+    <div className="space-y-1">
+      {units.map((unit, i) =>
+        unit.kind === 'text' ? (
+          <div key={i} className="px-3 py-2">
+            <AiMarkdown content={unit.text} />
+            {streaming && i === units.length - 1 && (
+              <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-primary align-middle" />
+            )}
+          </div>
+        ) : (
+          <ToolPartCard
+            key={i}
+            unit={unit}
+            streaming={!!streaming}
+            pendingConfirm={pendingConfirm}
+          />
+        )
+      )}
+      {units.length === 0 && streaming && (
+        <div className="flex items-center gap-2 rounded-lg px-3 py-2 text-xs text-muted-foreground">
+          <Loader2 className="size-3.5 animate-spin" /> 思考中...
+        </div>
+      )}
+      {!streaming && hasText && (
+        <div className="px-3">
+          <button
+            type="button"
+            onClick={() => void copyRaw()}
+            title="复制原文（Markdown）"
+            className="inline-flex items-center gap-1 rounded p-1 text-[10px] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+          >
+            {copied ? <Check className="size-3 text-green-500" /> : <Copy className="size-3" />}
+            {copied ? '已复制' : '复制'}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** 稳定的空消息数组：避免每次渲染新引用导致滚动 effect 误触发 */
+const NO_MESSAGES: AgentChatMessage[] = []
+
+/**
+ * Agent 主界面：类 Claude Code 的工作区编程助手。
+ * 上方是对话流（文本 + 工具卡），底部大输入框，Enter 发送 / Shift+Enter 换行。
+ * 对话绑定左侧选中的工作区，工具（读写文件 / 搜索 / 执行命令）只能作用于该目录。
+ */
+export function AgentPage() {
+  const workspaces = useAppStore((s) => s.agentWorkspaces)
+  const activeId = useAppStore((s) => s.activeAgentWorkspaceId)
+  const active = activeId ? workspaces.find((w) => w.id === activeId) : undefined
+  const aiSettings = useAppStore((s) => s.aiSettings)
+  const aiConfigs = useAppStore((s) => s.aiConfigs)
+  const hasConfig = Boolean(aiSettings.activeConfigId) && aiConfigs.length > 0
+  const setActiveAiConfig = useAppStore((s) => s.setActiveAiConfig)
+  const setAiPermissionMode = useAppStore((s) => s.setAiPermissionMode)
+  const permissionMode: AiPermissionMode =
+    aiSettings.permissionMode === 'confirm' ? 'confirm' : 'full'
+  const permissionMeta =
+    AGENT_PERMISSION_MODES.find((m) => m.value === permissionMode) ?? AGENT_PERMISSION_MODES[0]
+  const PermissionIcon = permissionMeta.icon
+  const chat = useAppStore((s) => (activeId ? s.agentChats[activeId] : undefined))
+  const messages = chat?.messages ?? NO_MESSAGES
+  const streaming = chat?.streaming ?? false
+  const error = chat?.error ?? null
+  const pendingConfirm = useAppStore((s) => {
+    if (!activeId) return null
+    for (const c of Object.values(s.agentPendingConfirms)) {
+      if (c.workspaceId === undefined || c.workspaceId === activeId) return c
+    }
+    return null
+  })
+  const sendAgentMessage = useAppStore((s) => s.sendAgentMessage)
+  const abortAgent = useAppStore((s) => s.abortAgent)
+  const clearAgentMessages = useAppStore((s) => s.clearAgentMessages)
+  const selectAgentWorkspace = useAppStore((s) => s.selectAgentWorkspace)
+
+  const [input, setInput] = useState('')
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const nearBottomRef = useRef(true)
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (el && nearBottomRef.current) el.scrollTop = el.scrollHeight
+  }, [messages, streaming, activeId])
+
+  const handleListScroll = () => {
+    const el = scrollRef.current
+    if (!el) return
+    nearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
+  }
+
+  const handleSend = () => {
+    if (streaming || !input.trim() || !hasConfig || !activeId) return
+    void sendAgentMessage(input)
+    setInput('')
+  }
+
+  // 切换工作区后把输入焦点还给页面（若输入框有焦点则保留）
+  useEffect(() => {
+    setInput('')
+  }, [activeId])
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-background">
+      {/* 顶栏：当前工作区 + 操作 */}
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border/70 px-3">
+        {active ? (
+          <>
+            <FolderOpen className="size-4 shrink-0 text-primary" />
+            <span className="shrink-0 text-sm font-medium">{active.name}</span>
+            <span
+              className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground"
+              title={active.path}
+            >
+              {active.path}
+            </span>
+          </>
+        ) : (
+          <>
+            <Bot className="size-4 shrink-0 text-muted-foreground" />
+            <span className="text-sm text-muted-foreground">AI Agent</span>
+          </>
+        )}
+        <div className="flex items-center gap-0.5">
+          {workspaces.length > 0 && activeId && (
+            <Tooltip title="清空当前工作区的对话">
+              <Button
+                type="text"
+                size="small"
+                className="px-1.5 text-muted-foreground"
+                icon={<Trash2 className="size-3.5" />}
+                disabled={messages.length === 0 || streaming}
+                onClick={() => void clearAgentMessages()}
+              />
+            </Tooltip>
+          )}
+        </div>
+      </div>
+
+      {/* 对话流 */}
+      <div
+        ref={scrollRef}
+        onScroll={handleListScroll}
+        className="agent-scroll min-h-0 flex-1 overflow-y-auto py-4"
+      >
+        {!active ? (
+          <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+            <Bot className="size-12 opacity-30" />
+            <div className="text-sm text-muted-foreground">
+              在左侧「工作区」面板添加一个本地目录，即可让 Agent 在该目录内
+              <br />
+              阅读 / 编辑文件、搜索代码并执行命令。
+            </div>
+            <Button type="primary" onClick={() => selectAgentWorkspace('')}>
+              选择工作区
+            </Button>
+          </div>
+        ) : messages.length === 0 && !streaming ? (
+          <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
+            <Bot className="size-10 opacity-30" />
+            <div className="text-sm text-muted-foreground">
+              在下方输入你想在「{active.name}」里完成的任务。
+            </div>
+            <div className="text-xs text-muted-foreground/60">
+              例如：列出项目结构，帮我加一个 /health 接口，然后跑一遍测试
+            </div>
+          </div>
+        ) : (
+          <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4">
+            {messages.map((m, i) => (
+              <MessageBubble
+                key={m.id}
+                message={m}
+                streaming={streaming && i === messages.length - 1 && m.role === 'assistant'}
+                pendingConfirm={pendingConfirm}
+              />
+            ))}
+            {error && !streaming && (
+              <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                {error}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* 底部大输入框：外层外壳是唯一的边框（内层输入区无边框，避免双重 border）；
+          左下角是模型选择与命令执行权限，右下角是发送/停止 */}
+      {active && (
+        <div className="shrink-0 p-3">
+          <div className="mx-auto w-full max-w-3xl">
+            <div
+              className={cn(
+                'overflow-hidden rounded-xl border border-transparent bg-muted/50 transition-colors',
+                'focus-within:border-primary/50 focus-within:bg-muted/70'
+              )}
+            >
+              <Input.TextArea
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                    e.preventDefault()
+                    handleSend()
+                  }
+                }}
+                placeholder={
+                  hasConfig
+                    ? `在「${active.name}」中描述你的任务…（Enter 发送 · Shift+Enter 换行）`
+                    : '请先在设置中配置 AI 模型'
+                }
+                autoSize={{ minRows: 2, maxRows: 8 }}
+                variant="borderless"
+                className="agent-input max-h-52 w-full border-none bg-transparent px-3 py-2.5 text-[13px] shadow-none"
+              />
+              {/* 工具行：模型 / 权限 在左，发送在右 */}
+              <div className="flex items-center justify-between gap-2 px-2 py-1.5">
+                <div className="flex min-w-0 items-center gap-0.5">
+                  <Select
+                    size="small"
+                    variant="borderless"
+                    placement="topLeft"
+                    className="max-w-48 min-w-0"
+                    value={
+                      aiConfigs.some((c) => c.id === aiSettings.activeConfigId)
+                        ? aiSettings.activeConfigId
+                        : undefined
+                    }
+                    onChange={(v) => void setActiveAiConfig(v)}
+                    placeholder="选择模型"
+                    popupMatchSelectWidth={false}
+                    options={aiConfigs.map((c) => ({
+                      value: c.id,
+                      label: `${c.name}（${c.model}）`
+                    }))}
+                  />
+                  <Dropdown
+                    trigger={['click']}
+                    placement="topLeft"
+                    autoAdjustOverflow={false}
+                    menu={{
+                      selectable: true,
+                      selectedKeys: [permissionMode],
+                      items: AGENT_PERMISSION_MODES.map((m) => ({
+                        key: m.value,
+                        icon: <m.icon className="size-3.5" />,
+                        label: (
+                          <span>
+                            {m.label}
+                            <span className="block text-[10px] text-muted-foreground">
+                              {m.hint}
+                            </span>
+                          </span>
+                        )
+                      })),
+                      onClick: ({ key }) => void setAiPermissionMode(key as AiPermissionMode)
+                    }}
+                  >
+                    <Button
+                      type="text"
+                      size="small"
+                      className={cn(
+                        'text-muted-foreground',
+                        permissionMode === 'confirm' && 'text-amber-500'
+                      )}
+                    >
+                      <PermissionIcon className="size-3.5" />
+                      {permissionMeta.label}
+                    </Button>
+                  </Dropdown>
+                </div>
+                {streaming ? (
+                  <Button
+                    type="text"
+                    danger
+                    icon={<Square className="size-4" />}
+                    title="停止生成"
+                    className="shrink-0"
+                    onClick={() => void abortAgent()}
+                  />
+                ) : (
+                  <Button
+                    type="text"
+                    icon={<Send className="size-4" />}
+                    disabled={!input.trim() || !hasConfig}
+                    title="发送"
+                    className="shrink-0"
+                    onClick={handleSend}
+                  />
+                )}
+              </div>
+            </div>
+            <div className="mt-1.5 flex items-center justify-between px-1 text-[10px] text-muted-foreground/70">
+              <span>Agent 只能在「{active.name}」目录内操作</span>
+              <span>工具：读文件 / 写文件 / 编辑 / 搜索 / 执行命令</span>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

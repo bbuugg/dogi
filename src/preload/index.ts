@@ -1,6 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import type {
+  AgentChatRequest,
+  AgentConfirmRequest,
+  AgentStreamEvent,
+  AgentWorkspace,
   AiChatRequest,
   AiConfirmRequest,
   AiModelConfig,
@@ -124,6 +128,29 @@ const api = {
     /** 回复确认请求：approved=true 执行，false 取消 */
     resolveConfirm: (id: string, approved: boolean): Promise<void> =>
       ipcRenderer.invoke('ai:confirm:resolve', { id, approved })
+  },
+  /** AI Agent（工作区编程/运维助手）：对话绑定一个本地工作区，工具在其内读写/执行命令 */
+  agent: {
+    listWorkspaces: (): Promise<AgentWorkspace[]> =>
+      ipcRenderer.invoke('agent:workspaces:list'),
+    saveWorkspace: (input: { id?: string; name: string; path: string }): Promise<
+      AgentWorkspace[]
+    > => ipcRenderer.invoke('agent:workspaces:save', input),
+    deleteWorkspace: (id: string): Promise<AgentWorkspace[]> =>
+      ipcRenderer.invoke('agent:workspaces:delete', id),
+    chat: (req: AgentChatRequest): Promise<{ requestId: string }> =>
+      ipcRenderer.invoke('agent:chat', req),
+    abort: (requestId: string): Promise<void> => ipcRenderer.invoke('agent:abort', requestId),
+    onChatEvent: (cb: (payload: { requestId: string; event: AgentStreamEvent }) => void) =>
+      subscribe('agent:chat-event', cb),
+    /** 确认模式下收到 execute_command 执行确认请求 */
+    onConfirmRequest: (cb: (req: AgentConfirmRequest) => void) => subscribe('agent:confirm', cb),
+    /** 确认已有结论（超时 / 中止由主进程通知移除卡片） */
+    onConfirmResolved: (cb: (payload: { id: string }) => void) =>
+      subscribe('agent:confirm-resolved', cb),
+    /** 回复确认请求：approved=true 执行，false 取消 */
+    resolveConfirm: (id: string, approved: boolean): Promise<void> =>
+      ipcRenderer.invoke('agent:confirm:resolve', { id, approved })
   },
   mcp: {
     list: (): Promise<McpServerConfig[]> => ipcRenderer.invoke('mcp:list'),

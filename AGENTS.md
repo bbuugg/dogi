@@ -42,6 +42,13 @@
 - **触发信号**：`require.resolve('vite/bin/vite.js')` 抛 `ERR_PACKAGE_PATH_NOT_EXPORTED`。
 - **正确做法**：用 `fileURLToPath(new URL('../node_modules/vite/bin/vite.js', import.meta.url))` 直接拼路径（见 `scripts/dev.mjs`）。
 
+### 6a. npm workspace 包参与主进程打包必须在 external 里显式放行
+
+- **触发信号**：构建成功但启动报 `ERR_MODULE_NOT_FOUND: Cannot find module '...packages/ai-agent/src/agent' imported from ...src/index.ts`，窗口不出现。
+- **根因/约束**：`vite.main.mts` 的 `rollupOptions.external` 判定先于 alias 解析，裸 specifier `@opsdesk/ai-agent` 不匹配任何放行条件 → 被 external 保留为运行时 import；Node 解析到 `src/index.ts` 后其扩展名缺失的相对 import 直接炸。
+- **正确做法**：external 判定里加 `!id.startsWith('@opsdesk')`（与 `@shared` 同理）。凡是新增要打进主进程 bundle 的 workspace 包，都要在此放行。
+- **验证方式**：`out/main/index.js` 里不应再有 `from "@opsdesk/ai-agent"` 或指向 `packages/` 的 import（`//#region packages/...` 注释是正常的内联痕迹）。
+
 ### 7. TypeScript 7 移除了 `baseUrl`
 
 - **触发信号**：`error TS5102: Option 'baseUrl' has been removed`。

@@ -518,3 +518,16 @@
   --primary-foreground: oklch(0.2 0.01 0);
   --ring: var(--custom-ring-dark);
 }
+
+/*
+ * AgentPage 大输入框：聚焦高亮由外壳 focus-within 统一负责，
+ * textarea 自身任何时候都不渲染边框 / 阴影 / 轮廓（antd :focus 样式会盖掉 Tailwind border-none）。
+ */
+.agent-input.ant-input,
+.agent-input.ant-input:focus,
+.agent-input.ant-input:focus-visible {
+  border: none !important;
+  box-shadow: none !important;
+  outline: none !important;
+  background: transparent;
+}

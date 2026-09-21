@@ -53,8 +53,8 @@ function describeError(err: unknown): string {
   return String(err)
 }
 
-/** 根据配置创建对应 provider 的模型实例 */
-function resolveModel(config: AiModelConfig): LanguageModel {
+/** 根据配置创建对应 provider 的模型实例（agent 服务复用） */
+export function resolveModel(config: AiModelConfig): LanguageModel {
   switch (config.kind) {
     case 'anthropic': {
       const provider = createAnthropic({ apiKey: config.apiKey, baseURL: config.baseURL })
