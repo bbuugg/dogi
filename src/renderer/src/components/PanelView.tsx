@@ -197,22 +197,39 @@ function Splitter({
     const up = () => {
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
       document.body.style.cursor = ''
+      document.body.style.userSelect = ''
     }
     document.body.style.cursor = direction === 'row' ? 'col-resize' : 'row-resize'
+    document.body.style.userSelect = 'none'
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up)
   }
 
   return (
     <div
       ref={ref}
       onPointerDown={onPointerDown}
+      title="拖动调整大小"
       className={cn(
-        'shrink-0 bg-border transition-colors hover:bg-primary',
-        direction === 'row' ? 'w-px cursor-col-resize' : 'h-px cursor-row-resize'
+        // 视觉上仍是 1px 细线，但用负 margin 扩出 8px 的抓取热区，且不占布局空间。
+        // 原来是个裸的 1px 元素，指针几乎落不上去（与侧边栏的 ResizeHandle 同一套做法）。
+        // relative + z-10：相邻面板的内容可能溢出盖住这条线，抬一层才抓得到。
+        'group/split relative z-10 shrink-0',
+        direction === 'row' ? '-mx-1 w-2 cursor-col-resize' : '-my-1 h-2 cursor-row-resize'
       )}
-    />
+    >
+      <div
+        className={cn(
+          'absolute bg-border transition-colors group-hover/split:bg-primary',
+          direction === 'row'
+            ? 'inset-y-0 left-1/2 w-px -translate-x-1/2'
+            : 'inset-x-0 top-1/2 h-px -translate-y-1/2'
+        )}
+      />
+    </div>
   )
 }
 

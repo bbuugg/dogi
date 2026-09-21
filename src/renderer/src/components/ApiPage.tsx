@@ -486,7 +486,7 @@ export function ApiPage({ requestId }: { requestId: string }) {
       {/* 请求行：方法 + 地址 + 发送 */}
       <div
         ref={reqRowRef}
-        className="flex shrink-0 items-center gap-2 border-y border-border px-3 py-2"
+        className="flex shrink-0 items-center gap-2 px-3 py-2"
       >
         <Select
           value={method}

@@ -125,7 +125,6 @@ export function PluginsPanel() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           allowClear
-          size="small"
         />
       </div>
 
