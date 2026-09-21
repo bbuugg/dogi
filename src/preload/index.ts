@@ -12,7 +12,6 @@ import type {
   ApiHttpResponse,
   ApiRequestEntry,
   AppInfo,
-  AppShortcutAction,
   McpServerConfig,
   McpToolInfo,
   NoteEntry,
@@ -25,7 +24,11 @@ import type {
   ShellDetectResult,
   SshConnectProgress,
   SshGroup,
-  SshProfile
+  SshProfile,
+  WsConnectOptions,
+  WsEvent,
+  WsOpenResult,
+  WsSendPayload
 } from '@shared/types'
 import type {
   PluginInfo,
@@ -199,6 +202,21 @@ const api = {
     clearHistory: (): Promise<ApiHistoryEntry[]> => ipcRenderer.invoke('api:history:clear'),
     send: (req: ApiHttpRequest): Promise<ApiHttpResponse> => ipcRenderer.invoke('api:send', req)
   },
+  /**
+   * WebSocket 调试（接口请求里的 ws 协议）。
+   * `open` 只建连并返回 connId，握手结果与每一帧消息都通过 `onEvent` 推送。
+   */
+  ws: {
+    /** connId 由渲染端生成（先拿 id 再建连，避免握手事件早于 IPC 回包被丢掉） */
+    open: (connId: string, options: WsConnectOptions): Promise<WsOpenResult> =>
+      ipcRenderer.invoke('ws:open', connId, options),
+    send: (connId: string, payload: WsSendPayload): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('ws:send', connId, payload),
+    close: (connId: string, code?: number, reason?: string): Promise<void> =>
+      ipcRenderer.invoke('ws:close', connId, code, reason),
+    /** 订阅所有连接的事件；渲染端按 payload.connId 过滤出自己那条 */
+    onEvent: (cb: (event: WsEvent) => void) => subscribe('ws:event', cb)
+  },
   prefs: {
     get: (): Promise<Preferences> => ipcRenderer.invoke('prefs:get'),
     save: (patch: Partial<Preferences>): Promise<Preferences> =>
@@ -208,8 +226,6 @@ const api = {
     /** 当前平台（同步常量，用于标题栏等 UI 的系统适配） */
     platform: process.platform,
     info: (): Promise<AppInfo> => ipcRenderer.invoke('app:info'),
-    /** 订阅主进程触发的全局快捷键动作 */
-    onShortcut: (cb: (action: AppShortcutAction) => void) => subscribe('app:shortcut', cb),
     /** 用系统默认程序打开外部链接（主进程会按安全协议过滤，避免弹窗） */
     openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url)
   },
@@ -217,16 +233,13 @@ const api = {
     /** 读取当前快捷键配置（动作 -> accelerator） */
     get: (): Promise<import('@shared/types').ShortcutConfig[]> =>
       ipcRenderer.invoke('shortcuts:get'),
-    /** 保存快捷键配置并立即重注册系统级快捷键 */
+    /**
+     * 保存快捷键配置。这些是**应用内**快捷键（渲染端自己监听 keydown 匹配），
+     * 主进程只负责落盘，保存后无需重注册。
+     */
     save: (shortcuts: import('@shared/types').ShortcutConfig[]): Promise<
       import('@shared/types').ShortcutConfig[]
-    > => ipcRenderer.invoke('shortcuts:save', shortcuts),
-    /**
-     * 录制模式开关：开启时注销全部系统级快捷键，避免已注册的全局快捷键
-     * （如 Ctrl+Alt+T）抢先触发动作、干扰录制；关闭时按存储重新注册。
-     */
-    setCapture: (enabled: boolean): Promise<void> =>
-      ipcRenderer.invoke('shortcuts:capture', enabled)
+    > => ipcRenderer.invoke('shortcuts:save', shortcuts)
   },
   window: {
     minimize: (): Promise<void> => ipcRenderer.invoke('window:minimize'),

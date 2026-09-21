@@ -12,6 +12,7 @@ import {
   ArrowRight,
   ArrowUp,
   Boxes,
+  Cable,
   FileCode2,
   FileText,
   Globe,
@@ -22,10 +23,11 @@ import {
 } from 'lucide-react'
 import { cn } from 'cn'
 import type { SessionInfo } from '@shared/types'
-import { groupTerminalSessionId, useAppStore, type PanelTab, type PanelTabType } from '@/stores/app-store'
+import { groupTerminalSessionId, useAppStore, type PanelTab } from '@/stores/app-store'
 import { TerminalView } from '@/components/TerminalView'
 import { AiPanel } from '@/components/AiPanel'
 import { ApiPage } from '@/components/ApiPage'
+import { WsPage } from '@/components/WsPage'
 import { ScriptsPage } from '@/components/ScriptsPage'
 import { NotesPage } from '@/components/NotesPage'
 import { PluginsPage } from '@/components/PluginsPage'
@@ -60,9 +62,14 @@ function zoneOf(rect: DOMRect, x: number, y: number): DropZone {
   return 'down'
 }
 
-/** 各标签类型的图标 */
-function TabIcon({ type }: { type: PanelTabType }) {
-  switch (type) {
+/**
+ * 各标签类型的图标。
+ *
+ * 收整个 `tab` 而不是 `type`：`api` 标签同时承载 HTTP 请求与 WebSocket 调试，
+ * 两者用不同的图标（Globe / Cable），只看 type 区分不出来。
+ */
+function TabIcon({ tab }: { tab: PanelTab }) {
+  switch (tab.type) {
     case 'terminal':
       return <TerminalSquare className="size-3.5 shrink-0" />
     case 'script':
@@ -70,7 +77,11 @@ function TabIcon({ type }: { type: PanelTabType }) {
     case 'note':
       return <FileText className="size-3.5 shrink-0" />
     case 'api':
-      return <Globe className="size-3.5 shrink-0" />
+      return tab.apiProtocol === 'ws' ? (
+        <Cable className="size-3.5 shrink-0" />
+      ) : (
+        <Globe className="size-3.5 shrink-0" />
+      )
     case 'plugins':
       return <Boxes className="size-3.5 shrink-0" />
     case 'plugin':
@@ -407,8 +418,7 @@ function DropZoneOverlay({ zone }: { zone: SplitDirectionInput }) {
 /** 标签条末尾的「新建」入口（替代过去常驻的「终端」标签） */
 function NewTabButton({ groupId }: { groupId: string }) {
   const createLocalSession = useAppStore((s) => s.createLocalSession)
-  const createApiRequest = useAppStore((s) => s.createApiRequest)
-  const openApiTab = useAppStore((s) => s.openApiTab)
+  const openNewApiDraft = useAppStore((s) => s.openNewApiDraft)
   const setSshDialog = useAppStore((s) => s.setSshDialog)
   const setActiveGroup = useAppStore((s) => s.setActiveGroup)
   return (
@@ -421,21 +431,22 @@ function NewTabButton({ groupId }: { groupId: string }) {
         items: [
           { key: 'local', icon: <TerminalSquare className="size-3.5" />, label: '新建本地终端' },
           { key: 'api', icon: <Globe className="size-3.5" />, label: '新建接口请求' },
+          { key: 'ws', icon: <Cable className="size-3.5" />, label: '新建 WebSocket' },
           { key: 'host', icon: <Plus className="size-3.5" />, label: '添加主机…' }
         ],
         onClick: ({ key }) => {
           if (key === 'local') void createLocalSession()
-          else if (key === 'api') {
-            void createApiRequest().then((id) => {
-              if (id) openApiTab(id)
-            })
-          } else setSshDialog(true, null)
+          // 与侧边栏「新建」一致：只开一个未保存草稿标签，Ctrl/Cmd+S 输名称后才落盘。
+          // （以前这里直接 createApiRequest 落盘，会在列表里留一条空请求，与侧边栏行为不一致）
+          else if (key === 'api') openNewApiDraft(groupId)
+          else if (key === 'ws') openNewApiDraft(groupId, 'ws')
+          else setSshDialog(true, null)
         }
       }}
     >
       <button
         type="button"
-        title="新建终端 / 接口请求 / 添加主机"
+        title="新建终端 / 接口请求 / WebSocket / 添加主机"
         className="flex w-8 shrink-0 items-center justify-center text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
       >
         <Plus className="size-3.5" />
@@ -601,7 +612,7 @@ function PanelTabItem({
             isOverTab && 'bg-primary/20'
           )}
         >
-          <TabIcon type={tab.type} />
+          <TabIcon tab={tab} />
           <span
             className="truncate"
             title={label}
@@ -648,7 +659,13 @@ function TabContent({ tab, active }: { tab: PanelTab; active: boolean }) {
     case 'note':
       return tab.noteId ? <NotesPage noteId={tab.noteId} /> : null
     case 'api':
-      return tab.apiRequestId ? <ApiPage requestId={tab.apiRequestId} /> : null
+      if (!tab.apiRequestId) return null
+      // 同一张表两种协议：ws 走 WebSocket 调试页，其余走 HTTP 请求页
+      return tab.apiProtocol === 'ws' ? (
+        <WsPage requestId={tab.apiRequestId} />
+      ) : (
+        <ApiPage requestId={tab.apiRequestId} />
+      )
     case 'plugins':
       return <PluginsPage />
     case 'plugin':

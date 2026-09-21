@@ -171,7 +171,7 @@ export function McpSettings() {
             size="small" type="text" onClick={() => void handleListTools()}>
             检查工具
           </Button>
-          <Button icon={<Plus className="size-4" />} size="small" variant="filled" onClick={() => setEditing({ ...EMPTY })}>
+          <Button type='text' icon={<Plus className="size-4" />} size="small" variant="filled" onClick={() => setEditing({ ...EMPTY })}>
             新建
           </Button>
         </div>

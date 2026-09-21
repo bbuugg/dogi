@@ -42,7 +42,9 @@ export default function App() {
     const tab = activeTabId ? s.ui.panelTabs.find((t) => t.id === activeTabId) : undefined
     if (tab?.type === 'script' && tab.scriptId) return editorSaveKey('script', tab.scriptId)
     if (tab?.type === 'note' && tab.noteId) return editorSaveKey('note', tab.noteId)
-    if (tab?.type === 'api' && tab.apiRequestId) return editorSaveKey('api', tab.apiRequestId)
+    // WebSocket 与 HTTP 请求共用一张表，但状态栏提示语不同，所以键前缀分开（见 editorSaveKey）
+    if (tab?.type === 'api' && tab.apiRequestId)
+      return editorSaveKey(tab.apiProtocol === 'ws' ? 'ws' : 'api', tab.apiRequestId)
     return null
   })
   const { sidebarVisible } = useActiveActivity()

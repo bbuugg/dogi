@@ -3,68 +3,33 @@ import { AlertTriangle, RotateCcw } from 'lucide-react'
 import type { AppShortcutAction } from '@shared/types'
 import {
   SHORTCUT_ACTIONS,
+  acceleratorFromEvent,
   findShortcutConflicts,
   formatShortcutForPlatform,
+  isUsableAccelerator,
   shortcutLabel
 } from '@shared/shortcuts'
 import { useAppStore } from '@/stores/app-store'
 import { Button, message } from 'antd'
 import { cn } from 'cn'
 
-/** 把一次键盘事件转成 Electron accelerator（跨平台用 CommandOrControl） */
-function eventToAccelerator(e: KeyboardEvent): string | null {
-  const mods: string[] = []
-  if (e.metaKey || e.ctrlKey) mods.push('CommandOrControl')
-  if (e.altKey) mods.push('Alt')
-  if (e.shiftKey) mods.push('Shift')
-  const key = keyFromEvent(e)
-  if (!key) return null
-  return [...mods, key].join('+')
-}
-
-function keyFromEvent(e: KeyboardEvent): string | null {
-  const code = e.code
-  let m: RegExpMatchArray | null
-  if ((m = code.match(/^Key([A-Z])$/))) return m[1]
-  if ((m = code.match(/^Digit([0-9])$/))) return m[1]
-  if ((m = code.match(/^Numpad([0-9])$/))) return m[1]
-  if ((m = code.match(/^F([0-9]{1,2})$/))) return code
-  const map: Record<string, string> = {
-    ArrowUp: 'Up',
-    ArrowDown: 'Down',
-    ArrowLeft: 'Left',
-    ArrowRight: 'Right',
-    Space: 'Space',
-    Enter: 'Enter',
-    Tab: 'Tab',
-    Backspace: 'Backspace',
-    Delete: 'Delete',
-    Home: 'Home',
-    End: 'End',
-    PageUp: 'PageUp',
-    PageDown: 'PageDown',
-    Insert: 'Insert'
-  }
-  return map[code] ?? null
-}
-
 export function ShortcutSettings() {
   const shortcuts = useAppStore((s) => s.shortcuts)
   const saveShortcuts = useAppStore((s) => s.saveShortcuts)
+  const setShortcutRecording = useAppStore((s) => s.setShortcutRecording)
   const platform = window.api.app.platform
   const [recording, setRecording] = useState<AppShortcutAction | null>(null)
 
-  // 进入/退出录制时挂起系统级快捷键，避免已注册的全局快捷键（如 Ctrl+Alt+T）
-  // 抢先触发动作、干扰录制。退出时无论成功/取消/改选都恢复注册。
+  // 进入/退出录制时挂起应用内快捷键分发：分发监听器注册得比这里早，
+  // 不挂起的话按下的组合会**既被录进去、又把动作执行一遍**。
+  // 退出时无论成功 / 取消 / 改选都恢复。
   useEffect(() => {
     if (!recording) return
-    void window.api.shortcuts.setCapture(true)
-    return () => {
-      void window.api.shortcuts.setCapture(false)
-    }
-  }, [recording])
+    setShortcutRecording(true)
+    return () => setShortcutRecording(false)
+  }, [recording, setShortcutRecording])
 
-  // 捕获模式：监听全局 keydown，组成 accelerator 后写入并退出捕获。
+  // 捕获模式：在 window 上监听 keydown，组成 accelerator 后写入并退出捕获。
   // 直接读 store 最新状态，避免闭包拿到过期的 shortcuts。
   useEffect(() => {
     if (!recording) return
@@ -84,19 +49,24 @@ export function ShortcutSettings() {
         setRecording(null)
         return
       }
-      const acc = eventToAccelerator(e)
-      if (acc) {
-        const cur = useAppStore.getState().shortcuts
-        void useAppStore
-          .getState()
-          .saveShortcuts(cur.map((s) => (s.action === recording ? { ...s, accelerator: acc } : s)))
-          .then(() =>
-            message.success(
-              `「${shortcutLabel(recording)}」已设为 ${formatShortcutForPlatform(acc, window.api.app.platform)}`
-            )
-          )
-        setRecording(null)
+      const acc = acceleratorFromEvent(e)
+      if (!acc) return
+      // 裸字母 / 数字在应用内匹配下会把该键整个吃掉（终端里再也打不出这个字母），
+      // 所以这里不收，提示用户重录而不是默默存下一个会坏事的值。
+      if (!isUsableAccelerator(acc)) {
+        message.warning('请至少带上 Ctrl 或 Alt（F1–F12 这类功能键可以单独使用）')
+        return
       }
+      const cur = useAppStore.getState().shortcuts
+      void useAppStore
+        .getState()
+        .saveShortcuts(cur.map((s) => (s.action === recording ? { ...s, accelerator: acc } : s)))
+        .then(() =>
+          message.success(
+            `「${shortcutLabel(recording)}」已设为 ${formatShortcutForPlatform(acc, window.api.app.platform)}`
+          )
+        )
+      setRecording(null)
     }
     window.addEventListener('keydown', handler, true)
     return () => window.removeEventListener('keydown', handler, true)
@@ -108,8 +78,10 @@ export function ShortcutSettings() {
   return (
     <div className="space-y-4">
       <p className="text-[11px] leading-4 text-muted-foreground">
-        全局快捷键：即使窗口最小化或隐藏到系统托盘，按下后也会立即显示在前台并执行对应操作。
-        含 <code className="rounded bg-secondary px-1">CommandOrControl</code> 的组合在 Mac 上为 ⌘、Windows/Linux 上为 Ctrl。
+        应用内快捷键：仅在 OpsDesk 窗口处于前台时生效，<span className="font-medium">不占用系统级热键</span>
+        ，也不会与其它程序抢组合键。含{' '}
+        <code className="rounded bg-secondary px-1">CommandOrControl</code> 的组合在 Mac 上为 ⌘、Windows/Linux
+        上为 Ctrl。
       </p>
 
       {conflictList.length > 0 && (
@@ -150,7 +122,7 @@ export function ShortcutSettings() {
                   {isConflict
                     ? '该组合与其它动作冲突'
                     : accelerator
-                      ? '全局生效（系统级）'
+                      ? '应用内生效（窗口在前台时）'
                       : '未绑定：该动作被禁用'}
                 </div>
               </div>
@@ -158,7 +130,7 @@ export function ShortcutSettings() {
                 onClick={() => setRecording(isRecording ? null : meta.action)}
                 title={accelerator || undefined}
                 color={isRecording ? 'primary' : isConflict ? 'danger' : 'default'}
-                variant={isRecording ? 'filled' : 'outlined'}
+                variant={isRecording ? 'filled' : 'dashed'}
                 className="shrink-0 px-3 text-[12px] font-medium tabular-nums"
               >
                 {isRecording ? '按下按键组合…（Esc 取消）' : display || '点击设置'}
@@ -171,6 +143,7 @@ export function ShortcutSettings() {
       <div className="flex justify-end">
         <Button
           size="small"
+          type='text'
           icon={<RotateCcw className="size-3.5" />}
           onClick={() =>
             void saveShortcuts(

@@ -178,18 +178,19 @@ export interface SshProfile {
   updatedAt: number
 }
 
-/** 全局快捷键触发的应用动作 */
+/** 应用内快捷键触发的动作（只在 OpsDesk 窗口聚焦时生效） */
 export type AppShortcutAction =
   | 'open-settings'
   | 'new-session'
   | 'open-command-palette'
-  | 'toggle-ai-panel'
-  | 'open-scripts'
 
 /**
  * 单条快捷键配置：动作 + Electron accelerator 字符串。
  * accelerator 为空字符串表示「禁用」该动作。
  * 跨平台写法用 `CommandOrControl`（mac 解析为 ⌘、Win/Linux 解析为 Ctrl）。
+ *
+ * 这些是**应用内**快捷键（由渲染端监听 keydown 自行匹配），**不是系统级热键** ——
+ * 注册成系统级会占用全局组合键、和别的程序抢，所以刻意不用 Electron 的 globalShortcut。
  */
 export interface ShortcutConfig {
   action: AppShortcutAction
@@ -263,8 +264,19 @@ export interface ApiGroup {
 }
 
 /**
+ * 接口调试的协议类型。
+ * - `http`：一次性请求/响应（缺省值，历史数据里没有该字段的都按 http 处理）
+ * - `ws`：长连接，由 `WsPage` 调试，连接与收发消息见 `WsEvent`
+ */
+export type ApiProtocol = 'http' | 'ws'
+
+/**
  * 保存的接口请求：侧边栏列表项，同时是 PanelView 里「接口请求」标签的打开对象。
  * 一个请求 = 一个标签，所以这里不带「未保存草稿」的概念（新建即落盘）。
+ *
+ * WebSocket 复用了这张表：`protocol: 'ws'` 时 `method`/`body` 不参与语义
+ * （连接靠 `url` + `headers` + `subprotocols`），这样分组、拖拽、搜索、草稿
+ * 那一整套都不用再造一份。
  */
 export interface ApiRequestEntry {
   id: string
@@ -274,6 +286,18 @@ export interface ApiRequestEntry {
   url: string
   headers: ApiHeaderPair[]
   body: string
+  /** 协议类型；undefined 视为 'http'（兼容历史数据） */
+  protocol?: ApiProtocol
+  /** 仅 WebSocket：子协议（Sec-WebSocket-Protocol），如 ['graphql-ws'] */
+  subprotocols?: string[]
+  /**
+   * 仅 WebSocket：跳过 TLS 证书校验（wss 自签证书），缺省关闭。
+   *
+   * 注意取值方向与字段名相反（沿用 undici 的 `connect.rejectUnauthorized`）：
+   * **`false` 才是「不校验」**，`true` / 缺省都是正常校验。
+   * 所以不需要跳过时应当**不写这个字段**，而不是写 `true`。
+   */
+  rejectUnauthorized?: boolean
   /**
    * 所属分组；undefined = 未分组。
    * 只由 `api:arrange`（拖拽重排）改动 —— 普通的保存/新建不要碰它，
@@ -327,6 +351,66 @@ export interface ApiHttpResponse {
   /** 失败时的错误信息 */
   error?: string
 }
+
+// ---------- WebSocket 调试 ----------
+
+/** 打开 WebSocket 连接的入参 */
+export interface WsConnectOptions {
+  url: string
+  /** 附加请求头（握手时带上，如 Authorization / Cookie / Origin） */
+  headers?: Record<string, string>
+  /** 子协议（Sec-WebSocket-Protocol） */
+  protocols?: string[]
+  /**
+   * 跳过 TLS 证书校验（wss 自签证书）。
+   * 与 `ApiRequestEntry.rejectUnauthorized` 同一套取值：**`false` = 不校验**。
+   */
+  rejectUnauthorized?: boolean
+}
+
+/** 连接状态（比 WebSocket.readyState 的数字更好读，渲染端直接用这个） */
+export type WsReadyState = 'connecting' | 'open' | 'closing' | 'closed'
+
+/**
+ * `ws:open` 的结果。
+ *
+ * 不抛异常（与 `executeHttp` 的约定一致）：
+ * - `error`：连地址都没通过校验 / 构造 socket 就失败了，渲染端直接显示失败；
+ * - `warning`：连上了但降级了（例如环境缺 undici，自定义请求头被忽略）。
+ * 握手本身的结果（成功或失败）不在这里，而是走 `WsEvent`。
+ */
+export interface WsOpenResult {
+  connId: string
+  error?: string
+  warning?: string
+}
+
+/** 待发送的一帧 */
+export interface WsSendPayload {
+  data: string
+  encoding: 'text' | 'base64'
+}
+
+/**
+ * 主进程 → 渲染端的连接事件。
+ *
+ * 每条事件都带 `connId`：同时可能有好几个 WebSocket 标签各自连着，
+ * 渲染端只处理自己那条连接的事件（见 WsPage 的过滤）。
+ */
+export type WsEvent =
+  | { connId: string; type: 'open'; protocol: string }
+  | {
+      connId: string
+      type: 'message'
+      /** 文本帧给原文；二进制帧给 base64（由 `encoding` 区分） */
+      data: string
+      encoding: 'text' | 'base64'
+      /** 原始字节数（文本帧是 utf8 字节数，用于界面显示体积） */
+      bytes: number
+      at: number
+    }
+  | { connId: string; type: 'close'; code: number; reason: string; at: number }
+  | { connId: string; type: 'error'; message: string }
 
 export type AiProviderKind =
   | 'openai'

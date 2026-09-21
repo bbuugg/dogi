@@ -3,7 +3,12 @@ import { STATUS_ITEM_CLASS } from '@/components/StatusBar'
 import { useAppStore } from '@/stores/app-store'
 
 /** 键前缀 → 中文名（只用于 title 提示） */
-const SUBJECT: Record<string, string> = { script: '脚本', note: '笔记', api: '接口请求' }
+const SUBJECT: Record<string, string> = {
+  script: '脚本',
+  note: '笔记',
+  api: '接口请求',
+  ws: 'WebSocket'
+}
 
 /**
  * 状态栏里的「编辑页保存状态」（渲染在 StatusBar 内，由 App.tsx 注入）。

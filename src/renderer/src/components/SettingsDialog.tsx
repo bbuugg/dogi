@@ -17,7 +17,7 @@ const MENU: Array<{
 }> = [
   { value: 'prefs', label: '偏好', desc: '应用主题', icon: SlidersHorizontal },
   { value: 'terminal', label: '终端', desc: '配色与外观', icon: TerminalSquare },
-  { value: 'shortcuts', label: '快捷键', desc: '全局快捷键设置', icon: Keyboard },
+  { value: 'shortcuts', label: '快捷键', desc: '应用内快捷键设置', icon: Keyboard },
   { value: 'ai', label: 'AI 配置', desc: '模型、MCP 服务与提示词', icon: Bot },
 ]
 

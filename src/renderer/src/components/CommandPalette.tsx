@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import {
   Boxes,
+  Cable,
   ChevronLeft,
   Globe,
   ListPlus,
@@ -17,7 +18,8 @@ import { cn } from 'cn'
 import { Button, Input, Modal, type InputRef } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import { scriptToTerminalInput } from '@/lib/script'
-import type { ScriptEntry } from '@shared/types'
+import { formatShortcutForPlatform } from '@shared/shortcuts'
+import type { AppShortcutAction, ScriptEntry } from '@shared/types'
 import {
   API_ACTIVITY_ID,
   NOTES_ACTIVITY_ID,
@@ -74,8 +76,7 @@ export function CommandPalette() {
   const createLocalSession = useAppStore((s) => s.createLocalSession)
   const connectHost = useAppStore((s) => s.connectHost)
   const selectActivity = useAppStore((s) => s.selectActivity)
-  const createApiRequest = useAppStore((s) => s.createApiRequest)
-  const openApiTab = useAppStore((s) => s.openApiTab)
+  const openNewApiDraft = useAppStore((s) => s.openNewApiDraft)
   /** 插件列表（含启用状态）与已加载的插件视图实例（只有启用且加载成功的插件才有视图） */
   const pluginList = useAppStore((s) => s.pluginList)
   const plugins = useAppStore((s) => s.plugins)
@@ -84,6 +85,8 @@ export function CommandPalette() {
   const setSshDialog = useAppStore((s) => s.setSshDialog)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const setRunScriptDialog = useAppStore((s) => s.setRunScriptDialog)
+  /** 当前快捷键配置：命令条目右侧的 hint 要显示用户实际设置的组合 */
+  const shortcuts = useAppStore((s) => s.shortcuts)
 
   const [mode, setMode] = useState<PaletteMode>('root')
   const [query, setQuery] = useState('')
@@ -105,6 +108,15 @@ export function CommandPalette() {
   }, [open, refreshScripts, refreshProfiles, refreshPluginList])
 
   const close = () => setOpen(false)
+
+  /**
+   * 把某个动作的**当前**快捷键配置转成展示文本（未绑定时不给 hint）。
+   * 快捷键可在设置里改，所以这里不能写死字符串，否则改完对不上。
+   */
+  const hintOf = (action: AppShortcutAction): string | undefined => {
+    const acc = shortcuts.find((s) => s.action === action)?.accelerator
+    return acc ? formatShortcutForPlatform(acc, window.api.app.platform) : undefined
+  }
 
   const goMode = (next: PaletteMode) => {
     setMode(next)
@@ -153,7 +165,7 @@ export function CommandPalette() {
       id: 'terminal.new',
       group: '终端',
       title: '新建本地终端',
-      hint: 'Ctrl+Alt+T',
+      hint: hintOf('new-session'),
       keywords: 'terminal local new 终端 新建 命令',
       icon: SquareTerminal,
       run: () => {
@@ -230,21 +242,31 @@ export function CommandPalette() {
       id: 'api.new',
       group: '界面',
       title: '新建接口请求',
-      description: '创建一条空请求并在新标签中打开',
+      description: '打开一个未保存的请求草稿（Ctrl/Cmd+S 命名后落盘）',
       keywords: 'api http new request 接口 请求 新建',
       icon: Globe,
       run: () => {
         close()
-        void createApiRequest().then((id) => {
-          if (id) openApiTab(id)
-        })
+        openNewApiDraft()
+      }
+    },
+    {
+      id: 'ws.new',
+      group: '界面',
+      title: '新建 WebSocket',
+      description: '打开一个未保存的 WebSocket 连接草稿，用于长连接调试',
+      keywords: 'ws websocket socket 长连接 推送 新建 调试',
+      icon: Cable,
+      run: () => {
+        close()
+        openNewApiDraft(undefined, 'ws')
       }
     },
     {
       id: 'settings.open',
       group: '界面',
       title: '打开设置',
-      hint: 'Ctrl+Alt+S',
+      hint: hintOf('open-settings'),
       keywords: 'settings preference 设置 偏好',
       icon: Settings,
       run: () => {

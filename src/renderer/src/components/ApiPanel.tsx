@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  Cable,
   ChevronDown,
   ChevronRight,
   ChevronsLeft,
@@ -25,7 +26,7 @@ import {
 import { apiTabId, useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'
 import { methodClass } from '@/lib/api-client'
-import type { ApiGroup, ApiRequestEntry } from '@shared/types'
+import type { ApiGroup, ApiProtocol, ApiRequestEntry } from '@shared/types'
 
 /** 树节点 key 前缀：g: 分组、r: 请求 */
 const GROUP_KEY_PREFIX = 'g:'
@@ -135,7 +136,20 @@ function DropLine({ after }: { after: boolean }) {
 /** 请求的副标题：优先展示地址，没填地址时给个提示 */
 function subtitleOf(req: ApiRequestEntry): string {
   const url = req.url.trim()
-  return url || '尚未填写请求地址'
+  return url || (req.protocol === 'ws' ? '尚未填写连接地址' : '尚未填写请求地址')
+}
+
+/**
+ * 列表左侧的协议标记：HTTP 请求显示方法名，WebSocket 没有方法，统一显示 WS。
+ * 两种条目共用同一张表，标记是唯一能一眼区分它们的地方。
+ */
+function protoLabel(req: ApiRequestEntry): string {
+  return req.protocol === 'ws' ? 'WS' : req.method
+}
+
+/** 协议标记配色：WS 固定用天蓝，避免和 HTTP 方法配色撞色 */
+function protoClass(req: ApiRequestEntry): string {
+  return req.protocol === 'ws' ? 'text-sky-500' : methodClass(req.method)
 }
 
 /**
@@ -290,9 +304,12 @@ export function ApiPanel() {
    * 新建：只打开右侧一个「未保存草稿」标签，不落盘、不进列表。
    * 真正的保存发生在用户在该标签里按 Ctrl/Cmd+S 之后（已填名称直接落盘，
    * 没填则弹窗补名称，见 ApiPage.saveNow）。
+   *
+   * protocol = 'ws' 时建的是 WebSocket 调试草稿，走同一套标签/落盘流程，
+   * 只是右侧渲染 WsPage 而不是 ApiPage。
    */
-  const handleCreate = (groupId?: string): void => {
-    openNewApiDraft(groupId)
+  const handleCreate = (groupId?: string, protocol: ApiProtocol = 'http'): void => {
+    openNewApiDraft(groupId, protocol)
   }
 
   const confirmDelete = async () => {
@@ -401,6 +418,7 @@ export function ApiPanel() {
             onDropRequest={dropRequest}
             onDropGroup={dropGroup}
             onNew={() => void handleCreate(group.id)}
+            onNewWs={() => void handleCreate(group.id, 'ws')}
             onRename={() => setGroupEdit({ id: group.id, name: group.name })}
             onDelete={() => {
               setDeleteGroupRequests(false)
@@ -441,16 +459,18 @@ export function ApiPanel() {
             icon={<FolderPlus className="size-3.5" />}
             onClick={() => setGroupEdit({ name: '' })}
           />
-          {/* 新建入口带下拉：空白请求 / cURL 导入两个动作收进菜单 */}
+          {/* 新建入口带下拉：HTTP 请求 / WebSocket 连接 / cURL 导入三个动作收进菜单 */}
           <Dropdown
             trigger={['click']}
             menu={{
               items: [
                 { key: 'blank', icon: <Plus className="size-3.5" />, label: '新建请求' },
+                { key: 'ws', icon: <Cable className="size-3.5" />, label: '新建 WebSocket' },
                 { key: 'curl', icon: <Terminal className="size-3.5" />, label: '导入 cURL' }
               ],
               onClick: ({ key }) => {
                 if (key === 'blank') void handleCreate()
+                else if (key === 'ws') void handleCreate(undefined, 'ws')
                 else setCurlOpen(true)
               }
             }}
@@ -459,7 +479,7 @@ export function ApiPanel() {
               type="text"
               size="small"
               className="px-0.5 text-muted-foreground"
-              title="新建请求 / 导入 cURL"
+              title="新建请求 / WebSocket / 导入 cURL"
               icon={<Plus className="size-3.5" />}
             >
               <ChevronDown className="size-3 opacity-60" />
@@ -482,7 +502,7 @@ export function ApiPanel() {
           <div className="mx-2 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
             还没有保存的请求。
             <br />
-            点击右上角 + 新建请求，或导入 cURL 命令。
+            点击右上角 + 新建请求 / WebSocket，或导入 cURL 命令。
           </div>
         ) : noMatch ? (
           <div className="mx-2 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
@@ -635,6 +655,7 @@ function GroupRow({
   onDropRequest,
   onDropGroup,
   onNew,
+  onNewWs,
   onRename,
   onDelete
 }: {
@@ -647,6 +668,8 @@ function GroupRow({
   onDropRequest: DropRequest
   onDropGroup: DropGroup
   onNew: () => void
+  /** 在本分组新建一条 WebSocket 调试草稿 */
+  onNewWs: () => void
   onRename: () => void
   onDelete: () => void
 }) {
@@ -674,6 +697,7 @@ function GroupRow({
 
   const items: MenuProps['items'] = [
     { key: 'new', icon: <Plus className="size-3.5" />, label: '在此分组新建请求' },
+    { key: 'newWs', icon: <Cable className="size-3.5" />, label: '在此分组新建 WebSocket' },
     { key: 'rename', icon: <Pencil className="size-3.5" />, label: '重命名' },
     { type: 'divider' },
     { key: 'delete', icon: <Trash2 className="size-3.5" />, label: '删除分组', danger: true }
@@ -698,6 +722,7 @@ function GroupRow({
           items,
           onClick: ({ key }) => {
             if (key === 'new') onNew()
+            else if (key === 'newWs') onNewWs()
             else if (key === 'rename') onRename()
             else onDelete()
           }
@@ -772,8 +797,15 @@ function RequestRow({
   const dragRef = useMemo(() => asRef<HTMLDivElement>(drag), [drag])
   const ref = useMemo(() => mergeRefs(dropRef, dragRef), [dropRef, dragRef])
 
+  // WebSocket 条目没有 HTTP 方法，图标与标记都要换一套
+  const isWs = request.protocol === 'ws'
+
   const items: MenuProps['items'] = [
-    { key: 'open', icon: <Globe className="size-3.5" />, label: '打开' },
+    {
+      key: 'open',
+      icon: isWs ? <Cable className="size-3.5" /> : <Globe className="size-3.5" />,
+      label: '打开'
+    },
     // 分组内请求才提供「移出分组」，作为移出分组的入口
     ...(request.groupId
       ? [{ key: 'moveout', icon: <ChevronsLeft className="size-3.5" />, label: '移出分组' }]
@@ -793,7 +825,7 @@ function RequestRow({
         active ? 'bg-primary/10 text-foreground' : 'text-muted-foreground'
       )}
       onClick={onOpen}
-      title={`${request.method} ${request.url}`}
+      title={`${protoLabel(request)} ${request.url}`}
     >
       {over && <DropLine after={after} />}
       <Dropdown
@@ -808,16 +840,20 @@ function RequestRow({
         }}
       >
         <div className="flex min-w-0 flex-1 items-start gap-2">
-          <Globe className="mt-0.5 size-3.5 shrink-0 opacity-70" />
+          {isWs ? (
+            <Cable className="mt-0.5 size-3.5 shrink-0 opacity-70" />
+          ) : (
+            <Globe className="mt-0.5 size-3.5 shrink-0 opacity-70" />
+          )}
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
               <span
                 className={cn(
                   'shrink-0 font-mono text-[10px] font-semibold',
-                  methodClass(request.method)
+                  protoClass(request)
                 )}
               >
-                {request.method}
+                {protoLabel(request)}
               </span>
               <span className="truncate text-[13px] font-medium">
                 {request.name.trim() || subtitleOf(request)}

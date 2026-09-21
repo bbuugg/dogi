@@ -11,6 +11,7 @@ import { AutoComplete, Button, Drawer, Input, Modal, Select, Tag, message } from
 import { apiTabId, apiTabTitle, editorSaveKey, NEW_API_REQUEST_ID, useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'
 import MonacoEditor from '@/components/MonacoEditor'
+import { TabButtons } from '@/components/TabButtons'
 import {
   COMMON_HEADERS,
   METHODS,
@@ -565,7 +566,7 @@ export function ApiPage({ requestId }: { requestId: string }) {
                           showSearch={{
                             filterOption: suggestions
                               ? (input, option) =>
-                                  (option?.value ?? '').toLowerCase().includes(input.toLowerCase())
+                                (option?.value ?? '').toLowerCase().includes(input.toLowerCase())
                               : false
                           }}
                         >
@@ -881,41 +882,6 @@ export function ApiPage({ requestId }: { requestId: string }) {
         />
         <p className="mt-2 text-xs text-muted-foreground">保存后该请求才会显示在左侧列表中。</p>
       </Modal>
-    </div>
-  )
-}
-
-/**
- * 分段切换按钮（请求构造区与响应区共用）。
- *
- * 两处的切换条**必须**用同一个组件：以前请求侧是 antd `Tabs`、响应侧是手写按钮，
- * 样式对不上（内边距、选中底色、字号都不一样）。抽出来之后改一处两边一起变。
- */
-function TabButtons<T extends string>({
-  tabs,
-  value,
-  onChange
-}: {
-  tabs: ReadonlyArray<{ key: T; label: string }>
-  value: T
-  onChange: (v: T) => void
-}) {
-  return (
-    <div className="flex shrink-0 items-center gap-1">
-      {tabs.map((it) => (
-        <button
-          key={it.key}
-          onClick={() => onChange(it.key)}
-          className={cn(
-            'rounded px-2 py-0.5 transition-colors',
-            value === it.key
-              ? 'bg-secondary font-medium text-foreground'
-              : 'text-muted-foreground hover:text-foreground'
-          )}
-        >
-          {it.label}
-        </button>
-      ))}
     </div>
   )
 }

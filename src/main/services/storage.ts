@@ -604,7 +604,7 @@ class StorageService {
     return []
   }
 
-  // ---------- 快捷键（全局，系统级） ----------
+  // ---------- 快捷键（应用内：主进程只存取配置，匹配与触发在渲染端） ----------
   getShortcuts(): ShortcutConfig[] {
     const stored = this.store.get('shortcuts')
     // 合并缺省，确保新增动作有条目（旧的存储不含该动作时不丢配置）

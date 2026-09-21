@@ -9,6 +9,7 @@ import type {
   AiStreamEvent,
   ApiGroup,
   ApiHistoryEntry,
+  ApiProtocol,
   ApiRequestEntry,
   ColorThemeName,
   NoteEntry,
@@ -29,7 +30,7 @@ import type {
 import type { AppShortcutAction } from '@shared/types'
 import type { PluginInfo } from '@shared/plugin'
 import type { PluginViewInstance } from '@/plugins/host'
-import { DEFAULT_SHORTCUTS } from '@shared/shortcuts'
+import { DEFAULT_SHORTCUTS, findShortcutByEvent } from '@shared/shortcuts'
 import { HOSTS_ACTIVITY_ID, SCRIPTS_ACTIVITY_ID } from '@/activity-ids'
 import { clampTerminalFontSize } from '@/lib/terminal-font'
 import { parseCurl } from '@/lib/api-client'
@@ -56,8 +57,10 @@ export type EditorSaveState = 'saving' | 'dirty' | 'saved'
  * 状态栏保存状态的键。
  *
  * 脚本 id / 笔记 id / 接口请求 id 来自三张不同的表、理论上可能撞车，所以带上类型前缀区分。
+ * `api` 与 `ws` 其实同属 apiRequests 一张表（id 不会撞），分开只是为了状态栏的提示语
+ * 能分别显示「接口请求」和「WebSocket」。
  */
-export const editorSaveKey = (kind: 'script' | 'note' | 'api', id: string): string =>
+export const editorSaveKey = (kind: 'script' | 'note' | 'api' | 'ws', id: string): string =>
   `${kind}:${id}`
 
 /**
@@ -89,6 +92,12 @@ export interface PanelTab {
   noteId?: string
   /** 接口请求：保存的请求 id */
   apiRequestId?: string
+  /**
+   * 接口请求的协议类型（决定这个标签渲染 ApiPage 还是 WsPage）。
+   * 打开标签时从请求上抄一份 —— 协议创建后不可改，所以不会与请求本身漂移；
+   * 草稿标签则是新建时指定的协议（见 `openNewApiDraft`）。
+   */
+  apiProtocol?: ApiProtocol
   /** 接口请求（未保存草稿）的目标分组：保存落盘时写入该分组 */
   apiGroupId?: string
   pluginViewId?: string
@@ -117,26 +126,39 @@ export function apiTabId(requestId: string): string {
 /** 未保存的「新建请求」草稿标签使用的请求 id（不是一个真实存储条目） */
 export const NEW_API_REQUEST_ID = '__new__'
 
+/**
+ * 未保存的「新建 WebSocket」草稿标签的请求 id。
+ *
+ * 与 HTTP 草稿**分开**：两者共用同一个草稿 id 的话，已经打开 HTTP 草稿时
+ * 再点「新建 WebSocket」只会聚焦到那个 HTTP 草稿上，协议切换不过来。
+ */
+export const NEW_WS_REQUEST_ID = '__new_ws__'
+
 /** 请求历史最多保留的条数 */
 export const API_HISTORY_LIMIT = 50
 
 /**
- * 接口请求的展示名：优先用用户起的名字，否则退回「方法 + 路径」，
+ * 接口请求的展示名：优先用用户起的名字，否则退回「协议 + 路径」，
  * 都没有时给个占位（新建但还没填地址的请求）。
  */
-export function apiTabTitle(req: Pick<ApiRequestEntry, 'name' | 'method' | 'url'>): string {
+export function apiTabTitle(
+  req: Pick<ApiRequestEntry, 'name' | 'method' | 'url'> & { protocol?: ApiProtocol }
+): string {
   const name = req.name.trim()
   if (name) return name
+  const isWs = req.protocol === 'ws'
   const url = req.url.trim()
-  if (!url) return '新建请求'
+  if (!url) return isWs ? '新建 WebSocket' : '新建请求'
+  // WebSocket 没有 HTTP 方法，用 WS 前缀代替
+  const prefix = isWs ? 'WS' : req.method
   try {
     const u = new URL(url)
     // 根路径且无查询串时用主机名，避免出现「GET /」这种没信息量的标题
     const path = u.pathname === '/' && !u.search ? u.host : `${u.pathname}${u.search}`
-    return `${req.method} ${path}`
+    return `${prefix} ${path}`
   } catch {
     // 地址还不完整（如只输入了 example.com）时按原文展示
-    return `${req.method} ${url}`
+    return `${prefix} ${url}`
   }
 }
 
@@ -532,6 +554,13 @@ interface UiState {
    * 只在 `Preferences.confirmCloseTab` 开启时才会被写入，弹框见 TabCloseConfirm。
    */
   pendingTabClose: PendingTabClose | null
+  /**
+   * 设置页是否正在录制快捷键。
+   *
+   * 录制时全局的 keydown 分发必须让路，否则按下的组合会**既被录进去、又把动作执行一遍**
+   * （两边都监听 window 的捕获阶段，注册更早的分发会先跑）。所以录制期间用一个标志位挂起分发。
+   */
+  shortcutRecording: boolean
 }
 
 interface AppStore {
@@ -573,7 +602,12 @@ interface AppStore {
 
   // ---------- 偏好 ----------
   preferences: Preferences
-  /** 全局快捷键配置（动作 -> accelerator），主进程据此注册系统级快捷键 */
+  /**
+   * 应用内快捷键配置（动作 -> accelerator）。
+   *
+   * 由**渲染端**在 window 上监听 keydown 自行匹配分发（见 bootstrap 里的 shortcutWired），
+   * 不用 Electron 的 globalShortcut —— 那是系统级的，会占用全局组合键、和别的程序抢。
+   */
   shortcuts: ShortcutConfig[]
   /** 本地可用 shell 检测结果（null = 尚未加载） */
   shells: ShellDetectResult | null
@@ -650,6 +684,10 @@ interface AppStore {
   setAiFloatingPos: (pos: { x: number; y: number } | null) => void
   setSettingsOpen: (open: boolean, tab?: UiState['settingsTab']) => void
   setCommandPaletteOpen: (open: boolean) => void
+  /** 设置页开始/结束录制快捷键（录制期间挂起应用内快捷键分发） */
+  setShortcutRecording: (recording: boolean) => void
+  /** 执行一个快捷键动作（应用内快捷键命中后调用） */
+  runShortcutAction: (action: AppShortcutAction) => void
   /** 切换功能区（活动栏 tab）：主区域与侧边栏都由它派生，不再单独存 view */
   selectActivity: (id: string) => void
   /** 运行时加载插件（扫描 userData/plugins，收集视图注入 store） */
@@ -749,8 +787,11 @@ interface AppStore {
   openNoteTab: (noteId: string) => void
   /** 在 PanelView 中打开接口请求标签（已存在则激活） */
   openApiTab: (requestId: string) => void
-  /** 打开一个「未保存的新请求」草稿标签（不落盘，保存时才写进列表） */
-  openNewApiDraft: (groupId?: string) => void
+  /**
+   * 打开一个「未保存的新请求」草稿标签（不落盘，保存时才写进列表）。
+   * `protocol` 决定草稿是 HTTP 还是 WebSocket（两者用不同的草稿标签 id）。
+   */
+  openNewApiDraft: (groupId?: string, protocol?: ApiProtocol) => void
   /** 在 PanelView 中打开插件管理标签（已存在则激活） */
   openPluginsTab: () => void
   /** 在 PanelView 中打开插件视图标签（已存在则激活） */
@@ -801,7 +842,10 @@ interface AppStore {
   setLocalShell: (shellId: string) => Promise<void>
   setTerminalFontSize: (size: number) => Promise<void>
   /** 设置服务器指标采集间隔（毫秒）：立即生效并持久化 */
-  /** 保存快捷键配置（持久化到主进程并立即重注册系统级快捷键） */
+  /**
+   * 保存快捷键配置（持久化到主进程）。
+   * 应用内快捷键是「每次按键现读 store 匹配」，所以落盘后无需任何重注册，立刻生效。
+   */
   saveShortcuts: (shortcuts: ShortcutConfig[]) => Promise<void>
   setMonitorInterval: (ms: number) => Promise<void>
   sendAiMessage: (text: string, targetSessionId?: string | null) => Promise<void>
@@ -813,7 +857,7 @@ interface AppStore {
 let listenersBound = false
 
 export const useAppStore = create<AppStore>()((set, get) => {
-/** 全局快捷键监听器仅注册一次，避免 HMR / 重复 bootstrap 叠加 */
+/** 应用内快捷键的 keydown 监听器仅注册一次，避免 HMR / 重复 bootstrap 叠加 */
 let shortcutWired = false
   if (!listenersBound && typeof window !== 'undefined' && window.api) {
     listenersBound = true
@@ -914,7 +958,8 @@ let shortcutWired = false
       aiPanelHeight: 440,
       aiFloatingPos: null,
       editorSaveStatus: {},
-      pendingTabClose: null
+      pendingTabClose: null,
+      shortcutRecording: false
     },
 
     monitors: {},
@@ -968,22 +1013,38 @@ let shortcutWired = false
           `${failedPlugins.length} 个插件加载失败：${failedPlugins.map((p) => p.name).join('、')}`
         )
       }
-      // 全局快捷键：主进程触发后在此分发到具体 UI 动作
+      // 应用内快捷键：渲染端自己监听 keydown 匹配（不是系统级 globalShortcut，见 ShortcutConfig 的注释）
       if (!shortcutWired) {
         shortcutWired = true
-        window.api.app.onShortcut((action: AppShortcutAction) => {
-          const s = get()
-          if (action === 'open-settings') s.setSettingsOpen(true)
-          else if (action === 'new-session') void s.createLocalSession()
-          else if (action === 'open-command-palette') s.setCommandPaletteOpen(true)
-          else if (action === 'toggle-ai-panel') {
-            // AI 属于终端页面：只作用于当前激活的终端标签（激活的不是终端则忽略）
-            const sid = groupTerminalSessionId(s, s.activeGroupId)
-            if (sid) s.setSessionAiOpen(sid, !s.ui.aiOpenSessions[sid])
-          }
-          else if (action === 'open-scripts') s.selectActivity(SCRIPTS_ACTIVITY_ID)
-        })
+        window.addEventListener(
+          'keydown',
+          (e) => {
+            // 输入法组合中（如中文输入）不参与匹配，否则会误吞候选词按键
+            if (e.isComposing) return
+            // 长按的自动重复不触发：系统级热键本来只触发一次，按住不放不该连开十个终端
+            if (e.repeat) return
+            const s = get()
+            // 设置页正在录制：让路，否则按下的组合会被录进去的同时把动作也跑一遍
+            if (s.ui.shortcutRecording) return
+            const hit = findShortcutByEvent(s.shortcuts, e)
+            if (!hit) return
+            // 捕获阶段拦下并阻止继续传播：让快捷键优先于 xterm / Monaco 自己的按键处理
+            e.preventDefault()
+            e.stopPropagation()
+            s.runShortcutAction(hit.action)
+          },
+          true
+        )
       }
+    },
+
+    setShortcutRecording: (recording) => set((s) => ({ ui: { ...s.ui, shortcutRecording: recording } })),
+
+    runShortcutAction: (action) => {
+      const s = get()
+      if (action === 'open-settings') s.setSettingsOpen(true)
+      else if (action === 'new-session') void s.createLocalSession()
+      else if (action === 'open-command-palette') s.setCommandPaletteOpen(true)
     },
 
     createLocalSession: async (shellId) => {
@@ -1615,21 +1676,26 @@ let shortcutWired = false
           type: 'api',
           title: req ? apiTabTitle(req) : '接口请求',
           closable: true,
-          apiRequestId: requestId
+          apiRequestId: requestId,
+          // 协议从请求上抄一份：标签渲染哪个页面只看它，不必再去 store 里查一遍
+          apiProtocol: req?.protocol ?? 'http'
         })
       })
     },
 
-    /** 打开一个未保存的「新建请求」草稿：右侧只建一个标签，不写进请求列表；
-     *  真正的落盘发生在用户按 Ctrl/Cmd+S 输入名称后（见 ApiPage 的 saveNow）。 */
-    openNewApiDraft: (groupId) => {
+    /** 打开一个未保存的「新建请求 / 新建 WebSocket」草稿：右侧只建一个标签，不写进请求列表；
+     *  真正的落盘发生在用户按 Ctrl/Cmd+S 输入名称后（见 ApiPage / WsPage 的 saveNow）。 */
+    openNewApiDraft: (groupId, protocol = 'http') => {
+      const isWs = protocol === 'ws'
+      const draftId = isWs ? NEW_WS_REQUEST_ID : NEW_API_REQUEST_ID
       set((s) =>
         addOrFocusTab(s, {
-          id: apiTabId(NEW_API_REQUEST_ID),
+          id: apiTabId(draftId),
           type: 'api',
-          title: '新建请求',
+          title: isWs ? '新建 WebSocket' : '新建请求',
           closable: true,
-          apiRequestId: NEW_API_REQUEST_ID,
+          apiRequestId: draftId,
+          apiProtocol: protocol,
           apiGroupId: groupId
         })
       )

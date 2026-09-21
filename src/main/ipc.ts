@@ -6,9 +6,9 @@ import { storage } from './services/storage'
 import { detectShells } from './services/shells'
 import { aiService } from './services/ai'
 import { mcpManager } from './services/mcp'
-import { registerShortcuts, unregisterShortcuts } from './shortcuts'
 import { pluginHost } from './services/plugins'
 import { executeHttp } from './services/http'
+import { wsService } from './services/ws'
 import { app } from 'electron'
 import type {
   AiModelConfig,
@@ -23,7 +23,10 @@ import type {
   ScriptEntry,
   SessionInfo,
   SshConnectProgress,
-  SshProfile
+  SshProfile,
+  WsConnectOptions,
+  WsEvent,
+  WsSendPayload
 } from '@shared/types'
 
 function broadcast(win: () => BrowserWindow | null, channel: string, payload: unknown): void {
@@ -264,6 +267,22 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   // 由主进程发出请求：不受渲染进程 CORS 限制，可访问内网与自签证书服务
   ipcMain.handle('api:send', (_e, req: ApiHttpRequest) => executeHttp(req))
 
+  // ---------- WebSocket 调试（接口请求里的 ws 协议） ----------
+  // 长连接：open 只负责建连并返回 connId，握手结果与收发的每一帧都走 'ws:event' 推送。
+  // connId 由渲染端先生成再传进来 —— 见 wsService.open 的注释（避免握手快于 IPC 回包）。
+  ipcMain.handle('ws:open', (_e, connId: string, options: WsConnectOptions) =>
+    wsService.open(connId, options)
+  )
+  ipcMain.handle('ws:send', (_e, connId: string, payload: WsSendPayload) =>
+    wsService.send(connId, payload)
+  )
+  ipcMain.handle('ws:close', (_e, connId: string, code?: number, reason?: string) =>
+    wsService.close(connId, code, reason)
+  )
+  wsService.on('event', (event: WsEvent) => broadcast(win, 'ws:event', event))
+  // 退出前把还开着的连接关掉，避免进程退出时残留半开的 socket
+  app.on('before-quit', () => wsService.closeAll())
+
   // ---------- AI 模型配置 ----------
   ipcMain.handle('ai:config:list', () => storage.listAiConfigs())
   ipcMain.handle('ai:config:save', (_e, config: AiModelConfig) => storage.saveAiConfig(config))
@@ -323,19 +342,13 @@ export function registerIpc(win: () => BrowserWindow | null): void {
     return prefs
   })
 
-  // ---------- 快捷键（全局，系统级） ----------
+  // ---------- 快捷键（应用内，仅持久化） ----------
+  // 匹配与触发都在渲染端（监听 window 的 keydown），主进程只负责存取配置。
+  // 刻意不用 Electron 的 globalShortcut：那是系统级的，会占用全局组合键、和别的程序抢。
   ipcMain.handle('shortcuts:get', () => storage.getShortcuts())
-  ipcMain.handle('shortcuts:save', (_e, shortcuts: import('@shared/types').ShortcutConfig[]) => {
-    const next = storage.saveShortcuts(shortcuts)
-    // 立即重新注册系统级快捷键，使改动即时生效
-    registerShortcuts(win, () => next)
-    return next
-  })
-  // 录制模式：注销/恢复系统级快捷键，避免已注册快捷键抢先触发、干扰录制
-  ipcMain.handle('shortcuts:capture', (_e, enabled: boolean) => {
-    if (enabled) unregisterShortcuts()
-    else registerShortcuts(win, () => storage.getShortcuts())
-  })
+  ipcMain.handle('shortcuts:save', (_e, shortcuts: import('@shared/types').ShortcutConfig[]) =>
+    storage.saveShortcuts(shortcuts)
+  )
 
   // ---------- 插件（运行时加载外部插件） ----------
   ipcMain.handle('plugins:list', () => pluginHost.listManifests())

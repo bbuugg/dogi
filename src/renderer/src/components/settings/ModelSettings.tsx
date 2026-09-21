@@ -261,7 +261,7 @@ export function ModelSettings() {
         <p className="text-xs text-muted-foreground">
           可添加多套模型配置，随时在 AI 面板顶部切换。
         </p>
-        <Button icon={<Plus className="size-4" />} size="small" variant="filled" onClick={() => setEditing({ ...EMPTY })}>
+        <Button type='text' icon={<Plus className="size-4" />} size="small" variant="filled" onClick={() => setEditing({ ...EMPTY })}>
           新建配置
         </Button>
       </div>

@@ -2,7 +2,6 @@ import { join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { app, BrowserWindow, Menu, nativeTheme, Tray, webContents } from 'electron'
 import { registerIpc, openExternalSafe } from './ipc'
-import { registerShortcuts } from './shortcuts'
 import { pluginHost } from './services/plugins'
 import { storage } from './services/storage'
 
@@ -271,7 +270,6 @@ app.whenReady().then(async () => {
   createWindow()
   // 插件需在 IPC 注册后加载，使插件主进程 handler 可被路由
   await pluginHost.init()
-  registerShortcuts(() => mainWindow, () => storage.getShortcuts())
   createTray()
 
   app.on('activate', () => {
