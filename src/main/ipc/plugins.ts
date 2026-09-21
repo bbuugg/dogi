@@ -4,8 +4,8 @@ import { pluginHost } from '../services/plugins/host'
 /**
  * 插件 IPC：清单、启用 / 卸载 / 安装 / 重载，以及插件沙箱的各项能力桥。
  *
- * `plugin:*` 是插件运行时的宿主侧能力（渲染代码、webview 入口、调用、HTTP、
- * 键值存储），宿主把它注入给插件，插件自己不碰 Electron API。
+ * `plugin:*` 是插件运行时的宿主侧能力（渲染代码、调用、HTTP、键值存储），
+ * 宿主把它注入给插件，插件自己不碰 Electron API。
  */
 export function registerPluginsIpc(): void {
   ipcMain.handle('plugins:list', () => pluginHost.listManifests())
@@ -19,8 +19,6 @@ export function registerPluginsIpc(): void {
   ipcMain.handle('plugins:reload', (_e, id?: string) => pluginHost.reload(id))
 
   ipcMain.handle('plugin:rendererCode', (_e, id: string) => pluginHost.getRendererCode(id))
-  /** 获取 webview 模式插件的 HTML 入口与 preload 脚本路径 */
-  ipcMain.handle('plugin:webviewInfo', (_e, id: string) => pluginHost.getWebviewInfo(id))
   ipcMain.handle('plugin:invoke', (_e, pluginId: string, name: string, args: unknown[]) =>
     pluginHost.invoke(pluginId, name, args ?? [])
   )

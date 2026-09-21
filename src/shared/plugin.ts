@@ -10,20 +10,10 @@
 export type PluginPermission = 'http' | 'storage' | 'fs'
 
 /**
- * 渲染端入口配置：
- * - 字符串：旧的运行时 blob import 方式（ESM 源码文件名，由宿主拉取源码执行）；
- * - 对象：webview 方式（独立构建的 HTML + JS + CSS bundle，由 webview 加载）。
+ * 渲染端入口：插件目录内的 ESM 源码文件名。
+ * 宿主读取源码后用 blob import 执行，插件在运行时通过 `activate(api)` 注册视图。
  */
-export type PluginRenderer =
-  | string
-  | {
-      /** 渲染模式 */
-      type: 'webview'
-      /** webview 加载的 HTML 入口（相对插件目录） */
-      entry: string
-      /** webview 的 preload 脚本（相对插件目录，CJS） */
-      preload?: string
-    }
+export type PluginRenderer = string
 
 export interface PluginManifest {
   /** 唯一 id（同 id 视为同一插件，主进程 handler 以 id 命名空间隔离） */
@@ -34,7 +24,7 @@ export interface PluginManifest {
   author?: string
   /** 侧边栏/视图图标：emoji 或字符即可（避免插件依赖我们的图标库） */
   icon?: string
-  /** 渲染端入口（字符串=blob import 方式；对象=webview 方式），缺省则该插件无 UI */
+  /** 渲染端入口（插件目录内的 ESM 源码文件名），缺省则该插件无 UI */
   renderer?: PluginRenderer
   /** 主进程入口（相对插件目录的 ESM 文件名），缺省则该插件无主进程逻辑 */
   main?: string

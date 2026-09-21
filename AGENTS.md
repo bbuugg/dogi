@@ -182,3 +182,11 @@
   - `main/index.ts` 从 `./ipc/index` 导入（写全，别依赖目录解析）。
 - **验证方式**：重构前后通道集合必须完全一致 —— 用同一条正则对比：
   `git show <旧提交>:src/main/ipc.ts` 与 `rg -o "ipcMain\.handle\(\s*'([^']+)'" src/main/ipc` 提取的通道名集合应完全相同（本次为 **95 个，零差异**；⚠️ 必须用 `\s*` 跨行匹配，否则会漏掉写成 `ipcMain.handle(\n  'xxx',` 的那些通道）。改完跑 `npm run typecheck` + `npx vite build -c vite.main.mts`。
+
+### 23. 插件只有一种加载方式：blob import（webview 方式已移除）
+
+- **触发信号**：想给插件加"独立 HTML + preload + vite 构建"的加载方式；或在代码/文档里看到 `plugin:webviewInfo`、`webviewTag`、`build:plugins`、`create:plugin` 这类历史名词。
+- **根因/约束**：插件渲染端曾经支持两种入口 —— 字符串（宿主读源码，blob import 执行）与对象 `{ type:'webview', entry, preload }`（插件自行构建 HTML + preload，由 `<webview>` 标签加载）。webview 方式要多维护一整套构建链（插件的 vite 配置、preload 脚本、dist 产物、主题 postMessage 桥），换来的只是"插件用自己的 DOM"，已整体移除。
+- **正确做法**：插件渲染端只有一种形态 —— `plugin.json` 里 `renderer: "xxx.js"`（插件目录内的 ESM 源码文件名）。链路是：`pluginHost.getRendererCode()` 读源码 → 渲染端 blob URL 动态 `import` → 调用 `activate(api)` 注册视图。插件**不写 HTML、不写 preload**，界面直接用宿主注入的 `api.antd` / `api.icons` / `api.MonacoEditor` / `api.cn` 编写（见 `features/plugins/host.ts` 的 `RendererHostApi`）。要新增插件，照 `plugins/redis-client/` 的结构写即可（它只有 `plugin.json` + `main.js` + `renderer.js`）。
+- **本次一并删除的设施**：`plugin:webviewInfo` 通道与 `window.api.plugins.webviewInfo`、`PluginRenderer` 的联合类型、`PluginViewInstance.renderType/webviewEntry/webviewPreload`、`PanelView` 的 `PluginWebviewTab`、主进程 `webviewTag: true` 与「Toggle Webview Devtools」菜单、`scripts/build-plugins.mjs`、`scripts/create-plugin.mjs`、npm 脚本 `build:plugins` / `create:plugin`。
+- **验证方式**：`rg -i webview src scripts plugins` 应零命中（`node_modules/` 与 `out/` 里 monaco 自身的代码除外）；`npm run typecheck` 与三端构建通过；`plugins/redis-client` 能正常打开即为回归通过。

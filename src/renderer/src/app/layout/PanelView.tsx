@@ -1,7 +1,6 @@
 import {
   Fragment,
   useCallback,
-  useEffect,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent
@@ -682,7 +681,7 @@ function TerminalTab({ sessionId, active }: { sessionId: string; active: boolean
   return <TerminalView session={session} isActive={active} />
 }
 
-/** 插件标签内容：webview 或组件 */
+/** 插件标签内容：渲染插件在 activate 时注册的视图组件 */
 function PluginTabContent({ tab }: { tab: PanelTab }) {
   const plugins = useAppStore((s) => s.plugins)
   const view = plugins.find((p) => p.viewId === tab.pluginViewId)
@@ -693,131 +692,5 @@ function PluginTabContent({ tab }: { tab: PanelTab }) {
       </div>
     )
   }
-  if (view.renderType === 'webview' && view.webviewEntry) {
-    return <PluginWebviewTab entry={view.webviewEntry} preload={view.webviewPreload} active />
-  }
   return <view.Component />
-}
-
-/** 插件 webview 渲染器：创建 <webview> 标签加载插件独立构建的 HTML */
-function PluginWebviewTab({
-  entry,
-  preload,
-  active
-}: {
-  entry: string
-  preload?: string | null
-  active: boolean
-}) {
-  const ref = useRef<HTMLDivElement>(null)
-  const [loading, setLoading] = useState(true)
-
-  const isDark = useAppStore((s) => s.preferences.theme === 'dark')
-  const colorTheme = useAppStore((s) => s.preferences.colorTheme)
-  const customColor = useAppStore((s) => s.preferences.customColor)
-
-  const pushTheme = useCallback(() => {
-    const container = ref.current
-    if (!container) return
-    const wv = container.querySelector('webview') as (Electron.WebviewTag & { send: (ch: string, ...args: unknown[]) => void }) | null
-    if (!wv) return
-    if (!wv.isConnected) return
-    const data = {
-      isDark,
-      colorTheme,
-      customVars: customColor ? { '--primary': customColor } : undefined
-    }
-    try {
-      wv.send('plugin:theme', data)
-    } catch {
-      // ignore
-    }
-  }, [isDark, colorTheme, customColor])
-
-  useEffect(() => {
-    const container = ref.current
-    if (!container) return
-
-    const oldWv = container.querySelector('webview')
-    if (oldWv) {
-      try {
-        oldWv.remove()
-      } catch {
-        container.innerHTML = ''
-      }
-    }
-
-    setLoading(true)
-
-    let webview: (Electron.WebviewTag & { send: (ch: string, ...args: unknown[]) => void }) | null = null
-    let cancelled = false
-
-    const createWv = () => {
-      if (cancelled || !container) return
-      webview = document.createElement('webview') as Electron.WebviewTag & {
-        send: (ch: string, ...args: unknown[]) => void
-      }
-      webview.src = entry
-      webview.style.width = '100%'
-      webview.style.height = '100%'
-      webview.style.border = 'none'
-      webview.setAttribute(
-        'webpreferences',
-        'contextIsolation=yes,nodeIntegration=no,spellcheck=no'
-      )
-      if (preload) {
-        webview.setAttribute('preload', preload)
-      }
-
-      const onStopLoading = () => {
-        if (!webview?.isConnected) return
-        setLoading(false)
-        pushTheme()
-      }
-      const onDomReady = () => {
-        if (!webview?.isConnected) return
-        pushTheme()
-      }
-      webview.addEventListener('did-stop-loading', onStopLoading)
-      webview.addEventListener('dom-ready', onDomReady)
-
-      try {
-        container.appendChild(webview)
-      } catch {
-        // ignore
-      }
-    }
-
-    queueMicrotask(createWv)
-
-    return () => {
-      cancelled = true
-      if (webview) {
-        try {
-          webview.remove()
-        } catch {
-          // ignore
-        }
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entry, preload])
-
-  useEffect(() => {
-    pushTheme()
-  }, [pushTheme])
-
-  return (
-    <div
-      ref={ref}
-      className="relative h-full w-full"
-      style={{ display: active ? 'block' : 'none' }}
-    >
-      {loading && (
-        <div className="absolute inset-0 z-10 flex items-center justify-center bg-background">
-          <div className="text-muted-foreground text-sm">加载中…</div>
-        </div>
-      )}
-    </div>
-  )
 }

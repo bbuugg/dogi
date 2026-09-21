@@ -328,9 +328,6 @@ const api = {
     /** 读取插件渲染端源码（供渲染端 blob import 运行） */
     rendererCode: (id: string): Promise<string | null> =>
       ipcRenderer.invoke('plugin:rendererCode', id),
-    /** 获取 webview 模式插件的 HTML 入口与 preload 脚本路径 */
-    webviewInfo: (id: string): Promise<{ entry: string; preload: string | null } | null> =>
-      ipcRenderer.invoke('plugin:webviewInfo', id),
     /** 发起 HTTP 请求（需插件声明 http 权限） */
     http: (pluginId: string, req: PluginHttpRequest): Promise<PluginHttpResponse> =>
       ipcRenderer.invoke('plugin:http', pluginId, req),

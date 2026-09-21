@@ -27,8 +27,7 @@ const PERMISSION_LABEL: Record<string, string> = {
 
 /** 渲染端入口的可读描述 */
 function rendererLabel(info: PluginInfo): string {
-  if (!info.renderer) return '无界面（仅主进程逻辑）'
-  return typeof info.renderer === 'string' ? '内置视图（源码加载）' : '独立页面（webview）'
+  return info.renderer ? '内置视图（源码加载）' : '无界面（仅主进程逻辑）'
 }
 
 /** 详情里的一行「标签 : 值」 */

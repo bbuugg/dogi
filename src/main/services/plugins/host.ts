@@ -149,7 +149,7 @@ class PluginHost {
         const dest = join(dir, name)
         // 内置插件随应用发布：始终用仓库最新版本覆盖，确保 dev 期改动即时生效；
         // 用户在 userData 自行安装的其他插件（不在仓库 plugins 内）不受影响。
-        // 过滤 node_modules 与源码目录（webview 模式插件只需 dist + preload + manifest）
+        // 过滤开发期产物：node_modules、插件源码目录与 .git
         await cp(join(src, name), dest, {
           recursive: true,
           force: true,
@@ -352,12 +352,10 @@ class PluginHost {
     return null
   }
 
-  /** 读取插件渲染端源码（供渲染端 blob import，仅 renderer 为字符串时有效） */
+  /** 读取插件渲染端源码（渲染端拉取后用 blob import 执行） */
   async getRendererCode(id: string): Promise<string | null> {
     const manifest = this.manifests.get(id)
     if (!manifest?.renderer) return null
-    // webview 模式的 renderer 是对象，不走 blob import
-    if (typeof manifest.renderer !== 'string') return null
     const file = join(this.pluginsDir(), id, manifest.renderer)
     try {
       await stat(file)
@@ -365,22 +363,6 @@ class PluginHost {
     } catch {
       return null
     }
-  }
-
-  /**
-   * 获取 webview 模式插件的 HTML 入口与 preload 脚本的绝对路径。
-   * 仅 renderer.type === 'webview' 时返回有效结果，否则返回 null。
-   */
-  getWebviewInfo(id: string): { entry: string; preload: string | null } | null {
-    const manifest = this.manifests.get(id)
-    if (!manifest?.renderer || typeof manifest.renderer === 'string') return null
-    if (manifest.renderer.type !== 'webview') return null
-    const pluginDir = join(this.pluginsDir(), id)
-    const entry = join(pluginDir, manifest.renderer.entry)
-    const preload = manifest.renderer.preload
-      ? join(pluginDir, manifest.renderer.preload)
-      : null
-    return { entry, preload }
   }
 
   private permissionsOf(id: string): Set<PluginPermission> {
