@@ -56,8 +56,17 @@ export function registerSystemIpc(ctx: IpcContext): void {
   // 终端中点击链接时使用：按安全协议过滤后由系统默认程序打开
   ipcMain.handle('app:openExternal', (_e, url: string) => openExternalSafe(url))
 
-  // ---------- 首屏就绪 ----------
-  // 渲染端把「数据加载完 + 主题已应用」告诉主进程，主进程据此撤下启动画面。
-  // 用 send / on 而非 invoke：一次性单向通知，不需要回值。
-  ipcMain.on('app:ready', () => ctx.onRendererReady())
+  // ---------- 首帧主题（同步取一次） ----------
+  // preload 在页面脚本之前用它把明暗 class 与配色主题直接落到 html 上，
+  // 否则首帧会先按 index.html 的硬编码主题渲染、再跳成用户设置的样子。
+  // 同步 IPC 会阻塞渲染进程，但只在窗口加载前调一次、返回的又是几个小字符串。
+  ipcMain.on('prefs:themeSync', (event) => {
+    const prefs = storage.getPreferences()
+    console.log('[theme] 首帧主题已交给 preload：', prefs.theme, prefs.colorTheme)
+    event.returnValue = {
+      theme: prefs.theme,
+      colorTheme: prefs.colorTheme,
+      customColor: prefs.customColor
+    }
+  })
 }

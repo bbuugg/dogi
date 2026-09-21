@@ -1256,13 +1256,7 @@ let shortcutWired = false
         activeAgentWorkspaceId: agentWorkspaces[0]?.id ?? null,
         activeAgentConversationId: initial.activeId
       })
-      // 首屏数据与配色都已就位：告诉主进程可以撤下启动画面、显示主窗口了。
-      // 刻意不用 requestAnimationFrame 等「渲染完这一帧」——此时窗口还是 show:false，
-      // 隐藏窗口的 rAF 会被 Chromium 节流甚至不触发，可能反而永远卡在启动画面；
-      // 主进程那边另有 ~450ms 的延迟，足够 React 把真实 UI 画出来。
-      // 放在插件加载之前：插件是后台能力，不该拖着启动画面不放。
-      window.api.app.ready()
-      // 运行时加载外部插件（扫描 userData/plugins 并收集视图）
+      // 运行时会加载外部插件（扫描 userData/plugins 并收集视图）
       const { loadPlugins } = await import('@/features/plugins/host')
       const pluginViews = await loadPlugins()
       const pluginList = await window.api.plugins.list()

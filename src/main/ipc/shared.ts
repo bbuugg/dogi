@@ -10,25 +10,16 @@ export interface IpcContext {
   win: () => BrowserWindow | null
   /** 向主窗口单向推送事件（窗口不存在 / 已销毁时静默丢弃） */
   broadcast: (channel: string, payload: unknown) => void
-  /**
-   * 渲染端首屏就绪（数据加载完 + 主题已应用）时的回调。
-   * 由 main/index.ts 注入，用于撤下启动画面并显示主窗口。
-   */
-  onRendererReady: () => void
 }
 
-export function createIpcContext(
-  win: () => BrowserWindow | null,
-  onRendererReady: () => void = () => {}
-): IpcContext {
+export function createIpcContext(win: () => BrowserWindow | null): IpcContext {
   return {
     win,
     broadcast: (channel, payload) => {
       const window = win()
       if (!window || window.isDestroyed()) return
       window.webContents.send(channel, payload)
-    },
-    onRendererReady
+    }
   }
 }
 

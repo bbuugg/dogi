@@ -201,15 +201,21 @@
 - **正确做法**：会话 CRUD 走 `agent:conversations:list/save/delete` 三个通道（save 返回**单个**会话，不回传全量 —— 会话带完整历史、体量可能很大）。切工作区用 `selectAgentWorkspace`，它会自动定位该工作区最近更新的会话、一个都没有就现建一个空会话；一切"当前会话"的判断读 `activeAgentConversationId`，不要再用 workspaceId 去索引消息。删除会话 / 工作区前先 `abortAgent(id)` 停掉在跑的请求，否则主进程的 agent 进程会变成孤儿。
 - **验证方式**：`rg "agentChats" src` 应无命中；同一工作区开两个会话分别对话，ACP 后端下应看到两个独立的 agent 进程（`disconnect` 一个不影响另一个）；重启应用后会话列表与消息仍在。
 
-### 25. 启动画面：主窗口要等「主题已应用」再显示
+### 25. 主题闪烁：preload 在首帧前应用，别用启动画面去遮
 
-- **触发信号**：启动时先看到一帧黑色 / 默认配色，再跳成设置里的配色；或想改主窗口的显示时机。
-- **根因/约束**：`index.html` 里的 `<html class="dark">` 是静态硬编码，而用户选的**配色主题**（`data-color-theme` / 自定义强调色）要等渲染端 `bootstrap()` 异步拿到 preferences 后由 `applyColorTheme()` 才应用。而主窗口原来的显示时机是 `ready-to-show` —— **它只代表「首帧已产出」，不代表主题已应用**，于是那一帧就被用户看到了。
-- **正确做法**：
-  - 主进程先亮启动画面（`createSplashWindow()`：360×240 无边框小窗，内容是 data URL 内联的 HTML，不引任何脚本）。**logo 用 `resolveIconPath()` 那张应用图标**（与窗口/托盘同一个文件），经 `nativeImage.createFromPath().toDataURL()` 内联；整段 HTML 走 `data:text/html;base64,...` 加载 —— 页面里嵌着图标的 data URL（含 `+ / =`），逐个转义不如一次 base64 省事。取不到图标时退回渐变方块（`splashLogoDataUrl()` 返回 null）。
-  - 渲染端在 `bootstrap()` 里「数据进 store + `applyColorTheme()` 之后」调 `window.api.app.ready()`（`ipcMain.on('app:ready')` → `IpcContext.onRendererReady`）。
-  - 主进程 `markRendererReady()` 收到后再压 `SPLASH_MIN_MS`(450ms) 才 `revealMainWindow()`，并且**必须同时满足 `ready-to-show` 已触发**，否则 show 出来的是一张空窗。先 show 主窗口、后销毁 splash，避免「两个窗口都没了」的瞬间。
-  - `SPLASH_TIMEOUT_MS`(8s) 兜底：渲染端永不报就绪（加载报错）也要放出主窗口，不能永远停在启动画面。重建窗口时 `rendererReady` / `windowReadyToShow` / `mainWindowRevealed` 三个标志都要复位。
-  - 复位 zoom 只能在 `show()` 之后（见第 16 条）。
-  - ⚠️ **不要用 `requestAnimationFrame` 等「渲染完这一帧」再报就绪**：此时窗口还是 `show: false`，Chromium 会节流甚至完全不触发隐藏窗口的 rAF，反而可能永远卡在启动画面。
-- **验证方式**：主进程会打印 `[splash] 启动画面已显示` 与 `[splash] 主窗口已显示，撤下启动画面`；两者之间应夹着 bootstrap / 插件加载的日志。用 `Start-Process electron.exe -ArgumentList '.' -RedirectStandardOutput out.log` 即可捕获（`Get-Process | ? MainWindowHandle` 那种采样不可靠：一个进程有多个顶层窗口时只返回其中一个）。
+- **触发信号**：启动时先看到一帧「默认主题 / 黑色」，再跳成设置里的配色；或者想加启动画面来盖住它。
+- **根因/约束**：
+  - `index.html` 的 `<html class="dark">` 是静态硬编码，而用户的**明暗与配色主题**（`dark` class / `data-color-theme` / 自定义强调色变量）都要等渲染端 `bootstrap()` **异步**拿到 preferences 后才由 `applyColorTheme()` 应用 —— 这中间就是那一帧跳变。
+  - antd 的 token 也不是预设的：`AntdProvider` 用 `readAppTokens()` **现读 CSS 变量**（`useMemo` 依赖 `preferences.colorTheme`），所以 CSS 变量晚一步，antd 组件整体就晚一步。
+  - ⚠️ **不要试图用「等主题就绪再显示主窗口」来遮**（试过：主进程建启动画面 + 渲染端报就绪 + 延迟揭示）。它既没解决问题（主窗口显示前的那一帧仍在），又硬给启动加了几百毫秒，还得维护一堆状态标志 + 超时兜底。**要消除，不要遮挡**。
+  - ⚠️ CSP 是 `script-src 'self'`，不能往 index.html 塞内联脚本干这件事（见第 15 条）。
+- **正确做法**：**preload 在页面脚本之前执行**，这是唯一能赶在首帧前的时机。
+  - 主进程 `ipcMain.on('prefs:themeSync')` 用 `event.returnValue` 同步返回 `{ theme, colorTheme, customColor }`（`ipc/system.ts`）。
+  - `preload/index.ts` 的 `applyInitialTheme()` 在**模块顶层立即调用**：`sendSync` 取一次偏好 → 按与主进程相同的规则解析明暗（`theme === 'dark'`，或 `system` 且 `matchMedia`）→ `classList.toggle('dark')` + `applyColorTheme(theme, custom, root)`。
+  - ⚠️ **`document.documentElement` 在 preload 里是 `null`**：preload 跑在 document_start，此时连 `<html>` 都还没被解析出来。写成 `if (!root) return` 会让整套逻辑**静默失效**（现象就是"改了没用、照样闪"，而主进程那句 `[theme] 首帧主题已交给 preload` 照样打印，很容易误判为已修好）。必须用 `MutationObserver` 盯着 `document` 的子节点，等 `<html>` 一出现立刻补上 —— 观察者回调是微任务，在解析器继续之前执行，仍在首帧之前（实测此刻 `document.readyState === 'loading'`）。
+  - 主题的纯逻辑放在 `src/shared/theme.ts`（`customAccentVars` + `applyColorTheme`），因为 preload 够不着渲染端的 `shared/lib/theme.ts`。它**不能引 DOM 类型**（`@shared` 同时被 node 侧 tsconfig 消费、lib 不含 DOM），所以 `applyColorTheme` 的第三参用自定义的 `ThemeElement` 接口；preload 侧另有一份最小 DOM 声明 `src/preload/dom.d.ts`（只声明 `document.documentElement` 与 `window.matchMedia`）。渲染端 `shared/lib/theme.ts` 只是包一层 `document.documentElement` 再 re-export，调用点无需改动。
+  - 渲染端的 `initThemeSync` / `applyColorTheme` 保持不变：负责运行中的切换，也是 preload 万一失败时的兜底。
+- **验证方式**（两段都要看，只看主进程那句会误判 —— 它只证明偏好交出去了，不证明用上了）：
+  1. 主进程：`[theme] 首帧主题已交给 preload： <theme> <colorTheme>`，应出现在「插件加载」日志之前；
+  2. preload：用 `$env:ELECTRON_ENABLE_LOGGING='1'` 启动，从 stderr 抓 `[theme] preload 已补应用首帧主题： <theme> <colorTheme> loading` —— **结尾的 `loading` 是关键判据**，`document.readyState === 'loading'` 说明它写在文档解析阶段、首帧之前。缺了这条日志就说明应用那步被 `if (!root) return` 之类挡掉了。
+  另外 `rg -i "splash|app:ready|revealMainWindow" src` 应零命中（旧的遮挡方案已整体移除）。

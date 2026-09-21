@@ -24,11 +24,8 @@ export { openExternalSafe } from './shared'
  *
  * 需要广播事件或读窗口的模块接收 `ctx`，纯请求-响应型的模块不接收任何参数。
  */
-export function registerIpc(
-  win: () => BrowserWindow | null,
-  onRendererReady?: () => void
-): void {
-  const ctx = createIpcContext(win, onRendererReady)
+export function registerIpc(win: () => BrowserWindow | null): void {
+  const ctx = createIpcContext(win)
 
   registerTerminalIpc(ctx)
   registerMonitorIpc(ctx)

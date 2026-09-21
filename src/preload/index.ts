@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
+import { applyColorTheme } from '../shared/theme'
+import type { ColorThemeName } from '../shared/types'
 import type {
   AgentBackend,
   AgentChatMessage,
@@ -45,6 +47,64 @@ import type {
   PluginHttpRequest,
   PluginHttpResponse
 } from '@shared/plugin'
+
+/**
+ * 首帧之前把主题落到 html 上。
+ *
+ * 渲染端要等异步的 `bootstrap()` 才能拿到 preferences，在那之前 `index.html`
+ * 上硬编码的 `class="dark"` 会先按默认主题渲染一帧 —— 这就是「启动时先黑一下、
+ * 再变成设置里的配色」的来源（闪的是**配色主题**，不是明暗）。
+ * preload 在页面脚本之前执行，这里同步取一次偏好直接设好 class 与
+ * `data-color-theme`，首帧就是用户设置的样子，不需要任何启动画面去遮。
+ *
+ * 读不到偏好（异常等）时保持 index.html 的默认值，渲染端 bootstrap 会再纠正。
+ */
+function applyInitialTheme(): void {
+  let prefs: {
+    theme: 'system' | 'light' | 'dark'
+    colorTheme: ColorThemeName
+    customColor?: string
+  } | null = null
+  try {
+    prefs = ipcRenderer.sendSync('prefs:themeSync')
+  } catch {
+    return
+  }
+  if (!prefs) return
+
+  const { theme, colorTheme, customColor } = prefs
+  // 明暗由主进程的 nativeTheme.themeSource 决定，这里按同一规则解析
+  const isDark =
+    theme === 'dark' ||
+    (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+
+  const apply = (): boolean => {
+    const root = document.documentElement
+    if (!root) return false
+    root.classList.toggle('dark', isDark)
+    applyColorTheme(colorTheme, customColor, root)
+    return true
+  }
+
+  if (apply()) {
+    console.log('[theme] preload 已应用首帧主题：', theme, colorTheme, document.readyState)
+    return
+  }
+
+  // ⚠️ Electron 的 preload 跑在 document_start，此时连 <html> 都还没被解析出来
+  // （documentElement 为 null），所以这里不能直接 return —— 否则主题根本没设上，
+  // 首帧仍是 index.html 里硬编码的默认主题，照样闪。
+  // 盯着 document 的子节点，<html> 一出现立刻补上：MutationObserver 是微任务，
+  // 在解析器继续之前执行，所以仍在首帧（body 尚未解析）之前。
+  const observer = new MutationObserver(() => {
+    if (!apply()) return
+    observer.disconnect()
+    console.log('[theme] preload 已补应用首帧主题：', theme, colorTheme, document.readyState)
+  })
+  observer.observe(document, { childList: true })
+}
+
+applyInitialTheme()
 
 type Unsubscribe = () => void
 
@@ -281,12 +341,7 @@ const api = {
     platform: process.platform,
     info: (): Promise<AppInfo> => ipcRenderer.invoke('app:info'),
     /** 用系统默认程序打开外部链接（主进程会按安全协议过滤，避免弹窗） */
-    openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url),
-    /**
-     * 首屏就绪通知（数据加载完 + 主题已应用）：主进程收到后才撤下启动画面、
-     * 显示主窗口，用户因此看不到主窗口「先默认配色、再变成设置配色」的闪烁。
-     */
-    ready: (): void => ipcRenderer.send('app:ready')
+    openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url)
   },
   shortcuts: {
     /** 读取当前快捷键配置（动作 -> accelerator） */

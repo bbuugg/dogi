@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
-import { app, BrowserWindow, Menu, nativeImage, nativeTheme, Tray } from 'electron'
+import { app, BrowserWindow, Menu, nativeTheme, Tray } from 'electron'
 import { registerIpc, openExternalSafe } from './ipc/index'
 import { pluginHost } from './services/plugins/host'
 import { storage } from './services/storage'
@@ -10,19 +10,6 @@ let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 /** 真正退出程序的标志位：仅当用户从托盘「退出」触发，关闭窗口时置位 */
 let isQuiting = false
-
-/** 启动画面：主窗口首帧准备好之前先亮它，用户看不到主窗口「先默认配色、再变设置配色」的闪烁 */
-let splashWindow: BrowserWindow | null = null
-/** 渲染端是否已报首屏就绪（数据加载完 + 主题已应用） */
-let rendererReady = false
-/** 主窗口是否已可安全显示（ready-to-show 已触发，首帧已产出） */
-let windowReadyToShow = false
-let mainWindowRevealed = false
-
-/** 启动画面的最短呈现时长：太短会一闪而过，反而比直接切过去更晃眼 */
-const SPLASH_MIN_MS = 450
-/** 兜底：渲染端迟迟不报就绪（加载报错等）也要放出主窗口，不能永远卡在启动画面 */
-const SPLASH_TIMEOUT_MS = 8000
 
 /**
  * 单实例锁：已有一个 OpsDesk 在运行时，再次启动的进程直接退出，
@@ -152,128 +139,7 @@ function createTray(): void {
   })
 }
 
-/**
- * 启动画面的 logo：把项目图标读进来转成 data URL 内联。
- * 图标缺失 / 解码失败时返回 null，调用方退回纯色块 logo（不至于开天窗）。
- */
-function splashLogoDataUrl(): string | null {
-  try {
-    const image = nativeImage.createFromPath(resolveIconPath())
-    return image.isEmpty() ? null : image.toDataURL()
-  } catch {
-    return null
-  }
-}
-
-/**
- * 启动画面的 HTML。
- *
- * 用 data URL 而不是单独文件 / 多入口构建：内容极小（图标 + 标题 + 进度条动画），
- * 不引任何脚本，内联最省事（CSP 也允许 data URL 的 img/font）。
- */
-function splashHtml(isDark: boolean, logo: string | null): string {
-  const bg = isDark ? '#0f1117' : '#ffffff'
-  const fg = isDark ? '#e8eaf0' : '#1b1d23'
-  const muted = isDark ? '#7c8296' : '#8b90a0'
-  const track = isDark ? 'rgba(255,255,255,.09)' : 'rgba(0,0,0,.07)'
-  const accent = '#4f7cff'
-  // 图标本身是圆形深色底，直接铺 64px 即可；取不到图时退回一个渐变圆角方块
-  const logoBlock = logo
-    ? `<img class="logo" src="${logo}" alt="">`
-    : `<div class="logo-fallback">O</div>`
-  return `<!doctype html>
-<html><head><meta charset="utf-8"><style>
-  html,body{margin:0;height:100%;overflow:hidden}
-  body{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;
-    background:${bg};color:${fg};user-select:none;
-    font:500 13px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}
-  .logo{width:64px;height:64px;object-fit:contain}
-  .logo-fallback{width:52px;height:52px;border-radius:14px;display:flex;align-items:center;
-    justify-content:center;background:linear-gradient(135deg,${accent},#8b5cf6);color:#fff;
-    font-size:24px;font-weight:700;box-shadow:0 8px 24px rgba(79,124,255,.35)}
-  .title{font-size:15px;font-weight:600;letter-spacing:.3px}
-  .sub{font-size:11px;color:${muted};margin-top:-8px}
-  .track{width:168px;height:3px;border-radius:2px;background:${track};overflow:hidden;margin-top:6px}
-  .bar{width:40%;height:100%;border-radius:2px;background:${accent};
-    animation:slide 1.1s ease-in-out infinite}
-  @keyframes slide{0%{transform:translateX(-100%)}100%{transform:translateX(250%)}}
-</style></head>
-<body>
-  ${logoBlock}
-  <div class="title">OpsDesk</div>
-  <div class="sub">AI 运维终端</div>
-  <div class="track"><div class="bar"></div></div>
-</body></html>`
-}
-
-function createSplashWindow(): void {
-  const isDark = nativeTheme.shouldUseDarkColors
-  splashWindow = new BrowserWindow({
-    width: 360,
-    height: 240,
-    frame: false,
-    resizable: false,
-    movable: false,
-    minimizable: false,
-    maximizable: false,
-    skipTaskbar: true,
-    show: true,
-    center: true,
-    // 与主窗口同底色，且创建前 themeSource 已就位，启动画面自身也不会闪
-    backgroundColor: isDark ? '#0f1117' : '#ffffff',
-    webPreferences: { contextIsolation: true, nodeIntegration: false, devTools: false }
-  })
-  // 整段 HTML 用 base64 传输：页面里嵌着图标的 data URL（含 + / = 等字符），
-  // 直接拼进 data:text/html 得逐个转义，base64 一次编码更省事也更稳
-  const html = splashHtml(isDark, splashLogoDataUrl())
-  splashWindow.webContents.on('did-fail-load', (_e, code, desc) => {
-    // 启动画面加载失败会显示成空白小窗，留下日志便于排查
-    console.error('[splash] 启动画面加载失败：', code, desc)
-  })
-  void splashWindow.loadURL(
-    `data:text/html;base64,${Buffer.from(html, 'utf-8').toString('base64')}`
-  )
-  splashWindow.on('closed', () => {
-    splashWindow = null
-  })
-  console.log('[splash] 启动画面已显示')
-}
-
-/** 渲染端报告首屏就绪（IPC `app:ready`） */
-function markRendererReady(): void {
-  if (rendererReady) return
-  rendererReady = true
-  // 再压一小段：让启动画面有完整的呈现，而不是刚出现就被主窗口顶掉
-  setTimeout(revealMainWindow, SPLASH_MIN_MS)
-}
-
-/**
- * 撤下启动画面并显示主窗口。
- *
- * 两个条件缺一不可：
- * - 渲染端已就绪 —— 否则会露出主窗口「先按默认配色渲染、再变成设置配色」的那一帧；
- * - ready-to-show 已触发 —— 否则 show 出来的是一张空窗。
- * 主窗口先显示、启动画面后销毁，避免出现「两个窗口都没了」的瞬间。
- */
-function revealMainWindow(): void {
-  if (mainWindowRevealed || !rendererReady || !windowReadyToShow) return
-  mainWindowRevealed = true
-
-  const window = mainWindow
-  if (window && !window.isDestroyed()) {
-    window.show()
-    // ⚠️ 复位 zoom 必须在 show 之后：隐藏窗口下调 setZoomFactor 会让首帧永不产出
-    window.webContents.setZoomFactor(1)
-  }
-  if (splashWindow && !splashWindow.isDestroyed()) splashWindow.destroy()
-  console.log('[splash] 主窗口已显示，撤下启动画面')
-}
-
 function createWindow(): void {
-  // （重新）建窗口时这几个标志都要复位：新窗口得自己走一遍「首帧 + 渲染端就绪」
-  rendererReady = false
-  windowReadyToShow = false
-  mainWindowRevealed = false
   const bounds = storage.getWindowBounds()
   const isMac = process.platform === 'darwin'
   // 窗口/任务栏图标：开发时取项目 resources 目录；打包后由 extraResources 带入安装目录 resources
@@ -321,10 +187,8 @@ function createWindow(): void {
   //    故复位挪到 ready-to-show（此时首帧已产出）以及窗口可见时的 did-finish-load（reload 场景）。
   mainWindow.webContents.setZoomFactor(1)
   mainWindow.on('ready-to-show', () => {
-    // 这里不直接 show：交给 revealMainWindow 等渲染端「主题已应用」的报告，
-    // 否则用户会看到主窗口先按默认配色渲染一帧、再跳成设置里的配色
-    windowReadyToShow = true
-    revealMainWindow()
+    mainWindow?.show()
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.setZoomFactor(1)
   })
   mainWindow.webContents.on('did-finish-load', () => {
     if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
@@ -379,16 +243,8 @@ app.whenReady().then(async () => {
   // 在创建窗口前应用主题偏好，renderer 的 prefers-color-scheme 随之生效
   nativeTheme.themeSource = storage.getPreferences().theme
   installMenu()
-  registerIpc(() => mainWindow, markRendererReady)
-  // 先亮启动画面，主窗口在后台加载（show: false），等渲染端报就绪后再一并揭示
-  createSplashWindow()
+  registerIpc(() => mainWindow)
   createWindow()
-  // 兜底：渲染端迟迟不报就绪时也要放出主窗口，不能永远停在启动画面
-  setTimeout(() => {
-    rendererReady = true
-    windowReadyToShow = true
-    revealMainWindow()
-  }, SPLASH_TIMEOUT_MS)
   // 插件需在 IPC 注册后加载，使插件主进程 handler 可被路由
   await pluginHost.init()
   createTray()
