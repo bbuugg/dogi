@@ -300,7 +300,7 @@ function PanelGroupView({ groupId }: { groupId: string }) {
       )}
       onMouseDown={() => setActiveGroup(groupId)}
     >
-      {/* 标签条 */}
+      {/* 标签条：整条铺一层淡底色，激活标签再用「纯底色 + 顶部主色条」浮起来 */}
       <div
         className={cn(
           'flex h-8 shrink-0 items-stretch border-b',
@@ -335,7 +335,7 @@ function PanelGroupView({ groupId }: { groupId: string }) {
             type="button"
             title="关闭整个组"
             onClick={() => void closeGroup(groupId)}
-            className="flex w-8 shrink-0 items-center justify-center border-l border-border/60 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+            className="flex w-8 shrink-0 items-center justify-center border-l border-border/60 text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
           >
             <X className="size-3.5" />
           </button>
@@ -419,7 +419,7 @@ function NewTabButton({ groupId }: { groupId: string }) {
       <button
         type="button"
         title="新建终端 / 接口请求 / 添加主机"
-        className="flex w-8 shrink-0 items-center justify-center text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+        className="flex w-8 shrink-0 items-center justify-center text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
       >
         <Plus className="size-3.5" />
       </button>
@@ -566,10 +566,11 @@ function PanelTabItem({
         onClick={focus}
         title="拖拽标签可排序、跨组移动，拖到面板边缘可分屏"
         className={cn(
-          'group/tab flex max-w-52 shrink-0 cursor-pointer items-center border-r border-border/60 transition-colors select-none',
+          // 顶部 2px 主色条：激活时着色、未激活透明 —— 两者都占位，切换时不跳行高
+          'group/tab flex max-w-52 shrink-0 cursor-pointer items-center border-r border-border/60 border-t-2 transition-colors select-none',
           isActive
-            ? 'bg-background text-foreground'
-            : 'text-muted-foreground hover:text-foreground hover:bg-secondary',
+            ? 'border-t-primary bg-background text-foreground'
+            : 'border-t-transparent text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground',
           isDragging && 'opacity-40'
         )}
       >
@@ -606,7 +607,7 @@ function PanelTabItem({
                 e.stopPropagation()
                 closePanelTab(tab.id)
               }}
-              className="ml-0.5 rounded p-0.5 opacity-0 transition-opacity hover:bg-secondary group-hover/tab:opacity-100"
+              className="ml-0.5 rounded p-0.5 opacity-0 transition-opacity hover:bg-foreground/10 group-hover/tab:opacity-100"
               title="关闭标签"
             >
               <X className="size-3" />

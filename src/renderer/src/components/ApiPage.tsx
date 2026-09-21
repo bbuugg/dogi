@@ -7,7 +7,7 @@ import {
   type PointerEvent as ReactPointerEvent
 } from 'react'
 import { ChevronDown, ChevronUp, Globe, History, Send, Trash2 } from 'lucide-react'
-import { AutoComplete, Button, Drawer, Input, Modal, Select, Table, Tabs, Tag, message } from 'antd'
+import { AutoComplete, Button, Drawer, Input, Modal, Select, Tabs, Tag, message } from 'antd'
 import { apiTabId, apiTabTitle, NEW_API_REQUEST_ID, useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'
 import MonacoEditor from '@/components/MonacoEditor'
@@ -478,43 +478,37 @@ export function ApiPage({ requestId }: { requestId: string }) {
             label: '请求头',
             children: (
               <div className="flex h-full flex-col overflow-auto py-3">
-                <Table<ApiHeaderPair>
-                  size="small"
-                  columns={[
-                    {
-                      key: 'name',
-                      width: 200,
-                      onCell: () => ({ style: { padding: 0 } }),
-                      render: (_, _r, i) => (
-                        <AutoComplete
-                          value={headers[i]?.key ?? ''}
-                          options={COMMON_HEADERS.map((n) => ({ value: n }))}
-                          onChange={(v) => updateHeader(i, 'key', v)}
-                          placeholder="名称，如 Content-Type"
-                          className="w-full"
-                          showSearch={{
-                            filterOption: (input, option) =>
-                              (option?.value ?? '').toLowerCase().includes(input.toLowerCase())
-                          }}
-                        >
-                          <Input
-                            size="small"
-                            variant="filled"
-                            className="font-mono text-[11px]"
-                            style={{ height: 32 }}
-                          />
-                        </AutoComplete>
-                      )
-                    },
-                    {
-                      key: 'value',
-                      onCell: () => ({ style: { padding: 0 } }),
-                      render: (_, _r, i) => {
-                        const p = headers[i]
-                        const suggestions = headerValueSuggestions(p?.key ?? '')
-                        return (
+                {/* 不用 antd Table：它强制 rowKey，而这里每行没有稳定 id，
+                    用 index 当 rowKey 已被 antd 弃用告警。行结构很简单（名称 / 值 / 删除），
+                    直接铺 flex 行，行为与原来一致。 */}
+                <div className="flex flex-col divide-y divide-border/40">
+                  {headers.map((h, i) => {
+                    const suggestions = headerValueSuggestions(h.key)
+                    return (
+                      <div key={i} className="flex items-center gap-2 py-1">
+                        <div className="w-[200px] shrink-0">
                           <AutoComplete
-                            value={p?.value ?? ''}
+                            value={h.key}
+                            options={COMMON_HEADERS.map((n) => ({ value: n }))}
+                            onChange={(v) => updateHeader(i, 'key', v)}
+                            placeholder="名称，如 Content-Type"
+                            className="w-full"
+                            showSearch={{
+                              filterOption: (input, option) =>
+                                (option?.value ?? '').toLowerCase().includes(input.toLowerCase())
+                            }}
+                          >
+                            <Input
+                              size="small"
+                              variant="filled"
+                              className="font-mono text-[11px]"
+                              style={{ height: 32 }}
+                            />
+                          </AutoComplete>
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <AutoComplete
+                            value={h.value}
                             options={suggestions ? suggestions.map((v) => ({ value: v })) : []}
                             onChange={(v) => updateHeader(i, 'value', v)}
                             placeholder={suggestions ? '可从常见取值中选择' : '值，如 application/json'}
@@ -533,33 +527,24 @@ export function ApiPage({ requestId }: { requestId: string }) {
                               style={{ height: 32 }}
                             />
                           </AutoComplete>
-                        )
-                      }
-                    },
-                    {
-                      key: 'action',
-                      width: 40,
-                      onCell: () => ({ style: { padding: 0, textAlign: 'center' } }),
-                      // 末行的空槽位不给删除按钮：删了 tidyHeaderRows 也会立刻补回来，是个空操作
-                      render: (_, _r, i) =>
-                        i === headers.length - 1 && isBlankHeader(headers[i]) ? null : (
-                          <Button
-                            type="text"
-                            size="small"
-                            className="size-7 text-muted-foreground"
-                            title="删除该请求头"
-                            icon={<Trash2 className="size-3.5" />}
-                            onClick={() => removeHeader(i)}
-                          />
-                        )
-                    }
-                  ]}
-                  dataSource={headers}
-                  rowKey={(_, i) => 'h' + i}
-                  pagination={false}
-                  showHeader={false}
-                  tableLayout="fixed"
-                />
+                        </div>
+                        <div className="w-10 shrink-0 text-center">
+                          {/* 末行的空槽位不给删除按钮：删了 tidyHeaderRows 也会立刻补回来，是个空操作 */}
+                          {i === headers.length - 1 && isBlankHeader(h) ? null : (
+                            <Button
+                              type="text"
+                              size="small"
+                              className="size-7 text-muted-foreground"
+                              title="删除该请求头"
+                              icon={<Trash2 className="size-3.5" />}
+                              onClick={() => removeHeader(i)}
+                            />
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
               </div>
             )
           },
@@ -568,47 +553,35 @@ export function ApiPage({ requestId }: { requestId: string }) {
             label: '参数',
             children: (
               <div className="flex h-full flex-col overflow-auto py-3">
-                <Table<ApiHeaderPair>
-                  size="small"
-                  columns={[
-                    {
-                      key: 'name',
-                      width: 200,
-                      onCell: () => ({ style: { padding: 0 } }),
-                      render: (_, _r, i) => (
+                {/* 同上：不用 antd Table，直接铺 flex 行（参数行无补全 / 无下拉） */}
+                <div className="flex flex-col divide-y divide-border/40">
+                  {params.map((p, i) => (
+                    <div key={i} className="flex items-center gap-2 py-1">
+                      <div className="w-[200px] shrink-0">
                         <Input
                           size="small"
                           variant="filled"
-                          value={params[i]?.key ?? ''}
+                          value={p.key}
                           onChange={(e) => updateParam(i, 'key', e.target.value)}
                           placeholder="参数名"
                           className="w-full font-mono text-[11px]"
                           style={{ height: 32 }}
                         />
-                      )
-                    },
-                    {
-                      key: 'value',
-                      onCell: () => ({ style: { padding: 0 } }),
-                      render: (_, _r, i) => (
+                      </div>
+                      <div className="min-w-0 flex-1">
                         <Input
                           size="small"
                           variant="filled"
-                          value={params[i]?.value ?? ''}
+                          value={p.value}
                           onChange={(e) => updateParam(i, 'value', e.target.value)}
                           placeholder="参数值"
                           className="w-full font-mono text-[11px]"
                           style={{ height: 32 }}
                         />
-                      )
-                    },
-                    {
-                      key: 'action',
-                      width: 40,
-                      onCell: () => ({ style: { padding: 0, textAlign: 'center' } }),
-                      // 末行空槽位不给删除按钮（删了 tidyHeaderRows 也会立刻补回来）
-                      render: (_, _r, i) =>
-                        i === params.length - 1 && isBlankHeader(params[i]) ? null : (
+                      </div>
+                      <div className="w-10 shrink-0 text-center">
+                        {/* 末行空槽位不给删除按钮（删了 tidyHeaderRows 也会立刻补回来） */}
+                        {i === params.length - 1 && isBlankHeader(p) ? null : (
                           <Button
                             type="text"
                             size="small"
@@ -617,15 +590,11 @@ export function ApiPage({ requestId }: { requestId: string }) {
                             icon={<Trash2 className="size-3.5" />}
                             onClick={() => removeParam(i)}
                           />
-                        )
-                    }
-                  ]}
-                  dataSource={params}
-                  rowKey={(_, i) => 'p' + i}
-                  pagination={false}
-                  showHeader={false}
-                  tableLayout="fixed"
-                />
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             )
           },
