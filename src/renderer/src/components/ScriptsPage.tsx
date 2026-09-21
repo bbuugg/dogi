@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { CheckCircle2, FileCode2, Loader2, Play, Trash2 } from 'lucide-react'
+import { CheckCircle2, FileCode2, Loader2, Play, Save, Trash2 } from 'lucide-react'
 import MonacoEditor from '@/components/MonacoEditor'
 import { Button, Input, Modal, message } from 'antd'
 import { useAppStore } from '@/stores/app-store'
@@ -187,27 +187,30 @@ export function ScriptsPage({ scriptId }: { scriptId: string }) {
           )}
         </span>
         <Button
+          type='text'
+          size='small'
           icon={<Play className="size-4" />}
           onClick={() => setRunScriptDialog(true, scriptId)}
           title="选择主机并运行脚本"
-        >
-          运行
-        </Button>
+        />
         <Button
+          type='text'
+          size='small'
           icon={<Trash2 className="size-4" />}
           danger
           onClick={() => setPendingDelete(activeScript)}
           title="删除脚本"
-        >
-          删除
-        </Button>
-        <Button onClick={() => void saveCurrentRef.current()} loading={saving}>
-          保存
-        </Button>
+        />
+        <Button
+          type='text'
+          size='small'
+          icon={<Save className="size-4" />}
+          onClick={() => void saveCurrentRef.current()} loading={saving}
+        />
       </div>
 
       {/* Monaco 编辑器主体 */}
-      <div className="min-h-0 flex-1 p-2">
+      <div className="min-h-0 flex-1">
         <MonacoEditor
           value={content}
           onChange={(v) => {

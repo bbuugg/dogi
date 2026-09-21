@@ -165,7 +165,7 @@ export function NotesPage({ noteId }: { noteId: string }) {
       </div>
 
       {/* Monaco 编辑器主体 */}
-      <div className="min-h-0 flex-1 p-2">
+      <div className="min-h-0 flex-1">
         <MonacoEditor
           value={content}
           onChange={(v) => {
