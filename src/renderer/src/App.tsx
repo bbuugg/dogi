@@ -30,7 +30,7 @@ export default function App() {
     return tab?.type === 'terminal'
   })
   /**
-   * 当前激活标签若是可编辑页（脚本 / 笔记），返回其保存状态的键：
+   * 当前激活标签若是可编辑页（脚本 / 笔记 / 接口请求），返回其保存状态的键：
    * 决定状态栏是否显示该页的保存状态。
    *
    * 这里必须返回**字符串**而不是对象：zustand 用 Object.is 比较快照，
@@ -42,6 +42,7 @@ export default function App() {
     const tab = activeTabId ? s.ui.panelTabs.find((t) => t.id === activeTabId) : undefined
     if (tab?.type === 'script' && tab.scriptId) return editorSaveKey('script', tab.scriptId)
     if (tab?.type === 'note' && tab.noteId) return editorSaveKey('note', tab.noteId)
+    if (tab?.type === 'api' && tab.apiRequestId) return editorSaveKey('api', tab.apiRequestId)
     return null
   })
   const { sidebarVisible } = useActiveActivity()
@@ -83,7 +84,7 @@ export default function App() {
         {/*
           底部功能条（类 VS Code 状态栏），整宽。
           左侧：监控指标条仅在终端标签激活时显示；
-          右侧：编辑页（脚本 / 笔记）保存状态 + AI 助手开关（纯图标）。
+          右侧：编辑页（脚本 / 笔记 / 接口请求）保存状态 + AI 助手开关（纯图标）。
           AiStatusButton 自己判断「当前激活标签是终端」才渲染，操作的是该终端页面自己的开关状态；
           保存状态同理只在激活标签是脚本 / 笔记时出现 —— 两者互斥，不会同时占位。
         */}

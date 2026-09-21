@@ -55,9 +55,10 @@ export type EditorSaveState = 'saving' | 'dirty' | 'saved'
 /**
  * 状态栏保存状态的键。
  *
- * 脚本 id 与笔记 id 来自两张不同的表、理论上可能撞车，所以带上类型前缀区分。
+ * 脚本 id / 笔记 id / 接口请求 id 来自三张不同的表、理论上可能撞车，所以带上类型前缀区分。
  */
-export const editorSaveKey = (kind: 'script' | 'note', id: string): string => `${kind}:${id}`
+export const editorSaveKey = (kind: 'script' | 'note' | 'api', id: string): string =>
+  `${kind}:${id}`
 
 /**
  * 等待二次确认的关闭操作。

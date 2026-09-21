@@ -7,8 +7,8 @@ import {
   type PointerEvent as ReactPointerEvent
 } from 'react'
 import { ChevronDown, ChevronUp, Globe, History, Send, Trash2 } from 'lucide-react'
-import { AutoComplete, Button, Drawer, Input, Modal, Select, Tabs, Tag, message } from 'antd'
-import { apiTabId, apiTabTitle, NEW_API_REQUEST_ID, useAppStore } from '@/stores/app-store'
+import { AutoComplete, Button, Drawer, Input, Modal, Select, Tag, message } from 'antd'
+import { apiTabId, apiTabTitle, editorSaveKey, NEW_API_REQUEST_ID, useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'
 import MonacoEditor from '@/components/MonacoEditor'
 import {
@@ -46,6 +46,16 @@ const RES_RATIO_MAX = 0.8
 const MIN_REQ_PANE_H = 120
 
 /**
+ * 请求构造区的分段切换项。
+ * 与响应区共用 `TabButtons`，所以两处样式天然一致（改一处两边都变）。
+ */
+const REQ_TABS = [
+  { key: 'headers', label: '请求头' },
+  { key: 'params', label: '参数' },
+  { key: 'body', label: '请求体' }
+] as const
+
+/**
  * 接口请求编辑页（主区域）：一个标签 = 一个已保存的请求。
  *
  * 与原 api-client 插件的区别：请求的「多标签」由 PanelView 承担，
@@ -64,6 +74,7 @@ export function ApiPage({ requestId }: { requestId: string }) {
   const recordApiHistory = useAppStore((s) => s.recordApiHistory)
   const clearApiHistory = useAppStore((s) => s.clearApiHistory)
   const updatePanelTabTitle = useAppStore((s) => s.updatePanelTabTitle)
+  const setEditorSaveStatus = useAppStore((s) => s.setEditorSaveStatus)
 
   const request = apiRequests.find((r) => r.id === requestId) ?? null
   /** 本标签是否是「未保存的新请求」草稿（requestId 为哨兵值，不是真实存储条目） */
@@ -94,6 +105,13 @@ export function ApiPage({ requestId }: { requestId: string }) {
   const [reqTab, setReqTab] = useState<'headers' | 'params' | 'body'>('headers')
   const [resTab, setResTab] = useState<'body' | 'headers'>('body')
   const [sending, setSending] = useState(false)
+  /**
+   * 草稿是否有未保存的改动 / 是否正在落盘。
+   * 只用于投影到底部状态栏（见 EditorSaveStatus）—— 接口请求**不自动保存**，
+   * 所以「未保存」是常态而非异常，这里只负责如实反映，不触发任何自动保存。
+   */
+  const [dirty, setDirty] = useState(false)
+  const [saving, setSaving] = useState(false)
   const [response, setResponse] = useState<ApiHttpResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   /** 响应正文：本地可编辑副本；用 Monaco 展示并允许其格式化按钮美化（不落盘） */
@@ -108,6 +126,17 @@ export function ApiPage({ requestId }: { requestId: string }) {
   const rootRef = useRef<HTMLDivElement | null>(null)
   /** 请求行（方法 + 地址 + 发送）：它的底边就是请求构造区的顶边，用来算响应面板的高度上限 */
   const reqRowRef = useRef<HTMLDivElement | null>(null)
+
+  /** 标记草稿有未保存改动：所有会改变「待保存内容」的地方（名称/方法/地址/头/参数/请求体）都要调 */
+  const markDirty = (): void => setDirty(true)
+
+  /** 把保存状态投影到 store，供底部状态栏的 EditorSaveStatus 显示 */
+  useEffect(() => {
+    setEditorSaveStatus(
+      editorSaveKey('api', requestId),
+      saving ? 'saving' : dirty ? 'dirty' : 'saved'
+    )
+  }, [requestId, saving, dirty, setEditorSaveStatus])
 
   /**
    * 新响应到达时，把正文按内容类型美化后放进可编辑副本（Monaco 展示 + 允许格式化按钮）。
@@ -140,6 +169,7 @@ export function ApiPage({ requestId }: { requestId: string }) {
       await persistDraft(nm)
       return
     }
+    setSaving(true)
     try {
       const current = useAppStore.getState().apiRequests.find((r) => r.id === requestId)
       await saveApiRequest({
@@ -153,14 +183,18 @@ export function ApiPage({ requestId }: { requestId: string }) {
         createdAt: 0,
         updatedAt: 0
       })
+      setDirty(false)
       message.success('已保存')
     } catch (e) {
       message.error(`保存失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setSaving(false)
     }
   }
 
   /** 草稿真正落盘：按给定名称写入列表，并把草稿标签切成真实标签 */
   const persistDraft = async (nm: string): Promise<void> => {
+    setSaving(true)
     try {
       // 草稿标签上记着「目标分组」：在分组里点「新建」时带过来
       const gid = useAppStore
@@ -180,6 +214,8 @@ export function ApiPage({ requestId }: { requestId: string }) {
       message.success('已保存')
     } catch (e) {
       message.error(`保存失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -206,6 +242,8 @@ export function ApiPage({ requestId }: { requestId: string }) {
     // 响应与错误属于「上一次请求的结果」，换请求时清空避免张冠李戴
     setResponse(null)
     setError(null)
+    // 刚载入 = 与磁盘一致（新建草稿则是「还没有任何待保存内容」）
+    setDirty(false)
   }, [requestId])
 
   /** 草稿变动后同步标签标题（否则改名/改地址后标签还停在旧文字） */
@@ -241,9 +279,11 @@ export function ApiPage({ requestId }: { requestId: string }) {
     if (field === 'value' && (headers[idx]?.key ?? '').trim().toLowerCase() === 'content-type') {
       setBodyLanguage(bodyLanguageOf(value))
     }
+    markDirty()
   }
   const removeHeader = (idx: number): void => {
     setHeaders((prev) => tidyHeaderRows(prev.filter((_, i) => i !== idx)))
+    markDirty()
   }
 
   // ---------- 查询参数（与请求头同样的「末行空槽位」交互，但无补全/无下拉） ----------
@@ -251,9 +291,11 @@ export function ApiPage({ requestId }: { requestId: string }) {
     setParams((prev) =>
       tidyHeaderRows(prev.map((p, i) => (i === idx ? { ...p, [field]: value } : p)))
     )
+    markDirty()
   }
   const removeParam = (idx: number): void => {
     setParams((prev) => tidyHeaderRows(prev.filter((_, i) => i !== idx)))
+    markDirty()
   }
 
   /**
@@ -264,6 +306,7 @@ export function ApiPage({ requestId }: { requestId: string }) {
     const raw = e.target.value
     setUrl(raw)
     setParams(tidyHeaderRows(parseQueryParams(raw)))
+    markDirty()
   }
 
   // ---------- 发送 ----------
@@ -323,6 +366,8 @@ export function ApiPage({ requestId }: { requestId: string }) {
     setBody(entry.body || '')
     setBodyLanguage(bodyLanguageOf(contentTypeOf(nextHeaders)))
     setReqTab('headers')
+    // 载入历史 = 改动了草稿内容，同样算未保存
+    markDirty()
   }
 
   /**
@@ -414,11 +459,14 @@ export function ApiPage({ requestId }: { requestId: string }) {
 
   return (
     <div ref={rootRef} className="flex h-full flex-col bg-background" onKeyDown={onKeyDown}>
-      {/* 工具栏：名称 + 历史（保存状态提示与删除按钮已移除；新建与导入 cURL 在侧边栏） */}
+      {/* 工具栏：名称 + 历史（新建与导入 cURL 在侧边栏；保存状态在底部状态栏，见 EditorSaveStatus） */}
       <div className="flex shrink-0 items-center gap-2 px-3 py-1.5">
         <Input
           value={name}
-          onChange={(e) => setName(e.target.value)}
+          onChange={(e) => {
+            setName(e.target.value)
+            markDirty()
+          }}
           placeholder="请求名称（可选，缺省显示「方法 + 路径」）"
           variant="borderless"
           className="min-w-0 flex-1 text-[15px] font-semibold"
@@ -442,7 +490,10 @@ export function ApiPage({ requestId }: { requestId: string }) {
       >
         <Select
           value={method}
-          onChange={(m) => setMethod(m)}
+          onChange={(m) => {
+            setMethod(m)
+            markDirty()
+          }}
           options={METHODS.map((m) => ({ label: m, value: m }))}
           className="w-28 shrink-0"
         />
@@ -464,171 +515,165 @@ export function ApiPage({ requestId }: { requestId: string }) {
         </Button>
       </div>
 
-      {/* 请求构造区（overflow-hidden：被压扁时裁掉内容，不要溢出去糊在响应面板上） */}
-      <Tabs
-        size="small"
-        activeKey={reqTab}
-        onChange={(v) => setReqTab(v as 'headers' | 'body')}
-        className="flex min-h-0 flex-1 flex-col overflow-hidden px-4!"
-        tabBarStyle={{ margin: 0 }}
-        styles={{ body: { height: '100%' }, content: { height: '100%' } }}
-        items={[
-          {
-            key: 'headers',
-            label: '请求头',
-            children: (
-              <div className="flex h-full flex-col overflow-auto py-3">
-                {/* 不用 antd Table：它强制 rowKey，而这里每行没有稳定 id，
-                    用 index 当 rowKey 已被 antd 弃用告警。行结构很简单（名称 / 值 / 删除），
-                    直接铺 flex 行，行为与原来一致。 */}
-                <div className="flex flex-col divide-y divide-border/40">
-                  {headers.map((h, i) => {
-                    const suggestions = headerValueSuggestions(h.key)
-                    return (
-                      <div key={i} className="flex items-center gap-2 py-1">
-                        <div className="w-[200px] shrink-0">
-                          <AutoComplete
-                            value={h.key}
-                            options={COMMON_HEADERS.map((n) => ({ value: n }))}
-                            onChange={(v) => updateHeader(i, 'key', v)}
-                            placeholder="名称，如 Content-Type"
-                            className="w-full"
-                            showSearch={{
-                              filterOption: (input, option) =>
-                                (option?.value ?? '').toLowerCase().includes(input.toLowerCase())
-                            }}
-                          >
-                            <Input
-                              size="small"
-                              variant="filled"
-                              className="font-mono text-[11px]"
-                              style={{ height: 32 }}
-                            />
-                          </AutoComplete>
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <AutoComplete
-                            value={h.value}
-                            options={suggestions ? suggestions.map((v) => ({ value: v })) : []}
-                            onChange={(v) => updateHeader(i, 'value', v)}
-                            placeholder={suggestions ? '可从常见取值中选择' : '值，如 application/json'}
-                            className="w-full"
-                            showSearch={{
-                              filterOption: suggestions
-                                ? (input, option) =>
-                                    (option?.value ?? '').toLowerCase().includes(input.toLowerCase())
-                                : false
-                            }}
-                          >
-                            <Input
-                              size="small"
-                              variant="filled"
-                              className="font-mono text-[11px]"
-                              style={{ height: 32 }}
-                            />
-                          </AutoComplete>
-                        </div>
-                        <div className="w-10 shrink-0 text-center">
-                          {/* 末行的空槽位不给删除按钮：删了 tidyHeaderRows 也会立刻补回来，是个空操作 */}
-                          {i === headers.length - 1 && isBlankHeader(h) ? null : (
-                            <Button
-                              type="text"
-                              size="small"
-                              className="size-7 text-muted-foreground"
-                              title="删除该请求头"
-                              icon={<Trash2 className="size-3.5" />}
-                              onClick={() => removeHeader(i)}
-                            />
-                          )}
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              </div>
-            )
-          },
-          {
-            key: 'params',
-            label: '参数',
-            children: (
-              <div className="flex h-full flex-col overflow-auto py-3">
-                {/* 同上：不用 antd Table，直接铺 flex 行（参数行无补全 / 无下拉） */}
-                <div className="flex flex-col divide-y divide-border/40">
-                  {params.map((p, i) => (
+      {/*
+        请求构造区（overflow-hidden：被压扁时裁掉内容，不要溢出去糊在响应面板上）。
+        切换条用与响应区同一个 TabButtons（原来是 antd Tabs，两边样式对不上）。
+      */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <div className="flex shrink-0 items-center gap-3 px-3 py-1.5 text-xs">
+          <TabButtons tabs={REQ_TABS} value={reqTab} onChange={setReqTab} />
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-hidden">
+          {reqTab === 'headers' && (
+            <div className="flex h-full flex-col overflow-auto px-3 py-3">
+              {/* 不用 antd Table：它强制 rowKey，而这里每行没有稳定 id，
+                  用 index 当 rowKey 已被 antd 弃用告警。行结构很简单（名称 / 值 / 删除），
+                  直接铺 flex 行，行为与原来一致。 */}
+              <div className="flex flex-col divide-y divide-border/40">
+                {headers.map((h, i) => {
+                  const suggestions = headerValueSuggestions(h.key)
+                  return (
                     <div key={i} className="flex items-center gap-2 py-1">
                       <div className="w-[200px] shrink-0">
-                        <Input
-                          size="small"
-                          variant="filled"
-                          value={p.key}
-                          onChange={(e) => updateParam(i, 'key', e.target.value)}
-                          placeholder="参数名"
-                          className="w-full font-mono text-[11px]"
-                          style={{ height: 32 }}
-                        />
+                        <AutoComplete
+                          value={h.key}
+                          options={COMMON_HEADERS.map((n) => ({ value: n }))}
+                          onChange={(v) => updateHeader(i, 'key', v)}
+                          placeholder="名称，如 Content-Type"
+                          className="w-full"
+                          showSearch={{
+                            filterOption: (input, option) =>
+                              (option?.value ?? '').toLowerCase().includes(input.toLowerCase())
+                          }}
+                        >
+                          <Input
+                            size="small"
+                            variant="filled"
+                            className="font-mono text-[11px]"
+                            style={{ height: 32 }}
+                          />
+                        </AutoComplete>
                       </div>
                       <div className="min-w-0 flex-1">
-                        <Input
-                          size="small"
-                          variant="filled"
-                          value={p.value}
-                          onChange={(e) => updateParam(i, 'value', e.target.value)}
-                          placeholder="参数值"
-                          className="w-full font-mono text-[11px]"
-                          style={{ height: 32 }}
-                        />
+                        <AutoComplete
+                          value={h.value}
+                          options={suggestions ? suggestions.map((v) => ({ value: v })) : []}
+                          onChange={(v) => updateHeader(i, 'value', v)}
+                          placeholder={suggestions ? '可从常见取值中选择' : '值，如 application/json'}
+                          className="w-full"
+                          showSearch={{
+                            filterOption: suggestions
+                              ? (input, option) =>
+                                  (option?.value ?? '').toLowerCase().includes(input.toLowerCase())
+                              : false
+                          }}
+                        >
+                          <Input
+                            size="small"
+                            variant="filled"
+                            className="font-mono text-[11px]"
+                            style={{ height: 32 }}
+                          />
+                        </AutoComplete>
                       </div>
                       <div className="w-10 shrink-0 text-center">
-                        {/* 末行空槽位不给删除按钮（删了 tidyHeaderRows 也会立刻补回来） */}
-                        {i === params.length - 1 && isBlankHeader(p) ? null : (
+                        {/* 末行的空槽位不给删除按钮：删了 tidyHeaderRows 也会立刻补回来，是个空操作 */}
+                        {i === headers.length - 1 && isBlankHeader(h) ? null : (
                           <Button
                             type="text"
                             size="small"
                             className="size-7 text-muted-foreground"
-                            title="删除该参数"
+                            title="删除该请求头"
                             icon={<Trash2 className="size-3.5" />}
-                            onClick={() => removeParam(i)}
+                            onClick={() => removeHeader(i)}
                           />
                         )}
                       </div>
                     </div>
-                  ))}
-                </div>
+                  )
+                })}
               </div>
-            )
-          },
-          {
-            key: 'body',
-            label: '请求体',
-            children: (
-              <div className="flex h-full min-h-0 flex-col">
-                <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-border">
-                  <MonacoEditor
-                    value={body}
-                    onChange={setBody}
-                    language={bodyLanguage}
-                    onLanguageChange={setBodyLanguage}
-                    showLanguageSelector
-                    showLineNumbersToggle
-                    showWordWrapToggle
-                    showCopyButton
-                    // Monaco 没有 placeholder，GET/HEAD 的提醒改挂在工具栏上 ——
-                    // 不额外占一行高度（请求构造区本来就容易被响应面板压扁）
-                    toolbar={
-                      method === 'GET' || method === 'HEAD' ? (
-                        <span className="shrink-0 text-[11px] text-amber-600 dark:text-amber-400">
-                          {method} 请求不携带请求体，这里的内容发送时会被忽略
-                        </span>
-                      ) : undefined
-                    }
-                  />
-                </div>
+            </div>
+          )}
+
+          {reqTab === 'params' && (
+            <div className="flex h-full flex-col overflow-auto px-3 py-3">
+              {/* 同上：不用 antd Table，直接铺 flex 行（参数行无补全 / 无下拉） */}
+              <div className="flex flex-col divide-y divide-border/40">
+                {params.map((p, i) => (
+                  <div key={i} className="flex items-center gap-2 py-1">
+                    <div className="w-[200px] shrink-0">
+                      <Input
+                        size="small"
+                        variant="filled"
+                        value={p.key}
+                        onChange={(e) => updateParam(i, 'key', e.target.value)}
+                        placeholder="参数名"
+                        className="w-full font-mono text-[11px]"
+                        style={{ height: 32 }}
+                      />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <Input
+                        size="small"
+                        variant="filled"
+                        value={p.value}
+                        onChange={(e) => updateParam(i, 'value', e.target.value)}
+                        placeholder="参数值"
+                        className="w-full font-mono text-[11px]"
+                        style={{ height: 32 }}
+                      />
+                    </div>
+                    <div className="w-10 shrink-0 text-center">
+                      {/* 末行空槽位不给删除按钮（删了 tidyHeaderRows 也会立刻补回来） */}
+                      {i === params.length - 1 && isBlankHeader(p) ? null : (
+                        <Button
+                          type="text"
+                          size="small"
+                          className="size-7 text-muted-foreground"
+                          title="删除该参数"
+                          icon={<Trash2 className="size-3.5" />}
+                          onClick={() => removeParam(i)}
+                        />
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
-            )
-          }
-        ]}
-      />
+            </div>
+          )}
+
+          {reqTab === 'body' && (
+            <div className="flex h-full min-h-0 flex-col px-3 pb-3">
+              <div className="min-h-0 flex-1 overflow-hidden">
+                <MonacoEditor
+                  value={body}
+                  onChange={(v) => {
+                    setBody(v)
+                    markDirty()
+                  }}
+                  language={bodyLanguage}
+                  onLanguageChange={setBodyLanguage}
+                  showLanguageSelector
+                  showLineNumbersToggle
+                  showWordWrapToggle
+                  showCopyButton
+                  // Monaco 没有 placeholder，GET/HEAD 的提醒改挂在工具栏上 ——
+                  // 不额外占一行高度（请求构造区本来就容易被响应面板压扁）
+                  toolbar={
+                    method === 'GET' || method === 'HEAD' ? (
+                      <span className="shrink-0 text-[11px] text-amber-600 dark:text-amber-400">
+                        {method} 请求不携带请求体，这里的内容发送时会被忽略
+                      </span>
+                    ) : undefined
+                  }
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
 
       {/*
         拖拽条：调整响应面板高度。**常驻**（只在面板折叠时隐藏）——
@@ -657,30 +702,17 @@ export function ApiPage({ requestId }: { requestId: string }) {
       >
         <div className="flex shrink-0 items-center gap-3 px-3 py-1.5 text-xs">
           {response ? (
-            <div className="flex shrink-0 items-center gap-1">
-              {(
-                [
-                  { key: 'body' as const, label: '响应体' },
-                  {
-                    key: 'headers' as const,
-                    label: '响应头' + (respHeaders.length ? ' (' + respHeaders.length + ')' : '')
-                  }
-                ]
-              ).map((it) => (
-                <button
-                  key={it.key}
-                  onClick={() => setResTab(it.key)}
-                  className={cn(
-                    'rounded px-2 py-0.5 transition-colors',
-                    resTab === it.key
-                      ? 'bg-secondary font-medium text-foreground'
-                      : 'text-muted-foreground hover:text-foreground'
-                  )}
-                >
-                  {it.label}
-                </button>
-              ))}
-            </div>
+            <TabButtons
+              tabs={[
+                { key: 'body' as const, label: '响应体' },
+                {
+                  key: 'headers' as const,
+                  label: '响应头' + (respHeaders.length ? ' (' + respHeaders.length + ')' : '')
+                }
+              ]}
+              value={resTab}
+              onChange={setResTab}
+            />
           ) : (
             <span className="shrink-0 font-medium text-muted-foreground">响应</span>
           )}
@@ -712,7 +744,7 @@ export function ApiPage({ requestId }: { requestId: string }) {
           (response ? (
             resTab === 'body' ? (
               <div className="min-h-0 flex-1 overflow-hidden px-3 pb-3">
-                <div className="h-full overflow-hidden rounded-md border border-border">
+                <div className="h-full overflow-hidden">
                   {/* 响应体用 Monaco：自带格式化按钮（工具栏的「代码」图标），无需再写自定义按钮 */}
                   <MonacoEditor
                     value={respBody}
@@ -849,6 +881,41 @@ export function ApiPage({ requestId }: { requestId: string }) {
         />
         <p className="mt-2 text-xs text-muted-foreground">保存后该请求才会显示在左侧列表中。</p>
       </Modal>
+    </div>
+  )
+}
+
+/**
+ * 分段切换按钮（请求构造区与响应区共用）。
+ *
+ * 两处的切换条**必须**用同一个组件：以前请求侧是 antd `Tabs`、响应侧是手写按钮，
+ * 样式对不上（内边距、选中底色、字号都不一样）。抽出来之后改一处两边一起变。
+ */
+function TabButtons<T extends string>({
+  tabs,
+  value,
+  onChange
+}: {
+  tabs: ReadonlyArray<{ key: T; label: string }>
+  value: T
+  onChange: (v: T) => void
+}) {
+  return (
+    <div className="flex shrink-0 items-center gap-1">
+      {tabs.map((it) => (
+        <button
+          key={it.key}
+          onClick={() => onChange(it.key)}
+          className={cn(
+            'rounded px-2 py-0.5 transition-colors',
+            value === it.key
+              ? 'bg-secondary font-medium text-foreground'
+              : 'text-muted-foreground hover:text-foreground'
+          )}
+        >
+          {it.label}
+        </button>
+      ))}
     </div>
   )
 }
