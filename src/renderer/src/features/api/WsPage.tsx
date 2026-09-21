@@ -29,8 +29,8 @@ import {
   useAppStore
 } from '@/stores/app-store'
 import { cn } from 'cn'
-import MonacoEditor from '@/components/MonacoEditor'
-import { TabButtons } from '@/components/TabButtons'
+import MonacoEditor from '@/shared/components/MonacoEditor'
+import { TabButtons } from '@/features/api/TabButtons'
 import {
   COMMON_HEADERS,
   emptyHeader,
@@ -40,7 +40,7 @@ import {
   normalizeHeaders,
   pairsToHeaders,
   tidyHeaderRows
-} from '@/lib/api-client'
+} from '@/features/api/api-client'
 import type {
   ApiHeaderPair,
   WsConnectOptions,

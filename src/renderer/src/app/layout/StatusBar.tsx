@@ -1,4 +1,4 @@
-import { PLUGINS_ACTIVITY_ID } from '@/activity-ids'
+import { PLUGINS_ACTIVITY_ID } from '@/app/activity-ids'
 import { useAppStore } from '@/stores/app-store'
 import { Button, Popover } from 'antd'
 import { Boxes, Command as CommandIcon, ListPlus, Menu, Plus, Settings } from 'lucide-react'

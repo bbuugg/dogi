@@ -1,4 +1,4 @@
-import { cn } from '@/lib/utils'
+import { cn } from '@/shared/lib/utils'
 import { useAppStore } from '@/stores/app-store'
 import type { PluginInfo } from '@shared/plugin'
 import { Button, Modal, Switch, Tag, message } from 'antd'

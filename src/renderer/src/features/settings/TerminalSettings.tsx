@@ -1,8 +1,8 @@
 import { Check } from 'lucide-react'
 import type { TerminalThemeName } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
-import { useIsDarkTheme } from '@/lib/theme'
-import { TERMINAL_THEMES, resolveTerminalTheme } from '@/lib/terminal-themes'
+import { useIsDarkTheme } from '@/shared/lib/theme'
+import { TERMINAL_THEMES, resolveTerminalTheme } from '@/features/terminal/terminal-themes'
 import { Select, Switch } from 'antd'
 import { cn } from 'cn'
 

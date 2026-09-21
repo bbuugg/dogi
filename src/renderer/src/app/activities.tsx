@@ -1,10 +1,10 @@
 import type { ComponentType } from 'react'
 import { Bot, Globe, Puzzle, Server, StickyNote } from 'lucide-react'
-import { AgentPanel } from '@/components/AgentPanel'
-import { ApiPanel } from '@/components/ApiPanel'
-import { HostsPanel } from '@/components/HostsPanel'
-import { NotesPanel } from '@/components/NotesPanel'
-import { PluginsPanel } from '@/components/PluginsPanel'
+import { AgentPanel } from '@/features/agent/AgentPanel'
+import { ApiPanel } from '@/features/api/ApiPanel'
+import { HostsPanel } from '@/features/hosts/HostsPanel'
+import { NotesPanel } from '@/features/notes/NotesPanel'
+import { PluginsPanel } from '@/features/plugins/PluginsPanel'
 import { useAppStore } from '@/stores/app-store'
 import {
   AGENT_ACTIVITY_ID,
@@ -12,7 +12,7 @@ import {
   HOSTS_ACTIVITY_ID,
   NOTES_ACTIVITY_ID,
   PLUGINS_ACTIVITY_ID
-} from '@/activity-ids'
+} from '@/app/activity-ids'
 
 /**
  * 功能区（活动栏条目）= 一个 tab。

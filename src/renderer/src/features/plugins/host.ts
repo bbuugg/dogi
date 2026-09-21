@@ -1,8 +1,8 @@
 import React from 'react'
 import type { ComponentType } from 'react'
 import type { PluginHttpRequest, PluginHttpResponse } from '@shared/plugin'
-import { cn } from '@/lib/utils'
-import MonacoEditor from '@/components/MonacoEditor'
+import { cn } from '@/shared/lib/utils'
+import MonacoEditor from '@/shared/components/MonacoEditor'
 import * as Icons from 'lucide-react'
 import * as antd from 'antd'
 

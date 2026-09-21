@@ -1,5 +1,5 @@
 import { Button, Tooltip } from 'antd'
-import { useActiveActivity } from '@/activities'
+import { useActiveActivity } from '@/app/activities'
 import { useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'
 

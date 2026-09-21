@@ -5,8 +5,8 @@ import { cn } from 'cn'
 import { ChevronDown, ChevronRight, ChevronsLeft, FileCode2, FolderPlus, Pencil, Play, Plus, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useDrag, useDrop } from 'react-dnd'
-import { SectionContent, SectionHeader, SectionShell } from '@/components/StackedSections'
-import { HOSTS_LIST_SECTION_ID, HOSTS_SCRIPTS_SECTION_ID } from '@/section-ids'
+import { SectionContent, SectionHeader, SectionShell } from '@/shared/components/StackedSections'
+import { HOSTS_LIST_SECTION_ID, HOSTS_SCRIPTS_SECTION_ID } from '@/app/section-ids'
 
 /** 树节点 key 前缀：g: 分组、s: 脚本 */
 const GROUP_KEY_PREFIX = 'g:'

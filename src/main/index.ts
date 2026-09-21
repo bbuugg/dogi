@@ -1,10 +1,10 @@
 import { join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { app, BrowserWindow, Menu, nativeTheme, Tray, webContents } from 'electron'
-import { registerIpc, openExternalSafe } from './ipc'
-import { pluginHost } from './services/plugins'
+import { registerIpc, openExternalSafe } from './ipc/index'
+import { pluginHost } from './services/plugins/host'
 import { storage } from './services/storage'
-import { acpAgentService } from './services/acp-agent'
+import { acpAgentService } from './services/ai/acp-agent'
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null

@@ -21,8 +21,8 @@ import type {
   AiPermissionMode,
   AiStreamEvent
 } from '@shared/types'
-import { sessionManager } from './sessions'
-import { storage } from './storage'
+import { sessionManager } from '../terminal/sessions'
+import { storage } from '../storage'
 import { mcpManager } from './mcp'
 
 const DEFAULT_SYSTEM_PROMPT = [

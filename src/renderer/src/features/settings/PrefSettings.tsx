@@ -1,7 +1,7 @@
 import { Check, Monitor, Moon, Sun } from 'lucide-react'
 import type { ThemeMode } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
-import { COLOR_THEMES } from '@/lib/color-themes'
+import { COLOR_THEMES } from '@/shared/lib/color-themes'
 import { ColorPicker, Switch } from 'antd'
 import { cn } from 'cn'
 

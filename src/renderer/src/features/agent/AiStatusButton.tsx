@@ -1,7 +1,7 @@
 import { Sparkles } from 'lucide-react'
 import { cn } from 'cn'
 import { groupTerminalSessionId, useAppStore } from '@/stores/app-store'
-import { STATUS_ITEM_CLASS } from '@/components/StatusBar'
+import { STATUS_ITEM_CLASS } from '@/app/layout/StatusBar'
 
 /**
  * 状态栏里的 AI 助手开关（纯图标，不带文字）。

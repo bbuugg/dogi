@@ -1,4 +1,4 @@
-import { resolvePanel, useActiveActivity } from '@/activities'
+import { resolvePanel, useActiveActivity } from '@/app/activities'
 import { useAppStore } from '@/stores/app-store'
 
 /** 侧边栏外壳：渲染当前功能区自己的面板（功能区没有面板时回退到有面板的功能区） */

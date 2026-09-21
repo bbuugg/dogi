@@ -26,7 +26,7 @@ import type {
   AgentStreamEvent,
   AgentWorkspace
 } from '@shared/types'
-import { storage } from './storage'
+import { storage } from '../storage'
 import type { AgentConfirmSink } from './agent'
 
 /** 确认模式下等待用户响应的最长时间，超时按「取消」处理 */

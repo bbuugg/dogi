@@ -1,6 +1,6 @@
-import { HOSTS_ACTIVITY_ID } from '@/activity-ids'
-import { HOSTS_SCRIPTS_SECTION_ID } from '@/section-ids'
-import { parseCurl } from '@/lib/api-client'
+import { HOSTS_ACTIVITY_ID } from '@/app/activity-ids'
+import { HOSTS_SCRIPTS_SECTION_ID } from '@/app/section-ids'
+import { parseCurl } from '@/features/api/api-client'
 import {
   firstGroupId,
   genPaneId,
@@ -10,11 +10,11 @@ import {
   updateSizes,
   type PaneNode,
   type SplitDirectionInput
-} from '@/lib/pane-layout'
-import { scriptToTerminalInput } from '@/lib/script'
-import { clampTerminalFontSize } from '@/lib/terminal-font'
-import { applyColorTheme } from '@/lib/theme'
-import type { PluginViewInstance } from '@/plugins/host'
+} from '@/app/layout/pane-layout'
+import { scriptToTerminalInput } from '@/features/scripts/script'
+import { clampTerminalFontSize } from '@/features/terminal/terminal-font'
+import { applyColorTheme } from '@/shared/lib/theme'
+import type { PluginViewInstance } from '@/features/plugins/host'
 import type { PluginInfo } from '@shared/plugin'
 import { DEFAULT_SHORTCUTS, findShortcutByEvent } from '@shared/shortcuts'
 import type {
@@ -1147,7 +1147,7 @@ let shortcutWired = false
         activeAgentWorkspaceId: agentWorkspaces[0]?.id ?? null
       })
       // 运行时加载外部插件（扫描 userData/plugins 并收集视图）
-      const { loadPlugins } = await import('@/plugins/host')
+      const { loadPlugins } = await import('@/features/plugins/host')
       const pluginViews = await loadPlugins()
       const pluginList = await window.api.plugins.list()
       set({ plugins: pluginViews, pluginList })
@@ -1514,7 +1514,7 @@ let shortcutWired = false
     selectActivity: (id) => set((s) => ({ ui: { ...s.ui, activeActivity: id } })),
 
     loadPlugins: async () => {
-      const { loadPlugins } = await import('@/plugins/host')
+      const { loadPlugins } = await import('@/features/plugins/host')
       const views = await loadPlugins()
       set((s) => ({ plugins: views, ...closeMissingPluginTabs(s, views) }))
     },
@@ -1526,7 +1526,7 @@ let shortcutWired = false
 
     togglePluginEnabled: async (id, enabled) => {
       const list = await window.api.plugins.setEnabled(id, enabled)
-      const { loadPlugins } = await import('@/plugins/host')
+      const { loadPlugins } = await import('@/features/plugins/host')
       const plugins = await loadPlugins()
       set((s) => {
         // 禁用会让插件视图消失，它开着的标签一并关掉
@@ -1543,7 +1543,7 @@ let shortcutWired = false
 
     uninstallPlugin: async (id) => {
       const list = await window.api.plugins.uninstall(id)
-      const { loadPlugins } = await import('@/plugins/host')
+      const { loadPlugins } = await import('@/features/plugins/host')
       const plugins = await loadPlugins()
       set((s) => {
         const closed = closeMissingPluginTabs(s, plugins)
@@ -1558,14 +1558,14 @@ let shortcutWired = false
 
     installPlugin: async (sourcePath) => {
       const list = await window.api.plugins.install(sourcePath)
-      const { loadPlugins } = await import('@/plugins/host')
+      const { loadPlugins } = await import('@/features/plugins/host')
       const plugins = await loadPlugins()
       set((s) => ({ pluginList: list, plugins, ui: withPluginList(s.ui, list) }))
     },
 
     reloadPlugins: async (id) => {
       const list = await window.api.plugins.reload(id)
-      const { loadPlugins } = await import('@/plugins/host')
+      const { loadPlugins } = await import('@/features/plugins/host')
       const plugins = await loadPlugins()
       set((s) => {
         const closed = closeMissingPluginTabs(s, plugins)

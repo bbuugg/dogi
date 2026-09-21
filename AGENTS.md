@@ -8,7 +8,7 @@
 
 - **触发信号**：`npm install node-pty` 或 `node-gyp rebuild` 报错（本机缺 MSVC / Windows Build Tools）。
 - **根因/约束**：node-pty 是需要本地编译的原生模块，安装时需 MSVC 工具链。本机已具备编译条件，直接使用官方 `node-pty`。
-- **正确做法**：依赖用 `node-pty`，import 路径 `node-pty`（`src/main/services/sessions.ts`）。若机器缺编译环境，可回退到 `@lydell/node-pty` 预编译包（仅改 import 与依赖并重装）。
+- **正确做法**：依赖用 `node-pty`，import 路径 `node-pty`（`src/main/services/terminal/sessions.ts`）。若机器缺编译环境，可回退到 `@lydell/node-pty` 预编译包（仅改 import 与依赖并重装）。
 - **注意**：Windows ConPTY 下 `pty.spawn()` 返回的 `pid` 恒为 **0**，这不是错误，不要用 pid 判断进程是否存活，应以 `onExit` 事件为准。
 - **验证方式**：`ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron.exe -e "require('node-pty').spawn('cmd.exe',[],{})"` 能收到输出即正常。
 
@@ -68,9 +68,9 @@
 
 - `createOpenAI()` 已无 `compatibility` 选项（v2/v3 有），OpenAI 兼容接口直接传 `baseURL` 即可。
 - **`provider(modelId)` 默认走 Responses API（/v1/responses），不是 chat/completions**：第三方兼容网关（Ollama/vLLM/one-api 等）普遍没实现该接口而报 404。需要 Chat Completions 时必须显式 `provider.chat(modelId)`；本项目通过 `AiModelConfig.apiStyle` 切换（见 `ai.ts` 的 `resolveModel`），`openai-compatible` kind 默认 `chat-completions`。
-- fullStream 事件字段：`text-delta` 是 `part.text`（v4 是 `textDelta`）、工具是 `input/output`（v4 是 `args/result`）。适配层见 `src/main/services/ai.ts` 的 `adaptPart`。
-- fullStream 的 `reasoning` part 同时带累积 `text` 与增量 `textDelta`：下发渲染端必须用 `textDelta`（渲染端自会累积），否则重复拼接。Agent 侧适配见 `packages/ai-agent/src/agent.ts` 的 `adaptAgentPart`，事件 `reasoning-delta` → part `{ type: 'reasoning', text }`；ACP 侧 `agent_thought_chunk` 同样映射为 `reasoning-delta`（见 `src/main/services/acp-agent.ts`）。
-- MCP 客户端已不在 `ai` 主包（v4 时代的 `experimental_createMCPClient` 已移除），用官方 `@modelcontextprotocol/sdk` 自行管理（见 `src/main/services/mcp.ts`），工具用 `dynamicTool + jsonSchema` 包装。
+- fullStream 事件字段：`text-delta` 是 `part.text`（v4 是 `textDelta`）、工具是 `input/output`（v4 是 `args/result`）。适配层见 `src/main/services/ai/ai.ts` 的 `adaptPart`。
+- fullStream 的 `reasoning` part 同时带累积 `text` 与增量 `textDelta`：下发渲染端必须用 `textDelta`（渲染端自会累积），否则重复拼接。Agent 侧适配见 `packages/ai-agent/src/agent.ts` 的 `adaptAgentPart`，事件 `reasoning-delta` → part `{ type: 'reasoning', text }`；ACP 侧 `agent_thought_chunk` 同样映射为 `reasoning-delta`（见 `src/main/services/ai/acp-agent.ts`）。
+- MCP 客户端已不在 `ai` 主包（v4 时代的 `experimental_createMCPClient` 已移除），用官方 `@modelcontextprotocol/sdk` 自行管理（见 `src/main/services/ai/mcp.ts`），工具用 `dynamicTool + jsonSchema` 包装。
 - streamText 默认单步，自动工具循环需 `stopWhen: stepCountIs(N)`。
 
 ### 10. xterm 6 默认 WebGL 渲染器
@@ -83,7 +83,7 @@
 ### 11. 新增会话类型必须同时接通数据转发（教训）
 
 - **事故**：`LocalSession` 的 `proc.onData` 只写了输出缓冲、漏了向 IPC 转发，终端黑屏；SshSession 因构造函数签名强制传 handlers 而幸免。
-- **正确做法**：所有 Session 实现的输出/退出必须经 `handlers.onData/onExit` → `sessionManager.emit('data'/'exit')` → `ipc.ts` broadcast → preload 订阅 → xterm，这条链缺一环就黑屏。新增传输类型（如 telnet、串口）时复制 SshSession 的 handlers 模式。
+- **正确做法**：所有 Session 实现的输出/退出必须经 `handlers.onData/onExit` → `sessionManager.emit('data'/'exit')` → `ipc/terminal.ts` 的 broadcast → preload 订阅 → xterm，这条链缺一环就黑屏。新增传输类型（如 telnet、串口）时复制 SshSession 的 handlers 模式。
 - **验证方式**：创建会话后调 `window.api.terminal.recentOutput(sessionId)` 应有 shell 提示符。
 
 ### 12. 主进程事件可能早于渲染端拿到 requestId（竞态）
@@ -130,7 +130,7 @@
 
 - **触发信号**：`opener.ts` 的 `openFileManagerAt` 返回 `{ ok: true }` 但资源管理器窗口不出现；IDE/外部终端同理。
 - **根因/约束**：`windowsHide: true` 会设置 `STARTF_USESHOWWINDOW | SW_HIDE`，explorer.exe 等 GUI 程序会**继承该显示标志**，spawn 成功但新窗口被隐藏（无任何报错）。
-- **正确做法**：打开外部 GUI 程序（explorer / IDE / 终端窗口）时不要传 `windowsHide: true`，只用 `{ detached: true, stdio: 'ignore' }` + `unref()`。见 `src/main/services/opener.ts` 的 `launch`。
+- **正确做法**：打开外部 GUI 程序（explorer / IDE / 终端窗口）时不要传 `windowsHide: true`，只用 `{ detached: true, stdio: 'ignore' }` + `unref()`。见 `src/main/services/system/opener.ts` 的 `launch`。
 - **验证方式**：调用前后对比 `Get-Process explorer | ? MainWindowHandle -ne 0` 的窗口列表，应有新增窗口（或用 MainWindowHandle 从 0 → 非 0 断言）。
 - **注意**：PowerShell 里 taskkill 用单斜杠 `taskkill /F /IM electron.exe`；双斜杠（Git Bash 转义语法）在 PowerShell 下无效、静默失败，导致旧实例残留占用调试端口。
 
@@ -144,8 +144,41 @@
 ### 20. 脚本没有独立功能区；侧边栏纵向分区统一用 StackedSections
 
 - **触发信号**：想给脚本单加一个活动栏图标、或写 `selectActivity('scripts')` / 找 `SCRIPTS_ACTIVITY_ID` 跳转脚本列表。
-- **根因/约束**：脚本只服务于主机，已从活动栏摘除（`SCRIPTS_ACTIVITY_ID` 常量已删除），改为「主机」侧边栏的下半区分区（上半区是主机列表，两区都可独立收起/展开）。折叠状态存在 `ui.collapsedSections`，key 见 `src/renderer/src/section-ids.ts`。
-- **正确做法**：跳转脚本用 `useAppStore((s) => s.openScriptsSection)`（一次展开「主机功能区 + 侧边栏 + 脚本分区」三层）。侧边栏内任何「上下分区、各自可折叠」的布局都用 `components/StackedSections.tsx`：`<StackedSections>` + `<SectionShell id grow minHeight>` + `<SectionHeader>` + `<SectionContent>`，分区 id 以「功能区.分区名」注册到 `section-ids.ts`。
+- **根因/约束**：脚本只服务于主机，已从活动栏摘除（`SCRIPTS_ACTIVITY_ID` 常量已删除），改为「主机」侧边栏的下半区分区（上半区是主机列表，两区都可独立收起/展开）。折叠状态存在 `ui.collapsedSections`，key 见 `src/renderer/src/app/section-ids.ts`。
+- **正确做法**：跳转脚本用 `useAppStore((s) => s.openScriptsSection)`（一次展开「主机功能区 + 侧边栏 + 脚本分区」三层）。侧边栏内任何「上下分区、各自可折叠」的布局都用 `shared/components/StackedSections.tsx`：`<StackedSections>` + `<SectionShell id grow minHeight>` + `<SectionHeader>` + `<SectionContent>`，分区 id 以「功能区.分区名」注册到 `app/section-ids.ts`。
 - **空间规则（别改成裸 flex）**：折叠的分区只占标题栏（`shrink-0`，不加 flex 简写），展开的分区 `flex: <grow> 1 0` + `min-height`；这样上面的分区收起时下面的自动上移补位，展开时也压不到 `minHeight` 以下。`SectionContent` 收起时用 `display:none` 而**不卸载**，否则面板里的搜索词、分组展开态会被重置。
 - **可拖拽高度**：分区声明 `resizableAbove={上方分区 id}` 后，顶部会多一条横向拖拽条（`SectionResizer`，绝对定位压在边界线上、不占布局高度），拖过的高度写入 `ui.sectionHeights`，此后该分区用 `flex: 0 0 <H>px`（剩余空间全归上方）。拖拽条只在「上下两个分区都展开」时存在——上方收起时下方本就要吃满剩余空间，固定高度反而会留白，所以那种情况下自动回到弹性分配。拖动时 `max = 容器高度 - 上方分区的 inline minHeight`（上方那份数字直接从 DOM 读，别在调用方再传一遍）。
 - **验证方式**：收起「主机」分区后脚本分区应紧贴其标题栏下方并占满剩余高度；展开后脚本停在底部且高度不低于 180px（`getComputedStyle` 的 `minHeight`）；拖动两者之间的横线，脚本高度随之变化且上方主机不被压到 200px 以下，收起再展开后高度保持。
+
+### 21. renderer 按功能分层：features / app / shared（别在 components 或根目录堆文件）
+
+- **触发信号**：要新建 `XxxPanel.tsx` / `XxxPage.tsx` / 某个功能专用的工具函数，却不知道放哪；或看到 `src/renderer/src/` 根目录散落着 `activities.tsx`、`section-ids.ts` 这类文件。
+- **根因/约束**：历史上组件全部平铺在 `components/`、工具全部平铺在 `lib/`，导致**互不相关的功能区**（主机 / 笔记 / 接口请求…）代码混在一起，改一处要先靠文件名猜归属。现约定三层结构，**每个文件都必须有明确归属**：
+
+  | 目录 | 收录什么 | 判定标准 |
+  |---|---|---|
+  | `features/<功能>/` | 业务功能的 UI **与**它专属的纯函数/类型 | 只服务某一个功能区，删掉这个功能就没人用 |
+  | `app/` | 应用装配与外壳：入口装配、功能区注册表、外层布局、主区域容器 | 不属于任何单一业务功能，是"整个应用"的一部分 |
+  | `shared/` | `components/`（复用 UI 组件）+ `lib/`（复用纯函数） | 被 **≥2 个** 功能区引用 |
+
+- **正确做法**（新增文件时按下表放）：
+  - `features/hosts/`（HostsPanel、SshProfileDialog、ssh-color.ts）、`features/scripts/`（ScriptsPanel、ScriptsPage、RunScriptDialog、script.ts）、`features/notes/`、`features/api/`（ApiPanel、ApiPage、WsPage、TabButtons、api-client.ts）、`features/agent/`、`features/plugins/`（含 `host.ts` 插件运行时宿主）、`features/terminal/`（TerminalView、terminal-*.ts）、`features/settings/`（含 SettingsDialog）
+  - `app/`：`App.tsx`、`activities.tsx`（功能区注册表）、`activity-ids.ts`、`section-ids.ts`；`app/layout/`：ActivityBar、Sidebar、TitleBar、StatusBar、PanelView、CommandPalette、TabCloseConfirm、`pane-layout.ts`（PanelView 的分屏模型）
+  - `shared/components/`：AntdProvider、ResizeHandle、StackedSections、MonacoEditor、MonitorBadge、EditorSaveStatus；`shared/lib/`：theme.ts、color-themes.ts、utils.ts、format.ts
+  - `stores/app-store.ts`（全局 zustand，跨切面）、`main.tsx` / `index.css` / `assets/` 留在 `src/renderer/src/` 根（入口与静态资源，与 `index.html` 同级是惯例）
+  - **判定"要不要进 features"的捷径**：这个模块能不能只用一个功能名来回答"它是干什么的"？能 → 进对应 `features/<名>/`；只能答"整个应用" → `app/`；要列举两个以上功能 → `shared/`。
+- **验证方式**：`src/renderer/src/components`、`lib`、`plugins` 三个旧目录**已不存在**（有残留说明又按旧习惯放了文件）；引用一律是 `@/features/...` / `@/app/...` / `@/shared/...`，`rg "@/components/|@/lib/|from '@/activities'" src` 不应有命中。
+
+### 22. 主进程：ipc 按通道前缀拆模块，services 按功能域分目录
+
+- **触发信号**：想往 `src/main/ipc.ts`（已拆除）加通道；或在 `src/main/services/` 下找不到某个服务。
+- **根因/约束**：原来单个 `ipc.ts` 堆了 95 个通道、无分组，`services/` 15 个文件平铺也看不出谁与谁同属一个模块。现约定：
+  - `src/main/ipc/`：一个模块一个文件，**通道前缀 ≈ 文件名** —— `terminal:*`→terminal.ts、`ai:*`→ai.ts、`agent:*`→agent.ts、`mcp:*`→mcp.ts、`api:*`/`ws:*`→api.ts、`ssh:*`→hosts.ts、`scripts:*`→scripts.ts、`notes:*`→notes.ts、`plugins:*`/`plugin:*`→plugins.ts、`shell:*`→opener.ts、`prefs:*`/`shortcuts:*`/`window:*`/`app:*`/`dialog:open`→system.ts，另有 `shared.ts`（IpcContext 与公共工具）。
+  - `src/main/services/`：按功能域分 `terminal/`（sessions、shells、monitor）、`ai/`（ai、agent、acp-agent、acp-detect、mcp）、`api/`（http、ws）、`plugins/host.ts`、`system/opener.ts`；`storage.ts` 留在 services 根 —— 它是被所有域引用的持久化层，塞进任何域都不对。
+- **正确做法**：
+  - 新增通道 → 在对应前缀的模块里 `ipcMain.handle`；只有**新增模块**时才需要在 `ipc/index.ts` 里加一行 `registerXxxIpc`。
+  - 需要广播或读窗口的模块接 `ctx: IpcContext`（`ctx.broadcast(channel, payload)` / `ctx.win()`）；纯请求-响应型模块**不接收参数**。
+  - 会话事件的副作用归各自域：数据转发在 terminal.ts、采集生命周期（created→start / closed→stop）在 monitor.ts、AI 实例销毁在 ai.ts。同一个 `sessionManager` 事件被多方订阅是**刻意的**（EventEmitter 多监听器），别为了"集中"再合回一个文件。
+  - `main/index.ts` 从 `./ipc/index` 导入（写全，别依赖目录解析）。
+- **验证方式**：重构前后通道集合必须完全一致 —— 用同一条正则对比：
+  `git show <旧提交>:src/main/ipc.ts` 与 `rg -o "ipcMain\.handle\(\s*'([^']+)'" src/main/ipc` 提取的通道名集合应完全相同（本次为 **95 个，零差异**；⚠️ 必须用 `\s*` 跨行匹配，否则会漏掉写成 `ipcMain.handle(\n  'xxx',` 的那些通道）。改完跑 `npm run typecheck` + `npx vite build -c vite.main.mts`。

@@ -1,4 +1,4 @@
-import { AiMarkdown } from '@/components/AiMarkdown'
+import { AiMarkdown } from '@/features/agent/AiMarkdown'
 import { Button, Dropdown, Input, Select } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'

@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { AlertCircle, ExternalLink, Trash2, Upload } from 'lucide-react'
 import { Button, Input, Modal, Switch, message } from 'antd'
 import { useAppStore } from '@/stores/app-store'
-import { cn } from '@/lib/utils'
+import { cn } from '@/shared/lib/utils'
 import type { PluginInfo } from '@shared/plugin'
 
 /** 统一把异常转成可提示的文本 */

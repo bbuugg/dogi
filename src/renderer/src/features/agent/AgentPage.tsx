@@ -29,8 +29,8 @@ import {
   X
 } from 'lucide-react'
 import { useAppStore } from '@/stores/app-store'
-import { AiMarkdown } from '@/components/AiMarkdown'
-import { TerminalView } from '@/components/TerminalView'
+import { AiMarkdown } from '@/features/agent/AiMarkdown'
+import { TerminalView } from '@/features/terminal/TerminalView'
 import { cn } from 'cn'
 import type {
   AgentChatMessage,

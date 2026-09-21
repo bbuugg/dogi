@@ -3,7 +3,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { dynamicTool, jsonSchema, type ToolSet } from 'ai'
 import type { McpServerConfig, McpToolInfo } from '@shared/types'
-import { storage } from './storage'
+import { storage } from '../storage'
 
 interface McpServerState {
   config: McpServerConfig

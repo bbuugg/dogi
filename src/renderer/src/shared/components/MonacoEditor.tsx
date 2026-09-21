@@ -3,8 +3,8 @@ import { Braces, Check, Code, Copy, Download, Hash, Lock, WrapText } from 'lucid
 import type { FC, ReactNode } from 'react'
 import { useEffect, useRef, useState } from 'react'
 import { Button, Select, Tag } from 'antd'
-import { cn } from '@/lib/utils'
-import { useIsDarkTheme } from '@/lib/theme'
+import { cn } from '@/shared/lib/utils'
+import { useIsDarkTheme } from '@/shared/lib/theme'
 
 // ── 本地化 Monaco Editor ─────────────────────────────────────────
 // 默认情况下 @monaco-editor/react 会从 CDN（cdn.jsdelivr.net）加载 Monaco 资源。

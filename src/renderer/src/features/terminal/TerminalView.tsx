@@ -8,10 +8,10 @@ import Zmodem from 'zmodem.js'
 import { cn } from 'cn'
 import type { SessionInfo, SshConnectProgress, SshConnectStage } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
-import { useIsDarkTheme } from '@/lib/theme'
-import { clampCompositionOverflow } from '@/lib/terminal-ime'
-import { resolveTerminalTheme } from '@/lib/terminal-themes'
-import { TERMINAL_FONT_SIZE_DEFAULT, TERMINAL_FONT_SIZE_STEP } from '@/lib/terminal-font'
+import { useIsDarkTheme } from '@/shared/lib/theme'
+import { clampCompositionOverflow } from '@/features/terminal/terminal-ime'
+import { resolveTerminalTheme } from '@/features/terminal/terminal-themes'
+import { TERMINAL_FONT_SIZE_DEFAULT, TERMINAL_FONT_SIZE_STEP } from '@/features/terminal/terminal-font'
 
 /** 常见命令词表：即使没有任何历史也能给出首词补全建议 */
 const COMMON_COMMANDS = [

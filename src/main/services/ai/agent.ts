@@ -23,7 +23,7 @@ import type {
   AgentStreamEvent
 } from '@shared/types'
 import { resolveModel } from './ai'
-import { storage } from './storage'
+import { storage } from '../storage'
 
 /** 确认模式下等待用户响应的最长时间，超时按「取消」处理 */
 const CONFIRM_TIMEOUT_MS = 10 * 60 * 1000

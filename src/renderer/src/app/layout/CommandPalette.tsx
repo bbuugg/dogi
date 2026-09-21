@@ -17,14 +17,14 @@ import {
 import { cn } from 'cn'
 import { Button, Input, Modal, type InputRef } from 'antd'
 import { useAppStore } from '@/stores/app-store'
-import { scriptToTerminalInput } from '@/lib/script'
+import { scriptToTerminalInput } from '@/features/scripts/script'
 import { formatShortcutForPlatform } from '@shared/shortcuts'
 import type { AppShortcutAction, ScriptEntry } from '@shared/types'
 import {
   API_ACTIVITY_ID,
   NOTES_ACTIVITY_ID,
   PLUGINS_ACTIVITY_ID
-} from '@/activity-ids'
+} from '@/app/activity-ids'
 
 /**
  * 命令面板层级：命令列表（根）/ 脚本列表 / 主机列表 / 插件列表。

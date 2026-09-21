@@ -4,7 +4,7 @@ import { ConfigProvider, theme as antdTheme } from 'antd'
 import type { ThemeConfig } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 import { useAppStore } from '@/stores/app-store'
-import { useIsDarkTheme } from '@/lib/theme'
+import { useIsDarkTheme } from '@/shared/lib/theme'
 
 /**
  * antd 的色板生成器只认 sRGB，而应用的主题变量是 oklch()，

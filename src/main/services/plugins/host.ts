@@ -11,8 +11,8 @@ import type {
   PluginHttpResponse,
   PluginPermission
 } from '@shared/plugin'
-import { storage } from './storage'
-import { executeHttp } from './http'
+import { storage } from '../storage'
+import { executeHttp } from '../api/http'
 
 /**
  * 插件宿主（主进程侧）：

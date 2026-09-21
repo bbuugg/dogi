@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { FileText, Save } from 'lucide-react'
-import MonacoEditor from '@/components/MonacoEditor'
+import MonacoEditor from '@/shared/components/MonacoEditor'
 import { Button, Input, message } from 'antd'
 import { editorSaveKey, useAppStore } from '@/stores/app-store'
 

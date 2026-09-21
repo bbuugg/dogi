@@ -10,8 +10,8 @@ import { ChevronDown, ChevronUp, Globe, History, Send, Trash2 } from 'lucide-rea
 import { AutoComplete, Button, Drawer, Input, Modal, Select, Tag, message } from 'antd'
 import { apiTabId, apiTabTitle, editorSaveKey, NEW_API_REQUEST_ID, useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'
-import MonacoEditor from '@/components/MonacoEditor'
-import { TabButtons } from '@/components/TabButtons'
+import MonacoEditor from '@/shared/components/MonacoEditor'
+import { TabButtons } from '@/features/api/TabButtons'
 import {
   COMMON_HEADERS,
   METHODS,
@@ -30,7 +30,7 @@ import {
   statusClass,
   tidyHeaderRows,
   withQuery
-} from '@/lib/api-client'
+} from '@/features/api/api-client'
 import type { ApiHeaderPair, ApiHttpResponse } from '@shared/types'
 
 /** 请求超时（毫秒） */

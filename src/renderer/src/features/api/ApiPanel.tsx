@@ -25,7 +25,7 @@ import {
 } from 'antd'
 import { apiTabId, useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'
-import { methodClass } from '@/lib/api-client'
+import { methodClass } from '@/features/api/api-client'
 import type { ApiGroup, ApiProtocol, ApiRequestEntry } from '@shared/types'
 
 /** 树节点 key 前缀：g: 分组、r: 请求 */

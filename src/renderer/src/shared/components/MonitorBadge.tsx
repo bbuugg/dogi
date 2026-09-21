@@ -4,7 +4,7 @@ import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, Cpu, MemoryStick, X } fr
 import { cn } from 'cn'
 import { useAppStore } from '@/stores/app-store'
 import { Popover } from 'antd'
-import { formatBytes, formatDuration, formatRate } from '@/lib/format'
+import { formatBytes, formatDuration, formatRate } from '@/shared/lib/format'
 import type { ServerMetrics } from '@shared/types'
 
 /** 可选的采集间隔（毫秒），由左/右箭头在两者间切换 */

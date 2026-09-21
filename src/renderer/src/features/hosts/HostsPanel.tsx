@@ -27,15 +27,15 @@ import {
   type MenuProps,
   type TreeDataNode
 } from 'antd'
-import { resolveSshColor, tintText } from '@/lib/ssh-color'
-import { ScriptsPanel } from '@/components/ScriptsPanel'
+import { resolveSshColor, tintText } from '@/features/hosts/ssh-color'
+import { ScriptsPanel } from '@/features/scripts/ScriptsPanel'
 import {
   SectionContent,
   SectionHeader,
   SectionShell,
   StackedSections
-} from '@/components/StackedSections'
-import { HOSTS_LIST_SECTION_ID } from '@/section-ids'
+} from '@/shared/components/StackedSections'
+import { HOSTS_LIST_SECTION_ID } from '@/app/section-ids'
 
 
 /** 树节点 key 前缀：g: 分组（g: 空 id 表示「未分组」伪分组）、p: 连接 */

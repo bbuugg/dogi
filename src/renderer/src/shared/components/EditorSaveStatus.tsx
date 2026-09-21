@@ -1,5 +1,5 @@
 import { CheckCircle2, Loader2 } from 'lucide-react'
-import { STATUS_ITEM_CLASS } from '@/components/StatusBar'
+import { STATUS_ITEM_CLASS } from '@/app/layout/StatusBar'
 import { useAppStore } from '@/stores/app-store'
 
 /** 键前缀 → 中文名（只用于 title 提示） */
