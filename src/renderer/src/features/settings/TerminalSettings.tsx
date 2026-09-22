@@ -128,8 +128,7 @@ export function TerminalSettings() {
             命令预测补全
           </label>
           <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-            根据命令历史与常见命令，在输入时给出补全建议，按 Tab 或 → 接受，Ctrl+↑/↓ 选择。
-            方向键与 Ctrl 组合键一律原样交给 shell，不会被建议列表拦截。
+            根据命令历史与常见命令，在输入时给出补全建议。
           </p>
         </div>
         <Switch
