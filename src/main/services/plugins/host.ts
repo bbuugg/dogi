@@ -1,4 +1,6 @@
 import { app } from 'electron'
+// 注意：`cp` 只用于「用户从本地目录/zip 安装插件」这条路径（源是磁盘上的真实目录）。
+// 内置插件播种走下面的 copyDir —— asar 内的路径不能用 fs.cp。
 import { readFile, readdir, writeFile, stat, cp, mkdir, rm } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
@@ -24,6 +26,31 @@ import { executeHttp } from '../api/http'
  * 渲染端通过 IPC 拉取 manifest 与渲染端源码（经 blob import 运行），
  * 因此插件无需打包进主应用，实现真正的运行时加载。
  */
+
+/** 递归复制时要跳过的目录名（开发期产物，不该进 userData） */
+const COPY_SKIP = new Set(['node_modules', 'src', '.git'])
+
+/**
+ * 递归复制目录（自己实现，**不要用 `fs.cp`**）。
+ *
+ * 打包后内置插件位于 `app.asar/plugins`，Electron 的 asar 垫片**没有实现 `fs.cp`/`cpSync`**：
+ * 实测同一个 asar 路径上 `existsSync` / `readdirSync` / `readFileSync` 全部正常，
+ * 只有 `cpSync` 抛 `ENOENT, plugins\xxx not found in ...app.asar`，
+ * 结果是打包版「播种内置插件失败」→ 全新安装的机器上一个内置插件都没有。
+ * 所以这里只用被垫片支持的 readdir / readFile / writeFile / mkdir。
+ */
+async function copyDir(src: string, dest: string): Promise<void> {
+  await mkdir(dest, { recursive: true })
+  const entries = await readdir(src, { withFileTypes: true })
+  for (const entry of entries) {
+    if (COPY_SKIP.has(entry.name)) continue
+    const from = join(src, entry.name)
+    const to = join(dest, entry.name)
+    if (entry.isDirectory()) await copyDir(from, to)
+    else if (entry.isFile()) await writeFile(to, await readFile(from))
+  }
+}
+
 class PluginHost {
   private manifests = new Map<string, PluginManifest>()
   /** pluginId:name -> handler */
@@ -150,14 +177,7 @@ class PluginHost {
         // 内置插件随应用发布：始终用仓库最新版本覆盖，确保 dev 期改动即时生效；
         // 用户在 userData 自行安装的其他插件（不在仓库 plugins 内）不受影响。
         // 过滤开发期产物：node_modules、插件源码目录与 .git
-        await cp(join(src, name), dest, {
-          recursive: true,
-          force: true,
-          filter: (s) => {
-            const parts = s.replace(/\\/g, '/').split('/')
-            return !parts.some((p) => p === 'node_modules' || p === 'src' || p === '.git')
-          }
-        })
+        await copyDir(join(src, name), dest)
         console.log(`[plugins] 已同步内置插件到 userData：${name}`)
       }
     } catch (e) {

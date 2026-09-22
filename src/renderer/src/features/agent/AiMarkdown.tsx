@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm'
 /** AI 输出 Markdown 渲染（GFM：表格 / 代码块 / 删除线） */
 export function AiMarkdown({ content }: { content: string }) {
   return (
-    <div className="text-[13px] leading-relaxed break-words">
+    <div className="text-sm leading-relaxed break-words">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{

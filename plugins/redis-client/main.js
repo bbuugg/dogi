@@ -206,16 +206,17 @@ class RedisClient {
 /*                         符文前值 / Buffer 工具                      */
 /* ------------------------------------------------------------------ */
 
+/** Buffer 是否为「非法 UTF-8」—— 即 textVal 会返回 hex 的那种 */
+function isBinaryBuf(buf) {
+  if (!Buffer.isBuffer(buf)) return false
+  return !Buffer.from(buf.toString('utf8'), 'utf8').equals(buf)
+}
+
 /** 将 Buffer 转为人可读文本；若含非法 UTF8 则判定为二进制并提供 hex */
 function textVal(buf) {
   if (buf == null) return ''
   if (!Buffer.isBuffer(buf)) return String(buf)
-  const text = buf.toString('utf8')
-  const binary = !Buffer.from(text, 'utf8').equals(buf)
-  if (binary) {
-    return buf.toString('hex')
-  }
-  return text
+  return isBinaryBuf(buf) ? buf.toString('hex') : buf.toString('utf8')
 }
 
 function err(e) {
@@ -228,6 +229,47 @@ function fmtBytes(n) {
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(2)} KB`
   return `${(n / 1024 / 1024).toFixed(2)} MB`
+}
+
+/**
+ * 解析 INFO 文本：`# Section` 分组 + `key:value` 行。
+ * 返回 order（保持 Redis 原始小节顺序，渲染端据此排卡片）+ sections 映射。
+ */
+function parseInfo(text) {
+  const sections = {}
+  const order = []
+  const labels = {}
+  let cur = 'misc'
+  // 分节键统一小写：INFO 里是 `# Server` / `# Clients` 这种首字母大写，
+  // 渲染端（以及 serverStats）一律按小写查（sections.server、sectionTitle 的中文映射），
+  // 不做归一化会导致指标卡、键空间、分节标题全部取不到值。原始标题留在 labels 里备用。
+  const ensure = (name) => {
+    const key = String(name || 'misc').trim().toLowerCase() || 'misc'
+    if (!sections[key]) {
+      sections[key] = {}
+      labels[key] = String(name || '').trim()
+      order.push(key)
+    }
+    return sections[key]
+  }
+  for (const line of String(text || '').split('\n')) {
+    const l = line.trim()
+    if (!l) continue
+    if (l.startsWith('#')) {
+      cur = l.slice(1).trim()
+      ensure(cur)
+      continue
+    }
+    const i = l.indexOf(':')
+    if (i < 0) continue
+    ensure(cur)[l.slice(0, i)] = l.slice(i + 1)
+  }
+  return { order, sections, labels }
+}
+
+/** 删除列表元素用的临时哨兵值：先 LSET 成它，再 LREM 掉，等价于「按位置删除」 */
+function listTombstone() {
+  return `__opsdesk_deleted_${Date.now()}_${Math.random().toString(36).slice(2, 8)}__`
 }
 
 /* ------------------------------------------------------------------ */
@@ -285,6 +327,23 @@ export function activate(api) {
     return typeof raw === 'string' ? raw : String(raw || '')
   })
 
+  /** INFO 全文 + 结构化小节（渲染端「信息」页面用） */
+  api.registerHandler('infoSections', async ({ id, db }) => {
+    const c = conns.get(id)
+    if (!c) throw new Error('未连接')
+    await c.ensureDb(db)
+    const raw = await c.command('INFO', 'ALL')
+    const text = typeof raw === 'string' ? raw : String(raw || '')
+    const { order, sections, labels } = parseInfo(text)
+    let dbsize = null
+    try {
+      dbsize = Number(await c.command('DBSIZE')) || 0
+    } catch {
+      // 权限受限时忽略
+    }
+    return { raw: text, order, sections, labels, dbsize, db: c.currentDb }
+  })
+
   /** 解析 INFO 为结构化摘要，供渲染端顶部展示 */
   api.registerHandler('serverStats', async ({ id, db }) => {
     const c = conns.get(id)
@@ -292,20 +351,7 @@ export function activate(api) {
     await c.ensureDb(db)
     const raw = await c.command('INFO', 'ALL')
     const text = typeof raw === 'string' ? raw : String(raw || '')
-    const sections = {}
-    let cur = 'misc'
-    for (const line of text.split('\n')) {
-      const l = line.trim()
-      if (!l) continue
-      if (l.startsWith('#')) {
-        cur = l.slice(1).trim()
-        continue
-      }
-      if (!sections[cur]) sections[cur] = {}
-      const i = l.indexOf(':')
-      if (i < 0) continue
-      sections[cur][l.slice(0, i)] = l.slice(i + 1)
-    }
+    const { sections } = parseInfo(text)
     return {
       server: sections.server || {},
       clients: sections.clients || {},
@@ -336,12 +382,16 @@ export function activate(api) {
     const keys = []
     for (const k of rawKeys) {
       const name = textVal(k)
+      // 非法 UTF-8 的 key 名会被 textVal 整体 hex 化：这个字符串**不是**真 key，
+      // 拿它去 GET/DEL 只会落空。所以标出来让渲染端禁用点击，
+      // 免得用户在列表里点了个「永远无数据」的死条目。
+      const binary = isBinaryBuf(k)
       let type = 'unknown'
       try {
         const t = await c.command('TYPE', k)
         type = textVal(t)
       } catch {}
-      keys.push({ key: name, type })
+      keys.push({ key: name, type, binary })
     }
     return { keys, cursor: nextCursor, done: nextCursor === 0 }
   })
@@ -434,6 +484,130 @@ export function activate(api) {
     await c.ensureDb(db)
     await c.command('DEL', key)
     return { ok: true }
+  })
+
+  /* ---------------------------------------------------------------
+   * 写入 / 编辑：渲染端的 Monaco 编辑器保存时落到这些 handler。
+   * 一律「先取连接 → ensureDb → 写 → 回传影响行数/长度」，方便界面回显。
+   * ------------------------------------------------------------- */
+
+  const useConn = async (id, db) => {
+    const c = conns.get(id)
+    if (!c) throw new Error('未连接')
+    await c.ensureDb(db)
+    return c
+  }
+
+  /**
+   * 覆盖 string 值。保留原有 TTL：Redis 6+ 可以直接 SET ... KEEPTTL，
+   * 但这里用 PTTL + PEXPIRE 兜底，兼容更老的实例。
+   */
+  api.registerHandler('setString', async ({ id, db, key, value }) => {
+    const c = await useConn(id, db)
+    let ttl = -1
+    try {
+      ttl = Number(await c.command('PTTL', key))
+    } catch {
+      // 取不到就按「无 TTL」处理
+    }
+    await c.command('SET', key, String(value ?? ''))
+    if (ttl > 0) await c.command('PEXPIRE', key, String(ttl))
+    const strlen = Buffer.byteLength(String(value ?? ''), 'utf8')
+    return { ok: true, strlen, ttl }
+  })
+
+  api.registerHandler('setHashField', async ({ id, db, key, field, value }) => {
+    const c = await useConn(id, db)
+    const created = Number(await c.command('HSET', key, field, String(value ?? ''))) === 1
+    return { ok: true, created }
+  })
+
+  api.registerHandler('delHashField', async ({ id, db, key, field }) => {
+    const c = await useConn(id, db)
+    const removed = Number(await c.command('HDEL', key, field)) || 0
+    return { ok: true, removed }
+  })
+
+  /** 按位置改列表元素 */
+  api.registerHandler('setListItem', async ({ id, db, key, index, value }) => {
+    const c = await useConn(id, db)
+    const i = Number(index)
+    if (!Number.isInteger(i) || i < 0) throw new Error('列表位置必须是非负整数')
+    await c.command('LSET', key, String(i), String(value ?? ''))
+    return { ok: true }
+  })
+
+  /** 追加元素：head=true 走 LPUSH，否则 RPUSH */
+  api.registerHandler('pushListItem', async ({ id, db, key, value, head }) => {
+    const c = await useConn(id, db)
+    const len = Number(await c.command(head ? 'LPUSH' : 'RPUSH', key, String(value ?? ''))) || 0
+    return { ok: true, length: len }
+  })
+
+  /**
+   * 按位置删列表元素：Redis 没有「按下标删除」，用「LSET 成随机哨兵 + LREM 1 哨兵」
+   * 两步等价实现（哨兵几乎不可能与真实值撞车）。
+   */
+  api.registerHandler('delListItem', async ({ id, db, key, index }) => {
+    const c = await useConn(id, db)
+    const i = Number(index)
+    if (!Number.isInteger(i) || i < 0) throw new Error('列表位置必须是非负整数')
+    const tomb = listTombstone()
+    await c.command('LSET', key, String(i), tomb)
+    const removed = Number(await c.command('LREM', key, '1', tomb)) || 0
+    return { ok: true, removed }
+  })
+
+  api.registerHandler('addSetMember', async ({ id, db, key, member }) => {
+    const c = await useConn(id, db)
+    const added = Number(await c.command('SADD', key, String(member ?? ''))) || 0
+    return { ok: true, added }
+  })
+
+  api.registerHandler('delSetMember', async ({ id, db, key, member }) => {
+    const c = await useConn(id, db)
+    const removed = Number(await c.command('SREM', key, String(member ?? ''))) || 0
+    return { ok: true, removed }
+  })
+
+  /** 新增或改分：ZADD 本身幂等（同 member 会更新 score） */
+  api.registerHandler('addZsetMember', async ({ id, db, key, member, score }) => {
+    const c = await useConn(id, db)
+    const s = String(score ?? '0')
+    if (Number.isNaN(Number(s))) throw new Error('分数必须是数字')
+    const added = Number(await c.command('ZADD', key, s, String(member ?? ''))) || 0
+    return { ok: true, added }
+  })
+
+  api.registerHandler('delZsetMember', async ({ id, db, key, member }) => {
+    const c = await useConn(id, db)
+    const removed = Number(await c.command('ZREM', key, String(member ?? ''))) || 0
+    return { ok: true, removed }
+  })
+
+  /** 重命名：目标已存在时拒绝（RENAME 会直接覆盖，GUI 里不静默毁数据） */
+  api.registerHandler('renameKey', async ({ id, db, key, newKey }) => {
+    const c = await useConn(id, db)
+    const target = String(newKey ?? '').trim()
+    if (!target) throw new Error('新 key 不能为空')
+    if (target === key) return { ok: true, key: target }
+    const exists = textVal(await c.command('EXISTS', target))
+    if (Number(exists) > 0) throw new Error(`目标 key「${target}」已存在`)
+    await c.command('RENAME', key, target)
+    return { ok: true, key: target }
+  })
+
+  /** 设置 TTL（秒）；ttl <= 0 表示「永不过期」（PERSIST） */
+  api.registerHandler('setTtl', async ({ id, db, key, ttl }) => {
+    const c = await useConn(id, db)
+    const sec = Math.floor(Number(ttl))
+    if (Number.isNaN(sec)) throw new Error('TTL 必须是数字（秒）')
+    if (sec <= 0) {
+      await c.command('PERSIST', key)
+      return { ok: true, ttl: -1 }
+    }
+    await c.command('EXPIRE', key, String(sec))
+    return { ok: true, ttl: sec }
   })
 
   api.log('redis-client 主进程已加载')

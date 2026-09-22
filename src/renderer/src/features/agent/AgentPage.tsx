@@ -47,13 +47,15 @@ import type {
 const ACP_OPTION = '__acp__'
 const ACP_MANAGE_OPTION = '__acp-manage__'
 
-/** Agent 工具的中文展示名 */
+/** Agent 工具的中文展示名（确认卡文案也复用它，如「是否允许…删除文件？」） */
 const AGENT_TOOL_LABELS: Record<string, string> = {
   list_files: '列出目录',
+  find_files: '查找文件',
   read_file: '读取文件',
   write_file: '写入文件',
   edit_file: '编辑文件',
-  search_files: '搜索文件',
+  delete_file: '删除文件',
+  search_files: '搜索内容',
   execute_command: '执行命令'
 }
 
@@ -182,7 +184,7 @@ function ToolPartCard({
         : ''
 
   return (
-    <details className="my-1.5 rounded-md border border-border/70 text-xs" open={!!confirm}>
+    <details className="my-1.5 text-sm" open={!!confirm}>
       <summary className="flex cursor-pointer items-center gap-1.5 px-2 py-1.5 text-muted-foreground hover:text-foreground">
         <StatusIcon
           className={cn('size-3.5 shrink-0', meta.cls, meta.spin && 'animate-spin')}
@@ -215,7 +217,8 @@ function ToolPartCard({
         {confirm && (
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <span className="text-[10px] text-muted-foreground">
-              是否允许在工作区「{confirm.workspaceName}」执行？
+              是否允许在工作区「{confirm.workspaceName}」
+              {AGENT_TOOL_LABELS[confirm.toolName] ?? '执行该操作'}？
             </span>
             <div className="ml-auto flex gap-1.5">
               <Button

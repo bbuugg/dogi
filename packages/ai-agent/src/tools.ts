@@ -1,8 +1,9 @@
 /**
- * 工作区 Agent 工具集：文件读写 / 搜索 / 编辑 / 执行命令。
+ * 工作区 Agent 工具集：文件读取 / 查找 / 写入 / 编辑 / 删除 / 执行命令。
  *
  * 所有工具都绑定一个工作区根目录（root），文件路径一律相对工作区，
  * 经 resolveInside 越界校验后落盘，防止 Agent 逃出工作区。
+ * 破坏性工具（execute_command、delete_file）在确认模式下统一经 requestConfirm 请示用户。
  */
 import { spawn } from 'node:child_process'
 import { promises as fs } from 'node:fs'
@@ -81,24 +82,38 @@ async function listDir(
   }
 }
 
+/** 单个文件的内容命中；需要上下文行时才保留全文（否则大结果集会白占内存） */
+interface SearchFileHit {
+  rel: string
+  hits: Array<{ line: number; text: string }>
+  source?: string[]
+}
+
+interface SearchAcc {
+  files: SearchFileHit[]
+  /** 已命中的总行数（跨文件累计，用于 maxResults 封顶） */
+  hits: number
+  max: number
+}
+
 async function searchDir(
   dir: string,
   root: string,
   re: RegExp,
   fileRe: RegExp | null,
   ignored: (rel: string, isDir: boolean) => boolean,
-  hits: string[],
-  max: number
+  acc: SearchAcc,
+  needSource: boolean
 ): Promise<void> {
-  if (hits.length >= max) return
+  if (acc.hits >= acc.max) return
   const entries = await fs.readdir(dir, { withFileTypes: true })
   for (const ent of entries) {
-    if (hits.length >= max) return
+    if (acc.hits >= acc.max) return
     const abs = join(dir, ent.name)
     const rel = relPathOf(root, abs)
     if (ignored(rel, ent.isDirectory())) continue
     if (ent.isDirectory()) {
-      await searchDir(abs, root, re, fileRe, ignored, hits, max)
+      await searchDir(abs, root, re, fileRe, ignored, acc, needSource)
       continue
     }
     if (!ent.isFile()) continue
@@ -107,14 +122,113 @@ async function searchDir(
     if (stat.size > MAX_SEARCH_FILE_SIZE) continue
     const buf = await fs.readFile(abs)
     if (buf.includes(0)) continue
-    const lines = buf.toString('utf8').split('\n')
-    for (let i = 0; i < lines.length && hits.length < max; i++) {
+    const source = buf.toString('utf8').split('\n')
+    const hits: Array<{ line: number; text: string }> = []
+    for (let i = 0; i < source.length && acc.hits < acc.max; i++) {
       re.lastIndex = 0
-      if (re.test(lines[i])) {
-        hits.push(`${rel}:${i + 1}: ${lines[i].trimEnd().slice(0, MAX_LINE_CHARS)}`)
+      if (re.test(source[i])) {
+        hits.push({ line: i + 1, text: source[i].trimEnd().slice(0, MAX_LINE_CHARS) })
+        acc.hits++
       }
     }
+    if (hits.length) acc.files.push(needSource ? { rel, hits, source } : { rel, hits })
   }
+}
+
+/**
+ * 把 glob 编译成 RegExp：`**` 跨目录，`*` / `?` 不跨 `/`。
+ * 不含 `/` 的 glob（如 `*.ts`）自动补 `**​/` 前缀，让它能匹配任意层级 —— 符合直觉。
+ */
+function globToRegExp(glob: string): RegExp {
+  const raw = glob.trim()
+  const pat = raw.includes('/') ? raw : `**/${raw}`
+  let re = ''
+  for (let i = 0; i < pat.length; i++) {
+    const ch = pat[i]
+    if (ch === '*') {
+      if (pat[i + 1] === '*') {
+        i++
+        if (pat[i + 1] === '/') {
+          // `**/` —— 连同分隔符一起可选，避免 `**​/*.ts` 强制要求中间多一层目录
+          i++
+          re += '(?:.*/)?'
+        } else {
+          // 结尾的 `**`（如 `foo/**`）—— 退化成「跨目录任意串」，否则会强制要求尾随 /
+          re += '.*'
+        }
+      } else {
+        re += '[^/]*'
+      }
+    } else if (ch === '?') {
+      re += '[^/]'
+    } else if ('\\^$.|+()[]{}'.includes(ch)) {
+      re += `\\${ch}`
+    } else {
+      re += ch
+    }
+  }
+  return new RegExp(`^${re}$`)
+}
+
+/** 按文件名 glob 递归查找（复用同一套忽略规则，匹配相对路径） */
+async function findFiles(
+  dir: string,
+  root: string,
+  re: RegExp,
+  ignored: (rel: string, isDir: boolean) => boolean,
+  out: string[],
+  max: number
+): Promise<void> {
+  if (out.length >= max) return
+  const entries = await fs.readdir(dir, { withFileTypes: true })
+  entries.sort((a, b) => a.name.localeCompare(b.name))
+  for (const ent of entries) {
+    if (out.length >= max) return
+    const abs = join(dir, ent.name)
+    const rel = relPathOf(root, abs)
+    if (ignored(rel, ent.isDirectory())) continue
+    if (ent.isDirectory()) {
+      await findFiles(abs, root, re, ignored, out, max)
+    } else if (ent.isFile()) {
+      if (re.test(rel)) out.push(rel)
+    }
+  }
+}
+
+/** 把内容命中格式化成模型友好的文本 */
+function formatSearchHits(acc: SearchAcc, context: number): string {
+  if (!acc.files.length) return '（未找到匹配）'
+  const out: string[] = []
+  if (context <= 0) {
+    // 保持 ripgrep 的 `路径:行号: 内容` 风格 —— 模型对这种格式最熟
+    for (const f of acc.files) {
+      for (const h of f.hits) out.push(`${f.rel}:${h.line}: ${h.text}`)
+    }
+    return out.join('\n')
+  }
+  for (const f of acc.files) {
+    const src = f.source
+    if (!src) continue
+    out.push(`${f.rel}:`)
+    // 合并重叠的上下文区间，避免同一段被打印多次
+    const ranges: Array<[number, number]> = []
+    for (const h of f.hits) {
+      const s = Math.max(1, h.line - context)
+      const e = Math.min(src.length, h.line + context)
+      const last = ranges[ranges.length - 1]
+      if (last && s <= last[1] + 1) last[1] = Math.max(last[1], e)
+      else ranges.push([s, e])
+    }
+    const hitLines = new Set(f.hits.map((h) => h.line))
+    ranges.forEach(([s, e], idx) => {
+      if (idx > 0) out.push('--')
+      for (let n = s; n <= e; n++) {
+        const mark = hitLines.has(n) ? ':' : '-'
+        out.push(`${n}${mark} ${src[n - 1].trimEnd().slice(0, MAX_LINE_CHARS)}`)
+      }
+    })
+  }
+  return out.join('\n')
 }
 
 // ---------- 命令执行 ----------
@@ -332,24 +446,45 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
 
     search_files: tool({
       description:
-        '在工作区中按正则搜索文件内容（自动跳过忽略目录、二进制与大文件）。返回命中文件的相对路径、行号与行内容。用于定位符号、关键配置与错误来源。',
+        '在工作区中按正则搜索文件内容（自动跳过忽略目录、二进制与大文件）。返回命中文件的相对路径、行号与行内容。用于定位符号、关键配置与错误来源。结果很多时用 filesOnly 只拿「文件:命中数」省上下文；要看代码上下文用 context。',
       inputSchema: z.object({
-        pattern: z.string().describe('正则表达式（区分大小写）'),
+        pattern: z.string().describe('正则表达式（默认区分大小写）'),
         path: z.string().optional().describe('搜索起点目录（相对工作区），缺省为根目录'),
         filePattern: z.string().optional().describe('限定文件名正则，如 "\\.(ts|tsx|json)$"'),
+        caseInsensitive: z
+          .boolean()
+          .optional()
+          .describe('忽略大小写（同时作用于 pattern 与 filePattern），默认 false'),
+        filesOnly: z
+          .boolean()
+          .optional()
+          .describe('只返回命中的文件及其命中数（每行 `路径:命中数`），不返回行内容'),
+        context: z
+          .number()
+          .optional()
+          .describe('每条命中附带的前后上下文行数（0–5），默认 0。适合需要看清代码结构的场景'),
         maxResults: z.number().optional().describe('最大命中行数，默认 200，最大 1000')
       }),
-      execute: async ({ pattern, path = '', filePattern, maxResults = 200 }) => {
+      execute: async ({
+        pattern,
+        path = '',
+        filePattern,
+        caseInsensitive = false,
+        filesOnly = false,
+        context = 0,
+        maxResults = 200
+      }) => {
+        const flags = caseInsensitive ? 'i' : ''
         let re: RegExp
         try {
-          re = new RegExp(pattern)
+          re = new RegExp(pattern, flags)
         } catch (e) {
           throw new Error(`无效的正则：${(e as Error).message}`)
         }
         let fileRe: RegExp | null = null
         if (filePattern) {
           try {
-            fileRe = new RegExp(filePattern)
+            fileRe = new RegExp(filePattern, flags)
           } catch (e) {
             throw new Error(`无效的文件名正则：${(e as Error).message}`)
           }
@@ -358,9 +493,42 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
         const stat = await fs.stat(absDir)
         if (!stat.isDirectory()) throw new Error(`不是目录：${path || '.'}`)
         const ignored = await createIgnoreChecker(root)
-        const hits: string[] = []
-        await searchDir(absDir, root, re, fileRe, ignored, hits, clampInt(maxResults, 1, 1000, 200))
-        return hits.length ? hits.join('\n') : '（未找到匹配）'
+        const ctx = clampInt(context, 0, 5, 0)
+        const max = clampInt(maxResults, 1, 1000, 200)
+        const acc: SearchAcc = { files: [], hits: 0, max }
+        await searchDir(absDir, root, re, fileRe, ignored, acc, ctx > 0)
+        if (!acc.files.length) return '（未找到匹配）'
+        if (filesOnly) {
+          const rows = acc.files.map((f) => `${f.rel}:${f.hits.length}`)
+          return `${rows.join('\n')}\n（${acc.files.length} 个文件，共 ${acc.hits} 处匹配）`
+        }
+        const more = acc.hits >= max ? `\n…（已达上限 ${max} 行，可能有更多）` : ''
+        return formatSearchHits(acc, ctx) + more
+      }
+    }),
+
+    find_files: tool({
+      description:
+        '按文件名 / 通配符查找文件（如 "*.ts"、"**/*.test.tsx"、"src/**/index.*"）。只匹配文件名，不搜内容（搜内容用 search_files）。自动跳过忽略目录。用于「项目里有哪些 X 文件」这类问题。',
+      inputSchema: z.object({
+        pattern: z
+          .string()
+          .describe('文件名通配符：* 匹配单层任意字符，? 匹配单个字符，** 跨目录；不含 / 时匹配任意层级下的文件名'),
+        path: z.string().optional().describe('搜索起点目录（相对工作区），缺省为根目录'),
+        maxResults: z.number().optional().describe('最大返回条数，默认 200，最大 1000')
+      }),
+      execute: async ({ pattern, path = '', maxResults = 200 }) => {
+        const re = globToRegExp(pattern)
+        const absDir = resolveInside(root, path)
+        const stat = await fs.stat(absDir)
+        if (!stat.isDirectory()) throw new Error(`不是目录：${path || '.'}`)
+        const ignored = await createIgnoreChecker(root)
+        const max = clampInt(maxResults, 1, 1000, 200)
+        const out: string[] = []
+        await findFiles(absDir, root, re, ignored, out, max)
+        if (!out.length) return `（没有匹配 ${pattern} 的文件）`
+        const more = out.length >= max ? `\n…（已达上限 ${max}，可能有更多）` : ''
+        return `${out.length} 个文件：\n${out.join('\n')}${more}`
       }
     }),
 
@@ -388,6 +556,53 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
         if (!stat.isDirectory()) throw new Error(`执行目录不是目录：${cwd || '.'}`)
         const t = clampInt(timeoutMs, 1000, 300_000, 120_000)
         return runCommand(command, execDir, t, options.abortSignal)
+      }
+    }),
+
+    /**
+     * 删除文件。存在的意义不只是「省得拼 rm」—— 更重要的是把删除收敛成
+     * 一个「单路径 + resolveInside 校验 + 同一道确认闸」的动作：
+     * 让模型拼 `rm -rf xxx` 才删，误伤面比单文件大得多。
+     */
+    delete_file: tool({
+      description:
+        '删除工作区内的文件。默认只删单个文件；path 是目录时必须显式传 recursive=true（会连同目录内所有内容一起删）。路径不存在会报错，不会静默成功。不可恢复操作，调用前请确认路径。',
+      inputSchema: z.object({
+        path: z.string().describe('相对工作区的路径'),
+        recursive: z
+          .boolean()
+          .optional()
+          .describe('path 是目录时必须显式传 true 才允许删除，默认 false（此时传目录会报错）')
+      }),
+      execute: async ({ path, recursive = false }, options) => {
+        const abs = resolveInside(root, path)
+        // 先确认存在：删一个不存在的路径直接报错，避免「静默成功」让模型误以为已删除
+        let stat: Awaited<ReturnType<typeof fs.stat>>
+        try {
+          stat = await fs.stat(abs)
+        } catch {
+          throw new Error(`路径不存在：${path}`)
+        }
+        const isDir = stat.isDirectory()
+        if (isDir && !recursive) {
+          throw new Error(
+            `${path} 是目录。删除目录必须显式传 recursive: true（会连同目录内所有内容一起删除）。`
+          )
+        }
+        // 破坏性操作：确认模式下必须请示（与 execute_command 同一道闸，不能绕）
+        if (needConfirm && opts.requestConfirm) {
+          const approved = await opts.requestConfirm({
+            toolCallId: options.toolCallId,
+            toolName: 'delete_file',
+            command: isDir ? `删除目录（含全部内容）：${path}` : `删除文件：${path}`
+          })
+          if (!approved) {
+            return '用户取消了本次删除（未删除任何内容）。请询问用户接下来希望怎么做，不要擅自重试。'
+          }
+        }
+        if (isDir) await fs.rm(abs, { recursive: true })
+        else await fs.unlink(abs)
+        return `已删除${isDir ? '目录' : '文件'} ${path}`
       }
     })
   }
