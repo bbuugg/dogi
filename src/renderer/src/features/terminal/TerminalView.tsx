@@ -620,6 +620,15 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
       activeIndexRef.current = (activeIndexRef.current + dir + n) % n
       setSuggestions({ items: suggestionsRef.current, index: activeIndexRef.current })
     }
+    /**
+     * 只有「纯可打印文本」才当作命令行内容来跟踪。
+     * 任何控制字符（Ctrl+A/B/E/R/U/K… 这类组合键、Tab、方向键 / F 键的 ESC 序列、
+     * DEL、可能带换行的粘贴）都意味着本地缓冲与 shell 真实命令行已经对不上 ——
+     * 这时必须重置缓冲并收起下拉框，否则组合键之后预测会乱套，
+     * 下拉框还会赖着不走继续吞掉 Tab / 方向键。
+     */
+    const isTrackableInput = (data: string): boolean =>
+      data.length > 0 && !/[\u0000-\u001f\u007f]/.test(data)
     const updateInputBuffer = (data: string) => {
       if (data === '\r' || data === '\n') {
         const cmd = inputBufferRef.current.trim()
@@ -638,8 +647,8 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
         clearSuggestions()
         return
       }
-      // 转义序列（方向键 / 功能键等）会让本地缓冲与 shell 错位，重置追踪
-      if (data.startsWith('\x1b') || data.includes('\x1b')) {
+      // 控制字符 / 转义序列 / 多行粘贴：不参与预测，按键原样交给 shell
+      if (!isTrackableInput(data)) {
         inputBufferRef.current = ''
         clearSuggestions()
         return
@@ -664,22 +673,20 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
       }
       // ZMODEM 传输期间禁用手动输入，避免破坏协议
       if (zsessionRef.current) return
-      // 预测下拉开启时拦截导航 / 接受键（不转发给 PTY，避免与 shell 行编辑冲突）
+      // 下拉框开着时只吃「接受」与「Ctrl+↑/↓ 选择」这几个键：
+      // 普通 ↑/↓/← 一律放行 —— 它们是 shell 的历史与光标移动，
+      // 在 tmux / vim 这类全屏程序里更是必须原样送达（Ctrl+B 之后的调整也靠它们）。
       if (suggestionsRef.current.length > 0) {
-        if (data === '\t') {
+        if (data === '\t' || data === '\x1b[C') {
           acceptSuggestion()
           return
         }
-        if (data === '\x1b[B') {
+        if (data === '\x1b[1;5B') {
           moveActive(1)
           return
         }
-        if (data === '\x1b[A') {
+        if (data === '\x1b[1;5A') {
           moveActive(-1)
-          return
-        }
-        if (data === '\x1b[C') {
-          acceptSuggestion()
           return
         }
       }
@@ -902,7 +909,7 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
           style={pos ? { top: pos.top, left: pos.left } : undefined}
           className="absolute z-10 max-h-56 w-80 overflow-y-auto rounded-md border border-border bg-popover/95 p-1 text-xs shadow-lg backdrop-blur">
           <div className="px-2 py-1 text-[10px] text-muted-foreground">
-            命令预测 · Tab/→ 接受 · ↑/↓ 切换 · Esc 关闭
+            命令预测 · Tab/→ 接受 · Ctrl+↑/↓ 选择 · Esc 关闭
           </div>
           {suggestions.items.map((item, i) => {
             const buf = inputBufferRef.current
