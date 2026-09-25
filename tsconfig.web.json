@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": ["vite/client"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "useDefineForClassFields": true,
+    "noEmit": false,
+    "declaration": false,
+    "emitDeclarationOnly": false,
+    "outDir": "node_modules/.tsbuild/web",
+    "paths": {
+      "@/*": ["./src/renderer/src/*"],
+      "@shared/*": ["./src/shared/*"]
+    }
+  },
+  "include": ["src/renderer/src/**/*", "src/renderer/index.html", "src/shared/**/*", "src/preload/global.d.ts", "src/types/**/*"]
+}

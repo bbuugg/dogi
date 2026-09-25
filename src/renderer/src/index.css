@@ -1,0 +1,634 @@
+@import 'tailwindcss';
+@import "@fontsource-variable/inter";
+
+/* 运行时插件的源码（含手写 Tailwind 类名）也纳入扫描，确保样式生成 */
+@source "../../../plugins/**";
+
+@custom-variant dark (&:is(.dark *));
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family:
+      'Segoe UI', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+    overflow: hidden;
+  }
+
+  button {
+    @apply cursor-pointer;
+  }
+  html {
+    @apply font-sans;
+
+    /* 桌面应用：界面默认不可选中，避免像网页一样拖出蓝色选区 / 双击选中按钮文字。
+       需要复制的内容用 select-text 显式开放（见下），这样规则集中在两处而不是散落在各组件里。
+       注意：antd 的 dialog / menu / popover 都 portal 到 body，所以规则必须挂在 html/body 上，
+       挂在 App 根节点上的 class 覆盖不到它们。 */
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  /* 可编辑控件必须保持可选中，否则无法用鼠标选择 / 替换已输入内容 */
+  input,
+  textarea,
+  [contenteditable='true'] {
+    user-select: text;
+    -webkit-user-select: text;
+  }
+}
+
+@utility no-scrollbar {
+  /* Firefox */
+  scrollbar-width: none !important;
+
+  /* IE and Edge */
+  -ms-overflow-style: none !important;
+
+  /* Chrome, Safari and Opera */
+  &::-webkit-scrollbar {
+    display: none !important;
+  }
+}
+
+/* antd Tree 根节点默认铺 colorBgContainer（浅色主题下是白色），侧边栏里要透出父容器底色 */
+.side-tree.ant-tree,
+.side-tree .ant-tree-list,
+.side-tree .ant-tree-list-holder {
+  background: transparent;
+}
+
+/* 缩进宽度（antd Tree 无 indentUnit 属性，只能从样式压；切换箭头隐藏后靠它区分层级） */
+.side-tree .ant-tree-indent-unit {
+  width: 14px;
+}
+
+/* 展开/折叠改为点击整行标题（GroupRow 自己处理），因此不显示切换箭头 */
+.side-tree .ant-tree-switcher {
+  display: none;
+}
+
+.side-tree .ant-tree-node-content-wrapper {
+  display: flex;
+  /* blockNode 下 antd 给 wrapper 的是 flex:auto（min-width 按内容算），长标题会把整行撑出 sidebar；
+     min-width:0 让它能收缩，内部的 truncate 才能生效（不用 overflow:hidden，会裁掉拖拽指示线） */
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 4px;
+  border-radius: var(--radius-md, 6px);
+}
+
+.side-tree .ant-tree-node-content-wrapper .ant-tree-title {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+
+/*
+ * 自绘高亮的行（笔记面板，对齐「AI」面板：行自己画 hover / 激活底色）：
+ * wrapper 自带 4px 内边距，antd 默认的 hover 灰底会从行内自绘底色的两侧露出一圈灰。
+ * 标了 row-own-bg 的行所在的 wrapper 一律透明，底色完全交给行自己。
+ */
+.side-tree .ant-tree-node-content-wrapper:has(.row-own-bg) {
+  background: transparent;
+}
+.side-tree .ant-tree-node-content-wrapper:has(.row-own-bg):hover {
+  background: transparent;
+}
+
+/*
+ * 自绘行与 wrapper 同高（wrapper 的 min-height 就是 30px）：
+ * 分组行的内容高度只有内部 small 按钮那么高（24px），比条目行矮一截，
+ * hover / 激活底色会铺不满整行 —— 统一抬到与 wrapper 一致，各类行高度才齐。
+ */
+.side-tree .ant-tree-node-content-wrapper .row-own-bg {
+  min-height: 30px;
+}
+
+/*
+ * 左下角全局菜单（StatusBar 的 Dropdown）：菜单项默认是 `display: block`，图标与文案走
+ * **行内布局** —— 图标是 inline-flex（自带 vertical-align 偏移）、文案是行内盒子，
+ * 两者基线差几个像素，看着就是「图标和内容没对齐」。这里改成 flex + 垂直居中。
+ *
+ * ⚠️ 两个坑，都踩过：
+ * 1. **类名前缀是 `ant-dropdown-menu-*`**（Dropdown 用 OverrideProvider 把 Menu 的
+ *    prefixCls 换成了 `ant-dropdown-menu`），写 `.ant-menu-item` 一条都命中不了；
+ * 2. 选择器要比 antd 更「特指」：它的 cssinjs 是**运行时注入** head 的（排在本文件之后），
+ *    同特异性时它赢。
+ * 一级菜单靠浮层容器上的 `.status-menu`（后代选择器），二级菜单的浮层不在一级浮层内部，
+ * 只能靠条目自身的 `.status-menu-item` 命中 —— 两种都写上。
+ */
+.status-menu .ant-dropdown-menu-item,
+.status-menu .ant-dropdown-menu-submenu-title,
+.ant-dropdown-menu-item.status-menu-item,
+.ant-dropdown-menu-submenu-title.status-menu-item {
+  display: flex;
+  align-items: center;
+}
+
+.status-menu .ant-dropdown-menu-title-content,
+.ant-dropdown-menu-title-content.status-menu-content {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 自定义标题栏：拖拽区域（窗口控制按钮等交互元素需用 app-no-drag 排除） */
+@utility app-drag {
+  -webkit-app-region: drag;
+}
+
+@utility app-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* 全局滚动条美化 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.2) transparent;
+}
+
+::-webkit-scrollbar {
+  width: .5rem;
+  height: .5rem;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 3px;
+
+  &:hover {
+    background: rgba(0, 0, 0, 0.3);
+  }
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* xterm 终端容器 */
+.xterm {
+  padding: 8px;
+}
+
+.xterm-viewport {
+  background-color: unset !important;
+}
+
+.xterm-viewport::-webkit-scrollbar {
+  width: 8px;
+}
+
+.xterm-viewport::-webkit-scrollbar-thumb {
+  background: color-mix(in oklab, var(--foreground) 15%, transparent);
+  border-radius: 4px;
+}
+
+/* 服务器监控：距下次采集的进度条（时长由内联样式按采集间隔注入） */
+@keyframes monitor-tick {
+  from {
+    width: 0%;
+  }
+
+  to {
+    width: 100%;
+  }
+}
+
+/* AI 浮窗折叠状态条：新文本替换旧文本时整行淡入上移（Codex「思考中」闪过的风格，
+   配合 React key=文本 触发重播） */
+@keyframes ai-line-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.ai-line {
+  animation: ai-line-in 0.25s ease-out;
+}
+
+/* 对话流「正在生成」三点指示器（TypingDots） */
+@keyframes agent-typing-bounce {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.45;
+  }
+
+  30% {
+    transform: translateY(-3px);
+    opacity: 1;
+  }
+}
+
+.agent-typing-dot {
+  animation: agent-typing-bounce 1s infinite;
+}
+
+.agent-typing-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.agent-typing-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+/* AI 浮窗横条输入框：hover/focus 也不出现边框/描边（antd cssinjs 是非 @layer 样式，
+   focus 态会压过 variant="borderless"，需同优先级显式去掉） */
+.ai-bar-input.ant-input,
+.ai-bar-input.ant-input:hover,
+.ai-bar-input.ant-input:focus,
+.ai-bar-input.ant-input:focus-visible {
+  border: none !important;
+  box-shadow: none !important;
+  outline: none !important;
+}
+
+/* 「按下也不出边框、不泛白」的 Select：Agent 输入框的模型选择、AI 助手顶部的模型选择、
+   Monaco 的语言选择（都是 antd Select variant="borderless"）。
+
+   这里压两件事：
+
+   1. **边框**：antd 已经把 borderless 的 border 在所有状态下设成 transparent，但内层 input
+      拿到 :focus-visible 时会在根节点上补一圈 outline（antd/es/select/style/select-input.js 的
+      genSelectInputFocusVisibleStyle(token, token.activeBorderColor)），点一下展开就冒出一圈
+      近黑色描边。鼠标点输入类元素同样命中 :focus-visible，不是键盘专属。
+      权限按钮（antd Button type="text"）没有这一层，按下始终干净。
+
+   2. **底色**：antd 在根节点上画 `background: var(--ant-select-background-color)`，基态值是
+      `token.colorBgContainer` —— 本项目 AntdProvider 把它映射到 `--background`，浅色主题下是**纯白**；
+      只有 borderless 变体才覆盖成 transparent。这条级联依赖 antd 内部的样式顺序 / 特异性，
+      展开（-focused）时会漏出白底 —— 落在 `bg-muted/50` 的输入框里就是「蒙了一层白色遮罩」。
+      直接把目标状态写死，不再指望它内部算对。
+
+   !important：antd 的 cssinjs 是非 @layer 样式，优先级高于 Tailwind 的 @layer utilities。 */
+.bare-select.ant-select,
+.bare-select.ant-select:hover,
+.bare-select.ant-select.ant-select-focused,
+.bare-select.ant-select.ant-select-open {
+  background-color: transparent !important;
+  box-shadow: none !important;
+  outline: none !important;
+}
+
+/* 内层「可视盒子」同理（antd 6 把内容放在 .ant-select-content 里，不再是 .ant-select-selector） */
+.bare-select.ant-select .ant-select-content {
+  background-color: transparent !important;
+}
+
+@theme inline {
+  --font-heading:
+      var(--font-sans);
+  --font-sans:
+      'Inter Variable', sans-serif;
+  --color-sidebar-ring:
+      var(--sidebar-ring);
+  --color-sidebar-border:
+      var(--sidebar-border);
+  --color-sidebar-accent-foreground:
+      var(--sidebar-accent-foreground);
+  --color-sidebar-accent:
+      var(--sidebar-accent);
+  --color-sidebar-primary-foreground:
+      var(--sidebar-primary-foreground);
+  --color-sidebar-primary:
+      var(--sidebar-primary);
+  --color-sidebar-foreground:
+      var(--sidebar-foreground);
+  --color-sidebar:
+      var(--sidebar);
+  --color-chart-5:
+      var(--chart-5);
+  --color-chart-4:
+      var(--chart-4);
+  --color-chart-3:
+      var(--chart-3);
+  --color-chart-2:
+      var(--chart-2);
+  --color-chart-1:
+      var(--chart-1);
+  --color-ring:
+      var(--ring);
+  --color-input:
+      var(--input);
+  --color-border:
+      var(--border);
+  --color-destructive:
+      var(--destructive);
+  /* ⚠️ 危险色的前景色必须在这里映射，否则 `text-destructive-foreground` 这类工具类
+     根本不会被生成（Tailwind 静默丢弃未知令牌），表现为「红底 + 灰字」的关闭按钮 */
+  --color-destructive-foreground:
+      var(--destructive-foreground);
+  --color-accent-foreground:
+      var(--accent-foreground);
+  --color-accent:
+      var(--accent);
+  --color-muted-foreground:
+      var(--muted-foreground);
+  --color-muted:
+      var(--muted);
+  --color-secondary-foreground:
+      var(--secondary-foreground);
+  --color-secondary:
+      var(--secondary);
+  --color-primary-foreground:
+      var(--primary-foreground);
+  --color-primary:
+      var(--primary);
+  --color-popover-foreground:
+      var(--popover-foreground);
+  --color-popover:
+      var(--popover);
+  --color-card-foreground:
+      var(--card-foreground);
+  --color-card:
+      var(--card);
+  --color-foreground:
+      var(--foreground);
+  --color-background:
+      var(--background);
+  --radius-sm:
+      calc(var(--radius) * 0.6);
+  --radius-md:
+      calc(var(--radius) * 0.8);
+  --radius-lg:
+      var(--radius);
+  --radius-xl:
+      calc(var(--radius) * 1.4);
+  --radius-2xl:
+      calc(var(--radius) * 1.8);
+  --radius-3xl:
+      calc(var(--radius) * 2.2);
+  --radius-4xl:
+      calc(var(--radius) * 2.6);
+}
+
+:root {
+  /* 声明同时支持明暗两种配色，让原生控件（autofill 填充/文字色、datalist 下拉、滚动条）
+     跟随 prefers-color-scheme（Electron 由 nativeTheme.themeSource 控制）自适应 */
+  color-scheme: light dark;
+  --background:
+      oklch(1 0 0);
+  --foreground:
+      oklch(0.145 0 0);
+  --card:
+      oklch(1 0 0);
+  --card-foreground:
+      oklch(0.145 0 0);
+  --popover:
+      oklch(1 0 0);
+  --popover-foreground:
+      oklch(0.145 0 0);
+  --primary:
+      oklch(0.205 0 0);
+  --primary-foreground:
+      oklch(0.985 0 0);
+  --secondary:
+      oklch(0.97 0 0);
+  --secondary-foreground:
+      oklch(0.205 0 0);
+  --muted:
+      oklch(0.97 0 0);
+  --muted-foreground:
+      oklch(0.556 0 0);
+  --accent:
+      oklch(0.97 0 0);
+  --accent-foreground:
+      oklch(0.205 0 0);
+  --destructive:
+      oklch(0.577 0.245 27.325);
+  --destructive-foreground:
+      oklch(0.985 0 0);
+  --border:
+      oklch(0.922 0 0);
+  --input:
+      oklch(0.922 0 0);
+  --ring:
+      oklch(0.708 0 0);
+  --chart-1:
+      oklch(0.87 0 0);
+  --chart-2:
+      oklch(0.556 0 0);
+  --chart-3:
+      oklch(0.439 0 0);
+  --chart-4:
+      oklch(0.371 0 0);
+  --chart-5:
+      oklch(0.269 0 0);
+  --radius:
+      0.625rem;
+  --sidebar:
+      oklch(0.965 0 0);
+  --sidebar-foreground:
+      oklch(0.145 0 0);
+  --sidebar-primary:
+      oklch(0.205 0 0);
+  --sidebar-primary-foreground:
+      oklch(0.985 0 0);
+  --sidebar-accent:
+      oklch(0.97 0 0);
+  --sidebar-accent-foreground:
+      oklch(0.205 0 0);
+  --sidebar-border:
+      oklch(0.922 0 0);
+  --sidebar-ring:
+      oklch(0.708 0 0);
+}
+
+.dark {
+  --background:
+      oklch(0.145 0 0);
+  --foreground:
+      oklch(0.985 0 0);
+  --card:
+      oklch(0.205 0 0);
+  --card-foreground:
+      oklch(0.985 0 0);
+  --popover:
+      oklch(0.205 0 0);
+  --popover-foreground:
+      oklch(0.985 0 0);
+  --primary:
+      oklch(0.922 0 0);
+  --primary-foreground:
+      oklch(0.205 0 0);
+  --secondary:
+      oklch(0.269 0 0);
+  --secondary-foreground:
+      oklch(0.985 0 0);
+  --muted:
+      oklch(0.269 0 0);
+  --muted-foreground:
+      oklch(0.708 0 0);
+  --accent:
+      oklch(0.269 0 0);
+  --accent-foreground:
+      oklch(0.985 0 0);
+  --destructive:
+      oklch(0.704 0.191 22.216);
+  --destructive-foreground:
+      oklch(0.985 0 0);
+  --border:
+      oklch(1 0 0 / 10%);
+  --input:
+      oklch(1 0 0 / 15%);
+  --ring:
+      oklch(0.556 0 0);
+  --chart-1:
+      oklch(0.87 0 0);
+  --chart-2:
+      oklch(0.556 0 0);
+  --chart-3:
+      oklch(0.439 0 0);
+  --chart-4:
+      oklch(0.371 0 0);
+  --chart-5:
+      oklch(0.269 0 0);
+  --sidebar:
+      oklch(0.205 0 0);
+  --sidebar-foreground:
+      oklch(0.985 0 0);
+  --sidebar-primary:
+      oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground:
+      oklch(0.985 0 0);
+  --sidebar-accent:
+      oklch(0.269 0 0);
+  --sidebar-accent-foreground:
+      oklch(0.985 0 0);
+  --sidebar-border:
+      oklch(1 0 0 / 10%);
+  --sidebar-ring:
+      oklch(0.556 0 0);
+}
+
+/* ------------------------------------------------------------------
+ * 界面配色（强调色）：由 html 的 data-color-theme 属性切换（见 lib/theme.ts）。
+ * 只覆盖强调色相关变量，中性色（背景/边框/文字）仍由 :root 与 .dark 决定；
+ * 不设置该属性时即为默认的中性配色。新增配色需同时更新 lib/color-themes.ts。
+ * ------------------------------------------------------------------ */
+:root[data-color-theme='blue'] {
+  --primary: oklch(0.52 0.19 258);
+  --primary-foreground: oklch(0.985 0.01 258);
+  --ring: oklch(0.63 0.16 258);
+}
+
+.dark[data-color-theme='blue'] {
+  --primary: oklch(0.74 0.13 258);
+  --primary-foreground: oklch(0.2 0.04 258);
+  --ring: oklch(0.58 0.12 258);
+}
+
+:root[data-color-theme='cyan'] {
+  --primary: oklch(0.55 0.11 195);
+  --primary-foreground: oklch(0.985 0.01 195);
+  --ring: oklch(0.66 0.1 195);
+}
+
+.dark[data-color-theme='cyan'] {
+  --primary: oklch(0.78 0.09 195);
+  --primary-foreground: oklch(0.21 0.03 195);
+  --ring: oklch(0.6 0.08 195);
+}
+
+:root[data-color-theme='green'] {
+  --primary: oklch(0.53 0.13 152);
+  --primary-foreground: oklch(0.985 0.01 152);
+  --ring: oklch(0.64 0.11 152);
+}
+
+.dark[data-color-theme='green'] {
+  --primary: oklch(0.76 0.11 152);
+  --primary-foreground: oklch(0.2 0.03 152);
+  --ring: oklch(0.58 0.09 152);
+}
+
+:root[data-color-theme='violet'] {
+  --primary: oklch(0.51 0.2 293);
+  --primary-foreground: oklch(0.985 0.01 293);
+  --ring: oklch(0.62 0.17 293);
+}
+
+.dark[data-color-theme='violet'] {
+  --primary: oklch(0.74 0.14 293);
+  --primary-foreground: oklch(0.21 0.04 293);
+  --ring: oklch(0.58 0.12 293);
+}
+
+:root[data-color-theme='rose'] {
+  --primary: oklch(0.55 0.2 12);
+  --primary-foreground: oklch(0.985 0.01 12);
+  --ring: oklch(0.65 0.17 12);
+}
+
+.dark[data-color-theme='rose'] {
+  --primary: oklch(0.76 0.14 12);
+  --primary-foreground: oklch(0.21 0.04 12);
+  --ring: oklch(0.6 0.12 12);
+}
+
+:root[data-color-theme='orange'] {
+  --primary: oklch(0.6 0.16 48);
+  --primary-foreground: oklch(0.985 0.01 48);
+  --ring: oklch(0.7 0.13 48);
+}
+
+.dark[data-color-theme='orange'] {
+  --primary: oklch(0.79 0.13 55);
+  --primary-foreground: oklch(0.23 0.04 48);
+  --ring: oklch(0.62 0.11 48);
+}
+
+:root[data-color-theme='amber'] {
+  --primary: oklch(0.64 0.14 85);
+  /* 偏黄的强调色用深色文字才够对比 */
+  --primary-foreground: oklch(0.22 0.03 85);
+  --ring: oklch(0.72 0.12 85);
+}
+
+.dark[data-color-theme='amber'] {
+  --primary: oklch(0.8 0.12 85);
+  --primary-foreground: oklch(0.24 0.03 85);
+  --ring: oklch(0.64 0.1 85);
+}
+
+/*
+ * 自定义强调色：没有固定色值，由 lib/theme.ts 从用户选的颜色算出
+ * --custom-*-light / --custom-*-dark 内联到 html 上（保留色相、按明暗夹取亮度），
+ * 这里只负责按当前明暗各取一套。
+ */
+:root[data-color-theme='custom'] {
+  --primary: var(--custom-primary-light);
+  --primary-foreground: var(--custom-primary-foreground-light);
+  --ring: var(--custom-ring-light);
+}
+
+.dark[data-color-theme='custom'] {
+  --primary: var(--custom-primary-dark);
+  --primary-foreground: oklch(0.2 0.01 0);
+  --ring: var(--custom-ring-dark);
+}
+
+/*
+ * AgentPage 大输入框：聚焦高亮由外壳 focus-within 统一负责，
+ * textarea 自身任何时候都不渲染边框 / 阴影 / 轮廓（antd :focus 样式会盖掉 Tailwind border-none）。
+ */
+.agent-input.ant-input,
+.agent-input.ant-input:focus,
+.agent-input.ant-input:focus-visible {
+  border: none !important;
+  box-shadow: none !important;
+  outline: none !important;
+  background: transparent;
+}

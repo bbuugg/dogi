@@ -1,0 +1,11 @@
+{
+  "id": "redis-client",
+  "name": "Redis客户端",
+  "version": "0.1.0",
+  "description": "Redis 客户端：连接管理、浏览 key、按类型查看数据，支持 string / hash / list / set / zset / stream",
+  "author": "Dogi",
+  "icon": "🔴",
+  "renderer": "renderer.js",
+  "main": "main.js",
+  "permissions": ["storage"]
+}

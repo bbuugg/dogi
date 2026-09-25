@@ -1,0 +1,181 @@
+import { useEffect, useRef, useState } from 'react'
+import { FileText, Save } from 'lucide-react'
+import MonacoEditor from '@/shared/components/MonacoEditor'
+import { Button, Input, message } from 'antd'
+import { editorSaveKey, useAppStore } from '@/stores/app-store'
+
+/** 自动保存防抖间隔（毫秒）：停止输入后挂起 */
+const AUTOSAVE_DELAY = 800
+
+/**
+ * 笔记编辑页（主区域）：标题 + 语言选择 + Monaco 正文。
+ * 通过 noteId prop 指定要编辑的笔记；正文/标题/语言改动后防抖自动保存，
+ * 也可手动 Ctrl+S（或点保存按钮）立即落盘，侧边栏列表随之刷新。
+ */
+export function NotesPage({ noteId }: { noteId: string }) {
+  const notes = useAppStore((s) => s.notes)
+  const saveNote = useAppStore((s) => s.saveNote)
+  const updatePanelTabTitle = useAppStore((s) => s.updatePanelTabTitle)
+  const setEditorSaveStatus = useAppStore((s) => s.setEditorSaveStatus)
+
+  const activeNote = notes.find((n) => n.id === noteId) ?? null
+
+  // 本地草稿（编辑器是受控组件）：随选中笔记重置
+  const [title, setTitle] = useState('')
+  const [content, setContent] = useState('')
+  const [language, setLanguage] = useState('markdown')
+  const [saving, setSaving] = useState(false)
+  const [dirty, setDirty] = useState(false)
+
+  // 每次渲染同步最新草稿，供防抖定时器 / 快捷键读取最新值
+  const draftRef = useRef({ title, content, language })
+  draftRef.current = { title, content, language }
+  const idRef = useRef<string | null>(noteId)
+  idRef.current = noteId
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** 当前挂起的防抖保存目标 id（切换笔记时据此把旧笔记的待保存内容冲刷掉） */
+  const pendingIdRef = useRef<string | null>(null)
+
+  /** 把指定 id 笔记的「当前草稿」落盘（草稿与 id 由调用方在合适的时机传入） */
+  const doSave = async (id: string | null, d: { title: string; content: string; language: string }): Promise<void> => {
+    if (!id) return
+    setSaving(true)
+    try {
+      await saveNote({
+        id,
+        title: d.title.trim() || '未命名笔记',
+        content: d.content,
+        language: d.language || 'markdown',
+        createdAt: 0,
+        updatedAt: 0
+      })
+      setDirty(false)
+    } catch (e) {
+      message.error(`保存失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /** 保存「当前正在编辑」的笔记：读取最近一次的 id 与草稿 */
+  const saveCurrent = () => doSave(idRef.current, draftRef.current)
+  const saveCurrentRef = useRef(saveCurrent)
+  saveCurrentRef.current = saveCurrent
+  /** 保存指定 id（用于切换前冲刷旧笔记）：草稿取切换那一刻的快照 */
+  const saveSnapshot = (id: string) => doSave(id, draftRef.current)
+
+  /** 改动后挂起防抖保存（记录目标 id，供切换时冲刷） */
+  const markDirty = (id: string | null) => {
+    setDirty(true)
+    if (timerRef.current) clearTimeout(timerRef.current)
+    if (!id) return
+    pendingIdRef.current = id
+    timerRef.current = setTimeout(() => {
+      const pid = pendingIdRef.current
+      pendingIdRef.current = null
+      if (pid) void saveSnapshot(pid)
+    }, AUTOSAVE_DELAY)
+  }
+
+  /** 切换 / 新建笔记：先冲刷旧笔记的待保存内容，再重置草稿 */
+  useEffect(() => {
+    if (timerRef.current) clearTimeout(timerRef.current)
+    const pendingId = pendingIdRef.current
+    pendingIdRef.current = null
+    if (pendingId && pendingId !== noteId && draftRef.current.content) {
+      void saveSnapshot(pendingId)
+    }
+    setTitle(activeNote?.title ?? '')
+    setContent(activeNote?.content ?? '')
+    setLanguage(activeNote?.language ?? 'markdown')
+    setDirty(false)
+  }, [noteId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Ctrl/Cmd+S 立即保存当前笔记 */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault()
+        void saveCurrentRef.current()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  /**
+   * 关闭标签（组件卸载）时把待保存内容冲刷掉，避免丢掉最后一段输入；
+   * 笔记已被删除时跳过，避免把已删除的笔记又写回去。
+   */
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current)
+      const pendingId = pendingIdRef.current
+      pendingIdRef.current = null
+      if (!pendingId) return
+      const exists = useAppStore.getState().notes.some((n) => n.id === pendingId)
+      if (exists) void doSave(pendingId, draftRef.current)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  /** 把保存状态投影到 store，供底部状态栏的 EditorSaveStatus 显示 */
+  useEffect(() => {
+    setEditorSaveStatus(editorSaveKey('note', noteId), saving ? 'saving' : dirty ? 'dirty' : 'saved')
+  }, [noteId, saving, dirty, setEditorSaveStatus])
+
+  if (!activeNote) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-muted-foreground">
+        <FileText className="size-12 opacity-30" />
+        <div className="text-sm">从左侧选择一篇笔记开始编辑</div>
+        <div className="text-xs text-muted-foreground/70">或点击「新建笔记」开始记录</div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex h-full flex-col bg-background">
+      {/* 工具栏：标题 + 保存按钮。保存状态不在这里，改由底部状态栏显示（见 EditorSaveStatus）。 */}
+      <div className="flex items-center gap-2 px-3 py-1.5">
+        <Input
+          value={title}
+          onChange={(e) => {
+            setTitle(e.target.value)
+            // 标签标题跟随笔记标题
+            updatePanelTabTitle(`note-${noteId}`, e.target.value.trim() || '未命名笔记')
+            markDirty(noteId)
+          }}
+          placeholder="笔记标题"
+          variant="borderless"
+          className="min-w-0 flex-1 text-[15px] font-semibold"
+        />
+        <Button
+          type='text'
+          icon={<Save className='size-4' />}
+          onClick={() => void saveCurrentRef.current()}
+          loading={saving}
+        />
+      </div>
+
+      {/* Monaco 编辑器主体 */}
+      <div className="min-h-0 flex-1">
+        <MonacoEditor
+          value={content}
+          onChange={(v) => {
+            setContent(v)
+            markDirty(noteId)
+          }}
+          language={language}
+          onLanguageChange={(lang) => {
+            setLanguage(lang)
+            markDirty(noteId)
+          }}
+          showLanguageSelector
+          showLineNumbersToggle
+          showWordWrapToggle
+        />
+      </div>
+    </div>
+  )
+}

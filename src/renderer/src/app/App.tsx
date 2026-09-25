@@ -1,0 +1,118 @@
+import { editorSaveKey, useAppStore } from '@/stores/app-store'
+import { TitleBar } from '@/app/layout/TitleBar'
+import { Sidebar } from '@/app/layout/Sidebar'
+import { ActivityBar } from '@/app/layout/ActivityBar'
+import { useActiveActivity } from '@/app/activities'
+import { MonitorBadge } from '@/shared/components/MonitorBadge'
+import { EditorSaveStatus } from '@/shared/components/EditorSaveStatus'
+import { AiStatusButton } from '@/features/agent/AiStatusButton'
+import { TransferTray } from '@/app/layout/TransferTray'
+import { SshProfileDialog } from '@/features/hosts/SshProfileDialog'
+import { SettingsDialog } from '@/features/settings/SettingsDialog'
+import { CommandPalette } from '@/app/layout/CommandPalette'
+import { RunScriptDialog } from '@/features/scripts/RunScriptDialog'
+import { PanelView } from '@/app/layout/PanelView'
+import { TabCloseConfirm } from '@/app/layout/TabCloseConfirm'
+import { StatusBar } from '@/app/layout/StatusBar'
+import { ResizeHandle } from '@/shared/components/ResizeHandle'
+import { AntdProvider } from '@/shared/components/AntdProvider'
+import { DndProvider } from 'react-dnd'
+import { HTML5Backend } from 'react-dnd-html5-backend'
+
+export default function App() {
+  const activeSessionId = useAppStore((s) => s.activeSessionId)
+  const sidebarWidth = useAppStore((s) => s.ui.sidebarWidth)
+  const setSidebarWidth = useAppStore((s) => s.setSidebarWidth)
+  /** 当前激活标签是否为终端：决定状态栏是否显示该会话的监控指标 */
+  const isTerminalActive = useAppStore((s) => {
+    const gid = s.activeGroupId
+    const activeTabId = gid ? s.groups[gid]?.activeTabId : null
+    const tab = activeTabId ? s.ui.panelTabs.find((t) => t.id === activeTabId) : undefined
+    return tab?.type === 'terminal'
+  })
+  /**
+   * 当前激活标签若是可编辑页（脚本 / 笔记 / 接口请求），返回其保存状态的键：
+   * 决定状态栏是否显示该页的保存状态。
+   *
+   * 这里必须返回**字符串**而不是对象：zustand 用 Object.is 比较快照，
+   * 每次返回新对象会被判定为「一直在变」而无限重渲染。
+   */
+  const activeEditorKey = useAppStore((s) => {
+    const gid = s.activeGroupId
+    const activeTabId = gid ? s.groups[gid]?.activeTabId : null
+    const tab = activeTabId ? s.ui.panelTabs.find((t) => t.id === activeTabId) : undefined
+    if (tab?.type === 'script' && tab.scriptId) return editorSaveKey('script', tab.scriptId)
+    if (tab?.type === 'note' && tab.noteId) return editorSaveKey('note', tab.noteId)
+    // WebSocket 与 HTTP 请求共用一张表，但状态栏提示语不同，所以键前缀分开（见 editorSaveKey）
+    if (tab?.type === 'api' && tab.apiRequestId)
+      return editorSaveKey(tab.apiProtocol === 'ws' ? 'ws' : 'api', tab.apiRequestId)
+    return null
+  })
+  const { sidebarVisible } = useActiveActivity()
+
+  return (
+    <AntdProvider>
+      {/* 单一 DndProvider：HostsPanel 与 PanelView 的拖拽共享同一 backend（react-dnd 禁止两个 HTML5 backend） */}
+      <DndProvider backend={HTML5Backend}>
+        {/* overflow-clip（而非 hidden）：clip 不构成滚动容器，Chrome 无法因焦点元素
+            （如终端输入法组合期间被拉宽的 textarea）越界而对应用根节点做横向 scrollIntoView，
+            杜绝「整个页面被推左」 */}
+        <div className="flex h-screen w-screen flex-col overflow-clip bg-background text-foreground">
+        <TitleBar />
+        <div className="flex min-h-0 flex-1">
+          {/* 活动栏常驻（不随侧边栏折叠消失），用于切换左侧功能区 */}
+          <ActivityBar />
+          {/* 侧边栏可折叠：外层容器宽度切换（内部保持固定宽度不回流，
+              折叠时拖拽条隐藏，展开入口在标题栏） */}
+          <div
+            className="shrink-0 overflow-hidden"
+            style={{ width: sidebarVisible ? sidebarWidth : 0 }}
+          >
+            <Sidebar />
+          </div>
+          {sidebarVisible && (
+            <ResizeHandle
+              width={sidebarWidth}
+              min={180}
+              max={480}
+              onResize={setSidebarWidth}
+            />
+          )}
+
+          <main className="relative flex min-w-0 flex-1 flex-col bg-sidebar px-2">
+            {/* 主区域恒为 PanelView：AI Agent 会话也是其中一种标签。
+                切到某个功能区**不会**自动打开它的标签（与笔记一致）：
+                只有点侧边栏里的具体条目（会话 / 笔记）才会把对应标签带到前台。 */}
+            <PanelView />
+          </main>
+        </div>
+
+        {/*
+          底部功能条（类 VS Code 状态栏），整宽。
+          左侧：只有常驻的全局菜单。
+          右侧（按此顺序）：编辑页保存状态 → 系统监控 → AI 助手开关 → 传输任务。
+          监控条放在 AI 助手入口左侧（终端标签激活时才出现）；
+          AiStatusButton 自己判断「当前激活标签是终端」才渲染，操作的是该终端页面自己的开关状态；
+          保存状态同理只在激活标签是脚本 / 笔记时出现 —— 它与监控互斥，不会同时占位。
+        */}
+        <StatusBar
+          right={
+            <>
+              {activeEditorKey && <EditorSaveStatus statusKey={activeEditorKey} />}
+              {isTerminalActive && <MonitorBadge sessionId={activeSessionId} />}
+              <AiStatusButton />
+              <TransferTray />
+            </>
+          }
+        />
+
+        <SshProfileDialog />
+        <SettingsDialog />
+        <CommandPalette />
+        <RunScriptDialog />
+        <TabCloseConfirm />
+        </div>
+      </DndProvider>
+    </AntdProvider>
+  )
+}

@@ -1,0 +1,168 @@
+import { useAppStore } from '@/stores/app-store'
+import { Button, Modal, Select, message } from 'antd'
+import { Plus } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+
+/** 保留当前选择；失效时用偏好值，再不行回退首项 */
+function pickId(current: string, ids: string[], preferred?: string): string {
+  if (current && ids.includes(current)) return current
+  if (preferred && ids.includes(preferred)) return preferred
+  return ids[0] ?? ''
+}
+
+/**
+ * 运行脚本对话框（全局单例，由 ui.runScriptDialog 驱动）：
+ * 选择脚本 + 选择主机，确认后连接该主机并在其上执行脚本
+ * （脚本以终端输入的方式写入，执行过程在终端里可见）。
+ */
+export function RunScriptDialog() {
+  const { open, scriptId } = useAppStore((s) => s.ui.runScriptDialog)
+  const setRunScriptDialog = useAppStore((s) => s.setRunScriptDialog)
+  const scripts = useAppStore((s) => s.scripts)
+  const profiles = useAppStore((s) => s.profiles)
+  const runScriptOnHost = useAppStore((s) => s.runScriptOnHost)
+  const setSshDialog = useAppStore((s) => s.setSshDialog)
+
+  /** 带预设脚本进入（列表/命令面板点运行）：锁定该脚本并隐藏脚本选择 */
+  const hasPreset = Boolean(scriptId)
+
+  const onOpenChange = (next: boolean): void => setRunScriptDialog(next, next ? scriptId : undefined)
+
+  const [selectedScript, setSelectedScript] = useState('')
+  const [selectedProfile, setSelectedProfile] = useState('')
+  const [running, setRunning] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  /** 预设脚本每次打开只应用一次，之后用户可自由改选 */
+  const presetApplied = useRef(false)
+
+  /** 预设时直接用 scriptId，否则用下拉选择的脚本 */
+  const effectiveScriptId = hasPreset ? scriptId : selectedScript
+
+  useEffect(() => {
+    if (!open) {
+      presetApplied.current = false
+      return
+    }
+    // 带预设脚本进入时锁定该脚本，不再做下拉预选
+    if (!hasPreset) {
+      const preferred = presetApplied.current ? undefined : scriptId
+      presetApplied.current = true
+      setSelectedScript((cur) => pickId(cur, scripts.map((s) => s.id), preferred))
+    }
+    setError(null)
+    setSelectedProfile((cur) => pickId(cur, profiles.map((p) => p.id)))
+  }, [open, scriptId, hasPreset, scripts, profiles])
+
+  const script = scripts.find((s) => s.id === effectiveScriptId)
+  const profile = profiles.find((p) => p.id === selectedProfile)
+  const canRun = Boolean(script && profile) && !running
+
+  const handleRun = async () => {
+    if (!script || !profile) return
+    setRunning(true)
+    setError(null)
+    try {
+      const ok = await runScriptOnHost(profile, script)
+      if (!ok) {
+        setError('连接超时或主机未就绪，脚本未执行。')
+        message.error('脚本未执行：连接超时或主机未就绪')
+        return
+      }
+      setRunScriptDialog(false)
+      message.success(`已在「${profile.name}」执行「${script.name}」`)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(msg)
+      message.error(`运行失败：${msg}`)
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <Modal
+      open={open}
+      onCancel={() => onOpenChange(false)}
+      title="运行脚本"
+      centered
+      width={480}
+      destroyOnHidden
+      okText="连接并运行"
+      cancelText="取消"
+      onOk={() => void handleRun()}
+      confirmLoading={running}
+      okButtonProps={{ disabled: !canRun }}
+      cancelButtonProps={{ disabled: running }}
+    >
+      <div className="grid gap-3 py-1">
+        {hasPreset ? (
+          <div className="grid gap-1.5">
+            <span className="text-xs font-medium text-foreground">脚本</span>
+            <div className="rounded-md border border-border/60 bg-secondary/40 px-3 py-1.5 text-sm text-foreground">
+              {script ? script.name : '（脚本不存在）'}
+            </div>
+          </div>
+        ) : (
+          <div className="grid gap-1.5">
+            <span className="text-xs font-medium text-foreground">脚本</span>
+            {scripts.length === 0 ? (
+              <p className="text-xs text-muted-foreground">还没有脚本，请先在脚本管理页新增。</p>
+            ) : (
+              <Select
+                value={selectedScript}
+                onChange={setSelectedScript}
+                placeholder="选择脚本"
+                style={{ width: '100%' }}
+                options={scripts.map((s) => ({ value: s.id, label: s.name }))}
+              />
+            )}
+          </div>
+        )}
+
+        <div className="grid gap-1.5">
+          <span className="text-xs font-medium text-foreground">主机</span>
+          {profiles.length === 0 ? (
+            <div className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
+              还没有主机，请先添加主机。
+              <div className="mt-2">
+                <Button
+                  icon={<Plus className="size-4" />}
+                  variant="filled"
+                  size="small"
+                  onClick={() => {
+                    onOpenChange(false)
+                    setSshDialog(true, null)
+                  }}
+                >
+                  添加主机
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <Select
+              value={selectedProfile}
+              onChange={setSelectedProfile}
+              placeholder="选择主机"
+              style={{ width: '100%' }}
+              options={profiles.map((p) => ({
+                value: p.id,
+                label: `${p.name}（${p.username}@${p.host}:${p.port}）`
+              }))}
+            />
+          )}
+        </div>
+
+        {script && (
+          <div className="grid gap-1.5">
+            <span className="text-xs font-medium text-foreground">将执行</span>
+            <pre className="no-scrollbar max-h-32 overflow-auto rounded-md border border-border/60 bg-secondary/40 p-2 font-mono text-xs whitespace-pre-wrap text-muted-foreground select-text">
+              {script.content}
+            </pre>
+          </div>
+        )}
+
+        {error && <p className="text-xs text-destructive">{error}</p>}
+      </div>
+    </Modal>
+  )
+}

@@ -1,0 +1,12 @@
+**/node_modules
+out
+.vscode
+build/config.gypi
+release
+.merkle-snapshot.json
+# 由 scripts/copy-monaco.cjs 生成的 Monaco 资源
+src/renderer/public/monaco-editor
+.workbuddy-ai
+# 临时验证产物（resolve-model 单文件打包 / 导出的明文配置），用完即弃
+.tooltest
+.workbuddy
