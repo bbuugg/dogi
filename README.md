@@ -143,3 +143,7 @@ npm run dist:win     # 打包（另有 dist / dist:mac / dist:linux / pack）
 | DeepSeek | 留空 | `deepseek-chat` | |
 | Google | 留空 | `gemini-2.5-pro` | |
 | OpenAI 兼容 | `http://localhost:11434/v1`（Ollama） | 服务端模型 ID | 默认 chat-completions，思考字段自动归一化 |
+
+# 写在最后
+
+感谢[linux.do](linux.do)论坛支持。
