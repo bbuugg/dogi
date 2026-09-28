@@ -42,7 +42,7 @@ export interface SidePanelTab {
  *
  * ⚠️ `MIN_CONVERSATION_WIDTH` 同时是**面板拖拽的上限**（`maxWidth = 容器 - 它`）——
  * 它只用来兜住「别把对话区挤没」，所以调小它 = 面板能拖得更宽、对话区能被压得更窄。
- * 320 是「气泡还能正常折行」的实用下限，别再无脑往下调。
+ * 340 是「气泡还能正常折行」的实用下限，别再无脑往下调。
  */
 const SIDE_PANEL_RATIO = 0.4
 const SIDE_PANEL_MIN_WIDTH = 340

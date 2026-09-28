@@ -333,7 +333,7 @@ function MessageBubbleImpl({
   }
 
   return (
-    <div data-message-id={message.id} className="group/msg space-y-3">
+    <div data-message-id={message.id} className="group/msg space-y-5">
       {foldedUnits && (
         <TurnFold summary={turnStepSummary(foldedUnits)}>
           {foldedUnits.map((unit, k) => renderUnit(unit, k))}
@@ -1439,7 +1439,7 @@ export function AgentPage({
                   ) : null
                 }
                 renderItem={(m, index) => (
-                  <div className="mx-auto w-full max-w-3xl px-5 pb-4">
+                  <div className="mx-auto w-full max-w-3xl px-5">
                     <MessageBubble
                       conversationId={conversationId}
                       message={m}
@@ -1464,8 +1464,8 @@ export function AgentPage({
           {/* 底部大输入框：外层外壳是唯一的边框（内层输入区无边框，避免双重 border）；
           左下角是命令执行权限，右下角是模型选择与发送/停止（模型紧贴发送按钮左侧） */}
           {active && (
-            <div className="shrink-0 px-5 py-4">
-              <div className="mx-auto w-full max-w-3xl">
+            <div className="mx-auto w-full max-w-3xl shrink-0 px-5 py-4">
+              <div>
                 {/* 编辑态提示条：说清「发送会连带删掉后面的消息」，也给了退路（Esc / 叉） */}
                 {editing && (
                   <div className="mb-1.5 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-xs text-amber-600 dark:text-amber-400">

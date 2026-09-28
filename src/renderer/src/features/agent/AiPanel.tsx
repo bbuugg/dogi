@@ -290,7 +290,7 @@ function MessageBubbleImpl({
   }
 
   return (
-    <div className="group/msg space-y-3">
+    <div className="group/msg space-y-5">
       {foldedUnits && (
         <TurnFold summary={turnStepSummary(foldedUnits)}>
           {foldedUnits.map((unit, k) => renderUnit(unit, k))}
