@@ -92,7 +92,7 @@ export function TerminalSettings() {
 
       <div className="flex items-start justify-between gap-4 rounded-md">
         <div>
-          <label htmlFor="copy-on-select" className="text-xs font-medium text-foreground">
+          <label htmlFor="copy-on-select" className="text-sm font-medium text-foreground">
             选中文本即复制
           </label>
           <p className="mt-1 text-xs leading-4 text-muted-foreground">
@@ -108,7 +108,7 @@ export function TerminalSettings() {
 
       <div className="flex items-start justify-between gap-4 rounded-md">
         <div>
-          <label htmlFor="right-click-paste" className="text-xs font-medium text-foreground">
+          <label htmlFor="right-click-paste" className="text-sm font-medium text-foreground">
             右键粘贴
           </label>
           <p className="mt-1 text-xs leading-4 text-muted-foreground">
@@ -124,7 +124,7 @@ export function TerminalSettings() {
 
       <div className="flex items-start justify-between gap-4 rounded-md">
         <div>
-          <label htmlFor="command-prediction" className="text-xs font-medium text-foreground">
+          <label htmlFor="command-prediction" className="text-sm font-medium text-foreground">
             命令预测补全
           </label>
           <p className="mt-1 text-xs leading-4 text-muted-foreground">

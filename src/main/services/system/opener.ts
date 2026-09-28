@@ -1,8 +1,9 @@
 // 系统打开服务：文件管理器 / 终端 / 已安装 IDE 的跨平台启动。
 // 平台差异集中在此：Windows 用 explorer/Windows Terminal，macOS 用 open/AppleScript，
 // Linux 用 xdg-open 与常见终端模拟器。
+import { shell } from 'electron'
 import { spawn } from 'node:child_process'
-import { accessSync } from 'node:fs'
+import { accessSync, statSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
 import type { IdeInfo, OpenResult } from '@shared/types'
 
@@ -65,6 +66,25 @@ export function openFileManagerAt(dir: string): OpenResult {
   if (platform === 'darwin') return launch('open', [dir])
   if (platform === 'linux') return launch('xdg-open', [dir])
   return launch('explorer', [dir])
+}
+
+/**
+ * 「打开文件位置」：目录 → 直接在文件管理器里打开该目录（看内容）；
+ * 文件 → 打开所在目录并选中该文件（Electron 的 showItemInFolder，跨平台）。
+ * 文件路径不存在时按错误返回（不当作目录处理）。
+ */
+export function revealPath(p: string): OpenResult {
+  try {
+    if (statSync(p).isDirectory()) return openFileManagerAt(p)
+  } catch {
+    return { ok: false, error: `路径不存在：${p}` }
+  }
+  try {
+    shell.showItemInFolder(p)
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
 }
 
 // ---------- 终端 ----------

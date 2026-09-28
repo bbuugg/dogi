@@ -7,6 +7,7 @@ import {
   File as FileIcon,
   Folder,
   FolderPlus,
+  FolderUp,
   Pencil,
   RefreshCw,
   Trash2,
@@ -38,7 +39,8 @@ function formatTime(ts: number): string {
  *
  * 一个标签 = 一个到主机的 SFTP 连接（connId 页面生成，卸载时关闭）；
  * 凭据复用主机配置（主进程按 profileId 解密），渲染端不接触密码。
- * 支持进入目录 / 返回上级 / 跳转路径 / 刷新 / 新建文件夹 / 上传（多选并发）/
+ * 支持进入目录 / 返回上级 / 跳转路径 / 刷新 / 新建文件夹 / 上传文件（多选并发）/
+ * 上传文件夹（递归，目录内每个文件一笔）/
  * 下载（文件 / 整个文件夹）/ 复制 / 移动（跨目录）/ 重命名 / 删除（目录递归）。
  * 所有传输进度汇聚到全局 store（见 TransferTray），在状态栏右下角统一展示。
  */
@@ -265,6 +267,23 @@ export function SftpPage({ profileId }: { profileId: string }) {
     })()
   }
 
+  /** 上传整个本地文件夹到当前远端子目录（同名目录合并；目录内每个文件各一笔传输） */
+  const uploadDir = (): void => {
+    void (async () => {
+      try {
+        const result = await window.api.sftp.uploadDir(connId, path)
+        if (result.ok) {
+          message.success('文件夹上传完成')
+          void load(path)
+        } else if (!result.canceled) {
+          message.error('上传失败：' + (result.error ?? ''))
+        }
+      } catch (e) {
+        message.error('上传失败：' + (e instanceof Error ? e.message : String(e)))
+      }
+    })()
+  }
+
   const rowMenu = (entry: SftpEntry): MenuProps => ({
     items: [
       ...(entry.isDir
@@ -335,14 +354,24 @@ export function SftpPage({ profileId }: { profileId: string }) {
             setMkdirOpen(true)
           }}
         />
-        <Button
-          className="shrink-0 gap-1.5"
-          icon={<Upload className="size-3.5" />}
-          disabled={connecting || Boolean(error)}
-          onClick={upload}
+        <Dropdown
+          trigger={['click']}
+          menu={{
+            items: [
+              { key: 'files', icon: <Upload className="size-3.5" />, label: '上传文件…' },
+              { key: 'dir', icon: <FolderUp className="size-3.5" />, label: '上传文件夹…' }
+            ],
+            onClick: ({ key }) => (key === 'files' ? upload() : uploadDir())
+          }}
         >
-          上传
-        </Button>
+          <Button
+            className="shrink-0 gap-1.5"
+            icon={<Upload className="size-3.5" />}
+            disabled={connecting || Boolean(error)}
+          >
+            上传
+          </Button>
+        </Dropdown>
       </div>
 
       {/* 文件列表 */}

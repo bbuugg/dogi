@@ -13,5 +13,6 @@
 export const HOSTS_ACTIVITY_ID = 'hosts'
 export const NOTES_ACTIVITY_ID = 'notes'
 export const API_ACTIVITY_ID = 'api'
+export const AUTOMATION_ACTIVITY_ID = 'automation'
 export const PLUGINS_ACTIVITY_ID = 'plugins'
 export const AGENT_ACTIVITY_ID = 'agent'

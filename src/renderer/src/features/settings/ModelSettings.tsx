@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { CloudDownload, Pencil, Plus, Star, Trash2 } from 'lucide-react'
+import { CloudDownload, Pencil, Plus, Trash2, X } from 'lucide-react'
 import type { AiApiStyle, AiModelConfig, AiProviderKind } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import { Button, Input, Modal, Popconfirm, Select, Tag } from 'antd'
@@ -85,7 +85,6 @@ export function ModelSettings() {
   const activeConfigId = useAppStore((s) => s.aiSettings.activeConfigId)
   const refreshAiConfigs = useAppStore((s) => s.refreshAiConfigs)
   const refreshAiSettings = useAppStore((s) => s.refreshAiSettings)
-  const setActiveAiConfig = useAppStore((s) => s.setActiveAiConfig)
 
   const [editing, setEditing] = useState<FormState | null>(null)
   const [saving, setSaving] = useState(false)
@@ -93,6 +92,14 @@ export function ModelSettings() {
   const [fetching, setFetching] = useState(false)
   /** 远程拉取到的模型 id 列表；null = 尚未拉取 */
   const [remoteModels, setRemoteModels] = useState<string[] | null>(null)
+  /** 列表行「拉取模型」弹窗状态 */
+  const [picker, setPicker] = useState<{
+    config: AiModelConfig
+    remote: string[] | null
+    selected: string[]
+    loading: boolean
+    error: string | null
+  } | null>(null)
 
   const patch = (partial: Partial<FormState>) =>
     setEditing((f) => (f ? { ...f, ...partial } : f))
@@ -145,8 +152,8 @@ export function ModelSettings() {
   const handleSave = async () => {
     if (!editing) return
     const models = editing.models.map((m) => m.trim()).filter(Boolean)
-    if (!editing.name.trim() || models.length === 0) {
-      setError('请填写配置名称，并至少添加一个模型 ID')
+    if (!editing.name.trim()) {
+      setError('请填写配置名称')
       return
     }
     setSaving(true)
@@ -186,6 +193,79 @@ export function ModelSettings() {
     await refreshAiSettings()
   }
 
+  /** 从列表直接移除某配置里的单个模型（二次确认在 UI 的 Popconfirm 里） */
+  const removeModel = async (config: AiModelConfig, model: string) => {
+    const source = config.models?.length ? config.models : config.model ? [config.model] : []
+    const rest = source.filter((m) => m !== model)
+    await window.api.ai.saveConfig({
+      ...config,
+      apiKey: undefined,
+      models: rest,
+      // 删空后把遗留的 model 字段一并清空，否则它会被列表当作仍有模型而重新显示
+      model: rest[0] ?? undefined
+    })
+    await refreshAiConfigs()
+  }
+
+  /** 列表行「拉取模型」：打开弹窗并按该配置拉取远程模型 */
+  const openPicker = async (config: AiModelConfig) => {
+    const baseURL =
+      config.baseURL?.trim() || (config.kind === 'openai' ? 'https://api.openai.com/v1' : '')
+    const initial = config.models?.length ? config.models : config.model ? [config.model] : []
+    setPicker({ config, remote: null, selected: [...initial], loading: false, error: null })
+    if (!baseURL) {
+      setPicker((p) => (p ? { ...p, error: '该配置未填写 Base URL，无法拉取远程模型' } : p))
+      return
+    }
+    if (!hasApiStyleChoice(config.kind)) {
+      setPicker((p) =>
+        p
+          ? {
+              ...p,
+              error: '远程拉取仅支持 OpenAI 兼容接口（OpenAI / OpenAI 兼容），其余服务商请手动输入模型 ID。'
+            }
+          : p
+      )
+      return
+    }
+    setPicker((p) => (p ? { ...p, loading: true, error: null } : p))
+    try {
+      const models = await window.api.ai.listRemoteModels({ baseURL, configId: config.id })
+      setPicker((p) => (p ? { ...p, remote: models, loading: false } : p))
+    } catch (err) {
+      setPicker((p) =>
+        p
+          ? {
+              ...p,
+              remote: [],
+              loading: false,
+              error: `拉取失败：${err instanceof Error ? err.message : String(err)}`
+            }
+          : p
+      )
+    }
+  }
+
+  const togglePickerModel = (m: string, checked: boolean) =>
+    setPicker((p) => {
+      if (!p) return p
+      const selected = checked ? [...p.selected, m] : p.selected.filter((x) => x !== m)
+      return { ...p, selected }
+    })
+
+  const confirmPicker = async () => {
+    if (!picker) return
+    const merged = Array.from(new Set([...(picker.config.models ?? []), ...picker.selected]))
+    await window.api.ai.saveConfig({
+      ...picker.config,
+      apiKey: undefined,
+      models: merged,
+      model: merged[0] ?? picker.config.model
+    })
+    await refreshAiConfigs()
+    setPicker(null)
+  }
+
   return (
     <>
       <div className="space-y-2">
@@ -217,25 +297,38 @@ export function ModelSettings() {
                 )}
               </div>
               <div className="truncate text-[10px] text-muted-foreground">
-                {KIND_LABELS[config.kind]} ·{' '}
-                {(config.models?.length ? config.models : [config.model]).join('、')}
+                {KIND_LABELS[config.kind]}
                 {hasApiStyleChoice(config.kind)
                   ? ` · ${API_STYLE_LABELS[config.apiStyle ?? API_STYLE_DEFAULT[config.kind] ?? 'responses'].split('（')[0]}`
                   : ''}
                 {config.baseURL ? ` · ${config.baseURL}` : ''}
                 {config.hasApiKey ? '' : ' · 未配置 Key'}
               </div>
+              {(config.models?.length ? config.models! : config.model ? [config.model] : [])
+                .filter(Boolean)
+                .length > 0 && (
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {(config.models?.length ? config.models! : [config.model!])
+                    .filter(Boolean)
+                    .map((m) => (
+                    <Popconfirm
+                      key={m}
+                      title="移除模型"
+                      description={`确定从「${config.name}」移除模型「${m}」吗？`}
+                      okText="移除"
+                      cancelText="取消"
+                      okButtonProps={{ danger: true }}
+                      onConfirm={() => void removeModel(config, m)}
+                    >
+                      <Tag className="m-0 cursor-pointer font-mono text-[10px]">
+                        {m}
+                        <X className="ml-0.5 inline-block size-2.5 align-middle" />
+                      </Tag>
+                    </Popconfirm>
+                  ))}
+                </div>
+              )}
             </div>
-            {config.id !== activeConfigId && (
-              <Button
-                icon={<Star className="size-3.5" />}
-                size="small"
-                type="text"
-                className="w-7 p-0"
-                title="设为默认模型（新会话的初始模型）"
-                onClick={() => void setActiveAiConfig(config.id)}
-              />
-            )}
             <Button
               icon={<Pencil className="size-3.5" />}
               size="small"
@@ -243,6 +336,14 @@ export function ModelSettings() {
               className="w-7 p-0"
               title="编辑"
               onClick={() => openEdit(config)}
+            />
+            <Button
+              icon={<CloudDownload className="size-3.5" />}
+              size="small"
+              type="text"
+              className="w-7 p-0"
+              title="拉取模型"
+              onClick={() => void openPicker(config)}
             />
             <Popconfirm
               title="删除模型配置"
@@ -412,6 +513,56 @@ export function ModelSettings() {
               </div>
             </div>
             {error && <p className="text-xs text-destructive">{error}</p>}
+          </div>
+        )}
+      </Modal>
+
+      <Modal
+        title={picker ? `拉取模型 · ${picker.config.name}` : '拉取模型'}
+        open={picker !== null}
+        onCancel={() => setPicker(null)}
+        onOk={() => void confirmPicker()}
+        okText="添加到配置"
+        cancelText="取消"
+        okButtonProps={{
+          disabled: !!picker?.loading || !picker?.remote || (picker?.remote.length ?? 0) === 0
+        }}
+        width={480}
+        destroyOnHidden
+        centered
+      >
+        {picker && (
+          <div className="space-y-3 pt-1">
+            {picker.loading && <p className="text-xs text-muted-foreground">正在拉取模型列表…</p>}
+            {picker.error && <p className="text-xs text-destructive">{picker.error}</p>}
+            {picker.remote && picker.remote.length === 0 && !picker.loading && !picker.error && (
+              <p className="text-xs text-muted-foreground">该接口未返回任何模型</p>
+            )}
+            {picker.remote && picker.remote.length > 0 && (
+              <div className="max-h-80 space-y-1.5 overflow-auto">
+                {picker.remote.map((m) => {
+                  const checked = picker.selected.includes(m)
+                  return (
+                    <label
+                      key={m}
+                      className="flex cursor-pointer items-center gap-2 rounded-md border border-border px-3 py-2 text-xs"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => togglePickerModel(m, e.target.checked)}
+                      />
+                      <span className="font-mono">{m}</span>
+                    </label>
+                  )
+                })}
+              </div>
+            )}
+            {picker.selected.length > 0 && (
+              <p className="text-[10px] text-muted-foreground">
+                已选 {picker.selected.length} 个，确认后将追加到「{picker.config.name}」（已存在的不会重复）。
+              </p>
+            )}
           </div>
         )}
       </Modal>

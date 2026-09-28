@@ -7,6 +7,7 @@ import {
   Globe,
   ListPlus,
   Plug,
+  ScrollText,
   Search,
   Server,
   Settings,
@@ -15,7 +16,7 @@ import {
   TerminalSquare
 } from 'lucide-react'
 import { cn } from 'cn'
-import { Button, Input, Modal, type InputRef } from 'antd'
+import { Button, Input, Modal, message, type InputRef } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import { scriptToTerminalInput } from '@/features/scripts/script'
 import { formatShortcutForPlatform } from '@shared/shortcuts'
@@ -77,6 +78,7 @@ export function CommandPalette() {
   const selectActivity = useAppStore((s) => s.selectActivity)
   const openScriptsSection = useAppStore((s) => s.openScriptsSection)
   const openNewApiDraft = useAppStore((s) => s.openNewApiDraft)
+  const openLogsTab = useAppStore((s) => s.openLogsTab)
   /** 插件列表（含启用状态）与已加载的插件视图实例（只有启用且加载成功的插件才有视图） */
   const pluginList = useAppStore((s) => s.pluginList)
   const plugins = useAppStore((s) => s.plugins)
@@ -263,6 +265,18 @@ export function CommandPalette() {
       }
     },
     {
+      id: 'logs.open',
+      group: '界面',
+      title: '主机日志',
+      description: 'SSH 连接 / 隧道 / SFTP 的最近事件记录',
+      keywords: 'log logs ssh tunnel sftp 日志 记录 主机',
+      icon: ScrollText,
+      run: () => {
+        close()
+        openLogsTab()
+      }
+    },
+    {
       id: 'settings.open',
       group: '界面',
       title: '打开设置',
@@ -329,7 +343,10 @@ export function CommandPalette() {
     icon: p.kind === 'local' ? TerminalSquare : Server,
     run: () => {
       close()
-      void connectHost(p)
+      // 连接前置检查失败（如 Mosh 缺本地 mosh-client）会同步报错，这里给用户提示
+      void connectHost(p).catch((e) => {
+        message.error(`连接失败：${e instanceof Error ? e.message : String(e)}`)
+      })
     }
   }))
 

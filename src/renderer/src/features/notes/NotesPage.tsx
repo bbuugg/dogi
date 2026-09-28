@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { FileText, Save } from 'lucide-react'
-import MonacoEditor from '@/shared/components/MonacoEditor'
+import { VditorEditor } from '@/features/notes/VditorEditor'
 import { Button, Input, message } from 'antd'
 import { editorSaveKey, useAppStore } from '@/stores/app-store'
 
@@ -8,8 +8,8 @@ import { editorSaveKey, useAppStore } from '@/stores/app-store'
 const AUTOSAVE_DELAY = 800
 
 /**
- * 笔记编辑页（主区域）：标题 + 语言选择 + Monaco 正文。
- * 通过 noteId prop 指定要编辑的笔记；正文/标题/语言改动后防抖自动保存，
+ * 笔记编辑页（主区域）：标题 + Vditor 正文（Markdown 即时渲染）。
+ * 通过 noteId prop 指定要编辑的笔记；正文/标题改动后防抖自动保存，
  * 也可手动 Ctrl+S（或点保存按钮）立即落盘，侧边栏列表随之刷新。
  */
 export function NotesPage({ noteId }: { noteId: string }) {
@@ -23,13 +23,12 @@ export function NotesPage({ noteId }: { noteId: string }) {
   // 本地草稿（编辑器是受控组件）：随选中笔记重置
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
-  const [language, setLanguage] = useState('markdown')
   const [saving, setSaving] = useState(false)
   const [dirty, setDirty] = useState(false)
 
   // 每次渲染同步最新草稿，供防抖定时器 / 快捷键读取最新值
-  const draftRef = useRef({ title, content, language })
-  draftRef.current = { title, content, language }
+  const draftRef = useRef({ title, content })
+  draftRef.current = { title, content }
   const idRef = useRef<string | null>(noteId)
   idRef.current = noteId
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -37,7 +36,7 @@ export function NotesPage({ noteId }: { noteId: string }) {
   const pendingIdRef = useRef<string | null>(null)
 
   /** 把指定 id 笔记的「当前草稿」落盘（草稿与 id 由调用方在合适的时机传入） */
-  const doSave = async (id: string | null, d: { title: string; content: string; language: string }): Promise<void> => {
+  const doSave = async (id: string | null, d: { title: string; content: string }): Promise<void> => {
     if (!id) return
     setSaving(true)
     try {
@@ -45,7 +44,8 @@ export function NotesPage({ noteId }: { noteId: string }) {
         id,
         title: d.title.trim() || '未命名笔记',
         content: d.content,
-        language: d.language || 'markdown',
+        // 正文一律 Markdown（Vditor 只吃 Markdown），旧笔记的其它语言在首次保存时归位
+        language: 'markdown',
         createdAt: 0,
         updatedAt: 0
       })
@@ -87,7 +87,6 @@ export function NotesPage({ noteId }: { noteId: string }) {
     }
     setTitle(activeNote?.title ?? '')
     setContent(activeNote?.content ?? '')
-    setLanguage(activeNote?.language ?? 'markdown')
     setDirty(false)
   }, [noteId]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -158,22 +157,14 @@ export function NotesPage({ noteId }: { noteId: string }) {
         />
       </div>
 
-      {/* Monaco 编辑器主体 */}
+      {/* Vditor 主体：内部自理滚动，外层只负责给出确定高度 */}
       <div className="min-h-0 flex-1">
-        <MonacoEditor
+        <VditorEditor
           value={content}
           onChange={(v) => {
             setContent(v)
             markDirty(noteId)
           }}
-          language={language}
-          onLanguageChange={(lang) => {
-            setLanguage(lang)
-            markDirty(noteId)
-          }}
-          showLanguageSelector
-          showLineNumbersToggle
-          showWordWrapToggle
         />
       </div>
     </div>

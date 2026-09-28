@@ -1,0 +1,11 @@
+{
+  "id": "port-killer",
+  "name": "端口占用",
+  "version": "0.0.1",
+  "description": "按端口查找占用进程并强制结束（Windows / Linux / macOS）；无权限时给出可在管理员终端执行的命令",
+  "author": "Dogi",
+  "icon": "🔌",
+  "renderer": "renderer.js",
+  "main": "main.js",
+  "permissions": ["storage"]
+}

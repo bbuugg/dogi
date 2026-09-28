@@ -18,9 +18,12 @@ import {
   FileText,
   FolderOpen,
   Globe,
+  Network,
   Plus,
   Puzzle,
+  ScrollText,
   TerminalSquare,
+  Workflow,
   X
 } from 'lucide-react'
 import { cn } from 'cn'
@@ -33,12 +36,16 @@ import { ApiPage } from '@/features/api/ApiPage'
 import { WsPage } from '@/features/api/WsPage'
 import { ScriptsPage } from '@/features/scripts/ScriptsPage'
 import { NotesPage } from '@/features/notes/NotesPage'
+import { AutomationPage } from '@/features/automation/AutomationPage'
 import { PluginsPage } from '@/features/plugins/PluginsPage'
 import { SftpPage } from '@/features/sftp/SftpPage'
-import { Button, Dropdown } from 'antd'
+import { TunnelsPanel } from '@/features/tunnels/TunnelsPanel'
+import { HostLogsPanel } from '@/features/logs/HostLogsPanel'
+import { Dropdown } from 'antd'
 import { useDrag, useDrop } from 'react-dnd'
 import type { PaneNode, SplitDirection, SplitDirectionInput } from '@/app/layout/pane-layout'
-import { resolveSshColor, tintText } from '@/features/hosts/ssh-color'
+import { resolveSshColor } from '@/features/hosts/ssh-color'
+import { tintText } from '@/shared/lib/color'
 
 /** react-dnd 拖拽标签的 item 类型与载荷（带来源组，drop 端据此判断跨组移动） */
 const TAB_DND_TYPE = 'panel-tab'
@@ -96,30 +103,25 @@ function TabIcon({ tab }: { tab: PanelTab }) {
       return <Puzzle className="size-3.5 shrink-0" />
     case 'sftp':
       return <FolderOpen className="size-3.5 shrink-0" />
+    case 'tunnels':
+      return <Network className="size-3.5 shrink-0" />
+    case 'logs':
+      return <ScrollText className="size-3.5 shrink-0" />
     case 'agent':
       return <Bot className="size-3.5 shrink-0" />
+    case 'automation':
+      return <Workflow className="size-3.5 shrink-0" />
   }
 }
 
-/** 空状态：还没有打开任何标签页 */
+/** 空状态：还没有打开任何标签页 —— 简单欢迎页 */
 function EmptyState() {
-  const setSshDialog = useAppStore((s) => s.setSshDialog)
-  const createLocalSession = useAppStore((s) => s.createLocalSession)
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-4 text-muted-foreground">
-      <TerminalSquare className="size-12 opacity-30" />
-      <div className="text-sm">还没有打开任何面板</div>
-      <div className="text-xs">双击左侧主机即可连接，或在下方新建一个本地终端</div>
-      <div className="flex items-center gap-2">
-        <Button
-          type='primary'
-          onClick={() => void createLocalSession()}
-        >
-          新建本地终端
-        </Button>
-        <Button onClick={() => setSshDialog(true, null)}>
-          添加主机
-        </Button>
+    <div className="flex h-full flex-col items-center justify-center gap-3 text-muted-foreground">
+      <TerminalSquare className="size-14 opacity-20" />
+      <div className="text-base font-medium text-foreground/80">欢迎使用</div>
+      <div className="text-xs text-muted-foreground/70">
+        双击左侧主机即可连接，或新建一个本地终端开始
       </div>
     </div>
   )
@@ -433,7 +435,9 @@ function PanelGroupView({ groupId }: { groupId: string }) {
             if (!tab) return null
             const isActive = group.activeTabId === tid
             return (
-              <div key={tid} className={isActive ? 'h-full' : 'hidden'}>
+              // 内容宿主必须是 flex 列：面板根的 flex-1 才有定义高度可言 ——
+              // 否则列表页（日志 / 隧道 / 插件）会长到内容高度，内部 overflow-auto 永远不触发滚动
+              <div key={tid} className={isActive ? 'flex h-full flex-col' : 'hidden'}>
                 <TabContent tab={tab} active={active && isActive} />
               </div>
             )
@@ -736,10 +740,20 @@ function TabContent({ tab, active }: { tab: PanelTab; active: boolean }) {
       return tab.pluginViewId ? <PluginTabContent tab={tab} /> : null
     case 'sftp':
       return tab.sftpProfileId ? <SftpPage profileId={tab.sftpProfileId} /> : null
+    case 'tunnels':
+      return <TunnelsPanel />
+    case 'logs':
+      return <HostLogsPanel />
     case 'agent':
-      // 会话视图完全由 conversationId 驱动，所以一个标签一份实例、互不串台
+      // 会话视图完全由 conversationId 驱动，所以一个标签一份实例、互不串台。
+      // `visible` 给会话页用来「切过来的那一帧先把内容区宽度量准」（见 AgentPage 的 contentWidth）
       return tab.agentConversationId ? (
-        <AgentPage conversationId={tab.agentConversationId} />
+        <AgentPage conversationId={tab.agentConversationId} visible={active} />
+      ) : null
+    case 'automation':
+      // 脚本视图由 scriptId 驱动；浏览器会话 id 就是标签 id（见 AutomationPage）
+      return tab.automationScriptId ? (
+        <AutomationPage scriptId={tab.automationScriptId} />
       ) : null
     default:
       return null

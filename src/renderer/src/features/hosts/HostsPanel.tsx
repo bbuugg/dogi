@@ -2,18 +2,19 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { SshGroup, SshProfile } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import {
-  ChevronDown,
-  ChevronRight,
   ChevronsLeft,
+  Fingerprint,
   FolderOpen,
   FolderPlus,
+  Network,
   Pencil,
   Plus,
   Server,
+  ScrollText,
   TerminalSquare,
   Trash2
 } from 'lucide-react'
-import { useDrag, useDrop } from 'react-dnd'
+import { useDrag } from 'react-dnd'
 import { cn } from 'cn'
 import {
   Button,
@@ -28,14 +29,23 @@ import {
   type MenuProps,
   type TreeDataNode
 } from 'antd'
-import { resolveSshColor, tintText } from '@/features/hosts/ssh-color'
+import { resolveSshColor } from '@/features/hosts/ssh-color'
 import { ScriptsPanel } from '@/features/scripts/ScriptsPanel'
+import { SidebarGroupRow } from '@/shared/components/SidebarGroupRow'
+import {
+  asRef,
+  DropLine,
+  mergeRefs,
+  useRowDrop,
+  type RowDragItem
+} from '@/shared/components/SidebarRowDnd'
 import {
   SectionContent,
   SectionHeader,
   SectionShell,
   StackedSections
 } from '@/shared/components/StackedSections'
+import { tintText } from '@/shared/lib/color'
 import { HOSTS_LIST_SECTION_ID } from '@/app/section-ids'
 
 
@@ -47,11 +57,6 @@ const PROFILE_KEY_PREFIX = 'p:'
 const DND_PROFILE = 'ssh-profile'
 const DND_GROUP = 'ssh-group'
 
-/** 拖拽载荷：两种类型都只需要被拖对象的 id */
-interface DragItem {
-  id: string
-}
-
 /** 列表块：未分组块（group 为空）恒在首位，其余每块是一个分组 */
 interface Block {
   group?: SshGroup
@@ -60,89 +65,6 @@ interface Block {
 
 const groupKey = (id: string): string => GROUP_KEY_PREFIX + id
 const profileKey = (id: string): string => PROFILE_KEY_PREFIX + id
-
-/**
- * react-dnd 的连接器签名是 `(node) => ReactElement | null`，与 React 的 ref 回调
- * （返回 void 或清理函数）不兼容，这里显式转成 ref 回调。
- * 必须配合 useMemo 使用：每次渲染新建 ref 会导致 React 卸载/重挂节点，拖拽中途断链。
- */
-function asRef<T extends HTMLElement>(connect: unknown) {
-  return (node: T | null): void => {
-    ;(connect as (el: T | null) => void)(node)
-  }
-}
-
-/** 同一个节点既要拖拽又要接掉落：合并两个 ref 回调 */
-function mergeRefs<T extends HTMLElement>(
-  a: (node: T | null) => void,
-  b: (node: T | null) => void
-) {
-  return (node: T | null): void => {
-    a(node)
-    b(node)
-  }
-}
-
-/**
- * 行的落点：接受「连接」与「分组」两种拖拽。
- * 用指针落在行的上/下半区判定插入位置（after），行边缘画一条插入指示线。
- */
-function useRowDrop<T extends HTMLElement>(opts: {
-  /** 拖的是连接时固定视为「追加到末尾」（拖到分组标题上 = 放进组尾） */
-  appendWhenProfileDrag?: boolean
-  canDrop?: (item: DragItem, type: string) => boolean
-  drop: (item: DragItem, type: string, after: boolean) => void
-}) {
-  const { appendWhenProfileDrag, canDrop, drop } = opts
-  const nodeRef = useRef<T | null>(null)
-  /** 落点在上半区还是下半区：drop 时读取（不放进 deps，避免拖拽中反复重建 spec） */
-  const afterRef = useRef(false)
-  const [after, setAfter] = useState(false)
-
-  const [{ over }, connectDrop] = useDrop<DragItem, void, { over: boolean }>(
-    () => ({
-      accept: [DND_PROFILE, DND_GROUP],
-      canDrop: (item, monitor) => (canDrop ? canDrop(item, String(monitor.getItemType())) : true),
-      hover: (_item, monitor) => {
-        const node = nodeRef.current
-        const offset = monitor.getClientOffset()
-        if (!node || !offset) return
-        const rect = node.getBoundingClientRect()
-        const next =
-          appendWhenProfileDrag && String(monitor.getItemType()) === DND_PROFILE
-            ? true
-            : offset.y > rect.top + rect.height / 2
-        afterRef.current = next
-        setAfter(next)
-      },
-      drop: (item, monitor) => drop(item, String(monitor.getItemType()), afterRef.current),
-      collect: (m) => ({ over: m.isOver() && m.canDrop() })
-    }),
-    [appendWhenProfileDrag, canDrop, drop]
-  )
-
-  const ref = useMemo(
-    () => (node: T | null) => {
-      nodeRef.current = node
-      ;(connectDrop as (el: T | null) => void)(node)
-    },
-    [connectDrop]
-  )
-
-  return { ref, over, after }
-}
-
-/** 插入指示线（行内绝对定位，配合行的 relative） */
-function DropLine({ after }: { after: boolean }) {
-  return (
-    <span
-      className={cn(
-        'pointer-events-none absolute inset-x-0 h-0.5 rounded bg-primary',
-        after ? '-bottom-px' : '-top-px'
-      )}
-    />
-  )
-}
 
 /** 取色面板里的快捷色板（常用的高辨识度色相） */
 const COLOR_PRESETS = [
@@ -237,6 +159,10 @@ function HostsSection() {
   const setSshProfileColor = useAppStore((s) => s.setSshProfileColor)
   const deleteSshGroup = useAppStore((s) => s.deleteSshGroup)
   const arrangeSsh = useAppStore((s) => s.arrangeSsh)
+  const openTunnelsTab = useAppStore((s) => s.openTunnelsTab)
+  const openLogsTab = useAppStore((s) => s.openLogsTab)
+  const knownHosts = useAppStore((s) => s.knownHosts)
+  const resetHostKey = useAppStore((s) => s.resetHostKey)
 
   /** 待确认删除的 SSH 配置（非 null 时弹出确认框） */
   const [pendingDelete, setPendingDelete] = useState<SshProfile | null>(null)
@@ -374,8 +300,10 @@ function HostsSection() {
     const target = pendingDelete
     if (!target) return
     setPendingDelete(null)
-    await window.api.ssh.remove(target.id)
+    const { clearedJumps } = await window.api.ssh.remove(target.id)
     await refreshProfiles()
+    // 被删主机若被别的连接用作跳板机，存储层会顺带清掉那些引用；这里明确告知，避免静默改配置
+    if (clearedJumps > 0) message.info(`已清除 ${clearedJumps} 个主机指向它的跳板设置`)
   }
 
   const submitGroupEdit = async () => {
@@ -413,6 +341,27 @@ function HostsSection() {
     })
   }
 
+  /** 该主机是否已有指纹记录（决定右键菜单里是否出现「重置主机指纹」） */
+  const hasFingerprint = (p: SshProfile): boolean =>
+    p.kind === 'ssh' && knownHosts.some((k) => k.host === p.host && k.port === (p.port || 22))
+
+  /** 重置主机指纹记录：仅当确信服务器密钥确实变更（如重装系统）才应重置 */
+  const resetFingerprint = (p: SshProfile): void => {
+    const port = p.port || 22
+    Modal.confirm({
+      title: '重置主机指纹？',
+      content: `将清除 ${p.host}:${port} 已记录的指纹，下次连接会重新记录服务器当前指纹。仅当确认服务器密钥确实变更（如重装系统）时才应重置。`,
+      okText: '重置',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      centered: true,
+      onOk: async () => {
+        await resetHostKey(p.host, port)
+        message.success('主机指纹已重置，下次连接将重新记录')
+      }
+    })
+  }
+
   const profileNode = (p: SshProfile, hasGroup: boolean): TreeDataNode => ({
     key: profileKey(p.id),
     title: (
@@ -423,6 +372,9 @@ function HostsSection() {
         onConnect={() => connect(p)}
         onEdit={() => setSshDialog(true, p)}
         onSftp={() => openSftpTab(p.id)}
+        onTunnels={() => openTunnelsTab(p.id)}
+        hasFingerprint={hasFingerprint(p)}
+        onResetFingerprint={() => resetFingerprint(p)}
         onMoveOut={() => moveToUngrouped(p)}
         onDelete={() => setPendingDelete(p)}
         onColor={(color) => void setSshProfileColor(p.id, color)}
@@ -441,22 +393,42 @@ function HostsSection() {
       return {
         key: groupKey(group.id),
         title: (
-          <GroupRow
+          <SidebarGroupRow
             expanded={isEmpty ? false : expandedKeys.includes(groupKey(group.id))}
-            group={group}
+            name={group.name}
             count={b.items.length}
+            color={group.color}
             onToggle={isEmpty ? () => {} : () => toggleKey(groupKey(group.id))}
-            onDropProfile={dropProfile}
+            itemType={DND_PROFILE}
+            groupType={DND_GROUP}
+            groupId={group.id}
+            onDropItem={dropProfile}
             onDropGroup={dropGroup}
             onNew={() => setSshDialog(true, null, group.id)}
-            onRename={() => setGroupEdit({ id: group.id, name: group.name })}
-            onColor={(color) =>
-              void saveSshGroup({ id: group.id, name: group.name, color })
-            }
-            onDelete={() => {
-              setDeleteGroupHosts(false)
-              setPendingGroupDelete(group)
+            newTitle="在此分组新建连接"
+            menuItems={[
+              { key: 'new', icon: <Plus className="size-3.5" />, label: '新建连接' },
+              { key: 'rename', icon: <Pencil className="size-3.5" />, label: '重命名' },
+              { type: 'divider' },
+              { key: 'delete', icon: <Trash2 className="size-3.5" />, label: '删除分组', danger: true }
+            ]}
+            onMenuClick={(key) => {
+              if (key === 'new') setSshDialog(true, null, group.id)
+              else if (key === 'rename') setGroupEdit({ id: group.id, name: group.name })
+              else {
+                setDeleteGroupHosts(false)
+                setPendingGroupDelete(group)
+              }
             }}
+            afterCount={
+              <ColorDot
+                value={group.color}
+                title={group.color ? '分组颜色' : '设置分组颜色'}
+                hoverGroupClass="group-hover/grp:opacity-100"
+                onChange={(color) => void saveSshGroup({ id: group.id, name: group.name, color })}
+                onClear={() => void saveSshGroup({ id: group.id, name: group.name, color: null })}
+              />
+            }
           />
         ),
         children: isEmpty ? undefined : b.items.map((p) => profileNode(p, true))
@@ -485,6 +457,22 @@ function HostsSection() {
         count={profiles.length}
         extra={
           <>
+            <Button
+              type="text"
+              size="small"
+              className="px-0.5 text-muted-foreground"
+              title="隧道"
+              icon={<Network className="size-3.5" />}
+              onClick={() => openTunnelsTab()}
+            />
+            <Button
+              type="text"
+              size="small"
+              className="px-0.5 text-muted-foreground"
+              title="主机日志"
+              icon={<ScrollText className="size-3.5" />}
+              onClick={() => openLogsTab()}
+            />
             <Button
               type="text"
               size="small"
@@ -628,129 +616,6 @@ type DropProfile = (
 ) => void
 type DropGroup = (dragId: string, targetGroupId: string, after: boolean) => void
 
-/** 分组行：可拖动排序，也可接收连接（追加进组）；右键可重命名 / 删除 */
-function GroupRow({
-  expanded,
-  group,
-  count,
-  onToggle,
-  onDropProfile,
-  onDropGroup,
-  onNew,
-  onRename,
-  onColor,
-  onDelete
-}: {
-  /** 当前是否为展开状态（决定箭头方向） */
-  expanded: boolean
-  group: SshGroup
-  count: number
-  /** 点击整行切换展开/折叠 */
-  onToggle: () => void
-  onDropProfile: DropProfile
-  onDropGroup: DropGroup
-  onNew: () => void
-  onRename: () => void
-  /** 设置分组颜色（null 清除）；组内未单独设色的连接会继承该颜色 */
-  onColor: (color: string | null) => void
-  onDelete: () => void
-}) {
-  const [{ isDragging }, drag] = useDrag<DragItem, void, { isDragging: boolean }>(
-    () => ({
-      type: DND_GROUP,
-      item: { id: group.id },
-      collect: (m) => ({ isDragging: m.isDragging() })
-    }),
-    [group.id]
-  )
-
-  const { ref: dropRef, over, after } = useRowDrop<HTMLDivElement>({
-    // 拖连接落在分组标题上 = 放进组尾
-    appendWhenProfileDrag: true,
-    canDrop: (item, type) => type === DND_PROFILE || item.id !== group.id,
-    drop: (item, type, at) => {
-      if (type === DND_GROUP) onDropGroup(item.id, group.id, at)
-      else onDropProfile(item.id, null, group.id, true)
-    }
-  })
-
-  const dragRef = useMemo(() => asRef<HTMLDivElement>(drag), [drag])
-  const ref = useMemo(() => mergeRefs(dropRef, dragRef), [dropRef, dragRef])
-
-  const items: MenuProps['items'] = [
-    { key: 'new', icon: <Plus className="size-3.5" />, label: '新建连接' },
-    { key: 'rename', icon: <Pencil className="size-3.5" />, label: '重命名' },
-    { type: 'divider' },
-    { key: 'delete', icon: <Trash2 className="size-3.5" />, label: '删除分组', danger: true }
-  ]
-
-  // 拖拽 ref 放在最外层：antd Dropdown 会给子节点合并自己的 ref（React 19 下 element.ref 已变更），
-  // 让 Dropdown 只包住内容，dnd 的连接器才不会被覆盖
-  return (
-    <div
-      ref={ref}
-      className={cn(
-        'group/grp relative flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded pr-1',
-        isDragging && 'opacity-40'
-      )}
-      onClick={onToggle}
-      title="点击展开/折叠（可拖动排序）"
-    >
-      {over && <DropLine after={after} />}
-      <Dropdown
-        trigger={['contextMenu']}
-        menu={{
-          items,
-          onClick: ({ key }) => {
-            if (key === 'new') onNew()
-            else if (key === 'rename') onRename()
-            else onDelete()
-          }
-        }}
-      >
-        <div className="flex min-w-0 flex-1 items-center gap-1.5">
-          {expanded ? (
-            <ChevronDown
-              className="size-3.5 shrink-0 text-muted-foreground"
-              style={group.color ? { color: group.color } : undefined}
-            />
-          ) : (
-            <ChevronRight
-              className="size-3.5 shrink-0 text-muted-foreground"
-              style={group.color ? { color: group.color } : undefined}
-            />
-          )}
-          <span
-            className="truncate text-sm font-medium text-muted-foreground"
-            style={group.color ? { color: tintText(group.color) } : undefined}
-          >
-            {group.name}
-          </span>
-          <span className="text-xs text-muted-foreground/70">{count}</span>
-          <ColorDot
-            value={group.color}
-            title={group.color ? '分组颜色' : '设置分组颜色'}
-            hoverGroupClass="group-hover/grp:opacity-100"
-            onChange={(color) => onColor(color)}
-            onClear={() => onColor(null)}
-          />
-          <Button
-            type="text"
-            size="small"
-            className="ml-auto px-1 opacity-0 transition-opacity group-hover/grp:opacity-100"
-            title="在此分组新建连接"
-            icon={<Plus className="size-3.5" />}
-            onClick={(e) => {
-              e.stopPropagation()
-              onNew()
-            }}
-          />
-        </div>
-      </Dropdown>
-    </div>
-  )
-}
-
 /** 连接行：可拖动排序 / 跨组；双击连接，右键连接 / 编辑 / 删除 */
 function ProfileRow({
   profile,
@@ -759,6 +624,9 @@ function ProfileRow({
   onConnect,
   onEdit,
   onSftp,
+  onTunnels,
+  hasFingerprint,
+  onResetFingerprint,
   onMoveOut,
   onDelete,
   onColor,
@@ -774,6 +642,12 @@ function ProfileRow({
   onEdit: () => void
   /** 打开该主机的 SFTP 文件管理（仅远程主机显示入口） */
   onSftp: () => void
+  /** 打开「隧道」标签并预选该主机新建隧道（仅远程主机显示入口） */
+  onTunnels: () => void
+  /** 该主机已有指纹记录（决定菜单是否显示「重置主机指纹」） */
+  hasFingerprint: boolean
+  /** 重置该主机指纹（确认框由宿主组件处理） */
+  onResetFingerprint: () => void
   /** 移出到「未分组」（仅分组内主机显示） */
   onMoveOut: () => void
   onDelete: () => void
@@ -782,7 +656,7 @@ function ProfileRow({
   onDropProfile: DropProfile
   onDropGroup: DropGroup
 }) {
-  const [{ isDragging }, drag] = useDrag<DragItem, void, { isDragging: boolean }>(
+  const [{ isDragging }, drag] = useDrag<RowDragItem, void, { isDragging: boolean }>(
     () => ({
       type: DND_PROFILE,
       item: { id: profile.id },
@@ -792,6 +666,8 @@ function ProfileRow({
   )
 
   const { ref: dropRef, over, after } = useRowDrop<HTMLDivElement>({
+    itemType: DND_PROFILE,
+    groupType: DND_GROUP,
     canDrop: (item, type) =>
       type === DND_GROUP ? hasGroup && item.id !== profile.groupId : item.id !== profile.id,
     drop: (item, type, at) => {
@@ -815,9 +691,22 @@ function ProfileRow({
       label: '连接'
     },
     { key: 'edit', icon: <Pencil className="size-3.5" />, label: '编辑' },
-    // 仅远程主机提供 SFTP 文件管理（本地主机没有远程文件系统）
+    // 仅远程主机提供 SFTP 文件管理与隧道入口（本地主机没有远程连接）
     ...(profile.kind === 'ssh'
-      ? [{ key: 'sftp', icon: <FolderOpen className="size-3.5" />, label: 'SFTP 文件管理' }]
+      ? [
+          { key: 'sftp', icon: <FolderOpen className="size-3.5" />, label: 'SFTP 文件管理' },
+          { key: 'tunnels', icon: <Network className="size-3.5" />, label: '隧道…' }
+        ]
+      : []),
+    // 仅有指纹记录的主机提供「重置主机指纹」（清掉后下次连接重新 TOFU）
+    ...(hasFingerprint
+      ? [
+          {
+            key: 'resetfingerprint',
+            icon: <Fingerprint className="size-3.5" />,
+            label: '重置主机指纹'
+          }
+        ]
       : []),
     // 分组内主机才提供「移到未分组」，作为移出分组的入口
     ...(profile.groupId
@@ -846,6 +735,8 @@ function ProfileRow({
             if (key === 'connect') onConnect()
             else if (key === 'edit') onEdit()
             else if (key === 'sftp') onSftp()
+            else if (key === 'tunnels') onTunnels()
+            else if (key === 'resetfingerprint') onResetFingerprint()
             else if (key === 'moveout') onMoveOut()
             else onDelete()
           }

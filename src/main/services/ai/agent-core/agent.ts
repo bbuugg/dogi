@@ -8,6 +8,7 @@ import type { ModelMessage, TextPart, ToolCallPart, ToolResultPart } from 'ai'
 type ToolResultOutput = ToolResultPart['output']
 import { buildAgentTools, type AgentPermissionMode, type AgentToolOptions } from './tools'
 import { buildSkillsPromptSection, type AgentSkill } from './skills'
+import type { TurnUsage } from '@shared/types'
 
 /** Agent 单轮对话的最大工具步数（工作流比终端助手更长） */
 export const MAX_STEPS = 25
@@ -47,6 +48,8 @@ export type AgentStreamEvent =
       output: unknown
       isError?: boolean
     }
+  /** 一轮结束时的用量统计（input/output/total tokens、tps、耗时等） */
+  | { type: 'usage'; usage: TurnUsage }
   | { type: 'finish'; finishReason: string }
   | { type: 'error'; message: string }
 

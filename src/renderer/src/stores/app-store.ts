@@ -38,9 +38,13 @@ import type {
   ApiProtocol,
   ApiRequestEntry,
   AppShortcutAction,
+  AutomationGroup,
+  AutomationScript,
   ColorThemeName,
+  HostLogEntry,
   NoteEntry,
   NoteGroup,
+  NoteImportResult,
   Preferences,
   ScriptEntry,
   ScriptGroup,
@@ -53,7 +57,10 @@ import type {
   SkillSettings,
   SshConnectProgress,
   SshGroup,
+  SshKnownHost,
   SshProfile,
+  SshTunnel,
+  SshTunnelRuntime,
   TransferExportResult,
   TransferImportResult,
   TransferKind,
@@ -74,7 +81,10 @@ export type PanelTabType =
   | 'plugins'
   | 'plugin'
   | 'sftp'
+  | 'tunnels'
+  | 'logs'
   | 'agent'
+  | 'automation'
 
 /** 编辑页（脚本 / 笔记）的保存状态，由页面自己投影到底部状态栏 */
 export type EditorSaveState = 'saving' | 'dirty' | 'saved'
@@ -88,6 +98,9 @@ export type EditorSaveState = 'saving' | 'dirty' | 'saved'
  */
 export const editorSaveKey = (kind: 'script' | 'note' | 'api' | 'ws', id: string): string =>
   `${kind}:${id}`
+
+/** 渲染端主机日志条数上限（与主进程内存环形缓冲一致，超出丢最旧的） */
+const HOST_LOG_LIMIT = 1000
 
 /**
  * 等待二次确认的关闭操作。
@@ -131,6 +144,13 @@ export interface PanelTab {
   /** sftp：对应的 SSH 主机配置 id（凭据在主进程按它解密） */
   sftpProfileId?: string
   pluginViewId?: string
+  /**
+   * 自动化：对应的脚本 id。
+   *
+   * 同时也是这个标签的浏览器会话 id（`automation-<scriptId>`）—— 一个脚本标签
+   * 一份浏览器会话，关标签就关会话，两者用同一个标识免得再维护一张映射表。
+   */
+  automationScriptId?: string
 }
 
 /**
@@ -342,6 +362,23 @@ function patchConversation(
  *
  * 只写不读回：调用期间流式输出可能又追加了 part，用主进程的返回值覆盖本地会丢内容。
  */
+/**
+ * 流式期间的**增量落盘**节流表（key = conversationId）。
+ *
+ * 一轮 Agent 对话可能跑几十步、持续很久；此前只在「发消息」与「轮末」落盘，
+ * 中途关掉应用这一轮的全部产出（工具结果、已生成的正文）都会丢 —— 用户实测踩到过。
+ * 这里按固定间隔节流写盘：最多丢最后几秒，又不会每个 token 都序列化整段历史。
+ */
+const AGENT_PERSIST_INTERVAL = 3000
+const agentPersistAt = new Map<string, number>()
+
+function persistConversationThrottled(id: string): void {
+  const now = Date.now()
+  if (now - (agentPersistAt.get(id) ?? 0) < AGENT_PERSIST_INTERVAL) return
+  agentPersistAt.set(id, now)
+  void persistConversation(useAppStore.getState().agentConversations, id)
+}
+
 async function persistConversation(
   conversations: AgentConversation[],
   id: string
@@ -898,7 +935,8 @@ interface AppStore {
   /**主机中的会话阶段（key 为 sessionId；连接就绪/失败/关闭后移除） */
   connectStages: Record<string, SshConnectProgress>
   // ---------- SFTP 传输任务 ----------
-  /** 进行中 / 刚结束的 SFTP 传输任务（transferId → 进度）；全局，供状态栏任务面板展示 */
+  /** 进行中 / 已结束的 SFTP 传输任务（transferId → 进度）；全局，供状态栏任务面板展示。
+   *  结束的不会自动移除，直到用户逐条移除或「清除已完成」（用户要求：完成后留在托盘里） */
   transfers: Record<string, TransferItem>
   /** 状态栏右下角传输任务面板是否展开 */
   transferTrayOpen: boolean
@@ -913,6 +951,18 @@ interface AppStore {
   profiles: SshProfile[]
   /**主机分组（侧边栏归类用） */
   sshGroups: SshGroup[]
+  /** 主机指纹记录（TOFU：首连静默记录，指纹变化硬失败） */
+  knownHosts: SshKnownHost[]
+  /** SSH 隧道配置（本地转发 / SOCKS5 动态代理） */
+  tunnels: SshTunnel[]
+  /** 隧道运行态（key 为隧道 id；由 tunnels:status 全量推送刷新） */
+  tunnelRuntime: Record<string, SshTunnelRuntime>
+  /** 「新建隧道」预选主机（右键「隧道…」传入；面板消费后清空） */
+  tunnelSeed: string | null
+
+  // ---------- 主机日志 ----------
+  /** SSH / 隧道 / SFTP 等主机事件（从旧到新，界面倒序展示；上限 HOST_LOG_LIMIT） */
+  hostLogs: HostLogEntry[]
 
   // ---------- 用户脚本 ----------
   scripts: ScriptEntry[]
@@ -923,6 +973,12 @@ interface AppStore {
   notes: NoteEntry[]
   /** 笔记分组（侧边栏里的分组节点，数组顺序即显示顺序） */
   noteGroups: NoteGroup[]
+
+  // ---------- 浏览器自动化 ----------
+  /** 自动化脚本（侧边栏列表；一个脚本对应 PanelView 里的一个标签 + 一份浏览器会话） */
+  automationScripts: AutomationScript[]
+  /** 自动化脚本分组（数组顺序即显示顺序） */
+  automationGroups: AutomationGroup[]
 
   // ---------- 接口请求 ----------
   /** 保存的接口请求（侧边栏列表；一个请求对应 PanelView 里的一个标签） */
@@ -1039,6 +1095,10 @@ interface AppStore {
   /** 拖拽分隔条时更新某分隔节点的权重 */
   resizeSplit: (splitId: string, sizes: number[]) => void
   refreshProfiles: () => Promise<void>
+  /** 刷新主机指纹记录（重置 / 连接记录后调用） */
+  refreshKnownHosts: () => Promise<void>
+  /** 重置指定 host:port 的主机指纹记录（下次连接重新 TOFU） */
+  resetHostKey: (host: string, port: number) => Promise<void>
   /** 新建（不传 id）或重命名（传 id）SSH 分组；color 为 undefined 保留原色，null 清除 */
   saveSshGroup: (input: { id?: string; name: string; color?: string | null }) => Promise<void>
   /** 设置连接的强调色（null 清除，回到继承所属分组） */
@@ -1170,6 +1230,8 @@ interface AppStore {
   saveNote: (note: NoteEntry) => Promise<void>
   /** 删除笔记，并关掉它的标签页 */
   deleteNote: (id: string) => Promise<void>
+  /** 从本地选择文件导入为笔记（每个文件一篇），返回新建的 id 供调用方打开第一篇 */
+  importNotes: () => Promise<NoteImportResult>
   /** 刷新笔记分组到 store */
   refreshNoteGroups: () => Promise<void>
   /** 新建（不传 id）或重命名（传 id）笔记分组 */
@@ -1181,6 +1243,26 @@ interface AppStore {
     groupIds: string[]
     notes: Array<{ id: string; groupId?: string }>
   }) => Promise<void>
+
+  // ----- 浏览器自动化 -----
+  refreshAutomationScripts: () => Promise<void>
+  /** 新建脚本（返回新脚本 id），并把它写进列表 */
+  createAutomationScript: (groupId?: string) => Promise<string>
+  saveAutomationScript: (script: AutomationScript) => Promise<void>
+  deleteAutomationScript: (id: string) => Promise<void>
+  refreshAutomationGroups: () => Promise<void>
+  /** 新建（不传 id）或重命名（传 id）自动化分组 */
+  saveAutomationGroup: (input: { id?: string; name: string }) => Promise<void>
+  /** 删除分组；deleteScripts=true 时连同组内脚本一起删除 */
+  deleteAutomationGroup: (id: string, deleteScripts?: boolean) => Promise<void>
+  /** 拖拽排序 / 换组后的整体重排：数组顺序即显示顺序 */
+  arrangeAutomation: (payload: {
+    groupIds: string[]
+    scripts: Array<{ id: string; groupId?: string }>
+  }) => Promise<void>
+  /** 在 PanelView 中打开自动化标签（已存在则激活） */
+  openAutomationTab: (scriptId: string) => void
+
   /** 选择要查看的插件（null 表示取消选择） */
   selectPlugin: (id: string | null) => void
   /** 在 PanelView 中打开脚本标签（已存在则激活） */
@@ -1200,6 +1282,24 @@ interface AppStore {
   consumeApiDraftSeed: () => void
   /** 打开主机的 SFTP 文件管理标签（已打开则聚焦） */
   openSftpTab: (profileId: string) => void
+  /** 打开「隧道」管理标签（已打开则聚焦；传 profileId 时预选该主机新建隧道） */
+  openTunnelsTab: (profileId?: string) => void
+  /** 隧道面板取走预选主机（取走即清空，避免之后打开又带上旧预选） */
+  consumeTunnelSeed: () => void
+  /** 拉取隧道配置与运行态（启动 / 增删后调用） */
+  refreshTunnels: () => Promise<void>
+  /** 新建（id 为空）或更新隧道；运行中被编辑的隧道由主进程自动重启 */
+  saveTunnel: (input: SshTunnel) => Promise<void>
+  /** 删除隧道（运行中先停止） */
+  removeTunnel: (id: string) => Promise<void>
+  startTunnel: (id: string) => Promise<void>
+  stopTunnel: (id: string) => Promise<void>
+  /** 打开「主机日志」标签（全局单例，已打开则聚焦；打开时顺手拉一次全量） */
+  openLogsTab: () => void
+  /** 重新拉取主机日志全量（跨重启保留的旧记录一并进来） */
+  refreshHostLogs: () => Promise<void>
+  /** 清空主机日志（内存 + 落盘文件） */
+  clearHostLogs: () => Promise<void>
   /** 在 PanelView 中打开插件管理标签（已存在则激活） */
   openPluginsTab: () => void
   /** 在 PanelView 中打开插件视图标签（已存在则激活） */
@@ -1256,7 +1356,7 @@ interface AppStore {
   setNotifyOnAgentFinish: (enabled: boolean) => Promise<void>
   /** 设置活动栏被隐藏的功能区 id 列表（持久化到偏好设置） */
   setHiddenActivities: (ids: string[]) => Promise<void>
-  /** 写入 / 更新一笔 SFTP 传输进度（来自 sftp:progress 广播；结束的会在延迟后自动移除） */
+  /** 写入 / 更新一笔 SFTP 传输进度（来自 sftp:progress 广播；结束的保留在托盘，不自动移除） */
   upsertTransfer: (progress: SftpTransferProgress) => void
   /** 从任务面板移除一笔传输（用户手动关闭） */
   removeTransfer: (transferId: string) => void
@@ -1373,12 +1473,15 @@ const DEFAULT_PREFERENCES: Preferences = {
   monitorInterval: 2000,
   confirmCloseTab: true,
   notifyOnAgentFinish: true,
-  hiddenActivities: []
+  hiddenActivities: [],
+  browserChannel: 'auto'
 }
 
 export const useAppStore = create<AppStore>()((set, get) => {
 /** 应用内快捷键的 keydown 监听器仅注册一次，避免 HMR / 重复 bootstrap 叠加 */
 let shortcutWired = false
+/** 退出前落盘请求的监听器同样只注册一次 */
+let flushWired = false
   if (!listenersBound && typeof window !== 'undefined' && window.api) {
     listenersBound = true
     // 会话输出退出等事件 -> 更新状态（数据本身由 TerminalView 自行订阅）
@@ -1401,6 +1504,25 @@ let shortcutWired = false
         return { connectStages }
       })
     })
+    // SSH 隧道运行态：全量推送（启动 / 停止 / 出错 / 连接数变化）
+    window.api.tunnels.onStatus((runtime) => {
+      set({ tunnelRuntime: Object.fromEntries(runtime.map((r) => [r.id, r])) })
+    })
+    // 主机日志：增量推送（初始全量在 bootstrap / 打开日志面板时拉取）。
+    // 同一 seq 会再次广播（终端命令的输出增量回填同一条目）→ 按 seq 覆盖，不要盲目追加
+    window.api.logs.onEntry((entry) => {
+      set((s) => {
+        const index = s.hostLogs.findIndex((e) => e.seq === entry.seq)
+        if (index >= 0) {
+          const hostLogs = [...s.hostLogs]
+          hostLogs[index] = entry
+          return { hostLogs }
+        }
+        const hostLogs = [...s.hostLogs, entry]
+        if (hostLogs.length > HOST_LOG_LIMIT) hostLogs.splice(0, hostLogs.length - HOST_LOG_LIMIT)
+        return { hostLogs }
+      })
+    })
     window.api.terminal.onClosed(({ sessionId }) => {
       if (reconnectingIds.has(sessionId)) return
       set((s) => applyTabClose(s, sessionId))
@@ -1412,7 +1534,7 @@ let shortcutWired = false
       // 每个会话的助手实例独立弹卡（同一实例内已由主进程串行化）
       set((s) => ({ pendingConfirms: { ...s.pendingConfirms, [req.id]: req } }))
     })
-    // 确认已有结论（超时 / 中止等非用户路径）：移除对应卡片
+    // 确认已有结论（中止等非用户路径）：移除对应卡片
     window.api.ai.onConfirmResolved(({ id }) => {
       set((s) => {
         if (!(id in s.pendingConfirms)) return {}
@@ -1433,7 +1555,7 @@ let shortcutWired = false
     window.api.agent.onConfirmRequest((req) => {
       set((s) => ({ agentPendingConfirms: { ...s.agentPendingConfirms, [req.id]: req } }))
     })
-    // 确认已有结论（超时 / 中止等非用户路径）：移除对应卡片
+    // 确认已有结论（中止等非用户路径）：移除对应卡片
     window.api.agent.onConfirmResolved(({ id }) => {
       set((s) => {
         if (!(id in s.agentPendingConfirms)) return {}
@@ -1472,11 +1594,18 @@ let shortcutWired = false
 
     profiles: [],
     sshGroups: [],
+    knownHosts: [],
+    tunnels: [],
+    tunnelRuntime: {},
+    tunnelSeed: null,
+    hostLogs: [],
 
     scripts: [],
     scriptGroups: [],
     notes: [],
     noteGroups: [],
+    automationScripts: [],
+    automationGroups: [],
     apiRequests: [],
     apiGroups: [],
     apiHistory: [],
@@ -1525,8 +1654,8 @@ let shortcutWired = false
       sectionHeights: {},
       activePluginId: null,
       panelTabs: [],
-      sidebarWidth: 240,
-      aiPanelWidth: 380,
+      sidebarWidth: 220,
+      aiPanelWidth: 300,
       aiPanelHeight: 440,
       aiFloatingPos: null,
       editorSaveStatus: {},
@@ -1538,9 +1667,11 @@ let shortcutWired = false
     monitors: {},
 
     bootstrap: async () => {
-      const [profiles, sshGroups, configs, settings, preferences, shells, scripts, scriptGroups, notes, noteGroups, apiRequests, apiGroups, apiHistory, shortcuts, agentWorkspaces, agentConversations] = await Promise.all([
+      const [profiles, sshGroups, knownHosts, tunnelInit, configs, settings, preferences, shells, scripts, scriptGroups, notes, noteGroups, automationScripts, automationGroups, apiRequests, apiGroups, apiHistory, shortcuts, agentWorkspaces, agentConversations, hostLogs] = await Promise.all([
         window.api.ssh.list(),
         window.api.ssh.listGroups(),
+        window.api.ssh.knownHostsList(),
+        window.api.tunnels.list(),
         window.api.ai.listConfigs(),
         window.api.ai.getSettings(),
         window.api.prefs.get(),
@@ -1549,12 +1680,15 @@ let shortcutWired = false
         window.api.scripts.listGroups(),
         window.api.notes.list(),
         window.api.notes.listGroups(),
+        window.api.automation.list(),
+        window.api.automation.listGroups(),
         window.api.apiClient.list(),
         window.api.apiClient.listGroups(),
         window.api.apiClient.listHistory(),
         window.api.shortcuts.get(),
         window.api.agent.listWorkspaces(),
-        window.api.agent.listConversations()
+        window.api.agent.listConversations(),
+        window.api.logs.list()
       ])
       // 配色必须在偏好写进 store 之前落到 html 上：antd 的 token 是在 store 更新引发的那次
       // 重渲染里从 CSS 变量读出来的，晚一步就会永远停在默认中性配色（直到用户手动切换）
@@ -1567,6 +1701,10 @@ let shortcutWired = false
       set({
         profiles,
         sshGroups,
+        knownHosts,
+        tunnels: tunnelInit.tunnels,
+        tunnelRuntime: Object.fromEntries(tunnelInit.runtime.map((r) => [r.id, r])),
+        hostLogs,
         aiConfigs: configs,
         aiSettings: settings,
         preferences: safePreferences,
@@ -1575,6 +1713,8 @@ let shortcutWired = false
         scriptGroups,
         notes,
         noteGroups,
+        automationScripts,
+        automationGroups,
         apiRequests,
         apiGroups,
         apiHistory,
@@ -1584,6 +1724,21 @@ let shortcutWired = false
         activeAgentWorkspaceId: agentWorkspaces[0]?.id ?? null,
         activeAgentConversationId: initial.activeId
       })
+      // 退出前的落盘请求（主进程 before-quit 时发来）：把进行中的 Agent 会话立刻写盘。
+      // 平时落盘是节流的（最多丢几秒），这一下把「最后几秒」也补上。
+      if (!flushWired && typeof window !== 'undefined' && window.api) {
+        flushWired = true
+        window.api.app.onFlushRequest(() => {
+          const streaming = Object.entries(get().agentRuns)
+            .filter(([, run]) => run.streaming)
+            .map(([cid]) => cid)
+          void Promise.all(
+            streaming.map((cid) => persistConversation(get().agentConversations, cid))
+          )
+            .catch(() => {})
+            .finally(() => void window.api.app.flushDone())
+        })
+      }
       // 运行时会加载外部插件（扫描 userData/plugins 并收集视图）
       const { loadPlugins } = await import('@/features/plugins/host')
       const pluginViews = await loadPlugins()
@@ -1670,11 +1825,20 @@ let shortcutWired = false
       // 按原会话重建：绑定了主机的（ssh 或 local 主机）沿用它，纯本地会话新建默认 shell
       let info: SessionInfo
       if (old.profileId) {
-        try {
-          info = await openSession(old.profileId)
-        } catch {
-          // 主机配置可能已删除：退化为普通本地终端
+        if (!get().profiles.some((p) => p.id === old.profileId)) {
+          // 主机配置已删除：退化为普通本地终端
           info = await window.api.terminal.createLocal(80, 24)
+        } else {
+          try {
+            info = await openSession(old.profileId)
+          } catch (e) {
+            // 配置还在但连接前置条件不满足（如 Mosh 缺本地 mosh-client）：提示后保持原样。
+            // 不能退化为本地终端 —— 那会「重连」出一个不相干的 shell
+            reconnectingIds.delete(id)
+            const { message } = await import('antd')
+            message.error(`重连失败：${e instanceof Error ? e.message : String(e)}`)
+            return
+          }
         }
       } else {
         info = await window.api.terminal.createLocal(80, 24)
@@ -1900,6 +2064,40 @@ let shortcutWired = false
       set({ profiles: await window.api.ssh.list() })
     },
 
+    refreshKnownHosts: async () => {
+      set({ knownHosts: await window.api.ssh.knownHostsList() })
+    },
+
+    /** 重置某主机的指纹记录：下次连接重新 TOFU 记录 */
+    resetHostKey: async (host, port) => {
+      await window.api.ssh.knownHostsReset(host, port)
+      await get().refreshKnownHosts()
+    },
+
+    refreshTunnels: async () => {
+      const { tunnels, runtime } = await window.api.tunnels.list()
+      set({ tunnels, tunnelRuntime: Object.fromEntries(runtime.map((r) => [r.id, r])) })
+    },
+
+    saveTunnel: async (input) => {
+      const { tunnels, runtime } = await window.api.tunnels.save(input)
+      set({ tunnels, tunnelRuntime: Object.fromEntries(runtime.map((r) => [r.id, r])) })
+    },
+
+    removeTunnel: async (id) => {
+      const { tunnels, runtime } = await window.api.tunnels.remove(id)
+      set({ tunnels, tunnelRuntime: Object.fromEntries(runtime.map((r) => [r.id, r])) })
+    },
+
+    /** 启动 / 停止：失败落在主进程的运行态里，经 tunnels:status 推送回来 */
+    startTunnel: async (id) => {
+      await window.api.tunnels.start(id)
+    },
+
+    stopTunnel: async (id) => {
+      await window.api.tunnels.stop(id)
+    },
+
     saveSshGroup: async (input) => {
       set({ sshGroups: await window.api.ssh.saveGroup(input) })
     },
@@ -1937,14 +2135,18 @@ let shortcutWired = false
 
     setAiFloatingPos: (pos) =>
       set((s) => ({ ui: { ...s.ui, aiFloatingPos: pos } })),
-    setSettingsOpen: (open, tab) =>
+    setSettingsOpen: (open, tab) => {
+      // 设置改为「独立窗口」承载（参考 fishwork 桌面版）：直接拉起主进程建好的设置窗口，
+      // 已开着则聚焦、不会重复开。仍保留 ui 中的状态，避免其它代码读到「没打开」。
+      if (open) void window.api.window.openSettings(tab)
       set((s) => ({
         ui: {
           ...s.ui,
           settingsOpen: open,
           ...(tab ? { settingsTab: tab } : {})
         }
-      })),
+      }))
+    },
     setSshDialog: (open, editing = null, groupId) =>
       set((s) => ({ ui: { ...s.ui, sshDialog: { open, editing, groupId } } })),
 
@@ -2138,6 +2340,12 @@ let shortcutWired = false
       set((s) => ({ notes, ...closePlainTab(s, `note-${id}`) }))
     },
 
+    importNotes: async () => {
+      const result = await window.api.notes.importFiles()
+      set({ notes: result.notes })
+      return result
+    },
+
     refreshNoteGroups: async () => {
       set({ noteGroups: await window.api.notes.listGroups() })
     },
@@ -2164,6 +2372,71 @@ let shortcutWired = false
     arrangeNotes: async (payload) => {
       const { groups, notes } = await window.api.notes.arrange(payload)
       set({ noteGroups: groups, notes })
+    },
+
+    refreshAutomationScripts: async () => {
+      set({ automationScripts: await window.api.automation.list() })
+    },
+
+    createAutomationScript: async (groupId) => {
+      const prevIds = new Set(get().automationScripts.map((s) => s.id))
+      const list = await window.api.automation.save({
+        id: '',
+        name: '未命名脚本',
+        code: '',
+        groupId,
+        createdAt: 0,
+        updatedAt: 0
+      })
+      const created = list.find((s) => !prevIds.has(s.id))
+      set({ automationScripts: list })
+      return created?.id ?? ''
+    },
+
+    saveAutomationScript: async (script) => {
+      set({ automationScripts: await window.api.automation.save(script) })
+    },
+
+    deleteAutomationScript: async (id) => {
+      const automationScripts = await window.api.automation.remove(id)
+      // 该脚本若正在标签页里打开，一并关掉（closePanelTab 会顺手关掉它的浏览器会话）
+      const tabId = `automation-${id}`
+      const hasTab = get().ui.panelTabs.some((t) => t.id === tabId)
+      if (hasTab) get().closePanelTab(tabId)
+      set({ automationScripts })
+    },
+
+    refreshAutomationGroups: async () => {
+      set({ automationGroups: await window.api.automation.listGroups() })
+    },
+
+    saveAutomationGroup: async (input) => {
+      set({ automationGroups: await window.api.automation.saveGroup(input) })
+    },
+
+    deleteAutomationGroup: async (id, deleteScripts) => {
+      const { groups, scripts } = await window.api.automation.removeGroup(id, deleteScripts)
+      const alive = new Set(scripts.map((s) => s.id))
+      set((s) => {
+        let patch: Partial<AppStore> = { automationGroups: groups, automationScripts: scripts }
+        for (const tab of s.ui.panelTabs) {
+          if (tab.type !== 'automation' || !tab.automationScriptId) continue
+          if (alive.has(tab.automationScriptId)) continue
+          patch = { ...patch, ...closePlainTab({ ...s, ...patch } as AppStore, tab.id) }
+        }
+        return patch
+      })
+      // 会话资源单独收尾：被删脚本的浏览器不能留着
+      for (const tab of get().ui.panelTabs) {
+        if (tab.type === 'automation' && tab.automationScriptId && !alive.has(tab.automationScriptId)) {
+          void window.api.browser.close(tab.id)
+        }
+      }
+    },
+
+    arrangeAutomation: async (payload) => {
+      const { groups, scripts } = await window.api.automation.arrange(payload)
+      set({ automationGroups: groups, automationScripts: scripts })
     },
 
     selectPlugin: (id) => {
@@ -2311,6 +2584,19 @@ let shortcutWired = false
       })
     },
 
+    openAutomationTab: (scriptId) => {
+      set((s) => {
+        const script = s.automationScripts.find((x) => x.id === scriptId)
+        return addOrFocusTab(s, {
+          id: `automation-${scriptId}`,
+          type: 'automation',
+          title: script?.name ?? '未命名脚本',
+          closable: true,
+          automationScriptId: scriptId
+        })
+      })
+    },
+
     openApiTab: (requestId) => {
       set((s) => {
         const req = s.apiRequests.find((r) => r.id === requestId)
@@ -2374,6 +2660,43 @@ let shortcutWired = false
       })
     },
 
+    /** 打开「隧道」管理标签：全局单例（同 id 复用）；profileId 供右键「隧道…」预选主机 */
+    openTunnelsTab: (profileId) => {
+      set((s) => {
+        const patch = addOrFocusTab(s, {
+          id: 'tunnels',
+          type: 'tunnels',
+          title: '隧道',
+          closable: true
+        })
+        return profileId ? { ...patch, tunnelSeed: profileId } : patch
+      })
+    },
+
+    consumeTunnelSeed: () => set({ tunnelSeed: null }),
+
+    /** 打开「主机日志」标签：全局单例；顺手拉一次全量（跨重启保留的记录也进来） */
+    openLogsTab: () => {
+      set((s) =>
+        addOrFocusTab(s, {
+          id: 'logs',
+          type: 'logs',
+          title: '主机日志',
+          closable: true
+        })
+      )
+      void get().refreshHostLogs()
+    },
+
+    refreshHostLogs: async () => {
+      set({ hostLogs: await window.api.logs.list() })
+    },
+
+    clearHostLogs: async () => {
+      await window.api.logs.clear()
+      set({ hostLogs: [] })
+    },
+
     openPluginsTab: () => {
       set((s) =>
         addOrFocusTab(s, {
@@ -2413,6 +2736,11 @@ let shortcutWired = false
       if (tab.type === 'terminal' && tab.sessionId) {
         void get().closeSession(tab.sessionId)
         return
+      }
+      // 自动化标签：连带关掉它那份浏览器会话（headless 进程，不关就成孤儿）。
+      // 会话 id 就是标签 id，见 PanelTab.automationScriptId 的说明。
+      if (tab.type === 'automation') {
+        void window.api.browser.close(tab.id)
       }
       set((st) => closePlainTab(st, id))
     },
@@ -2628,18 +2956,6 @@ let shortcutWired = false
           }
         }
       })
-      // 结束的进度停留一会儿再自动移除（完成 3 秒、失败/取消 5 秒），让用户看得到结果
-      if (progress.done || progress.error) {
-        const id = progress.transferId
-        const delay = progress.done ? 3000 : 5000
-        setTimeout(() => {
-          const cur = get().transfers[id]
-          // 期间若又收到新进度（不该发生）则不打断；只在仍是「结束态」时移除
-          if (cur && (cur.done || cur.error) && cur.bytes === progress.bytes) {
-            get().removeTransfer(id)
-          }
-        }, delay)
-      }
     },
 
     removeTransfer: (transferId) => {
@@ -2825,6 +3141,20 @@ let shortcutWired = false
       // 路由到发起该对话的会话（不依赖当前激活终端）
       const sid = aiRequestSessions.get(requestId)
       if (!sid) return
+      if (event.type === 'usage') {
+        set((s) => {
+          const chat = s.aiChats[sid]
+          if (!chat) return {}
+          const messages = [...chat.messages]
+          const last = messages[messages.length - 1]
+          if (last?.role === 'assistant') {
+            messages[messages.length - 1] = { ...last, usage: event.usage }
+          }
+          return { aiChats: { ...s.aiChats, [sid]: { ...chat, messages } } }
+        })
+        return
+      }
+
       if (event.type === 'finish') {
         aiRequestSessions.delete(requestId)
         set((s) => {
@@ -3262,6 +3592,22 @@ let shortcutWired = false
         return next
       }
 
+      if (event.type === 'usage') {
+        set((s) => {
+          const conversation = s.agentConversations.find((c) => c.id === cid)
+          if (!conversation) return {}
+          const messages = [...conversation.messages]
+          const last = messages[messages.length - 1]
+          if (last?.role === 'assistant') {
+            messages[messages.length - 1] = { ...last, usage: event.usage }
+          }
+          return {
+            agentConversations: patchConversation(s.agentConversations, cid, { messages })
+          }
+        })
+        return
+      }
+
       if (event.type === 'finish') {
         agentRequestConversations.delete(requestId)
         set((s) => ({
@@ -3318,6 +3664,8 @@ let shortcutWired = false
           })
         }
       })
+      // 流式期间增量落盘：中途关掉应用也不至于丢掉这一轮已有的产出
+      persistConversationThrottled(cid)
     },
 
     resolveAgentConfirm: async (id, approved) => {

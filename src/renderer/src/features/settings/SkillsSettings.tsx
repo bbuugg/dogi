@@ -132,8 +132,7 @@ export function SkillsSettings() {
         <div>
           <span className="text-sm font-medium text-foreground">技能（Skills）</span>
           <p className="mt-1 text-xs leading-4 text-muted-foreground">
-            一个技能就是「一个目录 + 里面的 SKILL.md」（frontmatter 写 name / description）。
-            放进下面的目录即自动发现，AI Agent 判断任务相关时会先读技能说明再照做。
+            一个技能就是「一个目录 + 里面的 SKILL.md」
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">

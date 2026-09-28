@@ -1,6 +1,6 @@
 import { useEffect, useMemo } from 'react'
-import { ArrowRightLeft, Copy, Download, ListX, Upload, X } from 'lucide-react'
-import { Badge, Button, Popover, Progress, Tooltip } from 'antd'
+import { ArrowRightLeft, Copy, Download, FolderOpen, ListX, Upload, X } from 'lucide-react'
+import { Badge, Button, Popover, Progress, Tooltip, message } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import { STATUS_ITEM_CLASS } from '@/app/layout/StatusBar'
 import type { SftpTransferProgress } from '@shared/types'
@@ -30,11 +30,13 @@ function formatSize(n: number): string {
 /**
  * 状态栏右下角的「传输任务」入口 + 任务面板。
  *
- * 所有 SFTP 传输（上传 / 下载 / 文件夹下载 / 复制 / 移动）的进度都汇聚到全局 store 的
- * transfers，这里统一展示并支持多任务并发、逐条取消、清除已完成。
+ * 所有 SFTP 传输（上传文件 / 上传文件夹 / 下载 / 文件夹下载 / 复制 / 移动）的进度都汇聚
+ * 到全局 store 的 transfers，这里统一展示并支持多任务并发、逐条取消、逐条移除、清除已完成。
  *
- * 组件常驻挂载（保持进度订阅生效），但仅当有传输任务（含刚结束、尚未自动移除的）时
- * 才在状态栏显示入口；任务全部清空后入口自动消失。
+ * ⚠️ 结束的任务**不自动移除**（用户要求）：完成后留在面板里，由用户手动清理；
+ * 上传 / 下载完成的条目带「打开文件位置」（本地侧路径，见 SftpTransferProgress.localPath）。
+ *
+ * 组件常驻挂载（保持进度订阅生效），仅当有任务时在状态栏显示入口；全部清空后入口消失。
  */
 export function TransferTray() {
   const transfers = useAppStore((s) => s.transfers)
@@ -51,6 +53,14 @@ export function TransferTray() {
     })
     return off
   }, [])
+
+  /** 打开文件位置：目录直接打开，文件在所在目录中选中 */
+  const reveal = (localPath: string): void => {
+    void (async () => {
+      const r = await window.api.shell.revealPath(localPath)
+      if (!r.ok) message.error(r.error ?? '打开文件位置失败')
+    })()
+  }
 
   const list = useMemo(() => Object.values(transfers), [transfers])
   const activeCount = list.filter((t) => !t.done && !t.error).length
@@ -80,6 +90,7 @@ export function TransferTray() {
           {list.map((t) => {
             const { icon: Icon, label } = kindMeta(t.kind)
             const finished = t.done || Boolean(t.error)
+            const localPath = t.localPath
             return (
               <div
                 key={t.transferId}
@@ -109,13 +120,28 @@ export function TransferTray() {
                         />
                       )}
                       <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground tabular-nums">
-                        {t.done
-                          ? '（完成）'
-                          : `${formatSize(t.speed)}/s${t.total === 0 ? ` · ${formatSize(t.bytes)}` : ''}`}
+                        {t.canceled
+                          ? '（已取消）'
+                          : t.done
+                            ? '（完成）'
+                            : `${formatSize(t.speed)}/s${t.total === 0 ? ` · ${formatSize(t.bytes)}` : ''}`}
                       </span>
                     </div>
                   )}
                 </div>
+                {/* 上传 / 下载完成后可打开本地侧位置（源文件 / 保存位置；复制 / 移动没有本地侧） */}
+                {finished && t.done && !t.error && !t.canceled && localPath && (
+                  <Tooltip title="打开文件位置">
+                    <Button
+                      type="text"
+                      size="small"
+                      className="h-5 w-5 shrink-0 p-0 text-muted-foreground hover:text-foreground"
+                      title="打开文件位置"
+                      icon={<FolderOpen className="size-3.5" />}
+                      onClick={() => reveal(localPath)}
+                    />
+                  </Tooltip>
+                )}
                 {!finished && (
                   <Tooltip title="取消该传输">
                     <Button

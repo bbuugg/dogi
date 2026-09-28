@@ -93,6 +93,33 @@ export function registerSftpIpc(ctx: IpcContext): void {
     }
   )
 
+  // 上传文件夹：选择本地目录 → 递归上传为远端子目录（目录内每个文件一笔独立传输）。
+  // 原生目录选择框无法被自动化点击，探针（scripts/verify-sftp-transfers.mjs）通过
+  // DOGI_SFTP_UPLOAD_DIR 指定本地目录跳过对话框；正常运行时不设置该变量，行为不变。
+  ipcMain.handle(
+    'sftp:uploadDir',
+    async (_e, connId: string, remoteDir: string): Promise<SftpTransferResult> => {
+      let localDir = process.env.DOGI_SFTP_UPLOAD_DIR || ''
+      if (!localDir) {
+        const window = ctx.win()
+        if (!window || window.isDestroyed()) return { ok: false, error: '窗口不可用' }
+        const picked = await dialog.showOpenDialog(window, {
+          title: '选择要上传的文件夹',
+          properties: ['openDirectory', 'createDirectory']
+        })
+        if (picked.canceled || !picked.filePaths.length) return { ok: false, canceled: true }
+        localDir = picked.filePaths[0]
+      }
+      try {
+        await sftpService.uploadDir(connId, localDir, remoteDir)
+        return { ok: true }
+      } catch (e) {
+        if (isTransferCancelled(e)) return { ok: false, canceled: true }
+        return { ok: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
   // 远端复制（文件或目录，递归）：to 为完整目标路径（含新名称）。
   ipcMain.handle(
     'sftp:copy',

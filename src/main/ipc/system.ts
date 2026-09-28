@@ -1,8 +1,35 @@
-import { app, dialog, ipcMain, nativeTheme } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme } from 'electron'
 import { storage } from '../services/storage'
+import { BUILTIN_PLAYWRIGHT_ID, mcpManager } from '../services/ai/mcp'
 import { isAppInForeground, showSystemNotice, type SystemNotice } from '../services/system/notify'
 import type { Preferences, ShortcutConfig } from '@shared/types'
 import { openExternalSafe, type IpcContext } from './shared'
+
+/** 等待「渲染端已落盘」应答的回调集合（见 requestRendererFlush） */
+const flushWaiters = new Set<() => void>()
+
+/**
+ * 退出前请求渲染端把「进行中的状态」立刻落盘。
+ *
+ * 为什么需要：Agent 一轮对话可能跑几十步、持续很久，而落盘是节流的（见渲染端的
+ * persistConversationThrottled）—— 直接退出会丢掉最后几秒的产出。
+ * 渲染端应答 `app:flushDone` 或超时后 resolve：**绝不阻塞退出**。
+ */
+export function requestRendererFlush(win: BrowserWindow | null, timeoutMs = 1200): Promise<void> {
+  if (!win || win.isDestroyed()) return Promise.resolve()
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (): void => {
+      if (settled) return
+      settled = true
+      flushWaiters.delete(finish)
+      resolve()
+    }
+    flushWaiters.add(finish)
+    win.webContents.send('app:flush')
+    setTimeout(finish, timeoutMs)
+  })
+}
 
 /**
  * 应用级系统能力 IPC：偏好设置、快捷键、文件选择对话框、窗口控制、应用信息。
@@ -14,9 +41,25 @@ export function registerSystemIpc(ctx: IpcContext): void {
   // ---------- 偏好（主题等） ----------
   ipcMain.handle('prefs:get', () => storage.getPreferences())
   ipcMain.handle('prefs:save', (_e, patch: Partial<Preferences>) => {
+    const before = storage.getPreferences()
     const prefs = storage.savePreferences(patch)
     // themeSource 变化会同步影响 renderer 的 prefers-color-scheme
     nativeTheme.themeSource = prefs.theme
+    // 浏览器来源决定内置 Playwright MCP 的启动参数（--browser / --executable-path）：
+    // 变了就断开重连，否则缓存里的旧参数会一直用到下次重启
+    if (patch.browserChannel !== undefined && patch.browserChannel !== before.browserChannel) {
+      mcpManager.invalidate(BUILTIN_PLAYWRIGHT_ID)
+    }
+    // 浏览器工具换成 / 换离「系统浏览器」：内置 Playwright MCP 的启停跟着变。
+    // 离开时断开（别把独立进程留在后台跑），改成 system 时下一轮对话自然会新连。
+    if (
+      patch.browserToolMode !== undefined &&
+      patch.browserToolMode !== before.browserToolMode
+    ) {
+      mcpManager.invalidate(BUILTIN_PLAYWRIGHT_ID)
+    }
+    // 广播给所有渲染端窗口（含设置窗口自身），让偏好跨窗口即时生效
+    ctx.broadcast('prefs:updated', prefs)
     return prefs
   })
 
@@ -63,16 +106,18 @@ export function registerSystemIpc(ctx: IpcContext): void {
   ipcMain.handle('app:notify', (_e, notice: SystemNotice) => {
     // 打日志（而不是静默 return）：「通知怎么没弹」只能从主进程这两行看出来
     if (!storage.getPreferences().notifyOnAgentFinish) {
-      console.log('[notify] 通知开关已关闭，跳过：', notice.title)
       return false
     }
     if (isAppInForeground(ctx.win())) {
-      console.log('[notify] 应用在前台，跳过通知：', notice.title)
       return false
     }
     const shown = showSystemNotice(notice)
-    console.log(shown ? '[notify] 已发送系统通知：' : '[notify] 系统不支持通知：', notice.title)
     return shown
+  })
+
+  // 渲染端应答「进行中的状态已落盘」（见 requestRendererFlush）
+  ipcMain.handle('app:flushDone', () => {
+    for (const finish of [...flushWaiters]) finish()
   })
 
   // ---------- 首帧主题（同步取一次） ----------

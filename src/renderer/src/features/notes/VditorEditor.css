@@ -1,0 +1,9 @@
+.vditor {
+    border: none !important;
+    border-radius: 0 !important;
+}
+
+.vditor-toolbar {
+    border: none !important;
+    background-color: transparent !important;
+}

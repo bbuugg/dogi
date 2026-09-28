@@ -25,4 +25,9 @@ export function registerMcpIpc(): void {
     const { infos, errors } = await mcpManager.buildToolset()
     return { tools: infos, errors }
   })
+  ipcMain.handle('mcp:serverTools', async (_e, id: string) => {
+    const config = storage.listMcpServers().find((s) => s.id === id)
+    if (!config) return { tools: [], error: '未找到该 MCP 服务配置' }
+    return mcpManager.listServerTools(config)
+  })
 }

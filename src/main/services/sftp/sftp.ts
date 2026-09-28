@@ -2,20 +2,22 @@
  * 主进程 SFTP 服务：远程文件浏览 / 上传 / 下载 / 管理。
  *
  * 凭据复用 SSH 主机配置（storage.getSshProfile 只在主进程返回解密后的密钥，
- * 渲染端永远拿不到），连接参数组装与 SshSession 一致（密码或私钥二选一）。
+ * 渲染端永远拿不到），连接统一走 services/ssh/connect（跳板链 / 主机指纹校验）。
  * 连接由渲染端生成 connId 主动开启（每个「文件管理」标签一个连接），
  * 标签关闭时调 close；远端断开 / 出错时通过 'closed' 事件通知渲染端。
  *
  * 传输进度经 'progress' 事件交由 IPC 层广播；对话框（另存为 / 选择文件）
  * 属于 UI 交互，放在 IPC 层而不是本服务。
  */
-import { Client, type SFTPWrapper, type Stats, type ConnectConfig } from 'ssh2'
+import { Client, type SFTPWrapper, type Stats } from 'ssh2'
 import { EventEmitter } from 'node:events'
 import { createReadStream, createWriteStream } from 'node:fs'
-import { mkdir as mkdirLocal, stat as statLocal } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir as mkdirLocal, readdir, stat as statLocal } from 'node:fs/promises'
+import { basename, join } from 'node:path'
 import type { Readable, Writable } from 'node:stream'
 import { storage } from '../storage'
+import { connectWithJumps } from '../ssh/connect'
+import { hostLogger } from '../log/logger'
 import { joinSftpPath, normalizeSftpPath } from '@shared/sftp-path'
 import type { SftpEntry } from '@shared/types'
 
@@ -54,7 +56,9 @@ export type SftpProgressPayload = {
   name: string
   bytes: number
   total: number
+  localPath?: string
   done?: boolean
+  canceled?: boolean
   error?: string
 }
 
@@ -86,72 +90,67 @@ class SftpService extends EventEmitter {
   async open(connId: string, profileId: string): Promise<void> {
     if (this.conns.has(connId)) return
     const profile = storage.getSshProfile(profileId)
-    if (!profile) throw new Error(`主机配置不存在: ${profileId}`)
-    if (profile.kind !== 'ssh') throw new Error('本地主机不支持 SFTP 文件管理')
+    if (!profile) {
+      hostLogger.error('sftp', `连接失败：主机配置不存在（${profileId}）`)
+      throw new Error(`主机配置不存在: ${profileId}`)
+    }
+    if (profile.kind !== 'ssh') {
+      hostLogger.error('sftp', `连接失败：本地主机不支持 SFTP 文件管理（${profile.username}@${profile.host}）`)
+      throw new Error('本地主机不支持 SFTP 文件管理')
+    }
 
     const title = `${profile.username}@${profile.host}`
-    const config: ConnectConfig = {
-      host: profile.host,
-      port: profile.port || 22,
-      username: profile.username,
-      keepaliveInterval: profile.keepaliveInterval || 15000,
-      readyTimeout: 20000
-    }
-    if (profile.authType === 'privateKey' && profile.privateKey) {
-      config.privateKey = profile.privateKey
-      if (profile.passphrase) config.passphrase = profile.passphrase
-    } else if (profile.password) {
-      config.password = profile.password
-    }
-
-    const conn = new Client()
-    const sftp = await new Promise<SFTPWrapper>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        try {
-          conn.end()
-        } catch {
-          // 忽略
-        }
-        reject(new Error('连接超时'))
-      }, config.readyTimeout)
-      let settled = false
-      conn
-        .on('error', (err) => {
+    let conn: Client
+    let sftp: SFTPWrapper
+    try {
+      // 统一连接层：跳板链与主机指纹校验都在里面，失败信息已带跳板上下文
+      const connected = await connectWithJumps(profile, { purpose: 'sftp' })
+      conn = connected.client
+      // 连接就绪后只剩「开 SFTP 通道」一步；仍留兜底计时，防极端情况下永不回调
+      sftp = await new Promise<SFTPWrapper>((resolve, reject) => {
+        let settled = false
+        const timer = setTimeout(() => {
+          if (settled) return
+          settled = true
+          connected.dispose()
+          reject(new Error('SFTP 通道打开超时'))
+        }, 20000)
+        /** 失败统一收尾：断开连接并 reject（成功路径不经这里） */
+        const abort = (err: Error): void => {
           if (settled) return
           settled = true
           clearTimeout(timer)
-          try {
-            conn.end()
-          } catch {
-            // 忽略
-          }
+          connected.dispose()
           reject(err)
+        }
+        conn.on('error', (err) => abort(err))
+        conn.on('close', () => abort(new Error('连接在建立 SFTP 通道前关闭')))
+        conn.sftp((err, s) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          if (err || !s) {
+            connected.dispose()
+            reject(err ?? new Error('无法打开 SFTP 通道'))
+            return
+          }
+          resolve(s)
         })
-        .on('ready', () => {
-          conn.sftp((err, s) => {
-            if (settled) return
-            settled = true
-            clearTimeout(timer)
-            if (err || !s) {
-              try {
-                conn.end()
-              } catch {
-                // 忽略
-              }
-              reject(err ?? new Error('无法打开 SFTP 通道'))
-              return
-            }
-            resolve(s)
-          })
-        })
-        .connect(config)
-    })
+      })
+    } catch (err) {
+      hostLogger.error(
+        'sftp',
+        `连接失败（${title}）：${err instanceof Error ? err.message : String(err)}`
+      )
+      throw err
+    }
 
     const entry: SftpConn = { connId, profileId, title, conn, sftp }
     this.conns.set(connId, entry)
     // 就绪后的断开 / 出错：清掉连接并广播（Promise 阶段挂的 error 监听此时 reject 已是 no-op）
     conn.on('error', () => this.drop(connId))
     conn.on('close', () => this.drop(connId))
+    hostLogger.info('sftp', `已连接 ${title}`)
   }
 
   /** 标题（user@host），供进度提示 / 界面展示 */
@@ -229,6 +228,8 @@ class SftpService extends EventEmitter {
    * 流「读 → 写」通用管道：累加已传字节并推送进度，注册可取消函数。
    * 读/写任意一侧可以是本地流或 SFTP 流（上传 / 下载 / 远端复制都复用它）。
    * resolve 时返回最终已传字节数（供调用方 emit 结束进度）。
+   * localPath 只对「有本地参与」的传输（上传 / 下载）有值：每一条进度都带上它，
+   * 渲染端 store 每次都是整条覆盖，不能指望只在结束事件里带。
    */
   private pump(
     read: Readable,
@@ -237,7 +238,8 @@ class SftpService extends EventEmitter {
     connId: string,
     name: string,
     kind: 'upload' | 'download' | 'copy' | 'move',
-    total: number
+    total: number,
+    localPath?: string
   ): Promise<number> {
     return new Promise<number>((resolve, reject) => {
       let bytes = 0
@@ -248,6 +250,7 @@ class SftpService extends EventEmitter {
           transferId,
           kind,
           name,
+          localPath,
           bytes,
           total,
           ...patch
@@ -294,8 +297,8 @@ class SftpService extends EventEmitter {
     const read = sftp.createReadStream(remotePath)
     const write = createWriteStream(localPath)
     try {
-      const bytes = await this.pump(read, write, transferId, connId, name, 'download', total)
-      this.emit('progress', { connId, transferId, kind: 'download', name, bytes, total, done: true })
+      const bytes = await this.pump(read, write, transferId, connId, name, 'download', total, localPath)
+      this.emit('progress', { connId, transferId, kind: 'download', name, localPath, bytes, total, done: true })
     } catch (e) {
       const canceled = isTransferCancelled(e)
       this.emit('progress', {
@@ -303,10 +306,12 @@ class SftpService extends EventEmitter {
         transferId,
         kind: 'download',
         name,
+        localPath,
         bytes: 0,
         total,
-        // 用户手动取消：按「结束（非失败）」处理，不在任务面板显示红色错误
+        // 用户手动取消：按「已取消」展示（不显示红色错误、不提供打开文件位置）
         done: canceled,
+        canceled: canceled || undefined,
         error: canceled ? undefined : e instanceof Error ? e.message : String(e)
       })
       throw e
@@ -376,6 +381,7 @@ class SftpService extends EventEmitter {
         bytes: 0,
         total,
         done: canceled,
+        canceled: canceled || undefined,
         error: canceled ? undefined : e instanceof Error ? e.message : String(e)
       })
       throw e
@@ -413,6 +419,7 @@ class SftpService extends EventEmitter {
         transferId,
         kind: 'upload',
         name,
+        localPath,
         bytes: 0,
         total: 0,
         ...patch
@@ -458,8 +465,62 @@ class SftpService extends EventEmitter {
       emit({ done: true })
     } catch (e) {
       const canceled = isTransferCancelled(e)
-      emit({ done: canceled, error: canceled ? undefined : e instanceof Error ? e.message : String(e) })
+      emit({
+        done: canceled,
+        canceled: canceled || undefined,
+        error: canceled ? undefined : e instanceof Error ? e.message : String(e)
+      })
       throw e
+    }
+  }
+
+  /**
+   * 递归上传整个本地目录到远端目录（remoteDir/<本地目录名>）。
+   * 与 downloadDir 对称：目录本身不计进度，目录内每个文件各算一笔独立传输；
+   * 远端同名目录已存在时合并（逐层建目录，存在即跳过）。任一步失败即中止
+   * （已传完的文件留在远端），错误由调用方展示。
+   */
+  async uploadDir(connId: string, localDir: string, remoteDir: string): Promise<void> {
+    const { sftp } = this.must(connId)
+    const target = joinSftpPath(remoteDir, basename(localDir))
+    await this.mkdirRecursive(sftp, target)
+    await this.uploadTree(connId, sftp, localDir, target)
+  }
+
+  /** 递归遍历本地目录：子目录先建好远端对应目录，文件逐个走 uploadFrom（各自一笔传输） */
+  private async uploadTree(
+    connId: string,
+    sftp: SFTPWrapper,
+    localDir: string,
+    remoteDir: string
+  ): Promise<void> {
+    const entries = await readdir(localDir, { withFileTypes: true })
+    for (const entry of entries) {
+      const localPath = join(localDir, entry.name)
+      if (entry.isDirectory()) {
+        const remote = joinSftpPath(remoteDir, entry.name)
+        await this.mkdirRecursive(sftp, remote)
+        await this.uploadTree(connId, sftp, localPath, remote)
+      } else {
+        await this.uploadFrom(connId, localPath, remoteDir)
+      }
+    }
+  }
+
+  /**
+   * 逐层创建远端目录（SFTP 的 mkdir 不递归）。某层已存在时按「lstat 确认是目录」放行，
+   * 其余失败（权限等）照常抛出 —— 别把任何错误都当成「已存在」静默吞掉。
+   */
+  private async mkdirRecursive(sftp: SFTPWrapper, path: string): Promise<void> {
+    let current = ''
+    for (const part of normalizeSftpPath(path).split('/').filter(Boolean)) {
+      current = joinSftpPath(current, part)
+      try {
+        await call<void>((cb) => sftp.mkdir(current, cb as never))
+      } catch (err) {
+        const st = await call<Stats>((cb) => sftp.lstat(current, cb as never)).catch(() => null)
+        if (!st?.isDirectory()) throw err
+      }
     }
   }
 
@@ -472,6 +533,7 @@ class SftpService extends EventEmitter {
     } catch {
       // 忽略
     }
+    hostLogger.info('sftp', `已关闭 ${entry.title}`)
   }
 
   closeAll(): void {
@@ -488,6 +550,7 @@ class SftpService extends EventEmitter {
     } catch {
       // 忽略
     }
+    hostLogger.warn('sftp', `连接已断开（${entry.title}）`)
     this.emit('closed', { connId })
   }
 }

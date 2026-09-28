@@ -1,19 +1,19 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useAppStore } from '@/stores/app-store'
+import type { AgentConversation, AgentWorkspace } from '@shared/types'
 import { Button, Input, Modal, message } from 'antd'
+import { cn } from 'cn'
 import {
   ChevronRight,
+  CirclePause,
   Folder,
   FolderPlus,
   Loader2,
-  MessageCircleQuestionMark,
   MessageSquarePlus,
   Pencil,
   Plus,
   Trash2
 } from 'lucide-react'
-import { useAppStore } from '@/stores/app-store'
-import { cn } from 'cn'
-import type { AgentConversation, AgentWorkspace } from '@shared/types'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 /** 新建 / 重命名工作区表单 */
 interface WorkspaceEdit {
@@ -47,6 +47,7 @@ export function AgentPanel() {
   // 不要用返回新对象 / 新 Set 的 selector（zustand 用 Object.is 比较，会无限重渲染）
   const agentRuns = useAppStore((s) => s.agentRuns)
   const followupRequests = useAppStore((s) => s.followupRequests)
+  const agentPendingConfirms = useAppStore((s) => s.agentPendingConfirms)
   const selectAgentWorkspace = useAppStore((s) => s.selectAgentWorkspace)
   const selectAgentConversation = useAppStore((s) => s.selectAgentConversation)
   const createAgentConversation = useAppStore((s) => s.createAgentConversation)
@@ -91,13 +92,19 @@ export function AgentPanel() {
   }, [conversations])
 
   /**
-   * 该会话是否正在等用户回答提问（`ask_followup_question` 的卡片挂在它的请求上）。
-   * followupRequests 按 toolCallId 索引，靠 requestId 反查所属会话（一个会话同时只有一个请求在跑）。
+   * 该会话是不是**卡在等用户动手**，以及卡在哪一种：
+   * - `'ask'`：`ask_followup_question` 的提问卡（按 toolCallId 索引，靠 requestId 反查会话）；
+   * - `'confirm'`：确认模式下的审批卡（执行命令 / 写入 / 编辑 / 删除前等你点「允许」）。
+   *
+   * 两种卡片都挂在**这一轮的请求 id** 上，而一个会话同时只有一个请求在跑，
+   * 所以 requestId 就足以对上号，不需要额外的映射表。
    */
-  const isAsking = (conversationId: string): boolean => {
+  const pendingKindOf = (conversationId: string): 'ask' | 'confirm' | null => {
     const requestId = agentRuns[conversationId]?.requestId
-    if (!requestId) return false
-    return Object.values(followupRequests).some((f) => f.requestId === requestId)
+    if (!requestId) return null
+    if (Object.values(followupRequests).some((f) => f.requestId === requestId)) return 'ask'
+    if (Object.values(agentPendingConfirms).some((c) => c.requestId === requestId)) return 'confirm'
+    return null
   }
 
   const toggleExpand = (id: string) =>
@@ -309,9 +316,9 @@ export function AgentPanel() {
                       {list.map((c) => {
                         // 会话行高亮只看「是不是当前激活会话」（它所在的分组头已让位不高亮）
                         const isActiveConv = c.id === activeConversationId && isWsSelected
-                        // 提问优先于运行中：它需要用户动手，光转圈会让人以为还在跑
-                        const asking = isAsking(c.id)
-                        const running = agentRuns[c.id]?.streaming === true
+                        // 等待处理优先于运行中：它已经停下来等你了，光转圈会让人以为还在跑
+                        const pending = pendingKindOf(c.id)
+                        const running = !pending && agentRuns[c.id]?.streaming === true
                         return (
                           <div
                             key={c.id}
@@ -329,19 +336,29 @@ export function AgentPanel() {
                             title={c.title}
                           >
                             {/*
-                              状态图标槽：**始终占位**（静止时是空的）—— 等回答 > 运行中。
+                              状态图标槽：**始终占位**（静止时是空的）—— 等待处理 > 运行中。
                               占位而不是「有图标才渲染」是为了两列对齐：
                               槽左边 = 行的 px-1.5、宽度 size-4，于是
                                 ① 运行中的转圈 / 等待图标与工作区的**文件夹图标同列**；
                                 ② 标题从 px-1.5 + 16 + gap-1.5 = 28px（pl-7）起，
-                                   与工作区**名称同列**，也不会因为当前有没有图标而左右跳。
+                                  与工作区**名称同列**，也不会因为当前有没有图标而左右跳。
                             */}
                             <span
                               className="flex size-4 shrink-0 items-center justify-center"
-                              title={asking ? '等待你的回答' : running ? '正在运行' : undefined}
+                              title={
+                                pending === 'ask'
+                                  ? '等待你回答提问'
+                                  : pending === 'confirm'
+                                    ? '等待你确认操作'
+                                    : running
+                                      ? '正在运行'
+                                      : undefined
+                              }
                             >
-                              {asking ? (
-                                <MessageCircleQuestionMark className="size-4 text-amber-500" />
+                              {pending ? (
+                                // 暂停（不是转圈）：这一轮已经停下来了，等的是你 —— 两个竖条比问号
+                                // 更贴「暂停中」，也顺手把审批卡（原来没有任何提示）覆盖了
+                                <CirclePause className="size-4 text-amber-500" />
                               ) : running ? (
                                 <Loader2 className="size-4 animate-spin text-primary" />
                               ) : null}

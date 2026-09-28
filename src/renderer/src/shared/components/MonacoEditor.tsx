@@ -4,7 +4,7 @@ import Editor, { loader } from '@monaco-editor/react'
 import { Button, Select, Tag } from 'antd'
 import { Braces, Check, Code, Copy, Download, Hash, Lock, WrapText } from 'lucide-react'
 import type { FC, ReactNode } from 'react'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 
 // ── 本地化 Monaco Editor ─────────────────────────────────────────
 // 默认情况下 @monaco-editor/react 会从 CDN（cdn.jsdelivr.net）加载 Monaco 资源。
@@ -39,15 +39,116 @@ export const MONACO_LANGUAGES = [
   { value: 'cpp', label: 'C++' }
 ]
 
-/** Monaco 编辑器实例的最小接口（仅用到 getAction / layout） */
+/**
+ * 回收一批**不再需要**的 Monaco model（多标签里关掉文件后调用）。
+ *
+ * 为什么不在关标签那一刻直接 dispose：关掉的往往正是当前标签，编辑器还指着那个 model ——
+ * 一 dispose，Monaco 就会拿一个已销毁的 model 去渲染（`Model is disposed!`）。所以由调用方
+ * 在 **effect 里**调（那一刻编辑器已经切到别的 model 上了），并且这里**跳过仍被编辑器占用的
+ * model**。拿不到占用清单（老版本 Monaco 没有 `getEditors`）时整体放弃 —— 宁可多占一点内存，
+ * 也不冒「把正在编辑的 model 拆掉」的风险。
+ *
+ * `prefix` 用来圈定范围（例如某个工作区的全部文件 model），`keepUris` 是要留下的那些。
+ */
+export function disposeUnusedModels(prefix: string, keepUris: Iterable<string>): void {
+  void loader.init().then((monaco) => {
+    // 用「只声明用得到的部分」的结构类型来接：不为它引入 monaco-editor 的类型依赖，
+    // 也免得新版 Monaco 上 `getEditors` 的具体签名差异传到调用点
+    const editorApi = monaco.editor as unknown as {
+      getEditors?: () => Array<{ getModel: () => unknown }>
+    }
+    const getEditors = editorApi.getEditors
+    if (typeof getEditors !== 'function') return
+    const keep = new Set(keepUris)
+    const inUse = new Set(getEditors.call(monaco.editor).map((e) => e.getModel()))
+    for (const model of monaco.editor.getModels()) {
+      const uri = model.uri.toString()
+      if (!uri.startsWith(prefix) || keep.has(uri) || inUse.has(model)) continue
+      model.dispose()
+    }
+  })
+}
+
+/**
+ * 把某个 model 的行尾对齐到**文件本身**（多标签里把文件内容读回来之后、写进 model 之前调用）。
+ *
+ * `@monaco-editor/react` 是在标签刚打开、内容还没读回来时用 value（空串）把 model 建好的，
+ * Monaco 给的是平台默认行尾（Windows = CRLF）；之后库把读回的内容写进 model 时会按 model
+ * 的行尾**归一化** —— 于是 LF 文件在编辑一次之后永远和磁盘对不上：原样撤销也亮「有未保存
+ * 的修改」，保存还会把整个文件改成 CRLF。所以在内容写进 model 之前先调它，把行尾定准；
+ * model 已有内容时不动（用户的编辑不该被这个辅助动作改写）。
+ *
+ * 文件自身没有换行（空文件 / 单行）时不动 —— 保留 Monaco 的平台默认。
+ */
+export async function syncModelEol(uriText: string, content: string): Promise<void> {
+  const target: '\r\n' | '\n' | null = content.includes('\r\n')
+    ? '\r\n'
+    : content.includes('\n')
+      ? '\n'
+      : null
+  if (!target) return
+  try {
+    const monaco = await loader.init()
+    const model = monaco.editor.getModel(monaco.Uri.parse(uriText))
+    if (!model || model.getValueLength() > 0 || model.getEOL() === target) return
+    model.setEOL(
+      target === '\r\n' ? monaco.editor.EndOfLineSequence.CRLF : monaco.editor.EndOfLineSequence.LF
+    )
+  } catch {
+    // 行尾没对齐只是「撤销回原样后是否还显示未保存」的体验问题，别让这次打开算失败
+  }
+}
+
+/** Monaco 选区（结构类型：够用即可，不为几个方法引入 monaco-editor 类型依赖） */
+type MonacoRange = {
+  startLineNumber: number
+  startColumn: number
+  endLineNumber: number
+  endColumn: number
+}
+
+/** Monaco 编辑器实例的最小接口 */
 type EditorInstance = {
   getAction: (id: string) => { run: () => void } | null
   layout: () => void
+  getSelection: () => MonacoRange | null
+  getModel: () => {
+    getLineContent: (lineNumber: number) => string
+    uri: { toString: () => string }
+  } | null
+  executeEdits: (
+    source: string,
+    edits: Array<{ range: MonacoRange; text: string; forceMoveMarkers?: boolean }>
+  ) => boolean
+  pushUndoStop: () => void
+  focus: () => void
 } | null
+
+/** 经 `apiRef` 暴露给外部的编辑器操作（如自动化页的「插入等待」） */
+export interface MonacoEditorHandle {
+  /** 在光标处插入一段代码（整行插入；多行按当前行缩进对齐；有选区则替换选区） */
+  insertSnippet: (snippet: string) => void
+  /** 聚焦编辑器 */
+  focus: () => void
+}
 
 interface MonacoEditorProps {
   value?: string
-  onChange?: (value: string) => void
+  /**
+   * 内容变化回调。第二个参数是**事件所属 model 的 URI**（有 `path` 时才有值）。
+   *
+   * ⚠️ 带 `path` 的编辑器在切换文件时，事件可能由**上一次订阅**的闭包送回来（见下面
+   * `handleEditorChange`），调用方**不能**信自己闭包里记的「当前文件」—— 要用这个 URI
+   * 反推目标（每个文件一个 model，URI 就是它的身份，见 `AgentFilesPanel` 的用法）。
+   */
+  onChange?: (value: string, modelUri?: string) => void
+  /**
+   * Monaco 的**虚拟路径**：传了它，`@monaco-editor/react` 会按路径给每个文件建一个 model，
+   * 于是**每个文件各自保留撤销栈与光标 / 滚动位置**（多标签编辑必须如此：
+   * 共用一个 model 时，在文件 B 里按 Ctrl+Z 会把文件 A 的编辑内容撤进来）。
+   * 必须是唯一的 URI；不传 = 单 model（同一时刻只有一个文件在编辑的场景）。
+   */
+  path?: string
   /** 默认语言，当 showLanguageSelector 为 true 时作为初始值 */
   language?: string
   height?: string | number
@@ -62,6 +163,8 @@ interface MonacoEditorProps {
   actions?: ReactNode
   /** 是否显示行号切换按钮 */
   showLineNumbersToggle?: boolean
+  /** 行号初始是否显示（默认 true）；之后可由工具条的行号按钮随时切换 */
+  defaultShowLineNumbers?: boolean
   /** 是否显示自动换行切换按钮 */
   showWordWrapToggle?: boolean
   /** 是否显示复制按钮 */
@@ -72,11 +175,14 @@ interface MonacoEditorProps {
   onDownload?: () => void
   /** 是否显示顶部工具栏（语言标签 / 各切换按钮 / toolbar / actions），默认 true */
   showHeader?: boolean
+  /** 挂载后把编辑器操作写进这个 ref（插入片段 / 聚焦），供外部工具条调用 */
+  apiRef?: RefObject<MonacoEditorHandle | null>
 }
 
 const MonacoEditor: FC<MonacoEditorProps> = ({
   value = '',
   onChange,
+  path,
   language = 'json',
   height = '100%',
   readOnly = false,
@@ -85,15 +191,17 @@ const MonacoEditor: FC<MonacoEditorProps> = ({
   toolbar,
   actions,
   showLineNumbersToggle = false,
+  defaultShowLineNumbers = true,
   showWordWrapToggle = false,
   showCopyButton = false,
   showDownloadButton = false,
   onDownload,
-  showHeader = true
+  showHeader = true,
+  apiRef
 }) => {
   const isDark = useIsDarkTheme()
   const [currentLanguage, setCurrentLanguage] = useState(language)
-  const [showLineNumbers, setShowLineNumbers] = useState(true)
+  const [showLineNumbers, setShowLineNumbers] = useState(defaultShowLineNumbers)
   const [wordWrap, setWordWrap] = useState<'on' | 'off'>('on')
   const [copied, setCopied] = useState(false)
   /** 编辑器挂载完成后再显示依赖 editor 实例的按钮 */
@@ -105,10 +213,101 @@ const MonacoEditor: FC<MonacoEditorProps> = ({
   /** 上一次已同步过的容器尺寸，用来避免 layout → 尺寸回调 → layout 的来回触发 */
   const laidOutSize = useRef({ w: 0, h: 0 })
 
+  /**
+   * 在光标处插入一段代码（供外部工具条调用，如自动化页的「插入等待」）。
+   *
+   * 规则（保证插完是**合法代码**，不会把语句拼进相邻行）：
+   * - 有选区 → 直接替换选区；
+   * - 光标所在行是空行 → 填这一行（沿用它的缩进，不叠加）；
+   * - 光标所在行有内容 → 在**该行之后**另起一行插入（整行插入）。
+   * 多行片段除首行外每行按当前行缩进对齐；结束前 pushUndoStop 让整次插入可一步撤销。
+   */
+  const insertSnippet = useCallback((snippet: string): void => {
+    const editor = editorRef.current
+    const model = editor?.getModel()
+    const selection = editor?.getSelection()
+    if (!editor || !model || !selection) return
+    const lineNumber = selection.startLineNumber
+    const line = model.getLineContent(lineNumber)
+    const indent = line.match(/^[ \t]*/)?.[0] ?? ''
+    const body = snippet
+      .split('\n')
+      .map((l, i) => (i === 0 || !l ? l : indent + l))
+      .join('\n')
+    const isEmpty =
+      selection.startLineNumber === selection.endLineNumber &&
+      selection.startColumn === selection.endColumn
+
+    let range: MonacoRange = selection
+    let text = body
+    if (isEmpty) {
+      if (line.trim() === '') {
+        // 空行：整行替换（把原有缩进也让出来，避免叠加成双份缩进）
+        range = {
+          startLineNumber: lineNumber,
+          startColumn: 1,
+          endLineNumber: lineNumber,
+          endColumn: line.length + 1
+        }
+        text = `${indent}${body}`
+      } else {
+        // 有内容：在本行之后另起一行，插入一条独立语句
+        const end = line.length + 1
+        range = { startLineNumber: lineNumber, startColumn: end, endLineNumber: lineNumber, endColumn: end }
+        text = `\n${indent}${body}`
+      }
+    }
+
+    editor.pushUndoStop()
+    editor.executeEdits('dogi-insert-snippet', [{ range, text, forceMoveMarkers: true }])
+    editor.pushUndoStop()
+    editor.focus()
+  }, [])
+
   const handleEditorDidMount = (editor: unknown): void => {
     editorRef.current = editor as EditorInstance
     setMounted(true)
   }
+
+  /**
+   * 转发给 @monaco-editor/react 的内容变化处理。两个坑都压在这一个函数里：
+   *
+   * 1. **引用必须稳定**：库内部拿 `onChange` 当订阅句柄（一变就 dispose 重订），传内联
+   *    箭头每渲染都重订；而重订发生在**同一提交里更靠后**的 effect 里，值同步的 effect
+   *    先跑，它触发的内容事件因此走**上一个**订阅，带着上一次渲染的闭包回来。
+   *    （父组件（如文件面板）的 effect 比库内 effect 更晚，所以 ref 的赋值放在**渲染期**。）
+   * 2. **事件要自带归属**：切 model 的 effect 先于同步 value 的 effect，事件回来时编辑器
+   *    已经是新 model —— 值取的是新的，旧闭包里的「当前文件」却是旧的。实测把打开的
+   *    新文件的初始值写进了旧文件的条目，旧文件没人动却亮起「有未保存的修改」。所以这里
+   *    把 model URI 一并送出去，让调用方按 URI 反推目标。
+   */
+  const onChangeRef = useRef(onChange)
+  onChangeRef.current = onChange
+  const handleEditorChange = useCallback((v: string | undefined): void => {
+    const uri = editorRef.current?.getModel()?.uri.toString()
+    onChangeRef.current?.(v || '', uri)
+  }, [])
+
+  const focusEditor = useCallback((): void => {
+    editorRef.current?.focus()
+  }, [])
+
+  /**
+   * 把编辑器句柄挂到外部 ref 上。
+   *
+   * ⚠️ 赋值必须放在 **effect 的执行体**里（依赖 `mounted`），不能只写在 onMount 里：
+   * Monaco 是异步加载的，第二次及以后挂载编辑器时（资源已缓存）`onMount` 可能早于本组件
+   * 首次 effect 执行，紧接着 StrictMode 的 effect 清理会把它抹成 null —— 之后没有任何
+   * 时机再赋值，外部拿到的永远是 null，表现就是「点了插入没反应」。
+   * 放在 effect 体里：只要 mounted 为真就（重新）赋值，真正的卸载才清空。
+   */
+  useEffect(() => {
+    if (!apiRef || !mounted) return
+    apiRef.current = { insertSnippet, focus: focusEditor }
+    return () => {
+      apiRef.current = null
+    }
+  }, [apiRef, mounted, insertSnippet, focusEditor])
 
   /**
    * 补一次 `layout()`，把编辑器从 5×5 的保底尺寸拉回容器真实大小。
@@ -283,10 +482,11 @@ const MonacoEditor: FC<MonacoEditorProps> = ({
         <Editor
           height={height}
           language={currentLanguage}
+          path={path}
           theme={isDark ? 'vs-dark' : 'vs'}
           value={value}
           onMount={handleEditorDidMount}
-          onChange={(v) => onChange?.(v || '')}
+          onChange={handleEditorChange}
           options={{
             fontSize: 13,
             mouseWheelZoom: true,

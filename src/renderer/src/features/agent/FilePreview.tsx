@@ -7,9 +7,14 @@
  *
  * SVG 用 `<img>` 渲染：图片上下文里 SVG 的脚本与外部引用都不会执行，
  * 比直接注入 markup 安全得多（那是 XSS）。
+ *
+ * 图片 / SVG 的缩放旋转**不自己写**：直接用 antd `Image` 自带的预览浮层 ——
+ * 点图打开，滚轮 / 双击缩放、拖拽平移、左旋右旋、上下翻转、Esc 或点遮罩关闭，
+ * 下限是「适应窗口」、上限 50 倍。antd 本来就是项目依赖，没必要再引一个缩放库。
  */
 import { useEffect, useState } from 'react'
 import { AlertTriangle, FileQuestion, Loader2, Music } from 'lucide-react'
+import { Image } from 'antd'
 import type { PreviewKind } from '@shared/workspace-media'
 
 export function FilePreview({
@@ -22,10 +27,13 @@ export function FilePreview({
   fileName: string
 }) {
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading')
+  /** 图片 / SVG 的失败态：加载态由 antd Image 自己管（见 placeholder），失败由 onError 接住 */
+  const [imgFailed, setImgFailed] = useState(false)
 
   // 换文件要重置状态，否则上一个文件的失败会把新文件也标成失败
   useEffect(() => {
     setState('loading')
+    setImgFailed(false)
   }, [url])
 
   if (kind === 'audio') {
@@ -68,21 +76,39 @@ export function FilePreview({
   }
 
   return (
-    <div className="relative flex h-full items-center justify-center overflow-auto p-4">
-      <img
+    <div className="relative flex h-full items-center justify-center p-4">
+      {/*
+        点图打开 antd 的预览浮层：放大 / 缩小 / 左旋 / 右旋 / 上下翻转 / 拖拽 / 滚轮缩放，
+        底部一排按钮、Esc 或点遮罩关闭（见文件头注释）。预览用的是**原图**，不受这里尺寸限制。
+
+        ⚠️ 尺寸与居中走**行内样式**而不是工具类：antd 的 Image 会给根元素与 img 套自己的
+        样式（cssinjs 非 @layer），同优先级的工具类可能被它压过；行内样式一定生效。
+        根元素必须撑满：img 的 `max-h-full / max-w-full` 是相对**它**算的，根元素高度为
+        auto 时百分比会失效（长图会直接溢出面板）。
+      */}
+      <Image
         src={url}
         alt={fileName}
-        className="max-h-full max-w-full object-contain"
-        onLoad={() => setState('ready')}
-        onError={() => setState('error')}
+        className="cursor-zoom-in"
+        style={{ maxHeight: '100%', maxWidth: '100%', objectFit: 'contain' }}
+        styles={{
+          root: {
+            display: 'flex',
+            width: '100%',
+            height: '100%',
+            alignItems: 'center',
+            justifyContent: 'center'
+          }
+        }}
+        placeholder={
+          <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Loader2 className="size-3.5 animate-spin" />
+            加载中…
+          </span>
+        }
+        onError={() => setImgFailed(true)}
       />
-      {state === 'loading' && (
-        <div className="absolute flex items-center gap-1.5 text-xs text-muted-foreground">
-          <Loader2 className="size-3.5 animate-spin" />
-          加载中…
-        </div>
-      )}
-      {state === 'error' && (
+      {imgFailed && (
         <div className="absolute inset-0 flex items-center justify-center bg-background/80">
           <PreviewError />
         </div>

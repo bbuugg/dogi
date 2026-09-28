@@ -25,12 +25,29 @@ import type {
   ApiHttpResponse,
   ApiRequestEntry,
   AppInfo,
+  AutomationGroup,
+  AutomationScript,
+  BrowserCandidate,
+  BrowserFrame,
+  BrowserInputEvent,
+  BrowserLogEvent,
+  BrowserRecordEvent,
+  BrowserRunResult,
+  BrowserSessionState,
+  BrowserViewportMode,
   DetectedAcpAgent,
+  GitAction,
+  GitBranchesResult,
+  GitCommit,
+  GitStatusResult,
+  HostLogEntry,
   IdeInfo,
   McpServerConfig,
   McpToolInfo,
+  MoshClientStatus,
   NoteEntry,
   NoteGroup,
+  NoteImportResult,
   OpenResult,
   Preferences,
   ScriptEntry,
@@ -45,7 +62,10 @@ import type {
   SkillListResult,
   SkillSettings,
   SshGroup,
+  SshKnownHost,
   SshProfile,
+  SshTunnel,
+  SshTunnelRuntime,
   TransferExportResult,
   TransferImportResult,
   TransferKind,
@@ -136,6 +156,12 @@ const api = {
     list: (): Promise<SessionInfo[]> => ipcRenderer.invoke('terminal:list'),
     /** 检测本地可用 shell（含平台默认 id） */
     listShells: (): Promise<ShellDetectResult> => ipcRenderer.invoke('terminal:listShells'),
+    /**
+     * 探测本地 mosh-client（原生 / WSL 回退）；refresh 为 true 时强制重扫，
+     * 供「刚装完 mosh-client 不想重启应用」的场景
+     */
+    moshStatus: (refresh?: boolean): Promise<MoshClientStatus> =>
+      ipcRenderer.invoke('terminal:moshStatus', refresh),
     createLocal: (cols?: number, rows?: number, shellId?: string, cwd?: string): Promise<SessionInfo> =>
       ipcRenderer.invoke('terminal:createLocal', cols, rows, shellId, cwd),
     createSsh: (profileId: string, cols?: number, rows?: number): Promise<SessionInfo> =>
@@ -171,7 +197,9 @@ const api = {
     list: (): Promise<SshProfile[]> => ipcRenderer.invoke('ssh:list'),
     save: (profile: SshProfile): Promise<SshProfile[]> =>
       ipcRenderer.invoke('ssh:save', profile),
-    remove: (id: string): Promise<SshProfile[]> => ipcRenderer.invoke('ssh:delete', id),
+    /** 删除主机；clearedJumps 为被顺带清掉的跳板引用数量（>0 时渲染端提示） */
+    remove: (id: string): Promise<{ profiles: SshProfile[]; clearedJumps: number }> =>
+      ipcRenderer.invoke('ssh:delete', id),
     /** 拖拽排序 / 换组后的整体重排（数组顺序即显示顺序） */
     arrange: (payload: {
       groupIds: string[]
@@ -183,7 +211,43 @@ const api = {
       ipcRenderer.invoke('ssh:groups:save', input),
     /** 删除分组；deleteProfiles=true 时连同组内连接一起删除 */
     removeGroup: (id: string, deleteProfiles?: boolean): Promise<SshGroup[]> =>
-      ipcRenderer.invoke('ssh:groups:delete', id, deleteProfiles)
+      ipcRenderer.invoke('ssh:groups:delete', id, deleteProfiles),
+    /** 测试连接：连上即断，返回耗时（毫秒）；失败抛错（错误信息已是用户可读文案） */
+    test: (draft: SshProfile): Promise<{ ms: number }> => ipcRenderer.invoke('ssh:test', draft),
+    /** 弹文件选择框读私钥内容；用户取消返回 null */
+    readKeyFile: (): Promise<{ path: string; content: string } | null> =>
+      ipcRenderer.invoke('ssh:readKeyFile'),
+    knownHostsList: (): Promise<SshKnownHost[]> => ipcRenderer.invoke('ssh:knownHosts:list'),
+    /** 重置指定 host:port 的主机指纹记录（下次连接重新 TOFU） */
+    knownHostsReset: (host: string, port: number): Promise<void> =>
+      ipcRenderer.invoke('ssh:knownHosts:reset', host, port)
+  },
+  /** SSH 隧道（本地转发 -L / 远程转发 -R / SOCKS5 动态 -D）：运行态经 onStatus 订阅推送 */
+  tunnels: {
+    list: (): Promise<{ tunnels: SshTunnel[]; runtime: SshTunnelRuntime[] }> =>
+      ipcRenderer.invoke('tunnels:list'),
+    /** 新建（id 为空）或更新（id 已存在）；运行中被编辑的隧道会自动重启 */
+    save: (tunnel: SshTunnel): Promise<{ tunnels: SshTunnel[]; runtime: SshTunnelRuntime[] }> =>
+      ipcRenderer.invoke('tunnels:save', tunnel),
+    /** 删除（运行中会先停止） */
+    remove: (id: string): Promise<{ tunnels: SshTunnel[]; runtime: SshTunnelRuntime[] }> =>
+      ipcRenderer.invoke('tunnels:delete', id),
+    /** 启动（失败不抛错，落在运行态的 error 里） */
+    start: (id: string): Promise<void> => ipcRenderer.invoke('tunnels:start', id),
+    stop: (id: string): Promise<void> => ipcRenderer.invoke('tunnels:stop', id),
+    /** 运行态全量推送（启动/停止/出错/连接数变化都会触发） */
+    onStatus: (cb: (runtime: SshTunnelRuntime[]) => void) => subscribe('tunnels:status', cb)
+  },
+  /** 主机日志：SSH 连接 / 隧道 / SFTP 等主机相关事件（记录在主进程，跨重启保留） */
+  logs: {
+    /** 全量读取（从旧到新，界面自行倒序）；上限 1000 条，更早的看落盘文件 */
+    list: (): Promise<HostLogEntry[]> => ipcRenderer.invoke('logs:list'),
+    /** 清空内存与落盘文件（序号继续递增，不复用） */
+    clear: (): Promise<void> => ipcRenderer.invoke('logs:clear'),
+    /** 在文件管理器中打开日志目录（userData/logs） */
+    reveal: (): Promise<OpenResult> => ipcRenderer.invoke('logs:reveal'),
+    /** 新日志实时推送（初始全量走 list，之后按此补增量） */
+    onEntry: (cb: (entry: HostLogEntry) => void) => subscribe('logs:entry', cb)
   },
   /** SFTP 文件管理：凭据复用 SSH 主机配置（主进程解密，渲染端不接触密码） */
   sftp: {
@@ -204,6 +268,9 @@ const api = {
     /** 弹选择文件对话框（可多选）后上传到远端目录（并发） */
     upload: (connId: string, remoteDir: string): Promise<SftpTransferResult> =>
       ipcRenderer.invoke('sftp:upload', connId, remoteDir),
+    /** 弹选择目录对话框后递归上传整个本地目录（目录内每个文件一笔独立传输） */
+    uploadDir: (connId: string, remoteDir: string): Promise<SftpTransferResult> =>
+      ipcRenderer.invoke('sftp:uploadDir', connId, remoteDir),
     /** 弹选择目录对话框后递归下载整个远端目录（目录内每个文件一笔独立传输） */
     downloadDir: (connId: string, remoteDir: string, defaultName: string): Promise<SftpTransferResult> =>
       ipcRenderer.invoke('sftp:downloadDir', connId, remoteDir, defaultName),
@@ -249,7 +316,7 @@ const api = {
       subscribe('ai:chat-event', cb),
     /** 确认模式下收到命令执行确认请求 */
     onConfirmRequest: (cb: (req: AiConfirmRequest) => void) => subscribe('ai:confirm', cb),
-    /** 确认已有结论（用户回复走本地移除；超时 / 中止由主进程通知移除卡片） */
+    /** 确认已有结论（用户回复走本地移除；中止 / 回合结束由主进程通知移除卡片） */
     onConfirmResolved: (cb: (payload: { id: string }) => void) =>
       subscribe('ai:confirm-resolved', cb),
     /** 回复确认请求：approved=true 执行，false 取消 */
@@ -292,9 +359,9 @@ const api = {
     onChatEvent: (
       cb: (payload: { requestId: string; conversationId?: string; event: AgentStreamEvent }) => void
     ) => subscribe('agent:chat-event', cb),
-    /** 确认模式下收到 execute_command 执行确认请求 */
+    /** 确认模式下收到改动类工具的确认请求（执行命令 / 写入 / 编辑 / 删除） */
     onConfirmRequest: (cb: (req: AgentConfirmRequest) => void) => subscribe('agent:confirm', cb),
-    /** 确认已有结论（超时 / 中止由主进程通知移除卡片） */
+    /** 确认已有结论（中止 / 回合结束由主进程通知移除卡片） */
     onConfirmResolved: (cb: (payload: { id: string }) => void) =>
       subscribe('agent:confirm-resolved', cb),
     /** 回复确认请求：approved=true 执行，false 取消 */
@@ -343,7 +410,11 @@ const api = {
       ipcRenderer.invoke('mcp:save', server),
     remove: (id: string): Promise<McpServerConfig[]> => ipcRenderer.invoke('mcp:delete', id),
     listTools: (): Promise<{ tools: McpToolInfo[]; errors: string[] }> =>
-      ipcRenderer.invoke('mcp:tools')
+      ipcRenderer.invoke('mcp:tools'),
+    serverTools: (
+      id: string
+    ): Promise<{ tools: McpToolInfo[]; error?: string }> =>
+      ipcRenderer.invoke('mcp:serverTools', id)
   },
   /** 技能（Agent Skills 约定：目录 + SKILL.md）：磁盘自动发现 + 启停 / 额外目录设置 */
   skills: {
@@ -392,7 +463,81 @@ const api = {
       id: string,
       deleteNotes?: boolean
     ): Promise<{ groups: NoteGroup[]; notes: NoteEntry[] }> =>
-      ipcRenderer.invoke('notes:groups:delete', id, deleteNotes)
+      ipcRenderer.invoke('notes:groups:delete', id, deleteNotes),
+    /** 从本地选择文件导入为笔记（每个文件一篇），返回最新列表与新建 id */
+    importFiles: (): Promise<NoteImportResult> => ipcRenderer.invoke('notes:import')
+  },
+  /** 内置的「自动化」功能：浏览器自动化脚本（Playwright） */
+  automation: {
+    list: (): Promise<AutomationScript[]> => ipcRenderer.invoke('automation:list'),
+    save: (script: AutomationScript): Promise<AutomationScript[]> =>
+      ipcRenderer.invoke('automation:save', script),
+    remove: (id: string): Promise<AutomationScript[]> =>
+      ipcRenderer.invoke('automation:delete', id),
+    /** 拖拽排序 / 换组后的整体重排（数组顺序即显示顺序） */
+    arrange: (payload: {
+      groupIds: string[]
+      scripts: Array<{ id: string; groupId?: string }>
+    }): Promise<{ groups: AutomationGroup[]; scripts: AutomationScript[] }> =>
+      ipcRenderer.invoke('automation:arrange', payload),
+    listGroups: (): Promise<AutomationGroup[]> => ipcRenderer.invoke('automation:groups:list'),
+    saveGroup: (input: { id?: string; name: string }): Promise<AutomationGroup[]> =>
+      ipcRenderer.invoke('automation:groups:save', input),
+    /** 删除分组；deleteScripts=true 时连同组内脚本一起删除 */
+    removeGroup: (
+      id: string,
+      deleteScripts?: boolean
+    ): Promise<{ groups: AutomationGroup[]; scripts: AutomationScript[] }> =>
+      ipcRenderer.invoke('automation:groups:delete', id, deleteScripts)
+  },
+  /**
+   * 浏览器会话控制。画面走 screencast 帧流（onFrame），输入靠 input() 转发 ——
+   * 浏览器本身是无窗口跑的，面板里看到的就是这一路帧。
+   */
+  browser: {
+    /** 探测本机可用的浏览器（自带 Chromium / Edge / Chrome） */
+    detect: (): Promise<BrowserCandidate[]> => ipcRenderer.invoke('browser:detect'),
+    /** 启动会话；mode 是视口预设（PC / 手机），与面板尺寸无关 */
+    open: (payload: {
+      sessionId: string
+      url?: string
+      mode?: BrowserViewportMode
+    }): Promise<BrowserSessionState> => ipcRenderer.invoke('browser:open', payload),
+    close: (sessionId: string): Promise<void> => ipcRenderer.invoke('browser:close', sessionId),
+    state: (sessionId: string): Promise<BrowserSessionState | null> =>
+      ipcRenderer.invoke('browser:state', sessionId),
+    navigate: (sessionId: string, url: string): Promise<void> =>
+      ipcRenderer.invoke('browser:navigate', { sessionId, url }),
+    back: (sessionId: string): Promise<void> => ipcRenderer.invoke('browser:back', sessionId),
+    forward: (sessionId: string): Promise<void> => ipcRenderer.invoke('browser:forward', sessionId),
+    reload: (sessionId: string): Promise<void> => ipcRenderer.invoke('browser:reload', sessionId),
+    /** 合成输入（鼠标 / 滚轮 / 键盘 / 文本），坐标须为页面视口坐标 */
+    input: (sessionId: string, event: BrowserInputEvent): Promise<void> =>
+      ipcRenderer.invoke('browser:input', { sessionId, event }),
+    /** 切换视口预设（PC / 手机） */
+    viewport: (sessionId: string, mode: BrowserViewportMode): Promise<void> =>
+      ipcRenderer.invoke('browser:viewport', { sessionId, mode }),
+    startRecord: (sessionId: string): Promise<void> =>
+      ipcRenderer.invoke('browser:record:start', sessionId),
+    stopRecord: (sessionId: string): Promise<void> =>
+      ipcRenderer.invoke('browser:record:stop', sessionId),
+    /** 运行脚本（浏览器没启动会自动启动） */
+    run: (
+      sessionId: string,
+      code: string,
+      mode?: BrowserViewportMode
+    ): Promise<BrowserRunResult> => ipcRenderer.invoke('browser:run', { sessionId, code, mode }),
+    /** 停止运行：只保证不再执行下一步 */
+    abort: (sessionId: string): Promise<void> => ipcRenderer.invoke('browser:abort', sessionId),
+    onFrame: (cb: (frame: BrowserFrame) => void): Unsubscribe =>
+      subscribe('browser:frame', cb),
+    onState: (cb: (state: BrowserSessionState) => void): Unsubscribe =>
+      subscribe('browser:state', cb),
+    onRecord: (cb: (event: BrowserRecordEvent) => void): Unsubscribe =>
+      subscribe('browser:record', cb),
+    onLog: (cb: (log: BrowserLogEvent) => void): Unsubscribe => subscribe('browser:log', cb),
+    onClosed: (cb: (payload: { sessionId: string; reason: string }) => void): Unsubscribe =>
+      subscribe('browser:closed', cb)
   },
   /** 内置的「接口请求」功能：请求由主进程发出，规避渲染进程的 CORS 限制 */
   apiClient: {
@@ -443,7 +588,10 @@ const api = {
   prefs: {
     get: (): Promise<Preferences> => ipcRenderer.invoke('prefs:get'),
     save: (patch: Partial<Preferences>): Promise<Preferences> =>
-      ipcRenderer.invoke('prefs:save', patch)
+      ipcRenderer.invoke('prefs:save', patch),
+    /** 偏好变更广播（主进程保存后推给所有渲染端窗口，跨窗口同步生效） */
+    onUpdated: (cb: (prefs: Preferences) => void) =>
+      subscribe('prefs:updated', cb)
   },
   /** 数据导入 / 导出（左下角菜单）：主机 / 笔记 / 接口请求 打成 zip 或从 zip 导回 */
   transfer: {
@@ -472,7 +620,13 @@ const api = {
      * 通知开关也读偏好；返回是否弹出。
      */
     notify: (notice: { title: string; body: string }): Promise<boolean> =>
-      ipcRenderer.invoke('app:notify', notice)
+      ipcRenderer.invoke('app:notify', notice),
+    /**
+     * 退出前主进程请求渲染端把「进行中的状态」落盘（如 Agent 长任务中途退出）。
+     * 处理完必须调 `flushDone()` —— 主进程只等一小会儿，等不到就照常退出。
+     */
+    onFlushRequest: (cb: () => void): Unsubscribe => subscribe('app:flush', cb),
+    flushDone: (): Promise<void> => ipcRenderer.invoke('app:flushDone')
   },
   shortcuts: {
     /** 读取当前快捷键配置（动作 -> accelerator） */
@@ -490,10 +644,15 @@ const api = {
     minimize: (): Promise<void> => ipcRenderer.invoke('window:minimize'),
     toggleMaximize: (): Promise<void> => ipcRenderer.invoke('window:toggleMaximize'),
     close: (): Promise<void> => ipcRenderer.invoke('window:close'),
+    /** 关闭独立设置窗口（区别于 close：close 关的是主窗口） */
+    closeSettings: (): Promise<void> => ipcRenderer.invoke('window:closeSettings'),
     isMaximized: (): Promise<boolean> => ipcRenderer.invoke('window:isMaximized'),
     /** 订阅最大化状态变化（自定义标题栏切换最大化/还原图标） */
     onMaximizedChange: (cb: (maximized: boolean) => void) =>
-      subscribe('window:maximized', cb)
+      subscribe('window:maximized', cb),
+    /** 打开独立设置窗口（已开着则聚焦，不会重复开） */
+    openSettings: (tab?: string): Promise<void> =>
+      ipcRenderer.invoke('window:openSettings', tab)
   },
   zmodem: {
     /** 打开文件选择框，返回选中文件的字节（用于 rz 上传） */
@@ -559,7 +718,20 @@ const api = {
       ipcRenderer.invoke('shell:openTerminal', dir),
     listIdes: (): Promise<IdeInfo[]> => ipcRenderer.invoke('shell:listIdes'),
     openIde: (ideId: string, dir: string): Promise<OpenResult> =>
-      ipcRenderer.invoke('shell:openIde', ideId, dir)
+      ipcRenderer.invoke('shell:openIde', ideId, dir),
+    /** 打开文件位置：目录直接打开，文件在所在目录中选中（不存在时返回 ok:false） */
+    revealPath: (path: string): Promise<OpenResult> =>
+      ipcRenderer.invoke('shell:revealPath', path)
+  },
+  /** 源代码管理（git）：以工作区目录为入口，定位仓库根后执行 */
+  git: {
+    status: (cwd: string): Promise<GitStatusResult> => ipcRenderer.invoke('git:status', cwd),
+    branches: (cwd: string): Promise<GitBranchesResult> => ipcRenderer.invoke('git:branches', cwd),
+    log: (cwd: string, n?: number): Promise<GitCommit[]> => ipcRenderer.invoke('git:log', cwd, n),
+    diff: (cwd: string, path: string, staged: boolean): Promise<string> =>
+      ipcRenderer.invoke('git:diff', cwd, path, staged),
+    action: (cwd: string, action: GitAction): Promise<string> =>
+      ipcRenderer.invoke('git:action', cwd, action)
   }
 }
 

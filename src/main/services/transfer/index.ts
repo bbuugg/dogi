@@ -58,6 +58,8 @@ function hostOut(p: SshProfile): SshProfile {
     port: p.port,
     username: p.username,
     authType: p.authType,
+    // 跳板链属于拓扑信息（非凭据），随包导出，导入后连接方式保持一致
+    jumpProfileId: p.jumpProfileId,
     command: p.command,
     args: p.args,
     autoCommand: p.autoCommand,

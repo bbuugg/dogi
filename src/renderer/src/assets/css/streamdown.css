@@ -1,0 +1,129 @@
+
+/*
+ * Streamdown（助手正文 / 思考内容的 markdown）代码块与表格：收敛成项目的「单层扁平块」。
+ *
+ * Streamdown 2.x 的默认观感是「外层侧栏色大卡片（bg-sidebar + p-2 + 18px 圆角）+ 内层再套一个
+ * 带边框的白底圆角盒」的套娃结构 —— 与本项目扁平、紧凑、克制描边的界面语言不符。
+ * 这里把外壳拆掉：代码块 / mermaid 图 / 表格各自只剩**一层**边框，字号 13px（比正文小一档），
+ * 圆角用项目口径的 rounded-md。行号与表格工具条的**开关**在 lib/streamdown.ts（props 层）。
+ *
+ * ⚠️ 这段**故意写在所有 @layer 之外**：Tailwind v4 的 utilities 在 `@layer utilities` 里，
+ * 而未分层的 CSS 在层叠顺序上**永远压过分层样式**（跟选择器优先级无关）—— 所以这里
+ * 不需要 `!important` 就能稳定盖掉 Streamdown 自带的工具类。规则都挂在 `.sd-md` 下
+ * （见 ai-elements 里 Streamdown 的 className），不会波及别处。
+ *
+ * 另注：Streamdown 的工具类要靠宿主 Tailwind 的 `@source` 扫它的 dist 才会生成
+ * （apps/web 与 apps/desktop 的 index.css 里各有一条），少了这条则这里覆盖的其实是「浏览器默认样式」。
+ * ⚠️ 注释里别写含 `*` 的通配路径 —— 星号后紧跟斜杠会把块注释提前终止，后面整段都会被当成裸 token。
+ */
+
+/* ── 代码块 ────────────────────────────────────────────────────────────────
+   外壳自己成为唯一的一层表面（默认是 bg-sidebar 大卡片 + 白底圆角盒两层）。
+   ⚠️ 复制按钮工具条的 -mt-10 是按「header 高 h-8 + flex gap-2」配对写死的，
+   这两个值别动，否则按钮会错位压到代码上。 */
+.sd-md :is([data-streamdown='code-block'], [data-streamdown='mermaid-block']) {
+  margin: 0.5rem 0; /* 默认 my-4，聊天流里太占纵向 */
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md); /* 项目口径的 rounded-md（--radius 0.875rem → 12px） */
+  overflow: hidden;
+}
+
+/* 工具条容器（复制 / 下载按钮那一行）：streamdown 原本把它做成 sticky top-2 + -mt-10，
+   贴在语言标签行上、随消息列表滚动时悬浮。但卡片 overflow:hidden 之后自己成了滚动容器
+   （scrollTop 恒 0），sticky 的 top-2 阈值会**立即生效**，把按钮压到卡顶下 8px、
+   与语言标签错位 —— 改回 static，让它停在 -mt-10 拉上去的那一行里，与标签同行。 */
+.sd-md :is([data-streamdown='code-block'], [data-streamdown='mermaid-block']) > div.sticky {
+  position: static;
+}
+
+.sd-md [data-streamdown='code-block'] {
+  padding: 0;
+}
+
+/* mermaid 图没有内层 body，自己补内边距 */
+.sd-md [data-streamdown='mermaid-block'] {
+  padding: 0.5rem;
+}
+
+/* 语言标签行：贴住代码区，只隔一条发丝线 */
+.sd-md [data-streamdown='code-block-header'] {
+  padding: 0 0.625rem;
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
+}
+
+/* 复制按钮的悬浮底：从「带边框的 sidebar 药丸」退成与块表面同源的低透明度底
+   （backdrop-blur 保留，滚动中短暂悬浮在内容上时仍可读） */
+.sd-md :is([data-streamdown='code-block-actions'], [data-streamdown='mermaid-block-actions']) {
+  margin-right: 0.25rem;
+  border-color: transparent;
+  background: color-mix(in oklab, var(--background) 80%, transparent);
+}
+
+/* 内层那个白底圆角盒退化成纯内边距（边框 / 底色 / 圆角都由外壳承担） */
+.sd-md [data-streamdown='code-block-body'] {
+  padding: 0.5rem 0.75rem;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  font-size: 0.8125rem;
+}
+
+/* pre 不再自带边距 / 内边距（2.x 里由 body 承担），等宽字体与项目统一；
+   盖掉 shiki 主题自带的整块背景（dark 下 #24292e 与项目近黑的底色对不上） */
+.sd-md [data-streamdown='code-block-body'] pre {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  font-family: var(--font-mono);
+  line-height: 1.55;
+}
+
+/* ── 表格 ────────────────────────────────────────────────────────────────
+   外壳拆卡片；内层滚动容器（Streamdown 自带 rounded-md border bg-background）成为唯一表面。 */
+.sd-md [data-streamdown='table-wrapper'] {
+  margin: 0.5rem 0;
+  gap: 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+}
+
+.sd-md table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem; /* 13px：比正文小一档，表格别喧宾夺主 */
+  line-height: 1.5;
+}
+
+/* ⚠️ 字号必须落在单元格上：Streamdown 给 th/td 挂了 text-sm(14px)，
+   只写在 table 上会被元素自身的类盖回 14px（继承敌不过自有声明）。
+   边框淡到 60%：密集网格用全强度 --border（≈#e5e5e5）会显得整块发重 */
+.sd-md :is(th, td) {
+  border: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
+  padding: 0.375rem 0.625rem;
+  font-size: 0.8125rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+/* 表头：盖掉自带的 bg-muted/80，底色统一由 th 上色；th 默认 whitespace-nowrap，
+   窄栏里长表头会把表格撑出横向滚动，放开换行 */
+.sd-md thead {
+  background: transparent;
+}
+
+.sd-md thead th {
+  white-space: normal;
+  font-weight: 600;
+  background: color-mix(in oklab, var(--muted-foreground) 8%, transparent);
+}
+
+/* 行内代码 */
+.sd-md :not(pre) > code {
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.8125rem;
+  background: color-mix(in oklab, var(--muted-foreground) 12%, transparent);
+}

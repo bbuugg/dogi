@@ -4,16 +4,24 @@ import { Button, Dropdown, type MenuProps } from 'antd'
 import {
   ArrowRightLeft,
   Boxes,
+  Check,
   Command as CommandIcon,
   FileDown,
   FileUp,
   ListPlus,
   Menu,
+  Monitor,
+  Moon,
+  Palette,
   Plus,
-  Settings
+  ScrollText,
+  Settings,
+  Sun
 } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { DataTransferDialog, type TransferMode } from './DataTransferDialog'
+import { COLOR_THEMES } from '@/shared/lib/color-themes'
+import type { ColorThemeName, ThemeMode } from '@shared/types'
 
 /** 状态栏条目统一样式（外部传入的节点也用它，保证与内置条目一致） */
 export const STATUS_ITEM_CLASS =
@@ -54,7 +62,11 @@ function MenuButton({ onTransfer }: { onTransfer: (mode: TransferMode) => void }
   const selectActivity = useAppStore((s) => s.selectActivity)
   const openScriptsSection = useAppStore((s) => s.openScriptsSection)
   const setSshDialog = useAppStore((s) => s.setSshDialog)
+  const openLogsTab = useAppStore((s) => s.openLogsTab)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
+  const preferences = useAppStore((s) => s.preferences)
+  const setTheme = useAppStore((s) => s.setTheme)
+  const setColorTheme = useAppStore((s) => s.setColorTheme)
   const [open, setOpen] = useState(false)
 
   const hint = 'ml-auto pl-3 text-xs text-muted-foreground'
@@ -64,6 +76,62 @@ function MenuButton({ onTransfer }: { onTransfer: (mode: TransferMode) => void }
     setOpen(false)
     fn()
   }
+
+  /** 主题子菜单里一行：色块（可选）+ 文案 + 命中时打勾 */
+  const ThemeRow = ({
+    label,
+    active,
+    swatch
+  }: {
+    label: string
+    active: boolean
+    swatch?: string
+  }) => (
+    <span className="flex w-full items-center gap-2">
+      {swatch && (
+        <span
+          className="size-3.5 shrink-0 rounded-full border border-border/60"
+          style={{ background: swatch }}
+        />
+      )}
+      <span className="flex-1">{label}</span>
+      {active && <Check className="size-3.5 text-primary" />}
+    </span>
+  )
+
+  /** 主题子菜单：明暗 + 配色（自定义走设置窗口的取色器） */
+  const themeChildren: MenuProps['items'] = [
+    {
+      key: 'theme:system',
+      icon: <Monitor className={icon} />,
+      label: <ThemeRow label="跟随系统" active={preferences.theme === 'system'} />
+    },
+    {
+      key: 'theme:light',
+      icon: <Sun className={icon} />,
+      label: <ThemeRow label="亮色" active={preferences.theme === 'light'} />
+    },
+    {
+      key: 'theme:dark',
+      icon: <Moon className={icon} />,
+      label: <ThemeRow label="暗色" active={preferences.theme === 'dark'} />
+    },
+    { type: 'divider' },
+    ...COLOR_THEMES.map((preset) => ({
+      key: `color:${preset.id}`,
+      label: (
+        <ThemeRow
+          label={preset.label}
+          swatch={preset.swatch}
+          active={preferences.colorTheme === preset.id}
+        />
+      )
+    })),
+    {
+      key: 'color:custom',
+      label: <ThemeRow label="自定义…" active={preferences.colorTheme === 'custom'} />
+    }
+  ]
 
   const items: MenuProps['items'] = [
     {
@@ -79,6 +147,7 @@ function MenuButton({ onTransfer }: { onTransfer: (mode: TransferMode) => void }
     { key: 'manage-scripts', icon: <ListPlus className={icon} />, label: '管理脚本' },
     { key: 'plugins', icon: <Boxes className={icon} />, label: '插件管理' },
     { key: 'add-host', icon: <Plus className={icon} />, label: '添加主机' },
+    { key: 'logs', icon: <ScrollText className={icon} />, label: '主机日志' },
     { type: 'divider' },
     {
       key: 'transfer',
@@ -90,6 +159,12 @@ function MenuButton({ onTransfer }: { onTransfer: (mode: TransferMode) => void }
       ]
     },
     { type: 'divider' },
+    {
+      key: 'theme',
+      icon: <Palette className={icon} />,
+      label: '主题',
+      children: themeChildren
+    },
     {
       key: 'settings',
       icon: <Settings className={icon} />,
@@ -113,7 +188,18 @@ function MenuButton({ onTransfer }: { onTransfer: (mode: TransferMode) => void }
     else if (key === 'manage-scripts') run(openScriptsSection)()
     else if (key === 'plugins') run(() => selectActivity(PLUGINS_ACTIVITY_ID))()
     else if (key === 'add-host') run(() => setSshDialog(true, null))()
+    else if (key === 'logs') run(openLogsTab)()
     else if (key === 'settings') run(() => setSettingsOpen(true))()
+    // 主题子菜单的叶子：明暗 / 配色
+    else if (key.startsWith('theme:')) {
+      setOpen(false)
+      void setTheme(key.slice('theme:'.length) as ThemeMode)
+    } else if (key.startsWith('color:')) {
+      setOpen(false)
+      const id = key.slice('color:'.length)
+      if (id === 'custom') void window.api.window.openSettings('prefs')
+      else void setColorTheme(id as ColorThemeName)
+    }
   }
 
   return (

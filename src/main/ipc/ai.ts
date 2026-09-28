@@ -65,7 +65,7 @@ export function registerAiIpc(ctx: IpcContext): void {
   // ---------- 命令执行确认（确认模式） ----------
   aiService.setConfirmSink({
     request: (req) => ctx.broadcast('ai:confirm', req),
-    // 确认已有结论（超时 / 中止等非用户路径），渲染端据此移除卡片
+    // 确认已有结论（中止等非用户路径），渲染端据此移除卡片
     resolved: (id) => ctx.broadcast('ai:confirm-resolved', { id })
   })
   ipcMain.handle('ai:confirm:resolve', (_e, payload: { id: string; approved: boolean }) =>

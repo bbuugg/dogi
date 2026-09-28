@@ -2,6 +2,7 @@ import { dialog, ipcMain } from 'electron'
 import { promises as fs } from 'node:fs'
 import { sessionManager } from '../services/terminal/sessions'
 import { detectShells } from '../services/terminal/shells'
+import { moshClientStatus } from '../services/terminal/mosh'
 import { storage } from '../services/storage'
 import type { SessionInfo, SshConnectProgress } from '@shared/types'
 import type { IpcContext } from './shared'
@@ -32,6 +33,8 @@ export function registerTerminalIpc(ctx: IpcContext): void {
   // ---------- 终端控制 ----------
   ipcMain.handle('terminal:list', () => sessionManager.list())
   ipcMain.handle('terminal:listShells', () => detectShells())
+  // 本地 mosh-client 探测（新建 Mosh 主机时提示；refresh 强制重扫，方便刚装完直接生效）
+  ipcMain.handle('terminal:moshStatus', (_e, refresh?: boolean) => moshClientStatus(refresh))
   ipcMain.handle(
     'terminal:createLocal',
     (_e, cols?: number, rows?: number, shellId?: string, cwd?: string) => {
@@ -51,9 +54,17 @@ export function registerTerminalIpc(ctx: IpcContext): void {
     (_e, profileId: string, cols?: number, rows?: number) => {
       const profile = storage.getSshProfile(profileId)
       if (!profile) throw new Error(`主机配置不存在: ${profileId}`)
+      // Mosh 走 UDP，无法经 SSH 隧道；组合使用直接拒绝（放在 mosh-client 探测之前，未装也先报这个）
+      if (profile.useMosh && profile.jumpProfileId) {
+        throw new Error(
+          'Mosh 不支持经跳板机连接（mosh 走 UDP，无法经 SSH 隧道），请改用普通 SSH 或取消跳板机'
+        )
+      }
       return profile.kind === 'local'
         ? sessionManager.createLocalHost(profile, cols, rows)
-        : sessionManager.createSsh(profile, cols, rows)
+        : profile.useMosh
+          ? sessionManager.createMosh(profile, cols, rows)
+          : sessionManager.createSsh(profile, cols, rows)
     }
   )
   ipcMain.handle('terminal:write', (_e, sessionId: string, data: string) =>

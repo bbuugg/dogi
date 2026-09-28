@@ -1,7 +1,8 @@
 import { useMemo, type ComponentType } from 'react'
-import { Bot, Globe, Puzzle, Server, StickyNote } from 'lucide-react'
+import { Bot, Globe, Puzzle, Server, StickyNote, Workflow } from 'lucide-react'
 import { AgentPanel } from '@/features/agent/AgentPanel'
 import { ApiPanel } from '@/features/api/ApiPanel'
+import { AutomationPanel } from '@/features/automation/AutomationPanel'
 import { HostsPanel } from '@/features/hosts/HostsPanel'
 import { NotesPanel } from '@/features/notes/NotesPanel'
 import { PluginsPanel } from '@/features/plugins/PluginsPanel'
@@ -9,6 +10,7 @@ import { useAppStore } from '@/stores/app-store'
 import {
   AGENT_ACTIVITY_ID,
   API_ACTIVITY_ID,
+  AUTOMATION_ACTIVITY_ID,
   HOSTS_ACTIVITY_ID,
   NOTES_ACTIVITY_ID,
   PLUGINS_ACTIVITY_ID
@@ -64,6 +66,12 @@ export const BUILTIN_ACTIVITIES: Activity[] = [
     label: '接口请求',
     icon: Globe,
     panel: ApiPanel
+  },
+  {
+    id: AUTOMATION_ACTIVITY_ID,
+    label: '自动化',
+    icon: Workflow,
+    panel: AutomationPanel
   },
   {
     id: PLUGINS_ACTIVITY_ID,

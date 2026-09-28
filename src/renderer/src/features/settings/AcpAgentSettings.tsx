@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { CloudDownload, Pencil, Plus, ScanSearch, Star, Trash2 } from 'lucide-react'
+import { CloudDownload, Pencil, Plus, ScanSearch, Star, Trash2, X } from 'lucide-react'
 import type { AcpAgentConfig, DetectedAcpAgent } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import { Button, Input, Modal, Popconfirm, Select, Tag, message } from 'antd'
@@ -9,13 +9,22 @@ interface FormState {
   name: string
   command: string
   args: string
+  env: Record<string, string>
+  models: string[]
 }
 
-const EMPTY: FormState = { id: '', name: '', command: '', args: '' }
+const EMPTY: FormState = { id: '', name: '', command: '', args: '', env: {}, models: [] }
 
 function toForm(config: AcpAgentConfig | null): FormState {
   if (!config) return { ...EMPTY }
-  return { id: config.id, name: config.name, command: config.command, args: config.args.join(' ') }
+  return {
+    id: config.id,
+    name: config.name,
+    command: config.command,
+    args: config.args.join(' '),
+    env: config.env ? { ...config.env } : {},
+    models: config.models ? [...config.models] : []
+  }
 }
 
 /** 设置页：预定义 ACP agent 配置（列表 / 新建 / 编辑 / 删除 / 检测本地已安装） */
@@ -30,17 +39,24 @@ export function AcpAgentSettings() {
   const [error, setError] = useState<string | null>(null)
   const [detecting, setDetecting] = useState(false)
   const [detected, setDetected] = useState<DetectedAcpAgent[] | null>(null)
+  const [detectOpen, setDetectOpen] = useState(false)
   /** 正在向哪个 agent 拉取模型（id） */
   const [fetchingModels, setFetchingModels] = useState<string | null>(null)
   /** 拉取结果弹窗：agent 配置 + agent 上报的模型列表 + 当前勾选 */
   const [modelPickup, setModelPickup] = useState<{
     config: AcpAgentConfig
     models: Array<{ value: string; name: string }>
+    /** 传入时（编辑弹窗内）勾选结果回写表单，否则直接落库 */
+    onPicked?: (picked: string[]) => void
   } | null>(null)
   const [pickedModels, setPickedModels] = useState<string[]>([])
 
-  /** 向 agent 询问可用模型（主进程临时建连 initialize + session/new 读取） */
-  const handleFetchModels = async (config: AcpAgentConfig) => {
+  /** 向 agent 询问可用模型（主进程临时建连 initialize + session/new 读取）
+   *  onPicked：传入时（编辑弹窗内）勾选结果回写表单而非直接落库 */
+  const handleFetchModels = async (
+    config: AcpAgentConfig,
+    onPicked?: (picked: string[]) => void
+  ) => {
     setFetchingModels(config.id)
     try {
       const result = await window.api.ai.acpListModels(config.id)
@@ -48,10 +64,10 @@ export function AcpAgentSettings() {
         message.info('该 agent 未上报可用模型（需支持 ACP configOptions 协议）')
         return
       }
-      // 已保存的模型若仍在上报列表里则预勾选，已被 agent 移除的自动剔除
+      // 仍在上报列表里的已保存项预勾选；agent 未上报的「自定义模型」在确认时保留
       const valid = config.models?.filter((m) => result.models.some((x) => x.value === m)) ?? []
       setPickedModels(valid)
-      setModelPickup({ config, models: result.models })
+      setModelPickup({ config, models: result.models, onPicked })
     } catch (err) {
       message.error('拉取失败：' + (err instanceof Error ? err.message : String(err)))
     } finally {
@@ -59,14 +75,21 @@ export function AcpAgentSettings() {
     }
   }
 
-  /** 确认勾选：写回该 agent 的 models 列表 */
+  /** 确认勾选：合并「自定义模型（agent 未上报的）」与本次勾选项 */
   const confirmPickModels = async () => {
     const pickup = modelPickup
     if (!pickup) return
-    const next = acpAgents.map((a) =>
-      a.id === pickup.config.id ? { ...a, models: pickedModels } : a
-    )
-    await commit(next)
+    const agentValues = new Set(pickup.models.map((m) => m.value))
+    const custom = (pickup.config.models ?? []).filter((m) => !agentValues.has(m))
+    const merged = Array.from(new Set([...custom, ...pickedModels]))
+    if (pickup.onPicked) {
+      pickup.onPicked(merged)
+    } else {
+      const next = acpAgents.map((a) =>
+        a.id === pickup.config.id ? { ...a, models: merged } : a
+      )
+      await commit(next)
+    }
     setModelPickup(null)
   }
 
@@ -80,6 +103,32 @@ export function AcpAgentSettings() {
 
   const patch = (partial: Partial<FormState>) =>
     setEditing((f) => (f ? { ...f, ...partial } : f))
+
+  /** 环境变量键值对编辑（允许同名键后改名，避免丢失） */
+  const setEnvKey = (oldKey: string, newKey: string) =>
+    setEditing((f) => {
+      if (!f) return f
+      const next: Record<string, string> = {}
+      for (const [k, v] of Object.entries(f.env)) next[k === oldKey ? newKey : k] = v
+      return { ...f, env: next }
+    })
+  const setEnvValue = (key: string, value: string) =>
+    setEditing((f) => (f ? { ...f, env: { ...f.env, [key]: value } } : f))
+  const removeEnv = (key: string) =>
+    setEditing((f) => {
+      if (!f) return f
+      const next = { ...f.env }
+      delete next[key]
+      return { ...f, env: next }
+    })
+  const addEnv = () =>
+    setEditing((f) => {
+      if (!f) return f
+      let key = 'NEW_VAR'
+      let i = 1
+      while (key in f.env) key = `NEW_VAR_${i++}`
+      return { ...f, env: { ...f.env, [key]: '' } }
+    })
 
   const openCreate = () => {
     setError(null)
@@ -119,7 +168,16 @@ export function AcpAgentSettings() {
         id: editing.id || crypto.randomUUID(),
         name: editing.name.trim(),
         command: editing.command.trim(),
-        args: editing.args.trim() ? editing.args.trim().split(/\s+/) : []
+        args: editing.args.trim() ? editing.args.trim().split(/\s+/) : [],
+        // 丢弃空 key 的行，避免把 `=value` 这种脏数据写进配置
+        env:
+          Object.keys(editing.env).length > 0
+            ? Object.fromEntries(
+                Object.entries(editing.env).filter(([k]) => k.trim().length > 0)
+              )
+            : undefined,
+        // 自定义模型 + 从 agent 拉取的模型都在这里；留空则使用 agent 自己的当前模型
+        models: editing.models.map((m) => m.trim()).filter(Boolean)
       }
       const exists = acpAgents.some((a) => a.id === config.id)
       const next = exists
@@ -157,6 +215,7 @@ export function AcpAgentSettings() {
       setDetected([])
     } finally {
       setDetecting(false)
+      setDetectOpen(true)
     }
   }
 
@@ -164,7 +223,7 @@ export function AcpAgentSettings() {
     <div className="space-y-2">
       <div className="flex items-center justify-between">
         <p className="text-xs text-muted-foreground">
-          预定义外部 ACP agent 启动配置；工作区在 AI Agent 输入框的模型下拉处按会话选择使用。
+          预定义外部 ACP agent 启动配置
         </p>
         <div className="flex shrink-0 items-center gap-1">
           <Button
@@ -189,39 +248,6 @@ export function AcpAgentSettings() {
         </div>
       </div>
 
-      {detected && (
-        <div className="rounded-md border border-border/70 bg-secondary/40 px-3 py-2">
-          <p className="mb-1.5 text-xs font-medium text-foreground">
-            {detected.length > 0 ? '检测到以下 ACP agent（点击添加为预置配置）' : '未在 PATH 中检测到已知 ACP agent'}
-          </p>
-          {detected.map((item) => (
-            <div key={item.command} className="flex items-center gap-2 py-1">
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-1.5">
-                  <span className="truncate text-xs font-medium">{item.name}</span>
-                  <code className="shrink-0 rounded bg-muted px-1 font-mono text-[10px]">
-                    {item.command}
-                    {item.args.length ? ` ${item.args.join(' ')}` : ''}
-                  </code>
-                </div>
-                <div className="truncate font-mono text-[10px] text-muted-foreground" title={item.path}>
-                  {item.path}
-                </div>
-              </div>
-              <Button
-                size="small"
-                type="text"
-                className="w-14 p-0"
-                disabled={acpAgents.some((a) => a.command === item.command)}
-                onClick={() => void addDetected(item)}
-              >
-                {acpAgents.some((a) => a.command === item.command) ? '已添加' : '添加'}
-              </Button>
-            </div>
-          ))}
-        </div>
-      )}
-
       {acpAgents.length === 0 && (
         <p className="rounded-md py-6 text-center text-xs text-muted-foreground">
           还没有 ACP agent 配置，点「检测已安装」自动发现，或「新建配置」手动添加
@@ -235,11 +261,6 @@ export function AcpAgentSettings() {
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
               <span className="truncate text-xs font-medium">{config.name}</span>
-              {config.id === activeAcpId && (
-                <span className="shrink-0 rounded bg-secondary px-1.5 text-[9px] leading-4 text-muted-foreground">
-                  使用中
-                </span>
-              )}
             </div>
             <div className="truncate font-mono text-[10px] text-muted-foreground">
               {config.command}
@@ -248,17 +269,30 @@ export function AcpAgentSettings() {
             {(config.models?.length ?? 0) > 0 && (
               <div className="mt-1 flex flex-wrap gap-1">
                 {config.models!.map((m) => (
-                  <Tag
+                  <Popconfirm
                     key={m}
-                    className="m-0 font-mono text-[10px]"
-                    closable
-                    onClose={(e) => {
-                      e.preventDefault()
-                      void removeModel(config, m)
-                    }}
+                    title="移除模型"
+                    description={`确定从「${config.name}」移除模型「${m}」吗？`}
+                    okText="移除"
+                    cancelText="取消"
+                    okButtonProps={{ danger: true }}
+                    onConfirm={() => void removeModel(config, m)}
                   >
-                    {m}
-                  </Tag>
+                    <Tag className="m-0 cursor-pointer font-mono text-[10px]">
+                      {m}
+                      <X className="ml-0.5 inline-block size-2.5 align-middle" />
+                    </Tag>
+                  </Popconfirm>
+                ))}
+              </div>
+            )}
+            {config.env && Object.keys(config.env).length > 0 && (
+              <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
+                <span>环境变量：</span>
+                {Object.keys(config.env).map((k) => (
+                  <code key={k} className="rounded bg-muted px-1 font-mono">
+                    {k}
+                  </code>
                 ))}
               </div>
             )}
@@ -349,6 +383,91 @@ export function AcpAgentSettings() {
                 onChange={(e) => patch({ args: e.target.value })}
               />
             </div>
+            <div className="grid gap-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-medium text-foreground">
+                  环境变量
+                  <span className="ml-1 font-normal text-muted-foreground">
+                    （GUI 进程不继承 shell 变量，Claude Code 等需在此填 ANTHROPIC_API_KEY 等）
+                  </span>
+                </span>
+                <Button
+                  size="small"
+                  type="text"
+                  icon={<Plus className="size-3.5" />}
+                  onClick={addEnv}
+                >
+                  添加
+                </Button>
+              </div>
+              {Object.keys(editing.env).length === 0 ? (
+                <p className="text-[10px] leading-4 text-muted-foreground">
+                  暂无，点「添加」注入如 <code className="font-mono">ANTHROPIC_API_KEY</code> /
+                  <code className="font-mono">ANTHROPIC_MODEL</code>。留空的行保存时会忽略。
+                </p>
+              ) : (
+                <div className="space-y-1.5">
+                  {Object.entries(editing.env).map(([key, value], index) => (
+                    <div key={index} className="flex items-center gap-1.5">
+                      <Input
+                        className="min-w-0 flex-1 font-mono"
+                        placeholder="KEY"
+                        value={key}
+                        onChange={(e) => setEnvKey(key, e.target.value)}
+                      />
+                      <span className="shrink-0 font-mono text-muted-foreground">=</span>
+                      <Input
+                        className="min-w-0 flex-1 font-mono"
+                        placeholder="VALUE"
+                        value={value}
+                        onChange={(e) => setEnvValue(key, e.target.value)}
+                      />
+                      <Button
+                        size="small"
+                        type="text"
+                        icon={<Trash2 className="size-3.5" />}
+                        className="w-7 shrink-0 p-0"
+                        onClick={() => removeEnv(key)}
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="grid gap-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-medium text-foreground">
+                  模型 ID（可自定义）
+                  <span className="ml-1 font-normal text-muted-foreground">
+                    （也可点「拉取」从 agent 获取后勾选；留空则使用 agent 自己的当前模型）
+                  </span>
+                </span>
+                <Button
+                  size="small"
+                  type="text"
+                  icon={<CloudDownload className="size-3.5" />}
+                  loading={fetchingModels === editing.id}
+                  disabled={!editing.id}
+                  onClick={() =>
+                    editing.id &&
+                    void handleFetchModels(
+                      { id: editing.id, models: editing.models } as AcpAgentConfig,
+                      (picked) => patch({ models: picked })
+                    )
+                  }
+                >
+                  拉取
+                </Button>
+              </div>
+              <Select
+                mode="tags"
+                placeholder="如 claude-sonnet-4-5"
+                value={editing.models}
+                tokenSeparators={[',', ' ']}
+                style={{ width: '100%' }}
+                onChange={(v: string[]) => patch({ models: v })}
+              />
+            </div>
             <p className="text-[10px] leading-4 text-muted-foreground">
               agent 通过 stdio 与本应用通信，需已安装且可在 PATH 中调用；多轮对话上下文由 agent
               会话自行保留。
@@ -383,8 +502,60 @@ export function AcpAgentSettings() {
           style={{ width: '100%' }}
         />
         <p className="mt-2 text-xs text-muted-foreground">
-          这些模型会出现在 AI Agent 的模型下拉里；不选任何模型则使用 agent 自己的当前模型。
+          勾选的模型会出现在 AI Agent 的模型下拉里；agent 未上报的自定义模型不会被覆盖。不选任何模型则使用 agent 自己的当前模型。
         </p>
+      </Modal>
+
+      {/* 检测已安装：用 modal 弹出结果列表，逐条添加为预置配置 */}
+      <Modal
+        title="检测到的 ACP agent"
+        open={detectOpen}
+        onCancel={() => setDetectOpen(false)}
+        footer={
+          <Button type="primary" onClick={() => setDetectOpen(false)}>
+            完成
+          </Button>
+        }
+        width={480}
+        destroyOnHidden
+        centered
+      >
+        {detected && detected.length > 0 ? (
+          <div className="space-y-1.5">
+            {detected.map((item) => (
+              <div
+                key={item.command}
+                className="flex items-center gap-2 rounded-md border border-border px-3 py-2"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="truncate text-xs font-medium">{item.name}</span>
+                    <code className="shrink-0 rounded bg-muted px-1 font-mono text-[10px]">
+                      {item.command}
+                      {item.args.length ? ` ${item.args.join(' ')}` : ''}
+                    </code>
+                  </div>
+                  <div className="truncate font-mono text-[10px] text-muted-foreground" title={item.path}>
+                    {item.path}
+                  </div>
+                </div>
+                <Button
+                  size="small"
+                  type="text"
+                  className="w-14 shrink-0 p-0"
+                  disabled={acpAgents.some((a) => a.command === item.command)}
+                  onClick={() => void addDetected(item)}
+                >
+                  {acpAgents.some((a) => a.command === item.command) ? '已添加' : '添加'}
+                </Button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="py-4 text-center text-xs text-muted-foreground">
+            未在 PATH 中检测到已知 ACP agent
+          </p>
+        )}
       </Modal>
     </div>
   )

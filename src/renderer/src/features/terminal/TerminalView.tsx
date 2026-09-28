@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, Check, RefreshCw, X } from 'lucide-react'
+import { AlertTriangle, Check, RefreshCw, RotateCw, X } from 'lucide-react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -43,6 +43,10 @@ function adjustTerminalFontSize(delta: number | 'reset'): void {
 interface TerminalViewProps {
   session: SessionInfo
   isActive: boolean
+  /** 会话结束后按 Enter 的自定义动作（如内嵌终端就地重开）；不传则走全局 reconnectSession */
+  onExitedReconnect?: () => void
+  /** 会话结束后按 Ctrl+D 的自定义动作（如内嵌终端就地关闭）；不传则走全局 closeSession */
+  onExitedClose?: () => void
 }
 
 /** ZMODEM 传输（rz/sz）的实时状态，用于展示进度条 */
@@ -110,6 +114,14 @@ function SshConnectCard({
   const target = profile
     ? `${profile.username}@${profile.host}:${profile.port || 22}`
     : session.title
+  // Mosh 会话的最后一步是拉起本地 mosh-client（而非打开 shell），文案跟着换
+  const steps = session.mosh
+    ? CONNECT_STEPS.map((s) => (s.stage === 'opening-shell' ? { ...s, label: '启动 Mosh' } : s))
+    : CONNECT_STEPS
+  const stageText =
+    session.mosh && progress.stage === 'opening-shell'
+      ? '认证通过，正在启动 mosh-server'
+      : CONNECT_STAGE_TEXT[progress.stage]
 
   return (
     <div
@@ -119,8 +131,11 @@ function SshConnectCard({
     >
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-medium">{CONNECT_STAGE_TEXT[progress.stage]}</div>
+          <div className="truncate text-sm font-medium">{stageText}</div>
           <div className="mt-0.5 truncate text-xs text-muted-foreground">{target}</div>
+          {progress.detail && (
+            <div className="mt-0.5 truncate text-xs text-primary/80">{progress.detail}</div>
+          )}
         </div>
         <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
           {(elapsed / 1000).toFixed(1)}s
@@ -137,7 +152,7 @@ function SshConnectCard({
       )}
 
       <div className="mt-3 space-y-1.5">
-        {CONNECT_STEPS.map((step, i) => {
+        {steps.map((step, i) => {
           const done = i < active
           const running = i === active
           return (
@@ -164,6 +179,7 @@ function SshConnectCard({
 
       <div className="mt-3 flex items-center justify-between gap-2 border-t border-border pt-2 text-[11px] text-muted-foreground">
         <span>认证：{profile?.authType === 'privateKey' ? '密钥' : '密码'}</span>
+        {session.mosh && <span>Mosh（UDP）</span>}
         <span>保活：{Math.round((profile?.keepaliveInterval || 15000) / 1000)}s</span>
         <span>超时：20s</span>
       </div>
@@ -179,7 +195,12 @@ function SshConnectCard({
   )
 }
 
-export function TerminalView({ session, isActive }: TerminalViewProps) {
+export function TerminalView({
+  session,
+  isActive,
+  onExitedReconnect,
+  onExitedClose
+}: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -491,7 +512,7 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
             const size: number = typeof details.size === 'number' ? details.size : 0
             // 仅用于对话框默认名：去掉目录分隔符与控制字符，避免被当作路径
             const safeName =
-              rawName.replace(/[\\/]/g, '_').replace(/[ -]/g, '').trim() || 'file'
+              rawName.replace(/[\\/]/g, '_').replace(/[\x00-\x1f]/g, '').trim() || 'file'
             setZmodem({ direction: 'download', name: rawName, text: `下载中：${rawName}`, progress: 0 })
             // 先选保存位置，再开始下载
             const filePath = await window.api.zmodem.askSavePath(safeName)
@@ -658,15 +679,18 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
     }
 
     term.onData((data) => {
-      // 会话已结束：拦截回车重连 / Ctrl+D 关闭标签，其余按键吞掉（对齐 Web 终端重连逻辑）
+      // 会话已结束：拦截回车重连 / Ctrl+D 关闭，其余按键吞掉（对齐 Web 终端重连逻辑）
       if (exitedRef.current) {
         if (!actionRef.current) {
           actionRef.current = true
           if (data === '\r') {
             term.write('\r\n\x1b[36m● 正在重连…\x1b[0m\r\n')
-            void useAppStore.getState().reconnectSession(session.id)
+            // 内嵌终端走自定义回调（就地重开，更新本地会话状态）；标签页终端走全局重连
+            if (onExitedReconnectRef.current) onExitedReconnectRef.current()
+            else void useAppStore.getState().reconnectSession(session.id)
           } else if (data === '\x04') {
-            void useAppStore.getState().closeSession(session.id)
+            if (onExitedCloseRef.current) onExitedCloseRef.current()
+            else void useAppStore.getState().closeSession(session.id)
           }
         }
         return
@@ -677,7 +701,8 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
       // 普通 ↑/↓/← 一律放行 —— 它们是 shell 的历史与光标移动，
       // 在 tmux / vim 这类全屏程序里更是必须原样送达（Ctrl+B 之后的调整也靠它们）。
       if (suggestionsRef.current.length > 0) {
-        if (data === '\t' || data === '\x1b[C') {
+        // 仅右键（→，\x1b[C）接受预测；Tab 不再拦截，落到原生 shell 补全
+        if (data === '\x1b[C') {
           acceptSuggestion()
           return
         }
@@ -847,6 +872,12 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
   exitedRef.current = exited
   // 重连/关闭动作只触发一次，避免连按产生多个会话
   const actionRef = useRef(false)
+  // 退出后的重连/关闭走自定义回调时，用 ref 镜像最新引用（onData 回调创建时只绑定一次，
+  // 闭包里若直接读 prop 会拿到旧值；内嵌终端的回调随 term 状态变化，必须读最新）
+  const onExitedReconnectRef = useRef(onExitedReconnect)
+  onExitedReconnectRef.current = onExitedReconnect
+  const onExitedCloseRef = useRef(onExitedClose)
+  onExitedCloseRef.current = onExitedClose
   // 会话结束后：把提示直接写进终端（对齐 Web 端子做法，不再弹浮层），并聚焦以接收回车重连 / Ctrl+D 关闭
   const exitNoticeRef = useRef(false)
   useEffect(() => {
@@ -872,6 +903,23 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
         >
           {showConnect && <SshConnectCard session={session} progress={connectStage} />}
         </div>
+      )}
+      {/* 会话结束后右下角提供显式重连按钮：与「按 Enter 重连」等价（同样是只触发一次的保护） */}
+      {exited && (
+        <button
+          type="button"
+          onClick={() => {
+            if (actionRef.current) return
+            actionRef.current = true
+            termRef.current?.write('\r\n\x1b[36m● 正在重连…\x1b[0m\r\n')
+            if (onExitedReconnectRef.current) onExitedReconnectRef.current()
+            else void useAppStore.getState().reconnectSession(session.id)
+          }}
+          className="absolute bottom-3 right-3 z-10 flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs text-foreground shadow-lg transition-colors hover:bg-secondary"
+        >
+          <RotateCw className="size-3.5" />
+          重新连接
+        </button>
       )}
       {zmodem && (
         <div className="absolute left-1/2 top-3 z-10 w-72 -translate-x-1/2 rounded-md border border-border bg-card px-3 py-2 text-xs text-foreground shadow">
@@ -909,7 +957,7 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
           style={pos ? { top: pos.top, left: pos.left } : undefined}
           className="absolute z-10 max-h-56 w-80 overflow-y-auto rounded-md border border-border bg-popover/95 p-1 text-xs shadow-lg backdrop-blur">
           <div className="px-2 py-1 text-[10px] text-muted-foreground">
-            命令预测 · Tab/→ 接受 · Ctrl+↑/↓ 选择 · Esc 关闭
+            命令预测 · → 接受 · Ctrl+↑/↓ 选择 · Esc 关闭
           </div>
           {suggestions.items.map((item, i) => {
             const buf = inputBufferRef.current
@@ -930,8 +978,13 @@ export function TerminalView({ session, isActive }: TerminalViewProps) {
                     : 'text-muted-foreground hover:bg-secondary'
                 )}
               >
-                <span className="truncate">{buf}</span>
-                <span className="truncate font-medium text-primary">{rest}</span>
+                {/* 两段文字必须留在同一个元素里：button 是 flex 容器，
+                    若拆成两个子 span，它们各自成为 flex 子项（块容器），
+                    边界空格就会落在各自行盒边缘被 CSS 裁掉、显示成「gitstatus」。 */}
+                <span className="truncate">
+                  {buf}
+                  <span className="font-medium text-primary">{rest}</span>
+                </span>
               </button>
             )
           })}

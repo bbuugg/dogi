@@ -11,6 +11,8 @@ import type {
   ApiGroup,
   ApiHistoryEntry,
   ApiRequestEntry,
+  AutomationGroup,
+  AutomationScript,
   McpServerConfig,
   NoteEntry,
   NoteGroup,
@@ -20,13 +22,18 @@ import type {
   ShortcutConfig,
   SkillSettings,
   SshGroup,
-  SshProfile
+  SshKnownHost,
+  SshProfile,
+  SshTunnel
 } from '@shared/types'
 import { DEFAULT_SHORTCUTS } from '@shared/shortcuts'
 
 interface StoreSchema {
   sshProfiles: SshProfile[]
   sshGroups: SshGroup[]
+  sshTunnels: SshTunnel[]
+  /** 已信任的主机密钥指纹（TOFU；指纹变化时连接硬失败） */
+  sshKnownHosts: SshKnownHost[]
   aiConfigs: AiModelConfig[]
   mcpServers: McpServerConfig[]
   aiSettings: AiSettings
@@ -38,12 +45,17 @@ interface StoreSchema {
   apiRequests: ApiRequestEntry[]
   apiGroups: ApiGroup[]
   apiHistory: ApiHistoryEntry[]
+  /** 浏览器自动化脚本与分组（脚本代码就是 Playwright JS 片段） */
+  automationScripts: AutomationScript[]
+  automationGroups: AutomationGroup[]
   shortcuts: ShortcutConfig[]
   agentWorkspaces: AgentWorkspace[]
   agentConversations: AgentConversation[]
   /** 技能的用户选择（启停 / 额外根目录）——技能内容本身在磁盘上，不进这里 */
   skillSettings: SkillSettings
   windowBounds?: { x?: number; y?: number; width: number; height: number }
+  /** 一次性迁移的执行标记（key = 迁移名），跑过就不重复跑 */
+  migrations?: Record<string, boolean>
 }
 
 const DEFAULT_SKILL_SETTINGS: SkillSettings = { disabled: [], extraDirs: [] }
@@ -63,7 +75,13 @@ const DEFAULT_PREFERENCES: Preferences = {
   monitorInterval: 2000,
   confirmCloseTab: true,
   notifyOnAgentFinish: true,
-  hiddenActivities: []
+  hiddenActivities: [],
+  browserChannel: 'auto',
+  /**
+   * 给 AI 用的浏览器工具：默认 `in-app` —— 用应用自带的浏览器（无窗口运行、画面镜像到
+   * 界面里的浏览器面板）。想彻底不给浏览器能力就设 `off`，想换本机窗口就设 `system`。
+   */
+  browserToolMode: 'in-app'
 }
 
 /** 密钥类字段加密前缀（safeStorage 密文 base64） */
@@ -74,6 +92,8 @@ class StorageService {
     defaults: {
       sshProfiles: [],
       sshGroups: [],
+      sshTunnels: [],
+      sshKnownHosts: [],
       aiConfigs: [],
       mcpServers: [],
       aiSettings: DEFAULT_AI_SETTINGS,
@@ -85,12 +105,80 @@ class StorageService {
       apiRequests: [],
       apiGroups: [],
       apiHistory: [],
+      automationScripts: [],
+      automationGroups: [],
       shortcuts: DEFAULT_SHORTCUTS,
       agentWorkspaces: [],
       agentConversations: [],
       skillSettings: DEFAULT_SKILL_SETTINGS
     }
   })
+
+  constructor() {
+    this.migrateBrowserToolMode()
+    this.migrateSshPrivateKeyAtRest()
+  }
+
+  /**
+   * 一次性迁移：把旧的「内置 Playwright MCP 开关」（布尔 `playwrightMcpEnabled`）
+   * 折算成三态 `browserToolMode`（off / in-app / system）。
+   *
+   * 旧语义：`true` = 用外部 Playwright MCP（拉起本机窗口）；`false` / 未设置 = 用应用
+   * 自带的浏览器。新语义里 `off` 是「一个浏览器工具都不给」—— 所以**旧的 false 不能
+   * 映射成 off**，那会把老用户手里的自带浏览器能力静默关掉。映射规则：
+   * `true → 'system'`，其余（含未设置）一律 `'in-app'`，即老用户的行为一点不变。
+   *
+   * ⚠️ 必须换一个新的 migration key：上一次「默认改关闭」的迁移
+   * （`builtinMcpDefaultOff`）已经在老用户身上跑过了，沿用它这段代码永远不会执行。
+   * 那段旧迁移已被本次取代（读取旧布尔值、写新值、顺手清掉旧字段）。
+   */
+  private migrateBrowserToolMode(): void {
+    if (this.store.get('migrations')?.browserToolMode) return
+    // 读的是**旧结构**：新类型里已经没有 playwrightMcpEnabled 了，只能按裸记录处理
+    const prefs = {
+      ...(this.store.get('preferences') as unknown as Record<string, unknown>)
+    }
+    if (prefs.browserToolMode === undefined) {
+      prefs.browserToolMode = prefs.playwrightMcpEnabled === true ? 'system' : 'in-app'
+    }
+    delete prefs.playwrightMcpEnabled
+    this.store.set('preferences', prefs as unknown as Preferences)
+    this.store.set('migrations', {
+      ...(this.store.get('migrations') ?? {}),
+      browserToolMode: true
+    })
+  }
+
+  /**
+   * 一次性迁移：把历史上明文入库的私钥补成 safeStorage 密文。
+   * 加密不可用时（如 Linux 未就绪 / 无 keyring）直接返回且**不写迁移标记**，
+   * 下次启动或下一次保存（saveSshProfile 里会再兜底调用）继续尝试；
+   * 保持明文的条目功能不受影响 —— decrypt 对无前缀值原样透传。
+   *
+   * 构造期会先跑一次，但 Windows 上 safeStorage 在 app ready 前不可用，
+   * 构造期那次会被静默跳过；主进程在 whenReady 后再显式补跑一次（幂等）。
+   */
+  migrateSshPrivateKeyAtRest(): void {
+    if (this.store.get('migrations')?.sshPrivateKeyAtRest) return
+    try {
+      if (!safeStorage.isEncryptionAvailable()) return
+      let changed = 0
+      const next = this.store.get('sshProfiles').map((p) => {
+        if (!p.privateKey || p.privateKey.startsWith(ENC_PREFIX)) return p
+        const encrypted = this.encrypt(p.privateKey)
+        if (!encrypted || encrypted === p.privateKey) return p
+        changed++
+        return { ...p, privateKey: encrypted }
+      })
+      if (changed > 0) this.store.set('sshProfiles', next)
+      this.store.set('migrations', {
+        ...(this.store.get('migrations') ?? {}),
+        sshPrivateKeyAtRest: true
+      })
+    } catch {
+      // 保持明文可读即可，下次再试
+    }
+  }
 
   private encrypt(secret: string | undefined): string | undefined {
     if (!secret) return undefined
@@ -156,12 +244,16 @@ class StorageService {
       ...profile,
       kind: profile.kind ?? 'ssh',
       password: this.decrypt(profile.password),
-      passphrase: this.decrypt(profile.passphrase)
+      passphrase: this.decrypt(profile.passphrase),
+      // 私钥同样加密落盘（历史明文条目由 migrateSshPrivateKeyAtRest 兜底补密）
+      privateKey: this.decrypt(profile.privateKey)
     }
   }
 
   /** 保存 SSH 配置（upsert）；password/privateKey/passphrase 为 undefined 时保留旧值 */
   saveSshProfile(input: SshProfile): SshProfile[] {
+    // 顺手补齐历史明文私钥 → 密文（幂等；构造期可能因 safeStorage 未就绪而跳过，这里兜底）
+    this.migrateSshPrivateKeyAtRest()
     const profiles = this.store.get('sshProfiles')
     const now = Date.now()
     const prev = input.id ? profiles.find((p) => p.id === input.id) : undefined
@@ -171,7 +263,7 @@ class StorageService {
       kind: input.kind ?? 'ssh',
       password: input.password !== undefined ? this.encrypt(input.password) : prev?.password,
       privateKey:
-        input.privateKey !== undefined ? input.privateKey : prev?.privateKey,
+        input.privateKey !== undefined ? this.encrypt(input.privateKey) : prev?.privateKey,
       passphrase:
         input.passphrase !== undefined ? this.encrypt(input.passphrase) : prev?.passphrase,
       createdAt: prev?.createdAt ?? now,
@@ -184,12 +276,29 @@ class StorageService {
     return this.listSshProfiles()
   }
 
-  deleteSshProfile(id: string): SshProfile[] {
+  deleteSshProfile(id: string): { profiles: SshProfile[]; clearedJumps: number } {
     this.store.set(
       'sshProfiles',
       this.store.get('sshProfiles').filter((p) => p.id !== id)
     )
-    return this.listSshProfiles()
+    const clearedJumps = this.clearJumpRefs(new Set([id]))
+    return { profiles: this.listSshProfiles(), clearedJumps }
+  }
+
+  /**
+   * 删除主机后清掉其它主机对它们的跳板引用。
+   * 悬空引用只会让连接在跳板解析时报错，显式清掉更符合直觉（调用方负责提示用户）。
+   */
+  private clearJumpRefs(removedIds: Set<string>): number {
+    if (removedIds.size === 0) return 0
+    let cleared = 0
+    const next = this.store.get('sshProfiles').map((p) => {
+      if (!p.jumpProfileId || !removedIds.has(p.jumpProfileId)) return p
+      cleared++
+      return { ...p, jumpProfileId: undefined, updatedAt: Date.now() }
+    })
+    if (cleared > 0) this.store.set('sshProfiles', next)
+    return cleared
   }
 
   /**
@@ -273,7 +382,63 @@ class StorageService {
         .filter((p) => !doomed.has(p.id))
         .map((p) => (p.groupId === id ? { ...p, groupId: undefined } : p))
     )
+    // 组内主机被一并删除时，清掉别处对它们的跳板引用（静默处理，保持本接口返回类型不变）
+    this.clearJumpRefs(doomed)
     return this.listSshGroups()
+  }
+
+  // ---------- SSH 隧道（本地转发 -L / 远程转发 -R / SOCKS5 动态 -D） ----------
+  listSshTunnels(): SshTunnel[] {
+    return this.store.get('sshTunnels')
+  }
+
+  /** 保存隧道（upsert）：不传 id 视为新增；沿用「旧记录兜底」约定合并未带字段 */
+  saveSshTunnel(input: SshTunnel): SshTunnel[] {
+    const tunnels = this.store.get('sshTunnels')
+    const now = Date.now()
+    const prev = input.id ? tunnels.find((t) => t.id === input.id) : undefined
+    const entry: SshTunnel = {
+      ...prev,
+      ...input,
+      id: input.id || crypto.randomUUID(),
+      bindHost: input.bindHost?.trim() || prev?.bindHost || '127.0.0.1',
+      createdAt: prev?.createdAt ?? now,
+      updatedAt: now
+    }
+    this.store.set(
+      'sshTunnels',
+      prev ? tunnels.map((t) => (t.id === entry.id ? entry : t)) : [...tunnels, entry]
+    )
+    return this.listSshTunnels()
+  }
+
+  deleteSshTunnel(id: string): SshTunnel[] {
+    this.store.set(
+      'sshTunnels',
+      this.store.get('sshTunnels').filter((t) => t.id !== id)
+    )
+    return this.listSshTunnels()
+  }
+
+  // ---------- 主机密钥指纹（known_hosts，TOFU 校验） ----------
+  listSshKnownHosts(): SshKnownHost[] {
+    return this.store.get('sshKnownHosts')
+  }
+
+  /** 记录主机密钥指纹（同 host:port 存在则覆盖 —— 供「重置后重连」重新信任） */
+  recordSshKnownHost(entry: SshKnownHost): void {
+    const list = this.store
+      .get('sshKnownHosts')
+      .filter((k) => !(k.host === entry.host && k.port === entry.port))
+    this.store.set('sshKnownHosts', [...list, entry])
+  }
+
+  /** 移除某主机的指纹记录（「重置主机指纹」；下次连接重新 TOFU 记录） */
+  deleteSshKnownHost(host: string, port: number): void {
+    this.store.set(
+      'sshKnownHosts',
+      this.store.get('sshKnownHosts').filter((k) => !(k.host === host && k.port === port))
+    )
   }
 
   // ---------- 用户脚本 ----------
@@ -287,6 +452,8 @@ class StorageService {
     const now = Date.now()
     const prev = input.id ? scripts.find((s) => s.id === input.id) : undefined
     const entry: ScriptEntry = {
+      // 旧记录兜底：编辑页保存只带草稿字段，groupId 等未带字段继承旧记录
+      ...prev,
       ...input,
       id: input.id || crypto.randomUUID(),
       createdAt: prev?.createdAt ?? now,
@@ -391,6 +558,9 @@ class StorageService {
     const now = Date.now()
     const prev = input.id ? notes.find((n) => n.id === input.id) : undefined
     const entry: NoteEntry = {
+      // 先铺旧记录再铺入参：编辑页保存只带草稿字段（标题 / 正文 / 语言），
+      // groupId 等元数据必须继承，否则一保存就掉出分组
+      ...prev,
       ...input,
       id: input.id || crypto.randomUUID(),
       language: input.language || prev?.language || 'markdown',
@@ -402,6 +572,30 @@ class StorageService {
       : [...notes, entry]
     this.store.set('notes', next)
     return next
+  }
+
+  /**
+   * 批量把本地文件导入成笔记：每个文件一篇 Markdown 笔记，追加到列表末尾。
+   *
+   * 为什么不复用 saveNote：saveNote 的 upsert 语义（id 为空即新建）不回传新建的 id，
+   * 而导入后要立刻打开第一篇，所以这里显式生成 id 并返回。
+   */
+  importNotes(items: { title: string; content: string }[]): {
+    notes: NoteEntry[]
+    createdIds: string[]
+  } {
+    const now = Date.now()
+    const created: NoteEntry[] = items.map((item, i) => ({
+      id: crypto.randomUUID(),
+      title: item.title,
+      content: item.content,
+      language: 'markdown',
+      createdAt: now + i,
+      updatedAt: now + i
+    }))
+    const next = [...this.store.get('notes'), ...created]
+    this.store.set('notes', next)
+    return { notes: next, createdIds: created.map((n) => n.id) }
   }
 
   deleteNote(id: string): NoteEntry[] {
@@ -485,6 +679,113 @@ class StorageService {
     return { groups: this.listNoteGroups(), notes: this.listNotes() }
   }
 
+  // ---------- 浏览器自动化 ----------
+  listAutomationScripts(): AutomationScript[] {
+    return this.store.get('automationScripts')
+  }
+
+  /** 保存脚本（upsert）：不传 id 视为新增 */
+  saveAutomationScript(input: AutomationScript): AutomationScript[] {
+    const scripts = this.store.get('automationScripts')
+    const now = Date.now()
+    const prev = input.id ? scripts.find((s) => s.id === input.id) : undefined
+    const entry: AutomationScript = {
+      // 旧记录兜底：编辑页保存只带草稿字段，groupId 等未带字段继承旧记录
+      ...prev,
+      ...input,
+      id: input.id || crypto.randomUUID(),
+      name: input.name?.trim() || prev?.name || '未命名脚本',
+      code: input.code ?? prev?.code ?? '',
+      createdAt: prev?.createdAt ?? now,
+      updatedAt: now
+    }
+    const next = prev
+      ? scripts.map((s) => (s.id === entry.id ? entry : s))
+      : [...scripts, entry]
+    this.store.set('automationScripts', next)
+    return next
+  }
+
+  deleteAutomationScript(id: string): AutomationScript[] {
+    this.store.set(
+      'automationScripts',
+      this.store.get('automationScripts').filter((s) => s.id !== id)
+    )
+    return this.listAutomationScripts()
+  }
+
+  listAutomationGroups(): AutomationGroup[] {
+    return this.store.get('automationGroups')
+  }
+
+  saveAutomationGroup(input: { id?: string; name: string }): AutomationGroup[] {
+    const groups = this.store.get('automationGroups')
+    const prev = input.id ? groups.find((g) => g.id === input.id) : undefined
+    const group: AutomationGroup = {
+      id: input.id || crypto.randomUUID(),
+      name: input.name.trim(),
+      createdAt: prev?.createdAt ?? Date.now()
+    }
+    this.store.set(
+      'automationGroups',
+      prev ? groups.map((g) => (g.id === group.id ? group : g)) : [...groups, group]
+    )
+    return this.listAutomationGroups()
+  }
+
+  deleteAutomationGroup(
+    id: string,
+    deleteScripts = false
+  ): { groups: AutomationGroup[]; scripts: AutomationScript[] } {
+    const members = this.store
+      .get('automationScripts')
+      .filter((s) => s.groupId === id)
+      .map((s) => s.id)
+    const doomed = new Set(deleteScripts ? members : [])
+    this.store.set(
+      'automationGroups',
+      this.store.get('automationGroups').filter((g) => g.id !== id)
+    )
+    this.store.set(
+      'automationScripts',
+      this.store
+        .get('automationScripts')
+        .filter((s) => !doomed.has(s.id))
+        .map((s) => (s.groupId === id ? { ...s, groupId: undefined } : s))
+    )
+    return { groups: this.listAutomationGroups(), scripts: this.listAutomationScripts() }
+  }
+
+  arrangeAutomation(payload: {
+    groupIds: string[]
+    scripts: Array<{ id: string; groupId?: string }>
+  }): { groups: AutomationGroup[]; scripts: AutomationScript[] } {
+    const groups = this.store.get('automationGroups')
+    const groupById = new Map(groups.map((g) => [g.id, g]))
+    const ordered = payload.groupIds
+      .map((id) => groupById.get(id))
+      .filter((g): g is AutomationGroup => Boolean(g))
+    for (const g of groups) {
+      if (!payload.groupIds.includes(g.id)) ordered.push(g)
+    }
+    this.store.set('automationGroups', ordered)
+
+    const scripts = this.store.get('automationScripts')
+    const scriptById = new Map(scripts.map((s) => [s.id, s]))
+    const next: AutomationScript[] = []
+    for (const item of payload.scripts) {
+      const s = scriptById.get(item.id)
+      if (!s) continue
+      next.push(s.groupId === item.groupId ? s : { ...s, groupId: item.groupId })
+    }
+    for (const s of scripts) {
+      if (!next.some((x) => x.id === s.id)) next.push(s)
+    }
+    this.store.set('automationScripts', next)
+
+    return { groups: this.listAutomationGroups(), scripts: this.listAutomationScripts() }
+  }
+
   // ---------- 接口请求（内置的 API 调试功能） ----------
   listApiRequests(): ApiRequestEntry[] {
     return this.store.get('apiRequests')
@@ -496,6 +797,8 @@ class StorageService {
     const now = Date.now()
     const prev = input.id ? requests.find((r) => r.id === input.id) : undefined
     const entry: ApiRequestEntry = {
+      // 旧记录兜底：编辑页保存只带草稿字段，groupId 等未带字段继承旧记录
+      ...prev,
       ...input,
       id: input.id || crypto.randomUUID(),
       createdAt: prev?.createdAt ?? now,

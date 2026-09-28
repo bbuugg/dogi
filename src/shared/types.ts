@@ -77,6 +77,18 @@ export interface Preferences {
    * 设置里关闭某个功能区后它既不出现在活动栏，也不会被激活。
    */
   hiddenActivities: string[]
+  /**
+   * 自动化面板使用哪个浏览器，缺省 auto（自带 Chromium → Edge → Chrome 逐级回退）。
+   * 解析逻辑见 services/browser/resolver.ts。
+   */
+  browserChannel: BrowserChannel
+  /**
+   * 给 AI 用的浏览器工具来自哪里，**缺省 `in-app`**（见 BrowserToolMode）。
+   *
+   * 一个开关管「有没有浏览器能力」，一个二选一管「用哪套引擎」：两套工具**同名**
+   * （`browser_navigate` 等），同时注册会互相覆盖，所以只能二选一。
+   */
+  browserToolMode?: BrowserToolMode
 }
 
 /** 检测到的本地可用 shell */
@@ -98,6 +110,20 @@ export interface ShellDetectResult {
   defaultId: string
 }
 
+/**
+ * 本地 mosh-client 探测结果（新建 / 编辑 Mosh 主机时提示，连接前也用它做前置检查）：
+ * - native：本机直接可执行（MSYS2 / Cygwin / brew / 系统包）
+ * - wsl：Windows 无原生客户端时回退到 WSL 内执行
+ * - none：两处都没有，hint 给出安装指引
+ */
+export interface MoshClientStatus {
+  kind: 'native' | 'wsl' | 'none'
+  /** native：mosh-client 可执行文件路径；wsl：发行版内的 mosh-client 路径 */
+  path?: string
+  /** kind=none 时的安装指引 / 诊断信息 */
+  hint?: string
+}
+
 export type SessionType = 'local' | 'ssh'
 
 export interface SessionInfo {
@@ -109,6 +135,8 @@ export interface SessionInfo {
   createdAt: number
   /** 会话是否已退出 */
   exited: boolean
+  /** 是否为 Mosh 会话（SSH 引导 + 本地 mosh-client，见 4.12）；仅用于展示区分 */
+  mosh?: boolean
 }
 
 /**
@@ -137,6 +165,8 @@ export interface SshConnectProgress {
   attempt?: number
   /** 仅 retrying：最大尝试次数 */
   maxAttempts?: number
+  /** 补充说明（有跳板机时标注当前正在连接哪一跳，如「跳板 1/2：root@10.0.0.1」） */
+  detail?: string
 }
 
 export type SshAuthType = 'password' | 'privateKey'
@@ -183,9 +213,99 @@ export interface SshProfile {
   args?: string[]
   /** 仅 local：终端启动后自动执行的命令 */
   autoCommand?: string
+  /**
+   * 仅 ssh：用 Mosh 连接（UDP 抗断线）——SSH 只负责引导 mosh-server，
+   * 终端数据走本地 mosh-client。需远端安装 mosh-server、本地有 mosh-client。
+   */
+  useMosh?: boolean
+  /**
+   * 仅 ssh：跳板机（另一条 ssh 配置的 id）。连接时先连跳板机，再经它
+   * forwardOut 到目标；支持多级串联，循环由运行时检测并拒绝。
+   * 与 Mosh 互斥（mosh 走 UDP，无法经 SSH 隧道）。
+   */
+  jumpProfileId?: string
   keepaliveInterval?: number
   createdAt: number
   updatedAt: number
+}
+
+// ---------- SSH 隧道（本地转发 / 远程转发 / SOCKS5 动态代理） ----------
+
+/** 隧道类型：local 本地转发（-L）；remote 远程转发（-R）；dynamic 动态 SOCKS5 代理（-D） */
+export type SshTunnelType = 'local' | 'remote' | 'dynamic'
+
+export interface SshTunnel {
+  id: string
+  /** 承载连接的主机配置 id（凭据在主进程按它解密） */
+  profileId: string
+  type: SshTunnelType
+  /** 监听侧地址：local/dynamic 在本机监听（默认 127.0.0.1）；remote 在服务器上监听 */
+  bindHost: string
+  /** 监听侧端口 */
+  bindPort: number
+  /** 目标侧地址：local 为远端解析的目标；remote 为本机可达的目标（仅 dynamic 不用） */
+  targetHost?: string
+  /** 目标侧端口（仅 local / remote） */
+  targetPort?: number
+  /** 备注（列表展示用） */
+  label?: string
+  /** 应用启动后自动拉起 */
+  autoStart?: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+export type SshTunnelStatus = 'stopped' | 'starting' | 'running' | 'error'
+
+/** 隧道运行时状态（主进程推送；渲染端只读展示） */
+export interface SshTunnelRuntime {
+  id: string
+  status: SshTunnelStatus
+  /** 仅 error：最近一次失败的描述 */
+  error?: string
+  /** 当前活跃的转发连接数 */
+  conns?: number
+  startedAt?: number
+}
+
+// ---------- 主机密钥指纹（known_hosts，TOFU 校验） ----------
+
+/** 一条已记录的主机密钥指纹（首次连接静默记录；指纹变化时连接硬失败） */
+export interface SshKnownHost {
+  host: string
+  port: number
+  /** 密钥算法（从密钥 blob 解析，如 ssh-ed25519） */
+  algo: string
+  /** SHA256 指纹（sha256 摘要的 base64，无填充，与 OpenSSH SHA256: 风格一致） */
+  fingerprint: string
+  addedAt: number
+}
+
+// ---------- 主机日志（SSH / 终端命令 / 隧道 / SFTP 等主机相关事件） ----------
+
+/** 日志级别（error 用于失败与意外中断） */
+export type HostLogLevel = 'info' | 'warn' | 'error'
+
+/** 日志分类：按产生日志的子系统划分，界面按它过滤 */
+export type HostLogScope = 'ssh' | 'terminal' | 'tunnel' | 'sftp'
+
+/**
+ * 一条主机日志（主进程的 hostLogger 追加；渲染端只读展示）。
+ * 内存环形缓冲 + userData/logs/host.log（JSONL）落盘，跨重启保留。
+ * ⚠️ 同一 seq 可能被再次广播（终端命令的输出增量回填同一条目，后到覆盖先到；
+ * 落盘文件同 seq 后写覆盖先写）——按 seq 覆盖，不要盲目 push。
+ */
+export interface HostLogEntry {
+  /** 自增序号（进程内唯一，重启后从落盘的最大值继续），渲染端用作 key */
+  seq: number
+  /** 时间戳（毫秒） */
+  ts: number
+  scope: HostLogScope
+  level: HostLogLevel
+  /** 一句话描述（单行） */
+  message: string
+  /** 补充细节（可选，多行；界面折叠展示） */
+  detail?: string
 }
 
 // ---------- SFTP（远程文件管理，复用 SSH 主机配置的凭据） ----------
@@ -215,8 +335,15 @@ export interface SftpTransferProgress {
   bytes: number
   /** 总字节（远端未报告时为 0，此时只展示已传字节） */
   total: number
-  /** 是否结束（成功；失败见 error） */
+  /**
+   * 本地侧绝对路径：上传 = 源文件，下载 = 目标文件（复制 / 移动没有）。
+   * 完成后任务面板据此提供「打开文件位置」。
+   */
+  localPath?: string
+  /** 是否结束（成功；失败见 error，用户取消见 canceled） */
   done?: boolean
+  /** 用户手动取消（按「已取消」展示，不当作错误；不提供打开文件位置） */
+  canceled?: boolean
   error?: string
 }
 
@@ -271,14 +398,14 @@ export interface ScriptEntry {
   updatedAt: number
 }
 
-/** 用户笔记：右侧 Monaco 编辑器承载正文，可任意指定语言 */
+/** 用户笔记：Vditor 编辑器承载 Markdown 正文 */
 export interface NoteEntry {
   id: string
   /** 笔记标题，兼作列表展示与搜索 */
   title: string
-  /** 笔记正文 */
+  /** 笔记正文（Markdown） */
   content: string
-  /** Monaco 语言（见 MONACO_LANGUAGES），缺省按创建时指定，默认 markdown */
+  /** 历史字段：Vditor 只吃 Markdown，新保存一律为 markdown（保留以兼容旧数据） */
   language: string
   /**
    * 所属分组；undefined = 未分组。
@@ -287,6 +414,16 @@ export interface NoteEntry {
   groupId?: string
   createdAt: number
   updatedAt: number
+}
+
+/** 从本地文件导入笔记的结果（每个文件一篇笔记） */
+export interface NoteImportResult {
+  /** 导入后的完整笔记列表 */
+  notes: NoteEntry[]
+  /** 新笔记 id，按选中文件的顺序 —— 调用方据此打开第一篇 */
+  createdIds: string[]
+  /** 读不出来 / 判定为二进制而跳过的文件名 */
+  skipped: string[]
 }
 
 /** 脚本分组：侧边栏里的分组节点（只承担归类 + 排序，不设颜色） */
@@ -301,6 +438,194 @@ export interface NoteGroup {
   id: string
   name: string
   createdAt: number
+}
+
+/** 自动化脚本分组：侧边栏里的分组节点（只承担归类 + 排序，不设颜色） */
+export interface AutomationGroup {
+  id: string
+  name: string
+  createdAt: number
+}
+
+/**
+ * 自动化脚本：一个脚本 = 一个 PanelView 标签。
+ *
+ * `code` 是 Playwright 的 JS 片段（官方 recorder 产出的形态），执行时被包进
+ * 一个 async 函数体，作用域里注入 `page` / `context` / `browser` / `expect`，
+ * 所以录制出来的 `await page.getByRole('button').click()` 可以直接跑。
+ * 见 services/browser/runner.ts —— 刻意不用子进程，规避打包后的模块解析问题。
+ */
+export interface AutomationScript {
+  id: string
+  /** 脚本名，兼作标签标题与搜索 */
+  name: string
+  /** Playwright JS 代码（多行片段，录制产出） */
+  code: string
+  /** 点「打开浏览器」时的起始地址，缺省 about:blank */
+  startUrl?: string
+  /**
+   * 所属分组；undefined = 未分组。
+   * 只由 `automation:arrange`（拖拽重排）改动 —— 普通的保存/新建不要碰它。
+   */
+  groupId?: string
+  createdAt: number
+  updatedAt: number
+}
+
+// ---------------------------------------------------------------------------
+// 浏览器自动化（自动化面板 + AI 的浏览器工具共用一套会话）
+// ---------------------------------------------------------------------------
+
+/**
+ * 自动化面板用哪个浏览器。
+ * - `auto`：自带 Chromium（若已下载）→ Edge → Chrome，逐级回退
+ * - `bundled`：Playwright 自带的 Chromium（需要先下载）
+ * - `msedge` / `chrome`：系统的 Edge / Chrome（Windows 上 Edge 必定存在）
+ *
+ * ⚠️ Playwright 版本与自带 Chromium 的 build 号是绑死的：装 1.63 却只有
+ * 别的 build 缓存时会直接报「Executable doesn't exist」，所以默认 auto 要先探测。
+ */
+export type BrowserChannel = 'auto' | 'bundled' | 'msedge' | 'chrome'
+
+/**
+ * 给 AI 用的浏览器工具来自哪里（`preferences.browserToolMode`）。
+ *
+ * - `off`：**一个都不给** —— Agent 拿不到任何 `browser_*` 工具，浏览器面板仍可手动使用；
+ * - `in-app`（默认）：应用自带的浏览器工具 —— 浏览器无窗口运行，画面经 screencast
+ *   镜像到界面里的浏览器面板（不弹本机窗口）；
+ * - `system`：改用内置的 Playwright MCP —— 独立进程，会拉起**本机**的 Edge / Chrome 窗口。
+ *
+ * ⚠️ 自带与 MCP 两套工具**同名**（`browser_navigate` 等），同时注册会静默互相覆盖，
+ * 所以这里是三态而不是「开关 + 开关」。
+ */
+export type BrowserToolMode = 'off' | 'in-app' | 'system'
+
+/**
+ * 浏览器视口预设：`desktop` = PC 屏，`mobile` = 手机屏。
+ *
+ * 具体尺寸 / deviceScaleFactor 见 `@shared/browser` 的 `BROWSER_VIEWPORT_PRESETS` ——
+ * 它决定页面的 layout viewport，也就决定响应式断点走哪一套（这才是「手机版」的本质）。
+ */
+export type BrowserViewportMode = 'desktop' | 'mobile'
+
+/** 浏览器会话状态（主进程推给渲染端，渲染端据此画地址栏与按钮态） */
+export interface BrowserSessionState {
+  sessionId: string
+  url: string
+  title: string
+  loading: boolean
+  canGoBack: boolean
+  canGoForward: boolean
+  /** 页面视口尺寸（CSS px），渲染端按它把面板坐标映射回页面坐标 */
+  viewport: { width: number; height: number }
+  /** 当前视口预设（PC / 手机） */
+  viewportMode: BrowserViewportMode
+  /** 是否正在录制（官方 recorder 已启用） */
+  recording: boolean
+  /** 是否正在跑脚本 */
+  running: boolean
+  /** 实际使用的浏览器（启动后确定，如 'msedge' / 'chromium'），未启动为 null */
+  channel: string | null
+}
+
+/** 一帧 screencast 画面。`data` 是不带 `data:` 前缀的 base64 JPEG */
+export interface BrowserFrame {
+  sessionId: string
+  data: string
+  width: number
+  height: number
+}
+
+/** 录制事件：官方 recorder 产出的代码增量 */
+export interface BrowserRecordEvent {
+  sessionId: string
+  /**
+   * - `added`：新增一个动作，代码**追加**到脚本末尾
+   * - `updated`：同一个动作被改写（连续输入会走这条），代码**替换最后一条**
+   * - `signal`：非动作信号（如弹窗、下载），只记日志
+   */
+  kind: 'added' | 'updated' | 'signal'
+  /** 官方生成器产出的代码，含缩进与结尾分号 */
+  code: string
+  /** 动作名（click / fill / navigate / press …），用于日志展示 */
+  action: string
+}
+
+/** 鼠标键（与 CDP 的取值一致） */
+export type BrowserMouseButton = 'none' | 'left' | 'middle' | 'right' | 'back' | 'forward'
+
+/**
+ * 渲染端 → 主进程的合成输入。
+ *
+ * 坐标一律是**页面视口坐标系**（渲染端负责从面板像素映射过来），
+ * 主进程只做「语义 → CDP 命令」的翻译，翻译逻辑在 services/browser/input.ts。
+ * `modifiers` 是 CDP 的位掩码：Alt=1 / Ctrl=2 / Meta=4 / Shift=8。
+ */
+export type BrowserInputEvent =
+  | {
+      kind: 'mouse'
+      type: 'mouseMoved' | 'mousePressed' | 'mouseReleased'
+      x: number
+      y: number
+      button: BrowserMouseButton
+      clickCount: number
+      modifiers: number
+    }
+  | {
+      kind: 'wheel'
+      x: number
+      y: number
+      deltaX: number
+      deltaY: number
+      modifiers: number
+    }
+  | {
+      kind: 'key'
+      type: 'keyDown' | 'keyUp'
+      /** 已按修饰键处理过的 key（如 Shift+a → 'A'） */
+      key: string
+      /** 物理键位（如 'KeyA'），CDP 需要它才能正确触发快捷键 */
+      code: string
+      /** keyDown 时的可打印文本；不可打印键省略 */
+      text?: string
+      windowsVirtualKeyCode: number
+      modifiers: number
+    }
+  /** 输入法 / 粘贴这类不经过按键的文本，走 Input.insertText */
+  | { kind: 'text'; text: string }
+
+/** 脚本运行日志级别 */
+export type BrowserLogLevel = 'info' | 'step' | 'success' | 'error'
+
+/** 脚本运行时的一行日志 */
+export interface BrowserLogEvent {
+  sessionId: string
+  level: BrowserLogLevel
+  message: string
+  at: number
+}
+
+/** 脚本执行结果 */
+export interface BrowserRunResult {
+  ok: boolean
+  /** 实际执行的步骤数 */
+  steps: number
+  error?: string
+  /** 出错时是第几步（从 1 开始） */
+  failedStep?: number
+  /** 用户点了「停止」（不是失败）—— 日志据此区分「已停止」与「失败」，别把取消当报错 */
+  aborted?: boolean
+}
+
+/** 已发现的浏览器可执行文件（设置页用来展示与选择） */
+export interface BrowserCandidate {
+  /** 与 BrowserChannel 对应，但排除了 auto */
+  channel: 'bundled' | 'msedge' | 'chrome'
+  label: string
+  /** 可执行文件绝对路径；bundled 未下载时为 null */
+  path: string | null
+  /** 是否可用（文件真实存在） */
+  available: boolean
 }
 
 /** 一条请求头：以「键值对数组」而非对象保存，保留空行以便在界面上继续编辑 */
@@ -573,9 +898,12 @@ export interface McpServerConfig {
 }
 
 /**
- * AI 执行终端命令的权限模式（可在对话输入框处实时切换）：
- * - full：完全访问，AI 可直接执行终端命令
- * - confirm：确认模式，AI 每次执行终端命令前都需要用户确认，用户可取消
+ * AI **改动**的权限模式（可在对话输入框处实时切换，工作区 Agent 与终端 AI 助手共用一份）：
+ * - full：全部访问，AI 可直接执行命令、读写文件
+ * - confirm：变更前确认，AI 每次执行命令 / 写入 / 编辑 / 删除前都要用户确认，用户可取消
+ *
+ * 终端 AI 助手只有「执行命令」会被拦（它的工具就是终端操作）；工作区 Agent 还会拦
+ * 写文件 / 编辑 / 删除 —— 见 agent-core/tools.ts 的 guardWrite。
  */
 export type AiPermissionMode = 'full' | 'confirm'
 
@@ -583,8 +911,9 @@ export type AiPermissionMode = 'full' | 'confirm'
  * AI Agent 后端：
  * - ai-sdk：内置 AI SDK 驱动（复用模型配置），工具由应用自己提供
  * - acp：连接外部 ACP agent（如 codex-acp），应用作为 ACP 客户端
+ * - mastra：内置 Mastra 驱动（复用同一套模型配置与工具），实验性
  */
-export type AgentBackend = 'ai-sdk' | 'acp'
+export type AgentBackend = 'ai-sdk' | 'acp' | 'mastra'
 
 /** ACP 后端的外部 agent 启动配置（stdio 通信） */
 export interface AcpAgentConfig {
@@ -594,6 +923,12 @@ export interface AcpAgentConfig {
   /** 可执行文件（绝对路径或 PATH 可解析名；Windows 下 npm 脚本需 .cmd 后缀） */
   command: string
   args: string[]
+  /**
+   * 启动 agent 时注入的环境变量。
+   * GUI 应用的主进程不会继承 shell 里的变量（尤其 macOS 上 `.zshrc`/`.bashrc` 不生效），
+   * 像 Claude Code 这类依赖 `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` 的 agent 必须在这里显式传，否则连不上。
+   */
+  env?: Record<string, string>
   /**
    * 从该 agent 拉取（session/new 的 configOptions，category=model）并勾选的模型 id 列表。
    * 空 = 未选择，使用 agent 自己的当前模型。
@@ -618,6 +953,16 @@ export interface AiSettings {
   /** AI 执行终端命令的权限模式；在对话输入框处实时切换 */
   permissionMode: AiPermissionMode
   systemPrompt?: string
+  /**
+   * 确认模式下等待用户点「允许 / 拒绝」的最长毫秒数，`0` = 不限时。
+   * 不设 = 用 @shared/ai-timeouts 的缺省值（当前也是不限时）；设置页可改。
+   */
+  confirmTimeoutMs?: number
+  /**
+   * 模型请求「首个内容块」的超时毫秒数，`0` = 不限时。
+   * 不设 = 用 @shared/ai-timeouts 的缺省值（5 分钟）；设置页可改。
+   */
+  modelTimeoutMs?: number
   /** 预定义的 ACP agent 配置（设置页维护，工作区在 AI Agent 模型下拉处选择） */
   acpAgents?: AcpAgentConfig[]
   /** 当前 ACP 后端使用的配置 id（缺省取 acpAgents[0]） */
@@ -696,12 +1041,32 @@ export interface AskFollowupAnswer {
   answers: FollowupAnswerItem[]
 }
 
+/** 一轮对话的用量与耗时统计（只有助手消息、且一轮跑完后才有） */
+export interface TurnUsage {
+  /** 输入（提示）tokens */
+  inputTokens: number
+  /** 输出（生成）tokens */
+  outputTokens: number
+  /** 总 tokens */
+  totalTokens: number
+  /** 其中「思考」tokens（不少模型把这部分算进 output 里） */
+  reasoningTokens?: number
+  /** 命中缓存的输入 tokens */
+  cachedInputTokens?: number
+  /** 整轮耗时（毫秒）：从发起到结束 */
+  durationMs: number
+  /** 输出速度（tokens/秒）：outputTokens ÷ 生成窗口（首字 → 结束） */
+  tps: number
+}
+
 /** AI 聊天消息（简化版 UIMessage，主进程与渲染进程一致） */
 export interface AiChatMessage {
   id: string
   role: 'user' | 'assistant'
   parts: AiMessagePart[]
   createdAt: number
+  /** 这一轮的用量统计（仅助手消息、一轮跑完后才有） */
+  usage?: TurnUsage
 }
 
 /** 发起 AI 对话的请求体：可绑定一个终端会话（该会话拥有独立的助手上下文） */
@@ -716,6 +1081,12 @@ export interface AiChatRequest {
   configId?: string
   /** 配置下的具体模型 id（配置挂了多个模型时按会话选择）；缺省用配置的 `model` */
   modelId?: string
+  /**
+   * 本次对话使用的内置引擎后端：缺省回退到 Mastra（与 AI Agent 页一致）。
+   * 仅作兜底用：`'ai-sdk'` 走原生 AI SDK 路径，其余（含未设置）走 Mastra。
+   * 终端助手当前没有 ACP 选项（ACP 在 AI Agent 页使用），故此处只区分内置引擎。
+   */
+  backend?: AgentBackend
 }
 
 export type AiMessagePart =
@@ -747,6 +1118,8 @@ export type AiStreamEvent =
       output: unknown
       isError?: boolean
     }
+  /** 一轮结束时的用量统计（input/output/total tokens、tps、耗时等） */
+  | { type: 'usage'; usage: TurnUsage }
   | { type: 'finish'; finishReason: string }
   | { type: 'error'; message: string }
 
@@ -771,6 +1144,8 @@ export interface AgentChatMessage {
   role: 'user' | 'assistant'
   parts: AgentMessagePart[]
   createdAt: number
+  /** 这一轮的用量统计（仅助手消息、一轮跑完后才有） */
+  usage?: TurnUsage
 }
 
 /** 工作区目录项（文件树用；`path` 相对工作区根、统一 '/' 分隔） */
@@ -863,10 +1238,12 @@ export type AgentStreamEvent =
       output: unknown
       isError?: boolean
     }
+  /** 一轮结束时的用量统计（input/output/total tokens、tps、耗时等） */
+  | { type: 'usage'; usage: TurnUsage }
   | { type: 'finish'; finishReason: string }
   | { type: 'error'; message: string }
 
-/** Agent 确认模式下 execute_command 执行前的主进程请示 */
+/** Agent 确认模式下**改动类工具**（执行命令 / 写入 / 编辑 / 删除）执行前的主进程请示 */
 export interface AgentConfirmRequest {
   /** 确认请求 id，回复时原样带回 */
   id: string
@@ -874,7 +1251,7 @@ export interface AgentConfirmRequest {
   requestId: string
   toolCallId: string
   toolName: string
-  /** 待执行的命令 */
+  /** 待执行的动作：命令原文，或「写入文件 xxx（n 字符）」这类说明 */
   command: string
   workspaceId?: string
   workspaceName?: string
@@ -908,6 +1285,81 @@ export interface OpenResult {
   ok: boolean
   error?: string
 }
+
+// ===== Git（源代码管理）=====
+/** 单个文件的两列状态码（X = 暂存区，Y = 工作区） */
+export interface GitChange {
+  /** 暂存区状态（porcelain 的 X 列） */
+  index: string
+  /** 工作区状态（porcelain 的 Y 列） */
+  worktree: string
+  /** 当前路径 */
+  path: string
+  /** 重命名 / 复制时的原始路径 */
+  origPath?: string
+}
+
+export interface GitRemote {
+  name: string
+  url: string
+}
+
+export interface GitStatusResult {
+  /** 是否 git 仓库（false 时其余字段除 root 外无意义） */
+  isRepo: boolean
+  /** 仓库根目录（非仓库时为空串） */
+  root: string
+  /** 当前分支名；分离头指针时为 null */
+  branch: string | null
+  /** 是否处于分离头指针（detached HEAD） */
+  detached: boolean
+  /** 跟踪的上游分支（如 origin/main），无则 null */
+  upstream: string | null
+  /** 领先上游的提交数 */
+  ahead: number
+  /** 落后上游的提交数 */
+  behind: number
+  /** 已配置的远端列表 */
+  remotes: GitRemote[]
+  /** 变更列表（git status --porcelain=v1） */
+  changes: GitChange[]
+  /** 改动过多被截断（列表已上限收敛）；为 true 时禁用批量操作 */
+  truncated: boolean
+}
+
+export interface GitBranchesResult {
+  /** 本地分支名 */
+  branches: string[]
+  /** 远端分支（带 origin/ 前缀，如 origin/main） */
+  remotes: string[]
+}
+
+export interface GitCommit {
+  /** 完整 hash */
+  hash: string
+  /** 短 hash */
+  short: string
+  /** 提交标题 */
+  subject: string
+  /** 作者 */
+  author: string
+  /** 日期（--date=short，YYYY-MM-DD） */
+  date: string
+}
+
+/** git 写操作：按 action 选择字段 */
+export type GitAction =
+  | { action: 'stage'; paths: string[] }
+  | { action: 'unstage'; paths: string[] }
+  | { action: 'rollback'; path: string; mode: 'worktree' | 'all' }
+  | { action: 'rollback-all'; paths: string[] }
+  | { action: 'commit'; message: string }
+  | { action: 'checkout'; ref: string }
+  | { action: 'create-branch'; name: string; from?: string }
+  | { action: 'set-remote'; name: string; url: string }
+  | { action: 'push' }
+  | { action: 'pull' }
+  | { action: 'init' }
 
 /** 单块磁盘/分区的使用情况 */
 export interface DiskUsage {

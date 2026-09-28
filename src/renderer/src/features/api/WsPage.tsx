@@ -17,10 +17,9 @@ import {
   Send,
   Settings2,
   Trash2,
-  TriangleAlert,
   Unplug
 } from 'lucide-react'
-import { AutoComplete, Button, Checkbox, Drawer, Input, Modal, Tag, message } from 'antd'
+import { AutoComplete, Button, Checkbox, Drawer, Input, Modal, Select, Tag, message } from 'antd'
 import {
   NEW_WS_REQUEST_ID,
   apiTabId,
@@ -123,6 +122,8 @@ export function WsPage({ requestId }: { requestId: string }) {
   // ---------- 连接配置草稿（不自动保存，Ctrl/Cmd+S 才落盘） ----------
   const [name, setName] = useState('')
   const [url, setUrl] = useState('')
+  /** 连接协议：ws:// 或 wss://（不再由用户手写，放左侧下拉选择） */
+  const [wsScheme, setWsScheme] = useState<'ws' | 'wss'>('wss')
   const [headers, setHeaders] = useState<ApiHeaderPair[]>([emptyHeader()])
   /** 子协议：界面上是逗号分隔的一行文本，落盘时拆成数组（见 parseProtocols） */
   const [subprotocols, setSubprotocols] = useState('')
@@ -133,7 +134,6 @@ export function WsPage({ requestId }: { requestId: string }) {
   const [state, setState] = useState<WsReadyState>('closed')
   /** 协商出来的子协议（服务端选的） */
   const [protocol, setProtocol] = useState('')
-  const [connError, setConnError] = useState<string | null>(null)
 
   // ---------- 消息日志 ----------
   const [log, setLog] = useState<WsLogEntry[]>([])
@@ -233,7 +233,6 @@ export function WsPage({ requestId }: { requestId: string }) {
           at: ev.at
         })
       } else {
-        setConnError(ev.message)
         setState('closed')
         connIdRef.current = null
         pushLog({
@@ -255,14 +254,15 @@ export function WsPage({ requestId }: { requestId: string }) {
   useEffect(() => {
     const req = useAppStore.getState().apiRequests.find((r) => r.id === requestId) ?? null
     setName(req?.name ?? '')
-    setUrl(req?.url ?? '')
+    const parsed = splitWsScheme(req?.url ?? '')
+    setWsScheme(parsed.scheme)
+    setUrl(parsed.rest)
     setHeaders(req?.headers?.length ? normalizeHeaders(req.headers) : [emptyHeader()])
     setSubprotocols((req?.subprotocols ?? []).join(', '))
     // 只有显式存了 false 才表示「跳过校验」：字段名沿用项目里 HTTP 那套
     // （undici 的 connect.rejectUnauthorized，false = 不校验）
     setSkipTls(req?.rejectUnauthorized === false)
     setDirty(false)
-    setConnError(null)
     setProtocol('')
     setLog([])
     setState('closed')
@@ -280,8 +280,9 @@ export function WsPage({ requestId }: { requestId: string }) {
 
   /** 草稿变动后同步标签标题（否则改名/改地址后标签还停在旧文字） */
   useEffect(() => {
-    updatePanelTabTitle(apiTabId(requestId), apiTabTitle({ name, method: 'GET', url, protocol: 'ws' }))
-  }, [name, url, requestId, updatePanelTabTitle])
+    const full = url.trim() ? `${wsScheme}://${url.trim()}` : ''
+    updatePanelTabTitle(apiTabId(requestId), apiTabTitle({ name, method: 'GET', url: full, protocol: 'ws' }))
+  }, [name, url, wsScheme, requestId, updatePanelTabTitle])
 
   /** 新帧到达后自动滚到底（除非用户自己往上翻了） */
   useEffect(() => {
@@ -314,7 +315,7 @@ export function WsPage({ requestId }: { requestId: string }) {
         name: name.trim(),
         // WebSocket 没有方法：占位成 GET，列表里显示的是协议标记（WS）而不是它
         method: 'GET',
-        url: url.trim(),
+        url: url.trim() ? `${wsScheme}://${url.trim()}` : '',
         headers,
         body: '',
         protocol: 'ws',
@@ -344,7 +345,7 @@ export function WsPage({ requestId }: { requestId: string }) {
       const id = await createApiRequest({
         name: nm,
         method: 'GET',
-        url: url.trim(),
+        url: url.trim() ? `${wsScheme}://${url.trim()}` : '',
         headers,
         body: '',
         protocol: 'ws',
@@ -373,16 +374,20 @@ export function WsPage({ requestId }: { requestId: string }) {
 
   // ---------- 连接 ----------
   const connect = async (): Promise<void> => {
-    const target = url.trim()
-    if (!target) {
-      setConnError('请填写连接地址')
+    // 协议由左侧下拉决定，输入框只填 host/path；用户若误粘贴了带协议的完整地址，这里去掉多余前缀
+    const host = url.trim().replace(/^wss?:\/\//i, '')
+    if (!host) {
+      pushLog({
+        dir: 'system',
+        level: 'error',
+        data: '请填写连接地址',
+        encoding: 'text',
+        bytes: 0,
+        at: Date.now()
+      })
       return
     }
-    if (!/^wss?:\/\//i.test(target)) {
-      setConnError('地址需以 ws:// 或 wss:// 开头')
-      return
-    }
-    setConnError(null)
+    const target = `${wsScheme}://${host}`
     // connId 必须**先**定下来再发起连接：握手可能快到 IPC 回包之前就完成，
     // 事件回调是靠 connIdRef 过滤的，晚一步设就会把 open/首帧当成别人的连接丢掉
     const id = newConnId()
@@ -408,7 +413,6 @@ export function WsPage({ requestId }: { requestId: string }) {
       const res = await window.api.ws.open(id, options)
       if (res.error) {
         connIdRef.current = null
-        setConnError(res.error)
         setState('closed')
         pushLog({
           dir: 'system',
@@ -433,7 +437,6 @@ export function WsPage({ requestId }: { requestId: string }) {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       connIdRef.current = null
-      setConnError(msg)
       setState('closed')
       pushLog({ dir: 'system', level: 'error', data: msg, encoding: 'text', bytes: 0, at: Date.now() })
     }
@@ -617,18 +620,30 @@ export function WsPage({ requestId }: { requestId: string }) {
         </Button>
       </div>
 
-      {/* 连接行：协议标记 + 地址 + 连接/断开 */}
+      {/* 连接行：协议下拉 + 地址 + 连接/断开 */}
       <div ref={connRowRef} className="flex shrink-0 items-center gap-2 px-3 py-2">
         <span className="shrink-0 rounded bg-secondary px-1.5 py-0.5 font-mono text-xs font-semibold text-sky-500">
           WS
         </span>
+        <Select
+          value={wsScheme}
+          onChange={(v: 'ws' | 'wss') => {
+            setWsScheme(v)
+            markDirty()
+          }}
+          className="w-24 shrink-0"
+          options={[
+            { value: 'wss', label: 'wss://' },
+            { value: 'ws', label: 'ws://' }
+          ]}
+        />
         <Input
           value={url}
           onChange={(e: ReactChangeEvent<HTMLInputElement>) => {
             setUrl(e.target.value)
             markDirty()
           }}
-          placeholder="连接地址，如 wss://echo.example.com/socket"
+          placeholder="连接地址，如 echo.example.com/socket"
           className="min-w-0 flex-1 font-mono text-xs"
         />
         {isOpen || busy ? (
@@ -653,15 +668,6 @@ export function WsPage({ requestId }: { requestId: string }) {
           </Button>
         )}
       </div>
-
-      {connError && (
-        <div className="flex shrink-0 items-center gap-1.5 px-3 pb-1 text-xs text-destructive">
-          <TriangleAlert className="size-3.5 shrink-0" />
-          <span className="min-w-0 flex-1 truncate" title={connError}>
-            {connError}
-          </span>
-        </div>
-      )}
 
       {/* 日志区：主区域，占满剩余高度（overflow-hidden：被压扁时裁掉，不要溢到发送区上） */}
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -698,7 +704,7 @@ export function WsPage({ requestId }: { requestId: string }) {
           {shown.length === 0 ? (
             <div className="mx-2 mt-6 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
               {log.length === 0
-                ? '还没有消息。填好地址点「连接」，连上后在下方发送区收发消息。'
+                ? '还没有消息'
                 : `没有符合「${LOG_FILTERS.find((f) => f.key === filter)?.label}」的日志。`}
             </div>
           ) : (
@@ -1033,6 +1039,19 @@ function LogRow({ entry }: { entry: WsLogEntry }) {
       )}
     </div>
   )
+}
+
+/**
+ * 从保存的完整地址里拆出协议与剩余部分。
+ * 没有协议时默认 wss（安全优先）；输入框只展示剩余部分，协议由下拉决定。
+ */
+function splitWsScheme(full: string): { scheme: 'ws' | 'wss'; rest: string } {
+  const m = /^wss?:\/\//i.exec(full.trim())
+  if (m) {
+    const scheme = m[0].toLowerCase().replace('://', '') as 'ws' | 'wss'
+    return { scheme, rest: full.trim().slice(m[0].length) }
+  }
+  return { scheme: 'wss', rest: full.trim() }
 }
 
 /** 逗号 / 空白分隔的子协议串 → 数组（去空、去重保序） */

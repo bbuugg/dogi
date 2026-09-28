@@ -1,8 +1,11 @@
 import { join } from 'node:path'
-import { app, BrowserWindow, Menu, nativeTheme, Tray } from 'electron'
+import { app, BrowserWindow, ipcMain, Menu, nativeTheme, Tray } from 'electron'
 import { registerIpc, openExternalSafe } from './ipc/index'
+import { requestRendererFlush } from './ipc/system'
+import { browserSessions } from './services/browser/session'
 import { pluginHost } from './services/plugins/host'
 import { storage } from './services/storage'
+import { hostLogger } from './services/log/logger'
 import { acpAgentService } from './services/ai/acp-agent'
 import {
   registerWorkspaceMediaScheme,
@@ -14,6 +17,8 @@ import { resolveIconPath } from './services/system/icon'
 registerWorkspaceMediaScheme()
 
 let mainWindow: BrowserWindow | null = null
+/** 独立设置窗口（单例；渲染端 `?window=settings`）；关掉后置空 */
+let settingsWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 /** 真正退出程序的标志位：仅当用户从托盘「退出」触发，关闭窗口时置位 */
 let isQuiting = false
@@ -72,18 +77,9 @@ function installMenu(): void {
               }
             }
           },
-          // 不用 { role: 'toggleDevTools' }：该角色操作的是当前聚焦的 webContents，
-          // 这里显式操作主窗口的 webContents，确保快捷键始终打开宿主 DevTools。
-          {
-            label: 'Toggle Developer Tools',
-            accelerator: 'CommandOrControl+Shift+I',
-            registerAccelerator: true,
-            click: () => {
-              if (mainWindow && !mainWindow.isDestroyed()) {
-                mainWindow.webContents.toggleDevTools()
-              }
-            }
-          },
+          // 默认角色：对当前聚焦的 webContents 切换 DevTools（之前为了 webview 强开主窗口，
+          // 现已无 webview，恢复正常行为——聚焦哪层就开哪层的 DevTools）。
+          { role: 'toggleDevTools' },
           { type: 'separator' },
           { role: 'togglefullscreen' }
         ]
@@ -156,7 +152,12 @@ function createWindow(): void {
       preload: join(import.meta.dirname, '../preload/index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      spellcheck: false
+      spellcheck: false,
+      // 关掉后台节流：应用最小化到托盘 / 被遮挡时，Chromium 默认会把渲染端定时器
+      // 先压到 1 次/秒、约 5 分钟后进入 intensive throttling（1 次/分钟）并停掉 rAF ——
+      // 终端输出、AI 流式渲染等全部停摆，表现就是「放后台过一会儿任务卡住」。
+      // 这是常驻运维工作台，后台继续干活是核心场景（功耗换功能，值得）。
+      backgroundThrottling: false
     }
   })
 
@@ -225,6 +226,65 @@ function createWindow(): void {
   }
 }
 
+/**
+ * 独立设置窗口（单例）：同一份渲染端 + `?window=settings`，渲染端据此只渲染设置面板
+ * （左分组菜单 + 右内容区，整窗铺满）。
+ * 单例：已经开着就拉到前面，不再开第二个（连点设置按钮不该堆一屏窗口）。
+ * 用与主窗口一致的自绘标题栏（渲染端画「设置 + 关闭」），Win/Linux 隐藏系统标题栏，
+ * mac 保留交通灯。
+ */
+function openSettingsWindow(tab?: string): void {
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    if (settingsWindow.isMinimized()) settingsWindow.restore()
+    settingsWindow.show()
+    settingsWindow.focus()
+    return
+  }
+
+  const query = new URLSearchParams({ window: 'settings' })
+  if (tab) query.set('tab', tab)
+  const queryObj: Record<string, string> = { window: 'settings' }
+  if (tab) queryObj.tab = tab
+
+  settingsWindow = new BrowserWindow({
+    width: 880,
+    height: 540,
+    minWidth: 720,
+    minHeight: 520,
+    show: false,
+    title: '设置',
+    autoHideMenuBar: true,
+    // 与主窗口同一套自绘标题栏（渲染端画「设置 + 关闭」），Win/Linux 隐藏系统标题栏，
+    // mac 用 hiddenInset 保留交通灯
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
+    ...(process.platform === 'darwin' ? { trafficLightPosition: { x: 12, y: 12 } } : {}),
+    // 创建前 themeSource 已就位，按解析后的主题设底色避免闪白
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#0f1117' : '#ffffff',
+    webPreferences: {
+      preload: join(import.meta.dirname, '../preload/index.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      spellcheck: false,
+      // 与主窗口同理：设置窗口也可能在后台被使用，不吃 Chromium 后台节流
+      backgroundThrottling: false
+    }
+  })
+
+  settingsWindow.on('ready-to-show', () => settingsWindow?.show())
+  settingsWindow.on('closed', () => {
+    settingsWindow = null
+  })
+
+  const devUrl = process.env.VITE_DEV_SERVER_URL
+  if (devUrl) {
+    void settingsWindow.loadURL(`${devUrl}?${query.toString()}`)
+  } else {
+    void settingsWindow.loadFile(join(import.meta.dirname, '../renderer/index.html'), {
+      query: queryObj
+    })
+  }
+}
+
 function saveBounds(): void {
   if (mainWindow && !mainWindow.isMinimized() && !mainWindow.isDestroyed()) {
     storage.setWindowBounds(mainWindow.getBounds())
@@ -234,10 +294,20 @@ function saveBounds(): void {
 app.whenReady().then(async () => {
   // 在创建窗口前应用主题偏好，renderer 的 prefers-color-scheme 随之生效
   nativeTheme.themeSource = storage.getPreferences().theme
+  // safeStorage 在 app ready 前不可用（构造期的迁移会被静默跳过），ready 后幂等补跑一次
+  storage.migrateSshPrivateKeyAtRest()
   installMenu()
   // 文件预览协议要早于窗口创建（页面一加载就可能请求图片/视频）
   serveWorkspaceMedia()
+  // 主机日志：早于 IPC 注册初始化，隧道自启（注册期同步触发）等早期事件的日志同样要落盘
+  await hostLogger.init()
   registerIpc(() => mainWindow)
+  // 设置窗口在主进程侧是「开一个独立窗口」，由渲染端的左下角菜单 / 命令面板触发
+  ipcMain.handle('window:openSettings', (_e, tab?: string) => openSettingsWindow(tab))
+  // 只关设置窗口本身（window:close 关的是主窗口，设置窗口的关闭按钮不能复用它）
+  ipcMain.handle('window:closeSettings', () => {
+    if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.close()
+  })
   createWindow()
   // 插件需在 IPC 注册后加载，使插件主进程 handler 可被路由
   await pluginHost.init()
@@ -260,6 +330,28 @@ app.on('will-quit', () => {
   tray?.destroy()
   tray = null
   acpAgentService.dispose()
+})
+
+/**
+ * 退出前关掉自动化用的浏览器。
+ *
+ * 那些是 Playwright 启动的 headless 子进程，不关就会变成孤儿进程挂在后台。
+ * `close()` 是异步的，所以先拦一次退出、关完再真退；带超时兜底 ——
+ * 个别浏览器进程卡死时不能把整个应用拖得退不掉。
+ */
+let browsersClosed = false
+app.on('before-quit', (event) => {
+  if (browsersClosed) return
+  event.preventDefault()
+  void Promise.race([
+    // 先让渲染端把进行中的会话落盘（Agent 长任务中途退出不丢最后几秒的产出），
+    // 再关浏览器子进程；两步各自都有超时，不会把退出拖住
+    requestRendererFlush(mainWindow).then(() => browserSessions.closeAll()),
+    new Promise((resolve) => setTimeout(resolve, 2500))
+  ]).finally(() => {
+    browsersClosed = true
+    app.quit()
+  })
 })
 
 app.on('window-all-closed', () => {

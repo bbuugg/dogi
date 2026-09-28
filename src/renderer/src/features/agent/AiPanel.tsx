@@ -5,8 +5,11 @@ import { MessageDeleteButton } from '@/features/agent/MessageDeleteButton'
 import { MessageEditButton } from '@/features/agent/MessageEditButton'
 import { ReasoningPanel } from '@/features/agent/ReasoningPanel'
 import { TOOL_LABELS, ToolCallRow, toolRunStatus } from '@/features/agent/ToolCallRow'
+import { findTailStart, TurnFold, turnStepSummary } from '@/features/agent/turn-fold'
+import { TokenUsageRow } from '@/features/agent/TokenUsageRow'
 import { TypingDots } from '@/features/agent/TypingDots'
-import { useMessageListScroll } from '@/features/agent/useMessageListScroll'
+import { VirtualMessageList } from '@/features/agent/VirtualMessageList'
+import { configModels, hasUsableConfig, modelNameOnly } from '@/features/agent/model-options'
 import { Button, Dropdown, Input, Select } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'
@@ -15,10 +18,10 @@ import type {
   AiChatMessage,
   AiConfirmRequest,
   AiMessagePart,
-  AiPermissionMode
+  AiPermissionMode,
+  TurnUsage
 } from '@shared/types'
 import {
-  ArrowDown,
   ChevronDown,
   ChevronUp,
   Eraser,
@@ -27,22 +30,30 @@ import {
   Pencil,
   Send,
   Settings2,
+  ShieldAlert,
   ShieldCheck,
   Sparkles,
   Square,
-  Terminal,
   X
 } from 'lucide-react'
 import {
+  memo,
   useEffect,
   useLayoutEffect,
   useRef,
   useState,
   type ComponentRef,
   type CSSProperties,
-  type PointerEvent as ReactPointerEvent
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode
 } from 'react'
 
+/**
+ * 权限模式（与工作区 Agent 共用同一份配置 `aiSettings.permissionMode`，
+ * 图标/文案两边保持一致，别一处一个说法）。
+ *
+ * 「全部访问」给警示色 + 盾牌带感叹号：那是「不再询问」的档，不能悄无声息地开着。
+ */
 const PERMISSION_MODES: Array<{
   value: AiPermissionMode
   label: string
@@ -51,9 +62,9 @@ const PERMISSION_MODES: Array<{
 }> = [
     {
       value: 'full',
-      label: '自动执行',
-      icon: Terminal,
-      hint: '无需确认'
+      label: '全部访问',
+      icon: ShieldAlert,
+      hint: '无需确认，直接执行'
     },
     {
       value: 'confirm',
@@ -142,7 +153,7 @@ function AiConfirmActions({ confirm }: { confirm: AiConfirmRequest }) {
   )
 }
 
-function MessageBubble({
+function MessageBubbleImpl({
   role,
   parts,
   streaming,
@@ -152,7 +163,8 @@ function MessageBubble({
   canDelete,
   tailCount,
   onDelete,
-  pendingConfirm
+  pendingConfirm,
+  usage
 }: {
   role: 'user' | 'assistant'
   parts: AiMessagePart[]
@@ -168,6 +180,8 @@ function MessageBubble({
   tailCount: number
   onDelete: () => void
   pendingConfirm: AiConfirmRequest | null
+  /** 这一轮的用量统计（仅助手消息、一轮跑完后才有） */
+  usage?: TurnUsage
 }) {
   const del = canDelete ? (
     <MessageDeleteButton count={tailCount} onConfirm={onDelete} />
@@ -212,53 +226,78 @@ function MessageBubble({
   // 空档期（还没吐出任何内容，或最后一步是已完成的工具、正文尚未开始）显示三点
   const showDots = !!streaming && (units.length === 0 || (last?.kind === 'tool' && !!last.result))
 
+  // 一轮已完成（助手消息、且不是正在流式、且没有待回答的追问卡）：把「末尾连续正文之前」的过程
+  // 收进一个折叠组，只留最终回答可见；与 fishwork 的 TurnStepGroup 等价。
+  // 待回答的追问卡不能折进去 —— 否则那张需要用户作答的交互卡被藏住（fishwork 也是这个处理）。
+  const followupRequests = useAppStore((s) => s.followupRequests)
+  const hasPendingFollowup = units.some(
+    (u) => u.kind === 'tool' && u.call.toolName === ASK_FOLLOWUP_TOOL && !!followupRequests[u.call.toolCallId]
+  )
+  const turnDone = role === 'assistant' && !streaming && !hasPendingFollowup
+  const tailStart = turnDone ? findTailStart(units) : 0
+  const foldedUnits = tailStart > 0 ? units.slice(0, tailStart) : null
+
+  const renderUnit = (unit: RenderUnit, i: number): ReactNode => {
+    if (unit.kind === 'text') {
+      return (
+        <div key={i} className="px-3 py-2">
+          <AiMarkdown content={unit.text} className="text-sm" />
+        </div>
+      )
+    }
+    if (unit.kind === 'reasoning') {
+      return (
+        <div key={i} className="px-3">
+          <ReasoningPanel text={unit.text} streaming={!!streaming && i === units.length - 1} />
+        </div>
+      )
+    }
+    if (unit.call.toolName === ASK_FOLLOWUP_TOOL) {
+      // 提问工具：待回答时是一张可交互的卡片，答完收成一条横条
+      return (
+        <div key={i} className="px-3">
+          <AskFollowupCard
+            toolCallId={unit.call.toolCallId}
+            input={unit.call.input}
+            output={unit.result?.output}
+            isError={unit.result?.isError}
+            streaming={streaming}
+          />
+        </div>
+      )
+    }
+    return (
+      <div key={i} className="px-3">
+        <ToolCallRow
+          toolName={unit.call.toolName}
+          input={unit.call.input}
+          output={unit.result?.output}
+          isError={unit.result?.isError}
+          status={toolRunStatus({
+            confirming: pendingConfirm?.toolCallId === unit.call.toolCallId,
+            hasResult: !!unit.result,
+            isError: unit.result?.isError,
+            streaming
+          })}
+          confirm={
+            pendingConfirm?.toolCallId === unit.call.toolCallId ? (
+              <AiConfirmActions confirm={pendingConfirm} />
+            ) : undefined
+          }
+        />
+      </div>
+    )
+  }
+
   return (
     <div className="group/msg space-y-3">
-      {units.map((unit, i) =>
-        unit.kind === 'text' ? (
-          <div key={i} className="px-3 py-2">
-            <AiMarkdown content={unit.text} className='text-sm' />
-            {streaming && i === units.length - 1 && (
-              <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-primary align-middle" />
-            )}
-          </div>
-        ) : unit.kind === 'reasoning' ? (
-          <div key={i} className="px-3">
-            <ReasoningPanel text={unit.text} streaming={!!streaming && i === units.length - 1} />
-          </div>
-        ) : unit.call.toolName === ASK_FOLLOWUP_TOOL ? (
-          // 提问工具：待回答时是一张可交互的卡片，答完收成一条横条
-          <div key={i} className="px-3">
-            <AskFollowupCard
-              toolCallId={unit.call.toolCallId}
-              input={unit.call.input}
-              output={unit.result?.output}
-              isError={unit.result?.isError}
-              streaming={streaming}
-            />
-          </div>
-        ) : (
-          <div key={i} className="px-3">
-            <ToolCallRow
-              toolName={unit.call.toolName}
-              input={unit.call.input}
-              output={unit.result?.output}
-              isError={unit.result?.isError}
-              status={toolRunStatus({
-                confirming: pendingConfirm?.toolCallId === unit.call.toolCallId,
-                hasResult: !!unit.result,
-                isError: unit.result?.isError,
-                streaming
-              })}
-              confirm={
-                pendingConfirm?.toolCallId === unit.call.toolCallId ? (
-                  <AiConfirmActions confirm={pendingConfirm} />
-                ) : undefined
-              }
-            />
-          </div>
-        )
+      {foldedUnits && (
+        <TurnFold summary={turnStepSummary(foldedUnits)}>
+          {foldedUnits.map((unit, k) => renderUnit(unit, k))}
+        </TurnFold>
       )}
+      {units.slice(tailStart).map((unit, k) => renderUnit(unit, tailStart + k))}
+      {usage && <TokenUsageRow usage={usage} className="px-3" />}
       {showDots && <TypingDots className="flex items-center gap-1.5 px-3 py-2" />}
       {/* 消息下方：复制原始 Markdown / 删除（生成中内容还在变，一轮结束再显示）；
           invisible 而不是不渲染：保留占位，hover 时不会把消息挤动 */}
@@ -269,6 +308,23 @@ function MessageBubble({
     </div>
   )
 }
+
+/** 记忆化：流式期间只重渲染正在生成的那条（parts / usage 引用不变的历史消息直接跳过）。
+ *  onEdit / onDelete 是渲染期为当前 msg 新建的闭包，行为恒定，不参与比较 ——
+ *  换终端会话时列表整体重挂（listKey 变化），不存在闭包串台。 */
+const MessageBubble = memo(
+  MessageBubbleImpl,
+  (a, b) =>
+    a.role === b.role &&
+    a.parts === b.parts &&
+    a.streaming === b.streaming &&
+    a.canEdit === b.canEdit &&
+    a.editing === b.editing &&
+    a.canDelete === b.canDelete &&
+    a.tailCount === b.tailCount &&
+    a.pendingConfirm === b.pendingConfirm &&
+    a.usage === b.usage
+)
 
 /** 稳定的空消息数组：避免每次渲染新引用导致滚动 effect 误触发 */
 const NO_MESSAGES: AiChatMessage[] = []
@@ -405,16 +461,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     ro.observe(parent)
     return () => ro.disconnect()
   }, [])
-  // 滚动定位（尾部跟随 / 滚动到底部按钮）与 Agent 页共用一套。
-  // `extra` 传 minimized：卡片从折叠态展开时高度才确定，要重算一次落点。
-  // 容器上已用 `overflow-anchor: none` 关掉 Chromium 的滚动锚定（流式内容增长/markdown
-  // 重排时它会错误修正滚动位置，造成偶发跳顶），改由这个 hook 显式管理。
-  const { scrollRef, onScroll, showJump, jumpToBottom } = useMessageListScroll({
-    conversationId: sessionId,
-    messages,
-    streaming: aiStreaming,
-    extra: minimized
-  })
+  // 消息流的滚动定位（吸底跟随 / 发送回底 / 回底按钮）都在 VirtualMessageList 内部管理；
+  // `extra` 传 minimized：卡片从折叠态展开时高度才有值，列表要重算一次落点。
 
   // 助手在折叠态（只剩一条横条）时提问会把卡片藏住，用户根本看不到 —— 有提问就撑开
   const hasFollowupForSession = useAppStore((s) => {
@@ -428,13 +476,12 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     if (hasFollowupForSession && sessionId) setAiMinimized(sessionId, false)
   }, [hasFollowupForSession, sessionId, setAiMinimized])
 
-  // 模型**按终端会话独立**：这个会话选过就用自己的，没选过才回退到设置页的默认模型
-  const effectiveConfigId =
-    chat?.configId && aiConfigs.some((c) => c.id === chat.configId)
-      ? chat.configId
-      : aiConfigs.some((c) => c.id === aiSettings.activeConfigId)
-        ? aiSettings.activeConfigId
-        : undefined
+  // 模型**按终端会话独立**：这个会话选过就用自己的，没选过才回退到设置页的默认模型。
+  // 参与回退的配置必须**有可用模型**（models 被删空的配置跳过，否则下拉会出 undefined 项、
+  // 请求也解析不出模型）
+  const usable = (id?: string | null): string | undefined =>
+    hasUsableConfig(aiConfigs, id) ? (id ?? undefined) : undefined
+  const effectiveConfigId = usable(chat?.configId) ?? usable(aiSettings.activeConfigId)
   const hasConfig = Boolean(effectiveConfigId)
 
   // ---------- 模型下拉：按「模型配置 / 模型 id」两级分组（结构同 Agent 页），另有 ACP 分组 ----------
@@ -444,7 +491,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const modelSelectValue = (() => {
     const config = aiConfigs.find((c) => c.id === effectiveConfigId)
     if (!config) return undefined
-    const models = config.models?.length ? config.models : [config.model]
+    const models = configModels(config)
+    if (models.length === 0) return undefined
     if (chat?.modelId && models.includes(chat.modelId)) {
       return `cfg:${config.id}:${chat.modelId}`
     }
@@ -463,10 +511,9 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
       ? [
         {
           label: 'AI 模型',
-          options: aiConfigs.flatMap((c) => {
-            const models = c.models?.length ? c.models : [c.model]
-            return models.map((m) => ({ value: `cfg:${c.id}:${m}`, label: `${c.name} · ${m}` }))
-          })
+          options: aiConfigs.flatMap((c) =>
+            configModels(c).map((m) => ({ value: `cfg:${c.id}:${m}`, label: `${c.name} · ${m}` }))
+          )
         }
       ]
       : []),
@@ -795,6 +842,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               open={modelSelectOpen}
               onOpenChange={setModelSelectOpen}
               options={modelOptions}
+              // 选中态只显示模型名（列表里仍是「提供商 · 模型」，方便区分同名模型）
+              labelRender={(opt) => modelNameOnly(opt.label)}
             />
             <Button
               type="text"
@@ -851,70 +900,62 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           {/* 消息区：占满卡片剩余高度并在内部滚动（高度固定，不随消息多少伸缩），
               AI 回复属于「内容」，保持可选中复制 */}
           <div className="relative min-h-0 flex-1">
-            <div
-              ref={scrollRef}
-              onScroll={onScroll}
-              className="h-full overflow-y-auto select-text"
-              style={{ overflowAnchor: 'none' }}
-            >
-              <div className="flex min-h-full flex-col space-y-3 p-3">
-                {messages.length === 0 && (
-                  <div className="flex flex-1 flex-col items-center justify-center gap-3 py-6 text-center text-muted-foreground">
-                    <Sparkles className="size-8 text-primary/40" />
-                    {activeSession ? (
-                      <div className="space-y-1 text-xs leading-5">
-                        <p>试试：查看当前目录下占用空间最大的文件</p>
-                        <p>试试：诊断 nginx 为什么启动失败</p>
-                      </div>
-                    ) : (
-                      <div className="space-y-1 text-xs leading-5">
-                        <p>打开一个终端会话后开始对话</p>
-                        <p>每个终端都有独立、互不影响的 AI 上下文</p>
-                      </div>
-                    )}
-                    {!hasConfig && (
-                      <Button
-                        size="small"
-                        variant="filled"
-                        className="mt-2"
-                        onClick={() => setSettingsOpen(true, 'ai')}
-                      >
-                        先去配置模型
-                      </Button>
-                    )}
-                  </div>
-                )}
-                {messages.map((msg, i) => (
-                  <MessageBubble
-                    key={msg.id}
-                    role={msg.role}
-                    parts={msg.parts}
-                    streaming={
-                      aiStreaming && i === messages.length - 1 && msg.role === 'assistant'
-                    }
-                    canEdit={!aiStreaming && msg.role === 'user'}
-                    editing={editing?.id === msg.id}
-                    onEdit={() => startEdit(msg)}
-                    canDelete={!aiStreaming}
-                    tailCount={messages.length - i}
-                    onDelete={() => deleteAiMessagesFrom(sessionId ?? '', msg.id)}
-                    pendingConfirm={pendingConfirm}
-                  />
-                ))}
+            {messages.length === 0 ? (
+              <div className="flex h-full flex-col p-3">
+                <div className="flex flex-1 flex-col items-center justify-center gap-3 py-6 text-center text-muted-foreground">
+                  <Sparkles className="size-8 text-primary/40" />
+                  {activeSession ? (
+                    <div className="space-y-1 text-xs leading-5">
+                      <p>试试：查看当前目录下占用空间最大的文件</p>
+                      <p>试试：诊断 nginx 为什么启动失败</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-1 text-xs leading-5">
+                      <p>打开一个终端会话后开始对话</p>
+                      <p>每个终端都有独立、互不影响的 AI 上下文</p>
+                    </div>
+                  )}
+                  {!hasConfig && (
+                    <Button
+                      size="small"
+                      variant="filled"
+                      className="mt-2"
+                      onClick={() => setSettingsOpen(true, 'ai')}
+                    >
+                      先去配置模型
+                    </Button>
+                  )}
+                </div>
                 {aiError && <p className="text-xs text-destructive px-3">{aiError}</p>}
               </div>
-            </div>
-            {/* 不在底部时显示：一键滚动到底部 */}
-            {showJump && (
-              <button
-                type="button"
-                onClick={jumpToBottom}
-                title="滚动到底部"
-                aria-label="滚动到底部"
-                className="absolute bottom-3 left-1/2 flex size-8 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-background text-muted-foreground shadow-md transition-colors hover:bg-secondary hover:text-foreground"
-              >
-                <ArrowDown className="size-4" />
-              </button>
+            ) : (
+              <VirtualMessageList
+                listKey={sessionId ?? '__no_session__'}
+                messages={messages}
+                className="h-full"
+                topGap={12}
+                extra={minimized}
+                footer={aiError ? <p className="text-xs text-destructive px-3">{aiError}</p> : null}
+                renderItem={(msg, index) => (
+                  <div className="pb-3">
+                    <MessageBubble
+                      role={msg.role}
+                      parts={msg.parts}
+                      streaming={
+                        aiStreaming && index === messages.length - 1 && msg.role === 'assistant'
+                      }
+                      canEdit={!aiStreaming && msg.role === 'user'}
+                      editing={editing?.id === msg.id}
+                      onEdit={() => startEdit(msg)}
+                      canDelete={!aiStreaming}
+                      tailCount={messages.length - index}
+                      onDelete={() => deleteAiMessagesFrom(sessionId ?? '', msg.id)}
+                      pendingConfirm={pendingConfirm}
+                      usage={msg.usage}
+                    />
+                  </div>
+                )}
+              />
             )}
           </div>
         </div>
@@ -1006,7 +1047,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             title={`${permissionMeta.label}：${permissionMeta.hint}（点击切换）`}
             className={cn(
               'shrink-0',
-              permissionMode === 'full' ? 'text-muted-foreground' : 'text-amber-500'
+              // 警示色给「全部访问」（不再询问），确认档走中性色 —— 与 Agent 页一致
+              permissionMode === 'full' ? 'text-amber-500' : 'text-muted-foreground'
             )}
           />
         </Dropdown>

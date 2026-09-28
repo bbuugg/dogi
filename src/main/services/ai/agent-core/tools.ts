@@ -3,7 +3,10 @@
  *
  * 所有工具都绑定一个工作区根目录（root），文件路径一律相对工作区，
  * 经 resolveInside 越界校验后落盘，防止 Agent 逃出工作区。
- * 破坏性工具（execute_command、delete_file）在确认模式下统一经 requestConfirm 请示用户。
+ *
+ * 权限：**会改动东西的工具**（execute_command / delete_file / write_file / edit_file）
+ * 统一走 `guardWrite` 一道闸 —— 确认模式下弹卡片等用户点「允许」，被拒绝就当次调用放弃；
+ * 只读类工具（list_files / read_file / search_files / find_files / read_skill）任何模式下都不拦。
  */
 import { spawn } from 'node:child_process'
 import { promises as fs } from 'node:fs'
@@ -25,7 +28,7 @@ const MAX_SEARCH_FILE_SIZE = 1_048_576
 const MAX_LINE_CHARS = 200
 
 export interface AgentToolOptions {
-  /** 确认模式下 execute_command 执行前需用户批准 */
+  /** 确认模式下**会改动东西的工具**（执行命令 / 写 / 编辑 / 删除）执行前需用户批准 */
   permissionMode: AgentPermissionMode
   requestConfirm?: (req: {
     toolCallId: string
@@ -357,9 +360,32 @@ async function runCommand(
 
 // ---------- 工具集 ----------
 
-/** 构建工作区 Agent 工具集（绑定 root 目录；确认模式下 execute_command 先请示用户） */
+/** 构建工作区 Agent 工具集（绑定 root 目录；确认模式下改动类工具先请示用户） */
 export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
-  const needConfirm = opts.permissionMode === 'confirm' && !!opts.requestConfirm
+  const confirm = opts.requestConfirm
+  const needConfirm = opts.permissionMode === 'confirm' && !!confirm
+
+  /**
+   * 改动类工具的**统一闸门**（与 fishwork 的 `guardWrite` 同一套语义）。
+   *
+   * 返回 `null` = 放行；返回字符串 = 这串就是**工具结果**（回绝说明），直接 `return` 回去 ——
+   * 刻意不抛错：回绝是「预期内的结果」，让模型看到原因后能向用户解释，
+   * 而不是变成一个工具报错把整轮打断。
+   *
+   * 必须过闸的是**会动磁盘 / 动进程**的工具：execute_command、delete_file、
+   * write_file、edit_file。新增工具时想清楚它会不会改动东西 —— 会，就得走这里。
+   */
+  const guardWrite = async (
+    /** 回绝时的短句，拼进工具结果（如「文件未写入：src/a.ts」） */
+    denied: string,
+    req: { toolCallId: string; toolName: string; command: string }
+  ): Promise<string | null> => {
+    if (!needConfirm || !confirm) return null
+    const approved = await confirm(req)
+    return approved
+      ? null
+      : `用户拒绝了这次调用（${denied}）。请询问用户接下来希望怎么做，不要擅自重试同一步。`
+  }
 
   return {
     list_files: tool({
@@ -409,8 +435,15 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
         path: z.string().describe('相对工作区的文件路径'),
         content: z.string().describe('完整文件内容')
       }),
-      execute: async ({ path, content }) => {
+      execute: async ({ path, content }, options) => {
         const abs = resolveInside(root, path)
+        // 会覆盖已有内容、且无法撤销：与执行命令同一道闸
+        const refused = await guardWrite(`文件未写入：${relPathOf(root, abs)}`, {
+          toolCallId: options.toolCallId,
+          toolName: 'write_file',
+          command: `写入文件 ${relPathOf(root, abs)}（${content.length} 字符）`
+        })
+        if (refused) return refused
         await fs.mkdir(dirname(abs), { recursive: true })
         await fs.writeFile(abs, content, 'utf8')
         return `已写入 ${relPathOf(root, abs)}（${content.length} 字符）`
@@ -431,7 +464,7 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
           )
           .describe('按顺序应用的替换列表')
       }),
-      execute: async ({ path, edits }) => {
+      execute: async ({ path, edits }, options) => {
         const abs = resolveInside(root, path)
         let text = await readTextFile(abs)
         const applied: string[] = []
@@ -442,6 +475,14 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
           text = text.split(oldText).join(newText)
           applied.push(`${oldText.slice(0, 40)}${oldText.length > 40 ? '…' : ''}（${count} 处）`)
         }
+        // 替换都在内存里试算过了（oldText 全找得到）才请示：确认卡是为了「真的会落盘」
+        // 这一步，为一次注定失败的编辑打扰用户没有意义。
+        const refused = await guardWrite(`文件未被编辑：${relPathOf(root, abs)}`, {
+          toolCallId: options.toolCallId,
+          toolName: 'edit_file',
+          command: `编辑文件 ${relPathOf(root, abs)}（${edits.length} 处替换）`
+        })
+        if (refused) return refused
         await fs.writeFile(abs, text, 'utf8')
         return `已应用 ${applied.length} 处编辑（${relPathOf(root, abs)}）：${applied.join('；')}`
       }
@@ -544,16 +585,12 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
         cwd: z.string().optional().describe('执行目录（相对工作区），缺省为工作区根目录')
       }),
       execute: async ({ command, timeoutMs, cwd = '' }, options) => {
-        if (needConfirm && opts.requestConfirm) {
-          const approved = await opts.requestConfirm({
-            toolCallId: options.toolCallId,
-            toolName: 'execute_command',
-            command
-          })
-          if (!approved) {
-            return '用户取消了本次命令执行（命令未运行）。请询问用户接下来希望怎么做，不要擅自重试同一条命令。'
-          }
-        }
+        const refused = await guardWrite('命令未运行', {
+          toolCallId: options.toolCallId,
+          toolName: 'execute_command',
+          command
+        })
+        if (refused) return refused
         const execDir = resolveInside(root, cwd)
         const stat = await fs.stat(execDir)
         if (!stat.isDirectory()) throw new Error(`执行目录不是目录：${cwd || '.'}`)
@@ -592,17 +629,13 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
             `${path} 是目录。删除目录必须显式传 recursive: true（会连同目录内所有内容一起删除）。`
           )
         }
-        // 破坏性操作：确认模式下必须请示（与 execute_command 同一道闸，不能绕）
-        if (needConfirm && opts.requestConfirm) {
-          const approved = await opts.requestConfirm({
-            toolCallId: options.toolCallId,
-            toolName: 'delete_file',
-            command: isDir ? `删除目录（含全部内容）：${path}` : `删除文件：${path}`
-          })
-          if (!approved) {
-            return '用户取消了本次删除（未删除任何内容）。请询问用户接下来希望怎么做，不要擅自重试。'
-          }
-        }
+        // 破坏性操作：确认模式下必须请示（与写 / 执行同一道闸，不能绕）
+        const refused = await guardWrite(isDir ? `目录未被删除：${path}` : `文件未被删除：${path}`, {
+          toolCallId: options.toolCallId,
+          toolName: 'delete_file',
+          command: isDir ? `删除目录（含全部内容）：${path}` : `删除文件：${path}`
+        })
+        if (refused) return refused
         if (isDir) await fs.rm(abs, { recursive: true })
         else await fs.unlink(abs)
         return `已删除${isDir ? '目录' : '文件'} ${path}`

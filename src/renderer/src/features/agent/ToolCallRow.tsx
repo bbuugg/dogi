@@ -20,6 +20,8 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { cn } from 'cn'
 import { CollapsibleRow } from '@/features/agent/CollapsibleRow'
 import { MessageCopyButton } from '@/features/agent/MessageCopyButton'
+import { buildFileDiff } from '@/features/agent/tool-file-diff'
+import { FileDiffView } from '@/shared/components/FileDiffView'
 
 /**
  * 工具调用的中文展示名。Agent 页（工作区助手）与终端 AI 助手共用一份 ——
@@ -134,6 +136,19 @@ export function toolArgPreview(input: unknown): string {
   return typeof first === 'string' ? first : JSON.stringify(obj)
 }
 
+/** 命令类工具不在横条上放参数预览：命令往往又长又绕，收起时只留工具名更清爽，
+ *  命令全文展开看「参数」段仍然完整可见 */
+const NO_PREVIEW_TOOLS = new Set(['execute_command', 'run_in_terminal'])
+
+/**
+ * 展开体里**不显示「参数」段**的工具：参数要么在横条预览里已经写明，要么毫无信息量，
+ * 摆出来只是噪音。读取类最典型 —— `{"path":"src/a.ts","offset":1,"limit":500}` 里
+ * 真正有用的只有 path（横条上就有），用户关心的是读到了什么。
+ *
+ * 与「改文件的工具」的区别：那类是连结果一起换掉（改渲染 diff），这类只藏参数、留结果。
+ */
+const NO_PARAM_TOOLS = new Set(['read_file'])
+
 /** 缩进成可读 JSON；本来就是普通字符串（文件内容、命令输出）则原样返回 */
 export function formatJson(value: unknown): string {
   if (typeof value === 'string') {
@@ -162,8 +177,13 @@ function clip(text: string): string {
  * 工具调用横条（参考 ainav/sdk 的 ToolCallBlock，样式全部 Tailwind 重写）。
  *
  * 收起时就是一行：[工具图标] [中文名] [主参数预览] [状态] [›]；
- * 展开后依次是「参数 / 错误 / 结果」三段，每段右上角可单独复制，
- * 待批准时确认按钮由调用方通过 `confirm` 插在最后。
+ * 展开后：
+ * - **改文件的工具**（write_file / edit_file / delete_file）显示 git 风格的**前后对比**，
+ *   不显示原始入参 / 结果 —— 参数里是整份文件内容，读起来毫无意义（见 tool-file-diff.ts）；
+ * - **读取类**（read_file）：展开体**只有读到的内容本身** —— 参数不显示（横条预览里
+ *   已经有了），连「结果」这个标题也省掉，复制按钮 hover 时才浮现（见 NO_PARAM_TOOLS）；
+ * - 其余工具依次是「参数 / 错误 / 结果」三段，每段右上角可单独复制；
+ * - 待批准时确认按钮由调用方通过 `confirm` 插在最后。
  *
  * 待批准时自动展开（确认按钮必须可见），用户手动收起后不再强制打开。
  */
@@ -196,11 +216,19 @@ export function ToolCallRow({
 
   const Icon = toolIcon(toolName)
   const meta = STATUS_META[status]
-  const inputText = input == null ? '' : clip(formatJson(input))
+  /** 改文件的工具：展开体换成前后对比，入参 / 结果就不再摆出来了 */
+  const fileDiff = buildFileDiff(toolName, input)
+  /** 读取类（见 NO_PARAM_TOOLS）：展开体只有内容本身，连「结果」这个标题也省掉 */
+  const bareOutput = NO_PARAM_TOOLS.has(toolName)
+  /** 该工具的入参不值得展示（diff 版或白名单里的读取类） */
+  const hideParams = Boolean(fileDiff) || bareOutput
+  const inputText = hideParams || input == null ? '' : clip(formatJson(input))
   const errorText = isError ? clip(formatJson(output)) : ''
-  const outputText = !isError && output !== undefined ? clip(formatJson(output)) : ''
-  const preview = toolArgPreview(input).replace(/\s+/g, ' ')
-  const hasBody = Boolean(inputText || errorText || outputText || confirm)
+  const outputText = fileDiff || isError || output === undefined ? '' : clip(formatJson(output))
+  const preview = NO_PREVIEW_TOOLS.has(toolName)
+    ? ''
+    : toolArgPreview(input).replace(/\s+/g, ' ')
+  const hasBody = Boolean(fileDiff || inputText || errorText || outputText || confirm)
 
   return (
     <CollapsibleRow
@@ -221,22 +249,32 @@ export function ToolCallRow({
       }
       body={
         <>
+          {fileDiff && (
+            <FileDiffView path={fileDiff.path} hunks={fileDiff.hunks} deleted={fileDiff.deleted} />
+          )}
           {inputText && (
             <ToolSection title="参数" text={inputText} copyTitle="复制参数" />
           )}
           {errorText && (
             <ToolSection title="错误" text={errorText} copyTitle="复制错误" error />
           )}
-          {outputText && (
-            <ToolSection title="结果" text={outputText} copyTitle="复制结果" />
-          )}
+          {outputText &&
+            (bareOutput ? (
+              // 读取类：展开体里直接就是读到的内容（见 OutputBlock）
+              <OutputBlock text={outputText} copyTitle="复制内容" />
+            ) : (
+              <ToolSection title="结果" text={outputText} copyTitle="复制结果" />
+            ))}
           {confirm}
         </>
       }
     >
-      {/* 工具名与参数预览都可以缩：横条被 max-w-full 封顶后由这两段吃溢出，
-          工具名封 10rem 上限（未知工具名可能很长），预览吃掉剩下的全部 */}
-      <span className="max-w-[10rem] min-w-0 truncate font-medium text-foreground/80">
+      {/* 工具名 vs 参数预览：**只有预览吃溢出**。
+          ⚠️ 名字必须是 shrink-0 —— 否则长预览（命令、路径、URL…）会把名字一起挤扁成省略号，
+          看起来像「工具名被截断」；名字自身用 max-w 封顶（未知工具名可能很长）。
+          配色：工具名/预览都比正文浅一档（正文是 foreground，这里 muted 系）——
+          工具调用是「过程」，不该和正文抢注意力。 */}
+      <span className="max-w-[10rem] shrink-0 truncate font-medium text-muted-foreground">
         {toolLabel(toolName)}
       </span>
       {preview && (
@@ -247,6 +285,33 @@ export function ToolCallRow({
       {status === 'running' && <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />}
       <span className={cn('shrink-0', meta.cls)}>{meta.label}</span>
     </CollapsibleRow>
+  )
+}
+
+/**
+ * 只有内容、没有「结果」小标题的输出块（读取类工具用，见 NO_PARAM_TOOLS）。
+ *
+ * 读取文件时展开体里**就应该是文件内容本身** —— 顶上一行「结果 + 复制按钮」纯属噪音
+ * （内容是什么一眼就看得出，不需要标题告诉用户）。
+ *
+ * 复制能力不丢：按钮挪到内容块的右上角、**hover 时才浮现**（用 `group/out` 局部组，
+ * 不跟外层行的 hover 联动）。给 pre 留出 `pr-9`，按钮不会压住第一行的尾巴。
+ */
+function OutputBlock({ text, copyTitle }: { text: string; copyTitle: string }) {
+  return (
+    <div className="group/out relative">
+      <pre
+        className={cn(
+          'whitespace-pre-wrap break-all rounded border border-border/70 bg-muted/40 px-2 py-1.5 pr-9',
+          'font-mono text-[13px] leading-relaxed text-muted-foreground'
+        )}
+      >
+        {text}
+      </pre>
+      <div className="absolute top-1 right-1 opacity-0 transition-opacity group-hover/out:opacity-100 focus-within:opacity-100">
+        <MessageCopyButton text={text} title={copyTitle} className="bg-muted/80" />
+      </div>
+    </div>
   )
 }
 
@@ -283,7 +348,8 @@ function ToolSection({
           'font-mono text-[13px] leading-relaxed',
           error
             ? 'border-destructive/40 bg-destructive/5 text-destructive'
-            : 'border-border/70 bg-muted/40 text-foreground/80'
+            : // 比正文浅一档：工具的参数 / 结果只是过程材料，不该和正文同色
+              'border-border/70 bg-muted/40 text-muted-foreground'
         )}
       >
         {text}

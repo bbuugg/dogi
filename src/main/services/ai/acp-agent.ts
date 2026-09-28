@@ -21,19 +21,19 @@ import type {
   ActiveSession,
   RequestPermissionRequest,
   RequestPermissionResponse,
+  SessionMode,
   SessionUpdate
 } from '@agentclientprotocol/sdk'
 import type {
   AcpAgentConfig,
   AgentChatRequest,
   AgentStreamEvent,
-  AgentWorkspace
+  AgentWorkspace,
+  AiPermissionMode
 } from '@shared/types'
 import { storage } from '../storage'
 import type { AgentConfirmSink } from './agent'
-
-/** 确认模式下等待用户响应的最长时间，超时按「取消」处理 */
-const CONFIRM_TIMEOUT_MS = 10 * 60 * 1000
+import { armConfirmTimeout } from './timeouts'
 
 /** agent 上报的模型列表（configOptions 里 category=model 的下拉项） */
 export interface AcpModelList {
@@ -91,18 +91,24 @@ function spawnAgentProcess(
   cwd: string
 ): ChildProcessWithoutNullStreams {
   const args = cfg.args ?? []
+  // 用户配置的环境变量合并进进程环境（GUI 主进程不继承 shell 里的 key，
+  // 例如 Claude Code 需要的 ANTHROPIC_API_KEY / ANTHROPIC_MODEL）。
+  // 只覆盖显式给的 key，其余沿用父进程环境。
+  const env: NodeJS.ProcessEnv = cfg.env ? { ...process.env, ...cfg.env } : process.env
   const resolved = resolveWindowsCommand(cfg.command)
   if (resolved.viaCmd) {
     return spawn('cmd.exe', ['/c', resolved.command, ...args], {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true
+      windowsHide: true,
+      env
     })
   }
   return spawn(resolved.command, args, {
     cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
-    windowsHide: true
+    windowsHide: true,
+    env
   })
 }
 
@@ -126,7 +132,8 @@ function killProcessTree(proc: ChildProcess): void {
 interface PendingConfirm {
   requestId: string
   resolve: (approved: boolean) => void
-  timer: ReturnType<typeof setTimeout>
+  /** 兜底定时器；按默认配置（不限时）时是 undefined（见 timeouts.ts） */
+  timer?: ReturnType<typeof setTimeout>
 }
 
 /**
@@ -146,6 +153,21 @@ interface ConversationAcpSession {
   sessionReady: Promise<ActiveSession>
   /** 正在进行的 turn 绑定的 requestId（权限确认卡回填用） */
   currentRequestId: string | null
+  /**
+   * agent 在 `session/new` 里**可选**广告的会话档位（ACP Session Modes）。
+   * 空数组 = 它没广告 / 不支持 —— 那我们就只剩「被问到时批准或拒绝」这一条路
+   * （协议不支持客户端强制它来问，见 pickModeId / applyPermissionMode）。
+   */
+  availableModes: SessionMode[]
+  /** 会话建立时的档位（约定对应「自动执行」档） */
+  defaultModeId: string | null
+  /** 当前已生效的档位（避免每轮重复下发） */
+  appliedModeId: string | null
+  /**
+   * 切档位入口：建会话时用 client 上下文闭包出来（`ActiveSession` 自己没有 setMode）。
+   * null = 会话没建好或已失效。
+   */
+  setMode: ((modeId: string) => Promise<void>) | null
   /** 会话创建时应用的模型 id（agent 上报的 configOptions value）；null = 用 agent 默认 */
   desiredModelId: string | null
   /** 通知连接关闭，让 connectWith 的 op 返回 */
@@ -224,6 +246,7 @@ class AcpAgentService extends EventEmitter {
     pending.resolve(approved)
   }
 
+  /** 结束挂起的确认（中止 / 连接关闭兜底），按「取消」处理 —— 确认卡不限时，就靠它收尾 */
   private clearPendingConfirms(requestId?: string): void {
     for (const pending of this.pendingConfirms.values()) {
       if (requestId && pending.requestId !== requestId) continue
@@ -258,7 +281,10 @@ class AcpAgentService extends EventEmitter {
         sink.resolved(id)
         resolve(approved)
       }
-      const timer = setTimeout(() => settle(false), CONFIRM_TIMEOUT_MS)
+      const timer = armConfirmTimeout(
+        () => settle(false),
+        storage.getAiSettings().confirmTimeoutMs
+      )
       this.pendingConfirms.set(id, { requestId: req.requestId, resolve: settle, timer })
       sink.request({
         id,
@@ -332,6 +358,9 @@ class AcpAgentService extends EventEmitter {
       console.error('[acp-agent] session ready', session.sessionId)
       const ws = this.sessions.get(conversationId)
       if (ws) ws.currentRequestId = requestId
+      // 先按当前权限模式把 agent 档位摆正，再提问 —— 否则「需确认」在 ACP agent 上
+      // 只是被动等着它来问，很多 agent 的默认档根本不会问（见 pickModeId 的注释）
+      if (ws) await this.applyPermissionMode(ws)
       // 不 await prompt：会话更新（文本/工具/权限）通过 nextUpdate() 流式消费，
       // prompt 的拒绝同样会经 updates 队列由 nextUpdate() 抛出
       session.prompt(text).catch(() => undefined)
@@ -350,6 +379,11 @@ class AcpAgentService extends EventEmitter {
             finishReason: message.stopReason === 'cancelled' ? 'aborted' : 'done'
           })
           return
+        }
+        // agent 自己换了档位（如切到 plan）：把「已生效档位」跟着更新。否则下一轮我们
+        // 以为还停在自己设的档上、直接跳过切换，权限模式就悄悄失效了。
+        if (message.update.sessionUpdate === 'current_mode_update' && ws) {
+          ws.appliedModeId = message.update.currentModeId
         }
         const event = toStreamEvent(message.update)
         if (event) this.emitEvent(requestId, event)
@@ -419,6 +453,10 @@ class AcpAgentService extends EventEmitter {
       connection: Promise.resolve(),
       sessionReady,
       currentRequestId: null,
+      availableModes: [],
+      defaultModeId: null,
+      appliedModeId: null,
+      setMode: null,
       desiredModelId: modelId ?? null,
       closeConnection: () => {},
       closed: false
@@ -473,6 +511,27 @@ class AcpAgentService extends EventEmitter {
         console.error('[acp-agent] initialized')
         const session = await ctx.buildSession(workspace.path).start()
         console.error('[acp-agent] session started', session.sessionId)
+        // 会话档位（可选能力）：agent 广告了档位，我们才能把「权限模式」映射过去
+        // （协议不支持客户端强制它来问，见 pickModeId 的注释）。没广告时保持空数组，
+        // 后续切档位一律静默跳过。
+        const modeState = session.modes ?? null
+        ws.availableModes = modeState?.availableModes ?? []
+        ws.defaultModeId = modeState?.currentModeId ?? null
+        ws.appliedModeId = ws.defaultModeId
+        // ActiveSession 自身没有 setMode，得用当前 client 上下文发 session/set_mode
+        ws.setMode = async (modeId: string) => {
+          await ctx.request(acp.methods.agent.session.setMode, {
+            sessionId: session.sessionId,
+            modeId
+          })
+        }
+        if (ws.availableModes.length) {
+          console.error(
+            `[acp-agent] 可用档位：${ws.availableModes
+              .map((m) => `${m.id}(${m.name})`)
+              .join(', ')}；当前 ${ws.defaultModeId}`
+          )
+        }
         // 会话选了具体模型：在 agent 上报的 configOptions（category=model）里切换。
         // agent 不支持 configOptions 时静默跳过 —— 模型由 agent 自己决定。
         if (modelId) {
@@ -535,6 +594,57 @@ class AcpAgentService extends EventEmitter {
     }
   }
 
+  /**
+   * 把应用的权限模式映射到 agent 自己广告的档位（ACP Session Modes）。
+   *
+   * 为什么需要它：**协议不支持「客户端强制 agent 必须来问」**（`ClientCapabilities` 里
+   * 没有权限相关能力位，也没有强制审批的方法）—— 问不问由 agent 自己的策略决定。
+   * 所以「需确认」对 ACP agent 的唯一强制手段，就是切到它自己语义等价的那个档位
+   * （如 opencode 的 plan / 各种「需审批」档）；agent 没广告档位就什么都不做 ——
+   * 绝不假装拦住了，真正的兜底是 handlePermission：它来问就照样弹确认卡。
+   */
+  private pickModeId(ws: ConversationAcpSession, mode: AiPermissionMode): string | null {
+    if (!ws.availableModes.length) return null
+    const describe = (m: SessionMode): string => `${m.id} ${m.name} ${m.description ?? ''}`
+    if (mode === 'full') {
+      /**
+       * 自动执行：优先找 agent 里那个「完全不问」的档（bypassPermissions / full-auto / yolo…）。
+       * 找不到再用会话建立时的默认档 —— 多数 agent 的默认档就是「不打扰」，但也有 agent
+       * 一上来停在 plan 这类保守档上，沿用默认会把「自动执行」变成「什么都不能干」。
+       */
+      const permissive = ws.availableModes.find((m) =>
+        /bypass|full[-\s_]?auto|yolo|auto[-\s_]?accept|完全|自动/i.test(describe(m))
+      )
+      return permissive?.id ?? ws.defaultModeId
+    }
+    const hit = ws.availableModes.find((m) =>
+      /ask|confirm|approv|审批|确认|supervised/i.test(describe(m))
+    )
+    if (hit) return hit.id
+    /**
+     * ⚠️ 没匹配到具名档位时**回落到会话默认档**，而不是「不动」：很多 agent 的「先问再做」
+     * 档就叫 default / build 之类，模式匹配永远打不中 —— 返回 null 会让档位停在上一轮切过去
+     * 的那个（用户看到的就是「切权限模式不生效」）。默认档基本都是「先问」语义，回落是对的。
+     */
+    return ws.defaultModeId
+  }
+
+  /** 每轮提问前把当前权限模式下发到 agent 档位；agent 不支持 / 切不动只记日志，不打断这一轮 */
+  private async applyPermissionMode(ws: ConversationAcpSession): Promise<void> {
+    const mode: AiPermissionMode =
+      storage.getAiSettings().permissionMode === 'confirm' ? 'confirm' : 'full'
+    const targetId = this.pickModeId(ws, mode)
+    if (!targetId || targetId === ws.appliedModeId || !ws.setMode) return
+    try {
+      await ws.setMode(targetId)
+      ws.appliedModeId = targetId
+      console.error(`[acp-agent] 档位已切到 ${targetId}（权限模式：${mode}）`)
+    } catch (err) {
+      // agent 不支持 / 拒绝切档：只记日志，权限语义仍由 handlePermission 兜底
+      console.error('[acp-agent] 切换档位失败', targetId, describeError(err))
+    }
+  }
+
   /** ACP 权限请求：full 模式自动放行，confirm 模式弹确认卡 */
   private async handlePermission(
     ws: ConversationAcpSession,
@@ -544,16 +654,21 @@ class AcpAgentService extends EventEmitter {
     const settings = storage.getAiSettings()
     const requestId = ws.currentRequestId
 
-    const pick = (kind: string): string | undefined => {
-      const opt = options.find((o) => o.kind === kind) ?? options[0]
-      return opt?.optionId
-    }
+    /**
+     * ⚠️ 只按 kind 精确取，**不做「取不到就退 options[0]」的兜底**：option 的 kind 是 agent
+     * 给的语义，`options[0]` 完全可能是 allow —— 在用户点了「拒绝」之后挑到它，等于把用户的
+     * 拒绝**静默反转**成放行。取不到就回 cancelled，让 agent 自己收手。
+     */
+    const pick = (kind: string): string | undefined =>
+      options.find((o) => o.kind === kind)?.optionId
+    const selected = (optionId?: string): RequestPermissionResponse =>
+      optionId
+        ? { outcome: { outcome: 'selected', optionId } }
+        : { outcome: { outcome: 'cancelled' } }
 
     if (settings.permissionMode !== 'confirm') {
-      // 完全访问：自动允许（优先 allow_always，让 agent 后续不再逐次询问）
-      const optionId = pick('allow_always') ?? pick('allow_once')
-      if (!optionId) return { outcome: { outcome: 'cancelled' } }
-      return { outcome: { outcome: 'selected', optionId } }
+      // 自动执行：直接放行（优先 allow_always，让 agent 后续不再逐次询问）
+      return selected(pick('allow_always') ?? pick('allow_once'))
     }
 
     const approved = requestId
@@ -564,9 +679,9 @@ class AcpAgentService extends EventEmitter {
           command: toolCall.title ?? ''
         })
       : false
-    const optionId = approved ? pick('allow_once') ?? pick('allow_always') : pick('reject_once')
-    if (!optionId) return { outcome: { outcome: 'cancelled' } }
-    return { outcome: { outcome: 'selected', optionId } }
+    return approved
+      ? selected(pick('allow_once') ?? pick('allow_always'))
+      : selected(pick('reject_once') ?? pick('reject_always'))
   }
 
   /** 中止对话：杀掉该会话的 agent 进程（会话作废，下次自动重建） */

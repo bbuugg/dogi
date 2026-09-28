@@ -1,5 +1,6 @@
 import { AgentFilesPanel } from '@/features/agent/AgentFilesPanel'
 import { AiMarkdown } from '@/features/agent/AiMarkdown'
+import { GitPanel } from '@/features/agent/GitPanel'
 import { AskFollowupCard } from '@/features/agent/AskFollowupCard'
 import { MessageCopyButton } from '@/features/agent/MessageCopyButton'
 import { MessageOutline } from '@/features/agent/MessageOutline'
@@ -7,18 +8,25 @@ import { MessageDeleteButton } from '@/features/agent/MessageDeleteButton'
 import { MessageEditButton } from '@/features/agent/MessageEditButton'
 import { ReasoningPanel } from '@/features/agent/ReasoningPanel'
 import { TOOL_LABELS, ToolCallRow, toolRunStatus } from '@/features/agent/ToolCallRow'
+import { findTailStart, TurnFold, turnStepSummary } from '@/features/agent/turn-fold'
+import { TokenUsageRow } from '@/features/agent/TokenUsageRow'
 import { TypingDots } from '@/features/agent/TypingDots'
 import { WorkspaceQuickActions } from '@/features/agent/WorkspaceQuickActions'
-import { useMessageListScroll } from '@/features/agent/useMessageListScroll'
+import { VirtualMessageList, type VirtualMessageListHandle } from '@/features/agent/VirtualMessageList'
+import { SidePanel, type SidePanelTab } from '@/features/agent/SidePanel'
+import { configModels, hasUsableConfig, modelNameOnly } from '@/features/agent/model-options'
+import { McpConfigPopover } from '@/features/agent/McpConfigPopover'
+import { BrowserPane } from '@/features/automation/BrowserPane'
 import { TerminalView } from '@/features/terminal/TerminalView'
-import { ResizeHandle } from '@/shared/components/ResizeHandle'
 import { useAppStore } from '@/stores/app-store'
 import { ASK_FOLLOWUP_TOOL } from '@shared/ask-followup'
+import { DEFAULT_BROWSER_VIEWPORT, agentBrowserSessionId } from '@shared/browser'
 import type {
   AgentChatMessage,
   AgentConfirmRequest,
   AgentMessagePart,
   AiPermissionMode,
+  BrowserViewportMode,
   IdeInfo,
   OpenResult,
   SessionInfo,
@@ -28,30 +36,34 @@ import type { MenuProps } from 'antd'
 import { Button, Dropdown, Input, Select, Tooltip, message } from 'antd'
 import { cn } from 'cn'
 import {
-  ArrowDown,
   Ban,
   Bot,
   Check,
   ChevronDown,
-  ChevronUp,
   Code2,
-  ExternalLink,
   Files,
   FolderOpen,
+  GitBranch,
+  Globe,
+  PanelRightClose,
+  PanelRightOpen,
   Pencil,
   Send,
   Settings,
+  ShieldAlert,
   ShieldCheck,
   Square,
+  SquareTerminal,
   Terminal,
   X
 } from 'lucide-react'
 import {
   type ComponentRef,
   type ReactNode,
-  type PointerEvent as ReactPointerEvent,
+  memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState
 } from 'react'
@@ -60,7 +72,13 @@ import {
 const ACP_OPTION = '__acp__'
 const ACP_MANAGE_OPTION = '__acp-manage__'
 
-/** 命令执行权限模式（与终端 AI 助手同一份配置 aiSettings.permissionMode） */
+/**
+ * 命令执行权限模式（与终端 AI 助手同一份配置 aiSettings.permissionMode）。
+ *
+ * 图标与配色对齐 fishwork：**放开的档给警示色**（全部访问 = 盾牌带感叹号 + 琥珀），
+ * 确认档用普通盾牌 —— 别让「已经全放开」这件事悄无声息地开着。
+ * 横条上只显示图标（文案在下拉项里），所以 `hint` 同时也是图标的悬停提示。
+ */
 const AGENT_PERMISSION_MODES: Array<{
   value: AiPermissionMode
   label: string
@@ -69,9 +87,9 @@ const AGENT_PERMISSION_MODES: Array<{
 }> = [
     {
       value: 'full',
-      label: '自动执行',
-      icon: Terminal,
-      hint: '无需确认'
+      label: '全部访问',
+      icon: ShieldAlert,
+      hint: '无需确认，直接执行'
     },
     {
       value: 'confirm',
@@ -139,8 +157,8 @@ function buildRenderUnits(parts: AgentMessagePart[]): RenderUnit[] {
 /**
  * 待批准的确认区（插在工具横条的展开体里）。
  *
- * 只在「需确认」模式下出现：Agent 执行命令 / 删除文件等危险操作前先请示，
- * 用户点了允许才真正执行。文案里带上工作区名，避免误批到别的目录。
+ * 只在「需确认」模式下出现：Agent 执行命令 / 写入 / 编辑 / 删除这些**会改动东西**的
+ * 操作前先请示，用户点了允许才真正执行。文案里带上工作区名，避免误批到别的目录。
  */
 function AgentConfirmActions({ confirm }: { confirm: AgentConfirmRequest }) {
   const resolveAgentConfirm = useAppStore((s) => s.resolveAgentConfirm)
@@ -185,7 +203,7 @@ function textOf(parts: AgentChatMessage['parts'], sep: string): string {
  * 单条消息：用户气泡 / 助手（Markdown + 工具横条），两者都可选中、都可一键复制。
  * 消息下方（hover 才露出）带「复制 / 编辑（仅用户消息）/ 删除」。
  */
-function MessageBubble({
+function MessageBubbleImpl({
   conversationId,
   message,
   streaming,
@@ -251,53 +269,78 @@ function MessageBubble({
   // 否则「点了发送却什么都没有」的那几秒看起来像卡住了
   const showDots = !!streaming && (units.length === 0 || (last?.kind === 'tool' && !!last.result))
 
+  // 一轮已完成（助手消息、且不是正在流式、且没有待回答的追问卡）：把「末尾连续正文之前」的过程
+  // 收进一个折叠组，只留最终回答可见；与 fishwork 的 TurnStepGroup 等价。
+  // 待回答的追问卡不能折进去 —— 否则那张需要用户作答的交互卡被藏住（fishwork 也是这个处理）。
+  const followupRequests = useAppStore((s) => s.followupRequests)
+  const hasPendingFollowup = units.some(
+    (u) => u.kind === 'tool' && u.call.toolName === ASK_FOLLOWUP_TOOL && !!followupRequests[u.call.toolCallId]
+  )
+  const turnDone = message.role === 'assistant' && !streaming && !hasPendingFollowup
+  const tailStart = turnDone ? findTailStart(units) : 0
+  const foldedUnits = tailStart > 0 ? units.slice(0, tailStart) : null
+
+  const renderUnit = (unit: RenderUnit, i: number): ReactNode => {
+    if (unit.kind === 'text') {
+      return (
+        <div key={i}>
+          <AiMarkdown content={unit.text} />
+        </div>
+      )
+    }
+    if (unit.kind === 'reasoning') {
+      return (
+        <ReasoningPanel
+          key={i}
+          text={unit.text}
+          streaming={!!streaming && i === units.length - 1}
+        />
+      )
+    }
+    if (unit.call.toolName === ASK_FOLLOWUP_TOOL) {
+      // 提问工具：待回答时是一张可交互的卡片，答完收成一条横条
+      return (
+        <AskFollowupCard
+          key={i}
+          toolCallId={unit.call.toolCallId}
+          input={unit.call.input}
+          output={unit.result?.output}
+          isError={unit.result?.isError}
+          streaming={streaming}
+        />
+      )
+    }
+    return (
+      <ToolCallRow
+        key={i}
+        toolName={unit.call.toolName}
+        input={unit.call.input}
+        output={unit.result?.output}
+        isError={unit.result?.isError}
+        status={toolRunStatus({
+          confirming: pendingConfirm?.toolCallId === unit.call.toolCallId,
+          hasResult: !!unit.result,
+          isError: unit.result?.isError,
+          streaming
+        })}
+        confirm={
+          pendingConfirm?.toolCallId === unit.call.toolCallId ? (
+            <AgentConfirmActions confirm={pendingConfirm} />
+          ) : undefined
+        }
+      />
+    )
+  }
+
   return (
     <div data-message-id={message.id} className="group/msg space-y-3">
-      {units.map((unit, i) =>
-        unit.kind === 'text' ? (
-          <div key={i}>
-            <AiMarkdown content={unit.text} />
-            {streaming && i === units.length - 1 && (
-              <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-primary align-middle" />
-            )}
-          </div>
-        ) : unit.kind === 'reasoning' ? (
-          <ReasoningPanel
-            key={i}
-            text={unit.text}
-            streaming={!!streaming && i === units.length - 1}
-          />
-        ) : unit.call.toolName === ASK_FOLLOWUP_TOOL ? (
-          // 提问工具：待回答时是一张可交互的卡片，答完收成一条横条
-          <AskFollowupCard
-            key={i}
-            toolCallId={unit.call.toolCallId}
-            input={unit.call.input}
-            output={unit.result?.output}
-            isError={unit.result?.isError}
-            streaming={streaming}
-          />
-        ) : (
-          <ToolCallRow
-            key={i}
-            toolName={unit.call.toolName}
-            input={unit.call.input}
-            output={unit.result?.output}
-            isError={unit.result?.isError}
-            status={toolRunStatus({
-              confirming: pendingConfirm?.toolCallId === unit.call.toolCallId,
-              hasResult: !!unit.result,
-              isError: unit.result?.isError,
-              streaming
-            })}
-            confirm={
-              pendingConfirm?.toolCallId === unit.call.toolCallId ? (
-                <AgentConfirmActions confirm={pendingConfirm} />
-              ) : undefined
-            }
-          />
-        )
+      {foldedUnits && (
+        <TurnFold summary={turnStepSummary(foldedUnits)}>
+          {foldedUnits.map((unit, k) => renderUnit(unit, k))}
+        </TurnFold>
       )}
+      {units.slice(tailStart).map((unit, k) => renderUnit(unit, tailStart + k))}
+      {message.usage && <TokenUsageRow usage={message.usage} />}
       {showDots && <TypingDots />}
       {/* 生成中就露出复制按钮没有意义（内容还在变），一轮结束再显示；
           invisible 而不是不渲染：保留占位，hover 时不会把消息挤动 */}
@@ -309,223 +352,45 @@ function MessageBubble({
   )
 }
 
+/** 记忆化：流式期间每个 token 都会触发整个列表重渲染，历史消息的 props
+ *  （message 引用 / 布尔 / 数值 / pendingConfirm 引用）全部不变，直接跳过 ——
+ *  只有正在生成的那条重渲染。滚动过程里的 setState（回底按钮）也不再掀起
+ *  可见消息的全量重渲染。 */
+const MessageBubble = memo(MessageBubbleImpl)
+
 /** 稳定的空消息数组：避免每次渲染新引用导致滚动 effect 误触发 */
 const NO_MESSAGES: AgentChatMessage[] = []
 
-/** 文件视图抽屉：滑入/滑出时长（ms），需与 className 里的 duration-200 一致 */
-const DRAWER_ANIM_MS = 200
-/** 文件视图抽屉：最小 / 默认宽度（px） */
-const FILES_DRAWER_MIN_WIDTH = 360
-const FILES_DRAWER_DEFAULT_WIDTH = 720
-/** 文件视图抽屉：展开时给左侧对话预留的宽度（px）—— 免得一拖就变成铺满整屏 */
-const FILES_DRAWER_GUTTER = 320
+/**
+ * 右侧多标签面板的标签 key。
+ *
+ * 浏览器 / 文件 / 源码管理是固定 key；**终端一个会话一个 key**（`terminal:<sessionId>`），
+ * 所以终端天然支持多开。以后要加「日志 / 预览」之类的视图，加一个 key、往 `sideTabs`
+ * 里补一条描述即可 —— 面板本身（`SidePanel`）不认识任何具体内容。
+ */
+type SideTabKey = 'browser' | 'files' | 'git' | `terminal:${string}`
 
 /**
- * 文件视图抽屉：最大宽度（px）。
+ * 标签在「打开顺序」里的位次。
  *
- * 正常情况下给左侧对话留 `FILES_DRAWER_GUTTER`，别一拖就铺满整屏。
- * 但分屏之后单块内容区可能只有几百像素，「留 320px」根本留不出来 ——
- * 算出来比最小宽度还小，硬留只会让抽屉顶出内容区左缘被裁掉（左缘的拖拽条一并消失，
- * 再也拖不回来）。所以容器过窄时直接允许抽屉铺满整块内容区。
- *
- * 宽度按内容区实测宽度算（抽屉嵌在内容区里，用窗口宽度会偏大导致被裁）。
+ * 不在表里的（理论上只在顺序表同步前的那一瞬出现）一律排到最后 ——
+ * `Array.prototype.sort` 是稳定的，所以它们仍保持 `sideTabs` 里的相对顺序。
  */
-function filesDrawerMaxWidth(containerWidth?: number): number {
-  const available = containerWidth && containerWidth > 0 ? containerWidth : window.innerWidth
-  const withGutter = available - FILES_DRAWER_GUTTER
-  return withGutter >= FILES_DRAWER_MIN_WIDTH ? withGutter : available
+function tabRank(order: string[], key: string): number {
+  const i = order.indexOf(key)
+  return i === -1 ? Number.MAX_SAFE_INTEGER : i
 }
 
-/**
- * 右侧抽屉（antd Drawer 的观感）：从右边缘滑出，宽度可拖拽，**不是全屏**。
- *
- * 两个动画上的细节：
- * - 关闭后延迟卸载，让滑出动画播完再摘掉 DOM；
- * - 打开时先以屏幕外状态挂载、两帧后再位移到 0 —— 挂载即到位的话浏览器不会为
- *   「初始状态」补过渡，首次展开就没动画（所以不能把 mounted/shown 一次设完）。
- */
-function RightDrawer({
-  open,
-  width,
-  minWidth,
-  maxWidth,
-  onResize,
-  onClose,
-  children
-}: {
-  open: boolean
-  width: number
-  minWidth: number
-  maxWidth: number
-  onResize: (width: number) => void
-  /** 点击抽屉外部时关闭（外部点击会穿透到下面的对话区，只能在事件里判定） */
-  onClose: () => void
-  children: ReactNode
-}) {
-  const [mounted, setMounted] = useState(open)
-  /** 是否已位移到最终位置（false = 停在屏幕外） */
-  const [shown, setShown] = useState(false)
-  /** 抽屉本体（含左缘拖拽条）：用来判定「点击落在抽屉内还是外」 */
-  const bodyRef = useRef<HTMLDivElement | null>(null)
-
-  useEffect(() => {
-    if (!open) {
-      setShown(false)
-      const timer = window.setTimeout(() => setMounted(false), DRAWER_ANIM_MS)
-      return () => window.clearTimeout(timer)
-    }
-    setMounted(true)
-    let inner = 0
-    const outer = requestAnimationFrame(() => {
-      inner = requestAnimationFrame(() => setShown(true))
-    })
-    return () => {
-      cancelAnimationFrame(outer)
-      cancelAnimationFrame(inner)
-    }
-  }, [open])
-
-  /**
-   * 展开期间点击抽屉外部就关闭（不是全屏遮罩式抽屉，点外面本来就该退出）。
-   * 监听挂在 document 的捕获阶段：抽屉外层是 pointer-events-none，外部点击会直接
-   * 落到下面的对话区，只能在全局事件里按「目标是否在抽屉内」判定。
-   */
-  useEffect(() => {
-    if (!open) return
-    const onDown = (e: MouseEvent): void => {
-      const target = e.target as HTMLElement | null
-      if (!target) return
-      // 抽屉内（含左缘拖拽条）不关
-      if (bodyRef.current?.contains(target)) return
-      // 顶栏的开关按钮自己会切换开关，交给它处理（否则这里先关、按钮再切成开）
-      if (target.closest?.('[data-outside-ignore]')) return
-      // 抽屉里弹出的下拉 / 浮层 portal 挂在 body 上，按组件树判不出来，按容器类名兜住
-      if (
-        target.closest?.(
-          '.ant-dropdown, .ant-select-dropdown, .ant-popover, .ant-tooltip, .ant-modal-wrap, .ant-image-preview-wrap'
-        )
-      ) {
-        return
-      }
-      onClose()
-    }
-    document.addEventListener('mousedown', onDown, true)
-    return () => document.removeEventListener('mousedown', onDown, true)
-  }, [open, onClose])
-
-  if (!mounted) return null
-
-  return (
-    // 外层只负责裁剪与不挡点击（关闭态整个抽屉在容器右边缘之外）
-    <div className="pointer-events-none absolute inset-0 z-20 overflow-hidden">
-      <div
-        ref={bodyRef}
-        style={{ transform: shown ? 'translateX(0)' : 'translateX(100%)' }}
-        className="pointer-events-auto absolute inset-y-0 right-0 flex transition-transform duration-200 ease-out"
-      >
-        {/* 抽屉左缘的拖拽条：面板在其右侧，所以 invert（向左拖才是变宽） */}
-        <ResizeHandle invert width={width} min={minWidth} max={maxWidth} onResize={onResize} />
-        <div
-          style={{ width }}
-          // 供回归脚本量「抽屉有没有超出内容区」（见 scripts/verify-agent-tabs.mjs）
-          data-agent-files-drawer
-          className="flex min-h-0 flex-col border-l border-border/70 bg-background shadow-2xl"
-        >
-          {children}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/** Agent 工作区内嵌终端：标题栏（路径 + 折叠/关闭），主体复用 TerminalView，高度可拖拽调整 */
-function EmbeddedTerminal({
-  session,
-  path,
-  onClose
-}: {
+/** 一个终端标签：会话 + 打开时的工作区目录 + 用的哪个 shell */
+interface TerminalTab {
+  /** 标签 key 用（= 会话 id，稳定且唯一） */
+  id: string
   session: SessionInfo
+  /** 打开时的目录（「执行命令」按它复用终端） */
   path: string
-  onClose: () => void
-}) {
-  const [collapsed, setCollapsed] = useState(false)
-  const [height, setHeight] = useState(200)
-
-  // 拖拽标题栏上方的分隔条调整终端高度（TerminalView 的 ResizeObserver 会自动重新 fit）；
-  // 终端位于页面底部，向上拖 = 面板变高，所以高度增量取 deltaY 的相反数。
-  // 收起态不渲染这个条（见下面 JSX），这里再兜一层：折叠后不再支持调整高度
-  const startDrag = (e: ReactPointerEvent<HTMLDivElement>) => {
-    if (collapsed) return
-    e.preventDefault()
-    const startY = e.clientY
-    const startHeight = height
-    const move = (ev: PointerEvent) => {
-      const next = startHeight - (ev.clientY - startY)
-      setHeight(Math.max(96, Math.min(480, next)))
-    }
-    const up = () => {
-      window.removeEventListener('pointermove', move)
-      window.removeEventListener('pointerup', up)
-      document.body.style.cursor = ''
-      document.body.style.userSelect = ''
-    }
-    document.body.style.cursor = 'row-resize'
-    document.body.style.userSelect = 'none'
-    window.addEventListener('pointermove', move)
-    window.addEventListener('pointerup', up)
-  }
-
-  return (
-    <div className="shrink-0 border-t border-border/70 bg-background">
-      {/* 高度拖拽条：位于终端标题栏（横条）上方。
-          收起后终端主体不可见，高度调整没有意义 —— 整条不再渲染，也就不能拖动 */}
-      {!collapsed && (
-        <div
-          onPointerDown={startDrag}
-          title="拖动调整高度"
-          className="group/resize relative z-10 -my-1 h-2 shrink-0 cursor-row-resize"
-        >
-          <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-border transition-colors group-hover/resize:bg-primary" />
-        </div>
-      )}
-      <div className="flex h-8 shrink-0 items-center gap-1.5 px-3">
-        <Terminal className="size-3.5 shrink-0 text-muted-foreground" />
-        <span
-          className="min-w-0 truncate font-mono text-xs text-muted-foreground"
-          title={path}
-        >
-          终端 · {path}
-        </span>
-        <div className="ml-auto flex items-center gap-0.5">
-          <Tooltip title={collapsed ? '展开终端' : '收起终端'}>
-            <Button
-              type="text"
-              size="small"
-              className="px-1.5 text-muted-foreground"
-              icon={collapsed ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}
-              onClick={() => setCollapsed((v) => !v)}
-            />
-          </Tooltip>
-          <Tooltip title="关闭终端">
-            <Button
-              type="text"
-              size="small"
-              className="px-1.5 text-muted-foreground"
-              icon={<X className="size-3.5" />}
-              onClick={onClose}
-            />
-          </Tooltip>
-        </div>
-      </div>
-      {/* 折叠用 hidden 而非卸载：xterm 重建会丢会话输出（terminal:data 无回放） */}
-      <div
-        className={cn('px-2 pb-2', collapsed && 'hidden')}
-        style={collapsed ? undefined : { height }}
-      >
-        <TerminalView session={session} isActive />
-      </div>
-    </div>
-  )
+  shellId?: string
+  /** 标签短名（终端 / 终端 2 …） */
+  label: string
 }
 
 /**
@@ -533,13 +398,23 @@ function EmbeddedTerminal({
  * 上方是对话流（文本 + 工具卡），底部大输入框，Enter 发送 / Shift+Enter 换行。
  * 对话绑定会话所属的工作区，工具（读写文件 / 搜索 / 执行命令）只能作用于该目录。
  *
- * **只认 `conversationId` 这一个入参**，不读 store 里的「当前选中」指针 ——
- * 那是侧边栏的选中态，多标签并存时它只能指向其中一个。因此它可以同时挂在多处
- * （PanelView 里一个会话一个标签、甚至分屏并排）而互不串台。
+ * **入参只有 `conversationId`（画哪个会话）与 `visible`（这一页当前显示着没有）**，
+ * 不读 store 里的「当前选中」指针 —— 那是侧边栏的选中态，多标签并存时它只能指向其中一个。
+ * 因此它可以同时挂在多处（PanelView 里一个会话一个标签、甚至分屏并排）而互不串台。
  * 「标签什么时候出现在 PanelView 里」由侧边栏点击（`selectAgentConversation`）决定，
  * 这里只负责「给定一个会话，把它画出来」。
+ *
+ * `visible` 目前只有一个用途：切到这个标签时**在绘制之前**量一次内容区宽度（见 `contentWidth`），
+ * 否则首帧会先用兜底宽度画、下一帧才纠正，看着就是「面板宽度闪一下」。
  */
-export function AgentPage({ conversationId }: { conversationId: string | null }) {
+export function AgentPage({
+  conversationId,
+  visible = true
+}: {
+  conversationId: string | null
+  /** 这一页当前是不是显示着（非活动的会话标签被 display:none 藏着）；缺省按显示处理 */
+  visible?: boolean
+}) {
   const workspaces = useAppStore((s) => s.agentWorkspaces)
   // 消息来自本会话（唯一真源），流式/错误等运行时状态另存 agentRuns
   const conversation = useAppStore((s) =>
@@ -573,19 +448,20 @@ export function AgentPage({ conversationId }: { conversationId: string | null })
   // 会话自己在下拉里选过的值优先；没选过才回退到工作区设置 / 设置页的默认模型。
   // 这样在 A 会话切模型不会波及 B 会话。
   const ownChoice = conversation?.configId
-  const backend = conversation?.backend ?? active?.backend ?? 'ai-sdk'
+  // 非 ACP 模型默认走内置的 Mastra agent（复用同一套模型配置与工具）；
+  // 旧会话若存的是 'ai-sdk' 仍按 ai-sdk 路径执行，不强制迁移。
+  const backend = conversation?.backend ?? active?.backend ?? 'mastra'
   // ACP 后端无需模型配置（agent 自带模型），只需有可用的预置配置
   const activeAcp =
     (backend === 'acp' ? acpAgents.find((a) => a.id === ownChoice) : undefined) ??
     acpAgents.find((a) => a.id === aiSettings.activeAcpId) ??
     acpAgents[0]
-  /** 本会话实际使用的模型配置：会话自己的选择优先，回退到设置里的默认模型 */
-  const effectiveConfigId =
-    backend !== 'acp' && ownChoice && aiConfigs.some((c) => c.id === ownChoice)
-      ? ownChoice
-      : aiConfigs.some((c) => c.id === aiSettings.activeConfigId)
-        ? aiSettings.activeConfigId
-        : undefined
+  /** 本会话实际使用的模型配置：会话自己的选择优先，回退到设置里的默认模型。
+   *  参与回退的配置必须**有可用模型**（models 被删空的配置跳过，否则下拉会出
+   *  undefined 项、请求也解析不出模型） */
+  const usable = (id?: string | null): string | undefined =>
+    backend !== 'acp' && hasUsableConfig(aiConfigs, id) ? (id ?? undefined) : undefined
+  const effectiveConfigId = usable(ownChoice) ?? usable(aiSettings.activeConfigId)
   const hasConfig = backend === 'acp' ? Boolean(activeAcp) : Boolean(effectiveConfigId)
 
   const pendingConfirm = useAppStore((s) => {
@@ -604,68 +480,270 @@ export function AgentPage({ conversationId }: { conversationId: string | null })
   /** 正在编辑的用户消息（内容已灌进输入框；发送时先删这条及其之后，再重发） */
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(null)
   const textareaRef = useRef<ComponentRef<typeof Input.TextArea> | null>(null)
-  // 滚动定位（尾部跟随 / 滚动到底部按钮）与终端 AI 助手共用
-  const { scrollRef, onScroll, showJump, jumpToBottom } = useMessageListScroll({
-    conversationId,
-    messages,
-    streaming
-  })
+  // 消息流的滚动定位（吸底跟随 / 发送回底 / 回底按钮）都在 VirtualMessageList 内部管理
+  const listRef = useRef<VirtualMessageListHandle>(null)
 
-  /** 消息目录点击：把那条消息滚到可视区顶部（消息上的 `scroll-mt` 由 CSS 留上边距） */
+  /** 消息目录点击：把那条消息滚到可视区顶部（虚拟列表按下标定位，未渲染的消息也能跳） */
   const jumpToMessage = (messageId: string): void => {
-    const node = scrollRef.current?.querySelector(
-      `[data-message-id="${CSS.escape(messageId)}"]`
-    )
-    node?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    listRef.current?.scrollToMessage(messageId)
   }
 
-  // 文件视图抽屉的开关与宽度（页面本地状态；标签保持挂载，切走再回来不重置）
-  const [filesOpen, setFilesOpen] = useState(false)
-  /** 用户拖到的宽度 —— **不是**最终渲染宽度，最终还要按内容区上限收敛（见 filesRenderWidth） */
-  const [filesWidth, setFilesWidth] = useState(() =>
-    Math.min(FILES_DRAWER_DEFAULT_WIDTH, filesDrawerMaxWidth())
-  )
-  /** 关闭文件视图：面板内的关闭按钮与「点击抽屉外部」共用（useCallback 保证
-      抽屉里的全局监听不会因为内联函数每次渲染重新挂） */
-  const closeFiles = useCallback(() => setFilesOpen(false), [])
-  /** 抽屉所在的内容区：宽度上限按它的实测宽度算 */
+  // ------------- 右侧多标签面板：标签的存在性 / 活动标签（宽度由 SidePanel 自持） -------------
+  /**
+   * 面板的活动标签（`null` = 面板收起）。所有标签都由下面的 `sideTabs` 描述。
+   *
+   * 收起面板**不关任何东西**：浏览器会话的生命周期归 Agent 的 browser_close 工具，
+   * 终端 / 文件 / 源码管理各自由标签上的 × 关闭 —— 收起只是把画面裁掉。
+   * 反过来，关标签也**不收起面板**：标签条上还有别的标签就切过去，空了才收起
+   * （四个 close*Tab 共用一个判据，见 fallbackSideTab）。
+   */
+  const [sideTab, setSideTab] = useState<SideTabKey | null>(null)
+  /** 订阅回调里要读当前标签（闭包会锁住旧值），渲染期同步一次 */
+  const sideTabRef = useRef<SideTabKey | null>(null)
+  sideTabRef.current = sideTab
+  /** 最近看过的标签：收起后（活动标签置 null）仍记得，供顶栏「门」按钮恢复 */
+  const lastSideTabRef = useRef<SideTabKey>('browser')
+  if (sideTab !== null) lastSideTabRef.current = sideTab
+
+  /** 浏览器标签是否存在。关掉它 = 连同浏览器会话一起销毁（见 closeBrowserTab） */
+  const [browserTabOpen, setBrowserTabOpen] = useState(false)
+  /** 订阅回调里要读「标签条上有没有浏览器标签」（闭包会锁住旧值），渲染期同步一次 */
+  const browserTabOpenRef = useRef(false)
+  browserTabOpenRef.current = browserTabOpen
+  /** 浏览器视口预设（PC / 手机）—— 由本页持有并传给面板里的 BrowserPane */
+  const [browserMode, setBrowserMode] = useState<BrowserViewportMode>(DEFAULT_BROWSER_VIEWPORT)
+
+  /** 文件视图 / 源码管理标签是否存在（内容跟着当前工作区走） */
+  const [filesTabOpen, setFilesTabOpen] = useState(false)
+  const [gitTabOpen, setGitTabOpen] = useState(false)
+  const [gitCount, setGitCount] = useState(0)
+  /**
+   * 切工作区 / 打开源码管理标签时刷新 badge 计数。
+   * 不用 setInterval 轮询：会话里执行 git 命令后 GitPanel 自己会刷新；这里只负责
+   * 进入工作区或打开标签时给个最新数字。
+   */
+  useEffect(() => {
+    if (!active) {
+      setGitCount(0)
+      return
+    }
+    let cancelled = false
+    void window.api.git
+      .status(active.path)
+      .then((s) => {
+        if (cancelled) return
+        setGitCount(s.isRepo ? s.changes.length : 0)
+      })
+      .catch(() => { })
+    return () => {
+      cancelled = true
+    }
+  }, [active?.path, gitTabOpen])
+
+  /** 内容区（对话 + 右侧面板）实测宽度：面板宽度上限按它算 */
   const contentRef = useRef<HTMLDivElement | null>(null)
   /**
-   * 内容区实测宽度（0 = 还没量到，退回窗口宽度兜底）。
+   * 内容区实测宽度（0 = 还没量到，退回容器比例兜底）。
    *
-   * 必须跟着尺寸变化走：分屏、拖侧边栏、切标签都会改变它，而抽屉宽度上限是按它算的 ——
-   * 只在挂载时算一次的话，容器变窄后抽屉仍按老宽度渲染，就会顶出分屏之外被裁。
+   * 必须跟着尺寸变化走：分屏、拖侧边栏、切标签都会改变它，而面板宽度上限是按它算的 ——
+   * 只在挂载时算一次的话，容器变窄后面板会顶出分屏之外被裁。
    */
   const [contentWidth, setContentWidth] = useState(0)
   useEffect(() => {
     const el = contentRef.current
     if (!el) return
-    const sync = (): void => setContentWidth(el.clientWidth)
+    const sync = (): void => {
+      const w = el.clientWidth
+      // **0 不是「容器变窄了」，是「这一段被藏起来了」**：非活动的会话标签是 display:none
+      // （见 PanelView 的 hidden），此时量到 0。把它记下来 = 面板宽度按兜底容器算错，
+      // 切回来才纠正 —— 那一错一纠就是「面板宽度闪一下」。所以 0 一律跳过，保留上次的实测值。
+      if (w > 0) setContentWidth(w)
+    }
     sync()
     const ro = new ResizeObserver(sync)
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
 
-  /** 抽屉宽度上限（内容区还没量到时按窗口宽度算） */
-  const filesMaxWidth = filesDrawerMaxWidth(contentWidth)
   /**
-   * 实际渲染宽度：容器变窄时把已有宽度一起收下来，别溢出到分屏之外。
-   * 存的是「用户拖到过多少」（filesWidth），渲染时再按上限收敛 —— 容器重新变宽会自动还回去。
+   * **刚切到可见的那一帧**就同步量一次 —— layout effect 里的更新会在浏览器绘制前落定。
+   *
+   * 光有上面那个 ResizeObserver 不够：它的回调**晚于首次绘制**。会话标签切过来时这一页
+   * 刚从 `display:none` 里出来，首帧只能拿兜底宽度画，下一帧 RO 才把真实宽度补上 ——
+   * 看到的就是「面板宽度闪一下」（面板拖到最宽时最明显）。这里量的是同一根元素、同一个值，
+   * 只是把时机提到绘制之前。
+   *
+   * 依赖只有 `visible`：只在「显示状态变了」时量一次，刻意不做成每次渲染都读 clientWidth
+   * （那是强制同步布局，消息流式刷新时会白烧性能）。
    */
-  const filesRenderWidth = Math.min(filesWidth, filesMaxWidth)
+  useLayoutEffect(() => {
+    if (!visible) return
+    const w = contentRef.current?.clientWidth ?? 0
+    if (w > 0) setContentWidth(w)
+  }, [visible])
 
-  // 内嵌终端（在输入框下方）：绑定打开时的工作区目录，切换工作区不影响已开的终端
-  // shellId 记下用的是哪个 shell，终端按钮的下拉据此标出当前项
-  const [term, setTerm] = useState<{ session: SessionInfo; path: string; shellId?: string } | null>(
-    null
-  )
-  const closeEmbeddedTerminal = useCallback(() => {
-    setTerm((cur) => {
-      if (cur) void window.api.terminal.kill(cur.session.id)
+  // ------------- 终端：一个会话一个标签（支持多开） -------------
+  const [terms, setTerms] = useState<TerminalTab[]>([])
+  /** 终端标签序号，只增不减 —— 标签名「终端 / 终端 2 / 终端 3 …」用它 */
+  const termSeqRef = useRef(0)
+
+  /**
+   * 关掉某个标签后，面板切到哪儿（`null` = 收起面板）。
+   *
+   * 判据只有一条：**标签条上还有没有别的标签** —— 有就切过去，一个都不剩才收起面板。
+   * （以前四个标签各写各的兜底、且各只认自己记住的那一个：关浏览器标签时终端 / 文件 /
+   * 源码管理还在也照样把面板收掉，用户实测反馈过。）
+   *
+   * 优先级：最后一个终端 → 浏览器 → 文件 → 源码管理。后两个与 `sideTabs` 一样，
+   * 要求当前工作区在（没有工作区时它们不挂在标签条上）。
+   */
+  const fallbackSideTab = useCallback(
+    (closing: SideTabKey): SideTabKey | null => {
+      const rest = terms.filter((t) => `terminal:${t.id}` !== closing)
+      if (rest.length > 0) return `terminal:${rest[rest.length - 1].id}`
+      if (closing !== 'browser' && conversationId && browserTabOpen) return 'browser'
+      if (closing !== 'files' && active && filesTabOpen) return 'files'
+      if (closing !== 'git' && active && gitTabOpen) return 'git'
       return null
-    })
+    },
+    [conversationId, terms, browserTabOpen, filesTabOpen, gitTabOpen, active]
+  )
+
+  /**
+   * 关掉一个终端标签：杀掉会话并摘掉标签。
+   * 关掉的正是当前标签就把面板切到别的标签（别的都没有才收起，见 fallbackSideTab）。
+   */
+  const closeTerminalTab = useCallback(
+    (id: string) => {
+      const rest = terms.filter((t) => t.id !== id)
+      const target = terms.find((t) => t.id === id)
+      if (target) void window.api.terminal.kill(target.session.id)
+      setTerms(rest)
+      const next = fallbackSideTab(`terminal:${id}`)
+      setSideTab((cur) => (cur === `terminal:${id}` ? next : cur))
+    },
+    [terms, fallbackSideTab]
+  )
+
+  // ------------- 顶栏按钮 / 面板开关 -------------
+  /** 顶栏按钮的统一行为：正看着这个标签就收起面板，否则切到它（标签不在的话由调用方先加上） */
+  const focusSideTab = useCallback((key: SideTabKey): void => {
+    setSideTab((cur) => (cur === key ? null : key))
   }, [])
+
+  /**
+   * 关闭浏览器标签 = **销毁浏览器会话**。
+   *
+   * Agent 的浏览器工具下次调用时会自己重新开一个（主进程 `ensureSession` 会重建），
+   * 所以这里不需要补偿；标签一并摘掉，下次用到时再按需挂出来。
+   * 面板若正看着它，切到别的标签 —— **别的标签还在就继续开着**，一个都不剩才收起
+   * （见 fallbackSideTab）。
+   */
+  const closeBrowserTab = useCallback((): void => {
+    if (conversationId) void window.api.browser.close(agentBrowserSessionId(conversationId))
+    setBrowserTabOpen(false)
+    const next = fallbackSideTab('browser')
+    setSideTab((cur) => (cur === 'browser' ? next : cur))
+  }, [conversationId, fallbackSideTab])
+
+  /** 顶栏「浏览器」按钮：标签不在就先加上，再看它 / 收起面板 */
+  const toggleBrowserTab = useCallback((): void => {
+    setBrowserTabOpen(true)
+    focusSideTab('browser')
+  }, [focusSideTab])
+
+  /** 顶栏「文件视图」「源码管理」按钮：标签不在就先加上 */
+  const toggleFilesTab = useCallback((): void => {
+    setFilesTabOpen(true)
+    focusSideTab('files')
+  }, [focusSideTab])
+  const toggleGitTab = useCallback((): void => {
+    setGitTabOpen(true)
+    focusSideTab('git')
+  }, [focusSideTab])
+
+  /** 关掉文件 / 源码管理标签（只是摘掉标签，不动工作区；别的标签还在就不收起面板） */
+  const closeFilesTab = useCallback((): void => {
+    setFilesTabOpen(false)
+    const next = fallbackSideTab('files')
+    setSideTab((cur) => (cur === 'files' ? next : cur))
+  }, [fallbackSideTab])
+  const closeGitTab = useCallback((): void => {
+    setGitTabOpen(false)
+    const next = fallbackSideTab('git')
+    setSideTab((cur) => (cur === 'git' ? next : cur))
+  }, [fallbackSideTab])
+
+  /**
+   * 顶栏最右的「门」按钮：开关整个面板。
+   * 展开时回到上次看的标签；那个标签已经关掉了就退回浏览器标签（面板的默认视图）。
+   */
+  const toggleSidePanel = useCallback((): void => {
+    if (sideTabRef.current !== null) {
+      setSideTab(null)
+      return
+    }
+    const last = lastSideTabRef.current
+    const stillThere =
+      last === 'browser'
+        ? browserTabOpen
+        : last === 'files'
+          ? filesTabOpen
+          : last === 'git'
+            ? gitTabOpen
+            : terms.some((t) => `terminal:${t.id}` === last)
+    if (stillThere) {
+      setSideTab(last)
+      return
+    }
+    setBrowserTabOpen(true)
+    setSideTab('browser')
+  }, [browserTabOpen, filesTabOpen, gitTabOpen, terms])
+
+  /**
+   * 已自动展开过的浏览器会话 id —— **每个浏览器会话只自动展开一次**。
+   * 之后无论 Agent 在这一页里怎么跳转，都不再抢着切标签（你收起就收起了）；
+   * 会话结束（browser_close / 你关掉标签）后清空，新会话照常弹。
+   */
+  const autoShownRef = useRef<string | null>(null)
+
+  /**
+   * Agent 用到浏览器时把浏览器标签挂出来（浏览器会话懒启动，一启动就推 `browser:state`）。
+   *
+   * 分两种情形，优先级从高到低：
+   * 1. **标签条上没有浏览器标签** → 一定挂出来并切过去，哪怕面板开着、你正在看终端/文件。
+   *    这是「AI 正在操作网页，你得看得见」的唯一时机 —— 没有标签时它连画面都没接，
+   *    再不让位就完全看不到（用户实测反馈过：面板开在别的标签上时就「什么都看不到」）；
+   * 2. 标签已在 → 保持原来的克制：面板正开着（你在看别的标签）不抢焦点；收起了也只在
+   *    **这个会话第一次**用浏览器时弹一次（`autoShownRef`），后续动作不再把它顶开。
+   */
+  useEffect(() => {
+    if (!conversationId) return
+    const sid = agentBrowserSessionId(conversationId)
+    const offState = window.api.browser.onState((state) => {
+      if (state.sessionId !== sid) return
+      // 情形 1：没有标签 —— 挂出来并切过去（不抢焦点的话就永远看不到画面）
+      if (!browserTabOpenRef.current) {
+        autoShownRef.current = sid
+        setBrowserTabOpen(true)
+        setSideTab('browser')
+        return
+      }
+      // 情形 2：标签已在 —— 面板开着就不动（你可能正看着别的标签）
+      if (sideTabRef.current !== null) return
+      if (autoShownRef.current === sid) return
+      autoShownRef.current = sid
+      setSideTab('browser')
+    })
+    const offClosed = window.api.browser.onClosed(({ sessionId }) => {
+      // 会话结束：下一个浏览器会话要重新享有「自动展开一次」的机会
+      if (sessionId === sid && autoShownRef.current === sid) autoShownRef.current = null
+    })
+    return () => {
+      offState()
+      offClosed()
+    }
+  }, [conversationId])
 
   // 已探测到的 IDE 列表（打开下拉里展示；探测失败仅静默降级）
   const [ides, setIdes] = useState<IdeInfo[]>([])
@@ -751,14 +829,15 @@ export function AgentPage({ conversationId }: { conversationId: string | null })
   const effectiveShellId =
     !preferredShellId || preferredShellId === 'default' ? defaultShellId : preferredShellId
 
-  /** 打开内嵌终端（在当前工作区目录启动）；已有终端就先换掉旧的。
-   *  shellId 缺省 = 交给主进程按偏好/平台默认选。
-   *  返回新会话（失败返回 null）—— 快捷功能的「执行命令」要拿到它才能写命令进去 */
+  /**
+   * 新建一个终端标签（在当前工作区目录启动），返回新会话（失败 null）。
+   *
+   * **多开**：每调一次开一个会话、挂一个标签（终端已经是面板里的一种标签，见 sideTabs），
+   * 标签名按创建序号起「终端 / 终端 2 / …」。shellId 缺省 = 交给主进程按偏好/平台默认选。
+   */
   const openEmbeddedTerminal = useCallback(
     async (shellId?: string): Promise<SessionInfo | null> => {
       if (!active) return null
-      const current = term
-      if (current) void window.api.terminal.kill(current.session.id)
       try {
         const session = await window.api.terminal.createLocal(
           undefined,
@@ -766,49 +845,66 @@ export function AgentPage({ conversationId }: { conversationId: string | null })
           shellId,
           active.path
         )
-        setTerm({ session, path: active.path, shellId: shellId ?? effectiveShellId })
+        termSeqRef.current += 1
+        const seq = termSeqRef.current
+        setTerms((cur) => [
+          ...cur,
+          {
+            id: session.id,
+            session,
+            path: active.path,
+            shellId: shellId ?? effectiveShellId,
+            label: seq === 1 ? '终端' : `终端 ${seq}`
+          }
+        ])
+        // 新开的终端立刻切到它的标签（面板随之展开）
+        setSideTab(`terminal:${session.id}`)
         return session
       } catch (err) {
-        // 旧会话已经杀掉了，别把 term 留在指向死会话的状态
-        setTerm(null)
         message.error(err instanceof Error ? err.message : '终端打开失败')
         return null
       }
     },
-    [active, term, effectiveShellId]
+    [active, effectiveShellId]
+  )
+
+  /** 会话结束后按 Enter 重连：摘掉死掉的标签，照它原来用的 shell 再开一个 */
+  const reconnectTerminal = useCallback(
+    (tab: TerminalTab) => {
+      closeTerminalTab(tab.id)
+      void openEmbeddedTerminal(tab.shellId)
+    },
+    [closeTerminalTab, openEmbeddedTerminal]
   )
 
   /**
-   * 工作区快捷功能里的「执行命令」：复用当前工作区的内嵌终端（没开就现开一个），
+   * 工作区快捷功能里的「执行命令」：复用当前工作区已有的终端（没有就现开一个），
    * 再用 runScript 写入 —— 它会等 shell 就绪，刚建好的会话也能立刻收到命令。
    */
   const runQuickCommand = useCallback(
     async (command: string) => {
       if (!active) throw new Error('没有选中的工作区')
-      const existing = term && term.path === active.path ? term.session : null
+      const existing = terms.find((t) => t.path === active.path)?.session ?? null
       const session = existing ?? (await openEmbeddedTerminal())
       if (!session) throw new Error('终端打开失败')
       const ok = await window.api.terminal.runScript(session.id, `${command}\r`)
       if (!ok) throw new Error('命令写入失败，请检查终端是否已退出')
     },
-    [active, term, openEmbeddedTerminal]
+    [active, terms, openEmbeddedTerminal]
   )
 
-  /** 终端按钮：在一个按钮上合并了「开/关」与「选 shell」——
-   *  只有一种 shell（或还没探测完）时直接开/关，多选时点开菜单挑一个 */
+  /** 顶栏终端按钮的左半：**新建一个终端**（多开）。关某个终端走它标签上的 × */
   const handleTerminalClick = useCallback(() => {
-    if (term) {
-      closeEmbeddedTerminal()
-      return
-    }
     void openEmbeddedTerminal()
-  }, [term, closeEmbeddedTerminal, openEmbeddedTerminal])
+  }, [openEmbeddedTerminal])
 
   /**
    * 快捷键「开关 AI Agent 终端」（默认 Ctrl/Cmd+Shift+`）的落地。
    *
-   * 终端会话绑定「打开时的工作区目录」，作为页面内状态更合适，所以动作只在 store 里
-   * 广播一次请求（`ui.agentTerminalToggle` 自增），真正的开/关在这里做。
+   * 终端已经是面板里的标签，所以这里做的是**开关面板**：正看着某个终端就收起面板，
+   * 否则切到最后一个终端；一个终端都没开才新建一个。
+   *
+   * 动作只在 store 里广播一次请求（`ui.agentTerminalToggle` 自增），真正的开/关在这里做。
    * 不传 shellId —— 用设置里配的默认终端（主进程按 preferences.localShell 选）。
    * ref 记住已处理到的值：挂载前攒下的旧请求不会在挂载时误触发一次。
    */
@@ -817,8 +913,13 @@ export function AgentPage({ conversationId }: { conversationId: string | null })
   useEffect(() => {
     if (agentTerminalToggle === handledToggleRef.current) return
     handledToggleRef.current = agentTerminalToggle
-    handleTerminalClick()
-  }, [agentTerminalToggle, handleTerminalClick])
+    const last = terms[terms.length - 1]
+    if (!last) {
+      void openEmbeddedTerminal()
+      return
+    }
+    setSideTab((cur) => (cur === `terminal:${last.id}` ? null : `terminal:${last.id}`))
+  }, [agentTerminalToggle, terms, openEmbeddedTerminal])
 
   /** 终端按钮的下拉菜单：检出多个 shell 时才出现 */
   const shellMenuItems: MenuProps['items'] = shells.map((s) => ({
@@ -827,18 +928,17 @@ export function AgentPage({ conversationId }: { conversationId: string | null })
     label: s.name
   }))
 
+  /** 下拉里选 shell = 用这个 shell **再开一个**终端（多开，不再复用/替换） */
   const handleShellSelect: MenuProps['onClick'] = ({ key, domEvent }) => {
     domEvent.stopPropagation()
-    // 选中的就是当前在用的那个：不重启终端
-    if (key === term?.shellId) return
     void openEmbeddedTerminal(key)
   }
 
-  /** 模型下拉选中值：ACP 后端显示预置配置，内置后端显示本会话实际使用的模型配置 */
+  /** 模型下拉选中值：ACP 后端显示预置配置，内置（Mastra）后端显示本会话实际使用的模型配置 */
   /**
    * 模型下拉的选中值编码（解析见 handleModelSelect）：
-   * - `cfg:<配置id>:<模型id>`：内置 AI SDK，配置下的具体模型
-   * - `<配置id>`：内置 AI SDK，配置默认模型（兼容旧值）
+   * - `cfg:<配置id>:<模型id>`：内置 Mastra agent，配置下的具体模型
+   * - `<配置id>`：内置 Mastra agent，配置默认模型（兼容旧值）
    * - `acp:<agentid>:<模型value>`：ACP agent 的具体模型
    * - `acp:<agentid>`：ACP agent 默认模型
    */
@@ -854,7 +954,8 @@ export function AgentPage({ conversationId }: { conversationId: string | null })
     if (!effectiveConfigId) return undefined
     const config = aiConfigs.find((c) => c.id === effectiveConfigId)
     if (!config) return undefined
-    const models = config.models?.length ? config.models : [config.model]
+    const models = configModels(config)
+    if (models.length === 0) return undefined
     if (conversation?.modelId && models.includes(conversation.modelId)) {
       return `cfg:${config.id}:${conversation.modelId}`
     }
@@ -885,10 +986,11 @@ export function AgentPage({ conversationId }: { conversationId: string | null })
       })
       return
     }
+    // 内置模型（cfg: 或纯配置 id）一律走 Mastra agent
     if (value.startsWith('cfg:')) {
       const [, cfgId, cfgModel] = value.split(':')
       void setAgentConversationModel(conversationId, {
-        backend: 'ai-sdk',
+        backend: 'mastra',
         configId: cfgId,
         modelId: cfgModel
       })
@@ -896,7 +998,7 @@ export function AgentPage({ conversationId }: { conversationId: string | null })
     }
     // 旧格式兜底：纯配置 id
     void setAgentConversationModel(conversationId, {
-      backend: 'ai-sdk',
+      backend: 'mastra',
       configId: value,
       modelId: undefined
     })
@@ -916,10 +1018,9 @@ export function AgentPage({ conversationId }: { conversationId: string | null })
       ? [
         {
           label: 'AI 模型',
-          options: aiConfigs.flatMap((c) => {
-            const models = c.models?.length ? c.models : [c.model]
-            return models.map((m) => ({ value: `cfg:${c.id}:${m}`, label: `${c.name} · ${m}` }))
-          })
+          options: aiConfigs.flatMap((c) =>
+            configModels(c).map((m) => ({ value: `cfg:${c.id}:${m}`, label: `${c.name} · ${m}` }))
+          )
         }
       ]
       : []),
@@ -981,36 +1082,154 @@ export function AgentPage({ conversationId }: { conversationId: string | null })
   }
 
   // 换了工作区或会话后清空草稿与编辑态，避免把上一段的输入带进新对话
-  // （滚动状态由 useMessageListScroll 按 conversationId 自行重置）
+  // （滚动状态由 VirtualMessageList 按 listKey 重挂自行重置）
   useEffect(() => {
     setInput('')
     setEditing(null)
   }, [activeId, conversationId])
 
+  /**
+   * 右侧面板的标签集合：**浏览器 / 终端 / 文件 / 源码管理** 都在这里。
+   *
+   * - **浏览器**：Agent 的 `browser_*` 工具就操作这个会话（会话 id 由 conversationId
+   *   推导，见 @shared/browser），看到的就是它正在操作的页面 —— 点哪、填了什么肉眼可见。
+   *   关掉这个标签会**销毁会话**（见 closeBrowserTab），所以它按需挂出来；
+   * - **终端**：一个会话一个标签（支持多开），绑定打开时的工作区目录；
+   * - **文件 / 源码管理**：跟着当前工作区，按需存在。
+   *
+   * 内容都**常挂载**（由 SidePanel 隐藏非活动标签）：浏览器标签卸载等于重新接一次
+   * 帧流（黑屏一下），终端标签卸载则 xterm 重建、会话输出全丢（`terminal:data` 无回放）。
+   */
+  const sideTabs: SidePanelTab[] = [
+    ...(conversationId && browserTabOpen
+      ? [
+        {
+          key: 'browser',
+          label: '浏览器',
+          title: '浏览器 · Agent 操作画面',
+          icon: <Globe className="size-4" />,
+          content: (
+            <div className="h-full px-2 pb-2">
+              <BrowserPane
+                sessionId={agentBrowserSessionId(conversationId)}
+                mode={browserMode}
+                onModeChange={setBrowserMode}
+                className="h-full"
+              />
+            </div>
+          ),
+          onClose: closeBrowserTab
+        }
+      ]
+      : []),
+    ...terms.map((t) => ({
+      key: `terminal:${t.id}`,
+      label: t.label,
+      title: `终端 · ${t.path}`,
+      icon: <SquareTerminal className="size-4" />,
+      content: (
+        <div className="h-full px-2 pb-2">
+          <TerminalView
+            session={t.session}
+            isActive={sideTab === `terminal:${t.id}`}
+            onExitedReconnect={() => reconnectTerminal(t)}
+            onExitedClose={() => closeTerminalTab(t.id)}
+          />
+        </div>
+      ),
+      onClose: () => closeTerminalTab(t.id)
+    })),
+    ...(active && filesTabOpen
+      ? [
+        {
+          key: 'files',
+          label: '文件',
+          title: `文件 · ${active.name}`,
+          icon: <Files className="size-4" />,
+          content: <AgentFilesPanel workspaceId={active.id} workspaceName={active.name} />,
+          onClose: closeFilesTab
+        }
+      ]
+      : []),
+    ...(active && gitTabOpen
+      ? [
+        {
+          key: 'git',
+          label: '源码管理',
+          title: `源码管理 · ${active.name}`,
+          icon: <GitBranch className="size-4" />,
+          content: (
+            <GitPanel
+              cwd={active.path}
+              onClose={closeGitTab}
+              onChanges={(info) => setGitCount(info ? info.count : 0)}
+            />
+          ),
+          onClose: closeGitTab
+        }
+      ]
+      : [])
+  ]
+
+  /** 面板正显示的那个终端标签（没有就是 null）—— 顶栏终端按钮的激活态与 shell 选中态用它 */
+  const activeTerm = terms.find((t) => `terminal:${t.id}` === sideTab) ?? null
+
+  /**
+   * 标签的**打开顺序**：新开的排到最后（跟浏览器 / 编辑器的标签条一致）。
+   *
+   * 上面 `sideTabs` 的数组顺序是代码里写死的（浏览器 → 终端 → 文件 → 源码管理），
+   * 因为每个标签的**存在性**是各自独立的开关，拼数组时只知道「有哪些」、不知道「谁先来的」。
+   * 于是打开浏览器会插到最前面，新开一个终端会插到「文件 / 源码管理」前面 —— 都不在末尾。
+   * 这里额外记一份打开顺序来修正它。
+   *
+   * 顺序表只需「追加 + 剔除」，不必在每个开 / 关的地方手动登记：哪些标签活着在渲染期就是
+   * 已知的（`sideTabs` 正是当前活着的那批），直接拿它同步即可 —— 关掉的自动剔掉、
+   * 新出现的追加到末尾，**关掉再打开也会自然排到最后**。
+   *
+   * 用 `useLayoutEffect`：顺序要在**首次绘制前**修正，否则新标签会先在固定槽位闪一帧再跳走。
+   */
+  const [tabOrder, setTabOrder] = useState<string[]>([])
+  /** 当前活着的标签 key 串（`sideTabs` 每次渲染都是新数组，直接拿它当 effect 依赖会每次都跑） */
+  const sideTabKeys = sideTabs.map((t) => t.key).join('\n')
+  useLayoutEffect(() => {
+    const keys = sideTabKeys ? sideTabKeys.split('\n') : []
+    setTabOrder((cur) => {
+      const kept = cur.filter((k) => keys.includes(k))
+      const added = keys.filter((k) => !kept.includes(k))
+      // 没变化就原样返回，别白白多渲染一次
+      return kept.length === cur.length && added.length === 0 ? cur : [...kept, ...added]
+    })
+  }, [sideTabKeys])
+
+  /** 按打开顺序排好的标签（见上；顺序表里还没有的排到最后） */
+  const orderedSideTabs = [...sideTabs].sort(
+    (a, b) => tabRank(tabOrder, a.key) - tabRank(tabOrder, b.key)
+  )
+
   return (
     <div className="flex h-full min-h-0 flex-col bg-background rounded-lg overflow-hidden">
       {/* 顶栏：当前工作区 + 操作 */}
-      <div className="flex h-12 shrink-0 items-center gap-2 px-3">
+      <div className="flex h-14 shrink-0 items-center gap-2 px-3 py-2">
         {active ? (
-          <>
+          <div className="ml-2 flex min-w-0 flex-1 flex-col justify-center">
             {conversation && (
               <span
-                className="ml-2 max-w-44 shrink-0 truncate text-base font-bold"
+                className="truncate text-base font-bold leading-tight"
                 title={conversation.title}
               >
                 {conversation.title}
               </span>
             )}
             {/* 当前工作目录：分屏后同一屏可能并排好几个会话，光看标题分不清各自作用在哪个目录。
-                长路径截断，完整路径走 title 悬浮提示 */}
+                放到会话名下方，长路径截断，完整路径走 title 悬浮提示 */}
             <span
               data-agent-cwd
-              className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground"
+              className="truncate font-mono text-xs leading-tight text-muted-foreground"
               title={active.path}
             >
               {active.path}
             </span>
-          </>
+          </div>
         ) : (
           <>
             <Bot className="size-4 shrink-0 text-muted-foreground" />
@@ -1021,149 +1240,231 @@ export function AgentPage({ conversationId }: { conversationId: string | null })
         <div className="ml-auto flex shrink-0 items-center gap-0.5">
           {active && (
             <>
-              <Tooltip title={filesOpen ? '收起文件视图' : '展开文件视图'}>
-                <Button
-                  type="text"
-                  // 抽屉按「点击外部」关闭，这个按钮自己会切换开关 ——
-                  // 标记后抽屉不再抢先把它判成外部点击（否则会先关再开，点了没反应）
-                  data-outside-ignore
-                  className={cn('px-1.5', filesOpen ? 'text-primary' : 'text-muted-foreground')}
-                  icon={<Files className="size-4" />}
-                  onClick={() => setFilesOpen((v) => !v)}
-                />
+              {/* 快捷功能：最左侧，下拉列 `<工作区>/.dogi/workspace.json` 里配好的条目 */}
+              <WorkspaceQuickActions workspace={active} onRunCommand={runQuickCommand} />
+              {/* 文件视图：单图标按钮 —— 在面板里挂出 / 切到「文件」标签（见 toggleFilesTab） */}
+              <Tooltip
+                title={sideTab === 'files' ? '收起面板' : '文件视图'}
+              >
+                <button
+                  type="button"
+                  title="文件视图"
+                  onClick={toggleFilesTab}
+                  className={cn(
+                    'flex size-7 items-center justify-center rounded-md border border-border bg-transparent',
+                    sideTab === 'files' ? 'text-primary' : 'text-foreground hover:bg-foreground/10'
+                  )}
+                >
+                  <Files className="size-4" />
+                </button>
               </Tooltip>
-              {/* 终端：一个按钮搞定「开/关」与「选 shell」——
-                  只有一种 shell 时点了直接开（再点关闭），多选时弹出菜单挑 */}
-              {shells.length > 1 ? (
-                <Tooltip title={term ? '切换终端' : '选择终端'}>
-                  <Dropdown
-                    trigger={['click']}
-                    placement="bottomRight"
-                    menu={{
-                      items: shellMenuItems,
-                      onClick: handleShellSelect,
-                      selectedKeys: term?.shellId ? [term.shellId] : []
-                    }}
-                  >
-                    <Button
-                      type="text"
-                      className={cn('px-1.5', term ? 'text-primary' : 'text-muted-foreground')}
-                      icon={<Terminal className="size-4" />}
-                    />
-                  </Dropdown>
-                </Tooltip>
-              ) : (
-                <Tooltip title={term ? '关闭终端' : '打开终端'}>
-                  <Button
-                    type="text"
-                    className={cn('px-1.5', term ? 'text-primary' : 'text-muted-foreground')}
-                    icon={<Terminal className="size-4" />}
+              {/* 源代码管理（git）：图标按钮 + 改动数 badge，同样是面板里的一个标签 */}
+              <Tooltip
+                title={sideTab === 'git' ? '收起面板' : '源代码管理（git）'}
+              >
+                <button
+                  type="button"
+                  title="源代码管理"
+                  onClick={toggleGitTab}
+                  className={cn(
+                    'relative flex size-7 items-center justify-center rounded-md border border-border bg-transparent',
+                    sideTab === 'git' ? 'text-primary' : 'text-foreground hover:bg-foreground/10'
+                  )}
+                >
+                  <GitBranch className="size-4" />
+                  {gitCount > 0 && (
+                    <span className="absolute -right-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] leading-none text-primary-foreground">
+                      {gitCount > 99 ? '99+' : gitCount}
+                    </span>
+                  )}
+                </button>
+              </Tooltip>
+              {/* 终端：分裂按钮 —— 左半**新建一个终端**（多开；关某个走它标签上的 ×），
+                  右半 chevron 下拉是「用哪个 shell 新建」 */}
+              <div className="flex items-stretch">
+                <Tooltip title="新建终端">
+                  <button
+                    type="button"
+                    title="新建终端"
                     onClick={handleTerminalClick}
-                  />
+                    className={cn(
+                      'flex size-7 items-center justify-center rounded-l-md border border-border border-r-0 bg-transparent',
+                      activeTerm ? 'text-primary' : 'text-foreground hover:bg-foreground/10'
+                    )}
+                  >
+                    <SquareTerminal className="size-4" />
+                  </button>
                 </Tooltip>
-              )}
-              <Tooltip title="打开工作区目录">
+                <Dropdown
+                  trigger={['click']}
+                  placement="bottomRight"
+                  menu={{
+                    items: shellMenuItems,
+                    onClick: handleShellSelect,
+                    selectedKeys: activeTerm?.shellId ? [activeTerm.shellId] : []
+                  }}
+                >
+                  <button
+                    type="button"
+                    title="选择终端"
+                    className="flex size-7 w-5 items-center justify-center rounded-l-none rounded-r-md border border-border bg-transparent text-foreground hover:bg-foreground/10"
+                  >
+                    <ChevronDown className="size-3.5" />
+                  </button>
+                </Dropdown>
+              </div>
+              {/* 浏览器：单图标按钮 —— 在多标签面板里切到浏览器标签，再点收起面板 */}
+              <Tooltip
+                title={
+                  sideTab === 'browser'
+                    ? '收起面板'
+                    : '打开浏览器（查看 Agent 正在操作的页面）'
+                }
+              >
+                <button
+                  type="button"
+                  aria-label="浏览器"
+                  title="浏览器"
+                  onClick={toggleBrowserTab}
+                  className={cn(
+                    'flex size-7 items-center justify-center rounded-md border border-border bg-transparent',
+                    sideTab === 'browser' ? 'text-primary' : 'text-foreground hover:bg-foreground/10'
+                  )}
+                >
+                  <Globe className="size-4" />
+                </button>
+              </Tooltip>
+              {/* 打开：分裂按钮 —— 左半在文件管理器打开目录，右半 chevron 下拉（文件管理器 / IDE） */}
+              <div className="flex items-stretch">
+                <Tooltip title="打开工作区目录">
+                  <button
+                    type="button"
+                    title="打开文件管理器"
+                    onClick={() => {
+                      if (!active) return
+                      void handleOpen(
+                        () => window.api.shell.openFileManager(active.path),
+                        `已打开：${active.path}`
+                      )
+                    }}
+                    className="flex size-7 items-center justify-center rounded-l-md border border-border border-r-0 bg-transparent text-foreground hover:bg-foreground/10"
+                  >
+                    <FolderOpen className="size-4" />
+                  </button>
+                </Tooltip>
                 <Dropdown
                   trigger={['click']}
                   placement="bottomRight"
                   menu={{ items: openMenuItems, onClick: handleOpenMenuClick }}
                 >
-                  <Button
-                    type="text"
-                    className="px-1.5 text-muted-foreground"
-                    icon={<ExternalLink className="size-4" />}
-                  />
+                  <button
+                    type="button"
+                    title="更多打开方式"
+                    className="flex size-7 w-5 items-center justify-center rounded-l-none rounded-r-md border border-border bg-transparent text-foreground hover:bg-foreground/10"
+                  >
+                    <ChevronDown className="size-3.5" />
+                  </button>
                 </Dropdown>
+              </div>
+              {/* 面板开关：功能区最右一个 —— 「右侧面板展开 / 收起」一对图标，
+                  图标本身就说明动作（收起时是展开箭头，展开时是收起箭头）。
+                  展开时回到上次看的标签（那个标签没了就退回浏览器标签），
+                  宽度由 SidePanel 默认撑到上限（= 把对话区压到最小宽度） */}
+              <Tooltip title={sideTab !== null ? '收起面板' : '展开面板'}>
+                <button
+                  type="button"
+                  aria-label="展开/收起面板"
+                  title="面板"
+                  aria-pressed={sideTab !== null}
+                  onClick={toggleSidePanel}
+                  className={cn(
+                    'flex size-7 items-center justify-center rounded-md border border-border bg-transparent',
+                    sideTab !== null ? 'text-primary' : 'text-foreground hover:bg-foreground/10'
+                  )}
+                >
+                  {sideTab !== null ? (
+                    <PanelRightClose className="size-4" />
+                  ) : (
+                    <PanelRightOpen className="size-4" />
+                  )}
+                </button>
               </Tooltip>
-              {/* 快捷功能：与终端 / 打开同一排，下拉列 `<工作区>/.dogi/workspace.json`
-                  里配好的条目（另见 WorkspaceQuickActions） */}
-              <WorkspaceQuickActions workspace={active} onRunCommand={runQuickCommand} />
             </>
           )}
         </div>
       </div>
 
-      {/* 内容区：左侧对话（对话流 + 输入框 + 内嵌终端），文件视图作为右侧抽屉覆盖在其上。
-          下面三个块刻意保持原缩进没有重排 —— 只多包一层容器，
-          免得整段 JSX 的缩进 diff 淹掉真正的改动。 */}
+      {/* 内容区：左侧对话（对话流 + 输入框），右侧是**多标签面板**
+          （浏览器 / 终端 / 文件 / 源码管理，见 sideTabs 与 SidePanel） */}
       <div ref={contentRef} className="relative flex min-h-0 flex-1">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {/* 对话流 + 底部的「滚动到底部」按钮。这一层 relative 只为给按钮做定位上下文，
           按钮浮在对话流底部正中央，不参与布局、不挤压消息 */}
           <div className="relative flex min-h-0 flex-1 flex-col">
-            <div
-              ref={scrollRef}
-              onScroll={onScroll}
-              className="agent-scroll min-h-0 flex-1 select-text overflow-y-auto p-4"
-            >
-              {!active ? (
-                <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-                  <Bot className="size-12 opacity-30" />
-                  <div className="text-sm text-muted-foreground">
-                    在左侧「工作区」面板添加一个本地目录，即可让 Agent 在该目录内
-                    <br />
-                    阅读 / 编辑文件、搜索代码并执行命令。
-                  </div>
-                  <Button type="primary" onClick={() => setSidebarCollapsed(false)}>
-                    打开工作区面板
-                  </Button>
+            {!active ? (
+              <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+                <Bot className="size-12 opacity-30" />
+                <div className="text-sm text-muted-foreground">
+                  在左侧「工作区」面板添加一个本地目录，即可让 Agent 在该目录内
+                  <br />
+                  阅读 / 编辑文件、搜索代码并执行命令。
                 </div>
-              ) : messages.length === 0 && !streaming ? (
-                <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
-                  <Bot className="size-10 opacity-30" />
-                  <div className="text-sm text-muted-foreground">
-                    在下方输入你想在「{active.name}」里完成的任务。
-                  </div>
-                  <div className="text-xs text-muted-foreground/60">
-                    例如：列出项目结构，帮我加一个 /health 接口，然后跑一遍测试
-                  </div>
+                <Button type="primary" onClick={() => setSidebarCollapsed(false)}>
+                  打开工作区面板
+                </Button>
+              </div>
+            ) : messages.length === 0 && !streaming ? (
+              <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
+                <Bot className="size-10 opacity-30" />
+                <div className="text-sm text-muted-foreground">
+                  在下方输入你想在「{active.name}」里完成的任务。
                 </div>
-              ) : (
-                <>
-                  <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-2">
-                    {messages.map((m, i) => (
-                      <MessageBubble
-                        key={m.id}
-                        conversationId={conversationId}
-                        message={m}
-                        streaming={streaming && i === messages.length - 1 && m.role === 'assistant'}
-                        canEdit={!streaming && m.role === 'user'}
-                        editing={editing?.id === m.id}
-                        onEdit={startEdit}
-                        canDelete={!streaming}
-                        tailCount={messages.length - i}
-                        pendingConfirm={pendingConfirm}
-                      />
-                    ))}
-                    {error && !streaming && (
+                <div className="text-xs text-muted-foreground/60">
+                  例如：列出项目结构，帮我加一个 /health 接口，然后跑一遍测试
+                </div>
+              </div>
+            ) : (
+              <VirtualMessageList
+                ref={listRef}
+                listKey={conversationId ?? '__none__'}
+                messages={messages}
+                className="min-h-0 flex-1"
+                footer={
+                  error && !streaming ? (
+                    <div className="mx-auto w-full max-w-3xl px-2">
                       <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                         {error}
                       </div>
-                    )}
+                    </div>
+                  ) : null
+                }
+                renderItem={(m, index) => (
+                  <div className="mx-auto w-full max-w-3xl px-5 pb-4">
+                    <MessageBubble
+                      conversationId={conversationId}
+                      message={m}
+                      streaming={
+                        streaming && index === messages.length - 1 && m.role === 'assistant'
+                      }
+                      canEdit={!streaming && m.role === 'user'}
+                      editing={editing?.id === m.id}
+                      onEdit={startEdit}
+                      canDelete={!streaming}
+                      tailCount={messages.length - index}
+                      pendingConfirm={pendingConfirm}
+                    />
                   </div>
-                </>
-              )}
-            </div>
+                )}
+              />
+            )}
             {/* 右侧「消息目录」：用户消息各占一段，悬停预览、点击跳转 */}
             <MessageOutline messages={messages} onJump={jumpToMessage} />
-            {/* 不在底部时才出现：一键回到最新内容（往上翻历史之后不用一路滚回去） */}
-            {showJump && (
-              <button
-                type="button"
-                onClick={jumpToBottom}
-                title="滚动到底部"
-                aria-label="滚动到底部"
-                className="absolute bottom-3 left-1/2 flex size-8 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-background text-muted-foreground shadow-md transition-colors hover:bg-secondary hover:text-foreground"
-              >
-                <ArrowDown className="size-4" />
-              </button>
-            )}
           </div>
 
           {/* 底部大输入框：外层外壳是唯一的边框（内层输入区无边框，避免双重 border）；
           左下角是命令执行权限，右下角是模型选择与发送/停止（模型紧贴发送按钮左侧） */}
           {active && (
-            <div className="shrink-0 p-4">
+            <div className="shrink-0 px-5 py-4">
               <div className="mx-auto w-full max-w-3xl">
                 {/* 编辑态提示条：说清「发送会连带删掉后面的消息」，也给了退路（Esc / 叉） */}
                 {editing && (
@@ -1242,20 +1543,22 @@ export function AgentPage({ conversationId }: { conversationId: string | null })
                           onClick: ({ key }) => void setAiPermissionMode(key as AiPermissionMode)
                         }}
                       >
+                        {/* 横条上**只显示图标**（文案在下拉项里，省下的宽度留给输入框）；
+                            「全部访问」用警示色 —— 它意味着不再询问 */}
                         <Button
                           type="text"
                           size="small"
+                          icon={<PermissionIcon className="size-4" />}
+                          title={`${permissionMeta.label}：${permissionMeta.hint}（点击切换）`}
                           className={cn(
-                            'text-muted-foreground',
-                            permissionMode === 'confirm' && 'text-amber-500'
+                            'px-1.5',
+                            permissionMode === 'full' ? 'text-amber-500!' : 'text-muted-foreground'
                           )}
-                        >
-                          <PermissionIcon className="size-3.5" />
-                          {permissionMeta.label}
-                        </Button>
+                        />
                       </Dropdown>
                     </div>
                     <div className="flex shrink-0 items-center gap-1">
+                      <McpConfigPopover />
                       <Select
                         size="small"
                         variant="borderless"
@@ -1268,6 +1571,8 @@ export function AgentPage({ conversationId }: { conversationId: string | null })
                         placeholder="选择模型"
                         popupMatchSelectWidth={false}
                         options={modelOptions}
+                        // 选中态只显示模型名（列表里仍是「提供商 · 模型」，方便区分同名模型）
+                        labelRender={(opt) => modelNameOnly(opt.label)}
                       />
                       {streaming ? (
                         <Button
@@ -1297,36 +1602,22 @@ export function AgentPage({ conversationId }: { conversationId: string | null })
             </div>
           )}
 
-          {/* 内嵌终端：位于输入框下方 */}
-          {active && term && (
-            <EmbeddedTerminal
-              session={term.session}
-              path={term.path}
-              onClose={closeEmbeddedTerminal}
-            />
-          )}
         </div>
 
-        {/* 工作区文件视图：从右边缘滑出的抽屉（antd Drawer 那种观感），**不全屏**。
-            绝对定位覆盖在内容区之上、不参与 flex 布局 ——
-            展开时左侧对话的宽度与排版一点不动（挤窄对话区会让消息整段重排） */}
+        {/* 右侧多标签面板：浏览器 / 终端 / 文件 / 源码管理都是它的标签（见 sideTabs），
+            拖左边缘可改宽度。常挂载（收起时宽度动画到 0）—— 展开有动画，
+            且各标签的画面 / 终端会话都不会丢。
+            标签顺序用 `orderedSideTabs`（打开顺序），不是 `sideTabs` 的固定槽位 */}
         {active && (
-          <RightDrawer
-            open={filesOpen}
-            width={filesRenderWidth}
-            // 容器比最小宽度还窄时（分屏挤到极限），下限也跟着降 —— 否则 min > max，
-            // 拖拽条会一直把宽度夹到 min，把抽屉顶出内容区
-            minWidth={Math.min(FILES_DRAWER_MIN_WIDTH, filesMaxWidth)}
-            maxWidth={filesMaxWidth}
-            onResize={setFilesWidth}
-            onClose={closeFiles}
-          >
-            <AgentFilesPanel
-              workspaceId={active.id}
-              workspaceName={active.name}
-              onClose={closeFiles}
-            />
-          </RightDrawer>
+          <SidePanel
+            open={orderedSideTabs.length > 0 && sideTab !== null}
+            tabs={orderedSideTabs}
+            activeKey={sideTab}
+            // 标签 key 只可能来自本页 sideTabs，收窄是安全的
+            onSelect={(key) => setSideTab(key as SideTabKey)}
+            onCollapse={() => setSideTab(null)}
+            containerWidth={contentWidth}
+          />
         )}
       </div>
     </div>

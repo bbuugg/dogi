@@ -3,6 +3,10 @@
 
 /* 运行时插件的源码（含手写 Tailwind 类名）也纳入扫描，确保样式生成 */
 @source "../../../plugins/**";
+/* streamdown 渲染的 DOM 直接带 Tailwind 类名（list-inside / [li_&]:pl-6 / 代码块与
+   表格外壳等），必须在扫描源里它才会生成对应工具类 —— 否则列表圆点戳出正文、
+   代码块/表格控件全部裸奔 */
+@source "../../../node_modules/streamdown/dist";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -38,6 +42,10 @@
   [contenteditable='true'] {
     user-select: text;
     -webkit-user-select: text;
+  }
+  button:not(:disabled), [role="button"]:not(:disabled) {
+    cursor:
+      pointer;
   }
 }
 
@@ -170,6 +178,18 @@
   background: transparent;
 }
 
+/*
+ * Virtuoso 消息列表的滚动容器：**预留**滚动条槽位。
+ *
+ * 展开一段长思考、或流式内容把列表撑高时，列表会从「不可滚」变成「可滚」—— 滚动条
+ * 一出现，内容可用宽度就少 8px，居中的消息列会整体横移一下（就是那种「内容跳了一下」）。
+ * `scrollbar-gutter: stable` 让这条槽位常驻：有没有滚动条，内容宽度都一样。
+ * 定位靠 Virtuoso 自己打在滚动容器上的属性（不是我们的类名，不受组件换实现影响）。
+ */
+[data-virtuoso-scroller] {
+  scrollbar-gutter: stable;
+}
+
 /* xterm 终端容器 */
 .xterm {
   padding: 8px;
@@ -242,6 +262,57 @@
 
 .agent-typing-dot:nth-child(3) {
   animation-delay: 0.3s;
+}
+
+/* ------------------------------------------------------------------
+ * 思考横条的「思考中」流光（ai-elements 那种柔和的呼吸感）
+ *
+ * 做法是「渐变裁到文字 + 背景横向位移」，但关键在于**渐变怎么排**：
+ * 原来是一条很窄的强调色亮光扫过去 —— 对比太强，看着像一条彩色的虫子在爬。
+ * 现在改成 3 倍宽、两端都是底色的对称渐变：亮部宽而柔地从右边进来、左边出去，
+ * 且 0% 与 100% 两帧**都停在「亮部在文字之外」的位置**（整行都是底色），
+ * 所以循环回到起点时看不出跳变 —— 这正是它比原来顺眼的原因。
+ *
+ * 底色用 muted-foreground（思考/工具文案本来就该比正文浅），亮部才到 foreground，
+ * 也不引入强调色：换配色 / 明暗主题都跟着走，不抢正文注意力。
+ * 用 background-position 而不是改字号 / 字重，右侧那列实时预览不会被挤动。
+ * ------------------------------------------------------------------ */
+@keyframes reasoning-shimmer {
+  from {
+    background-position: 0% 0;
+  }
+
+  to {
+    background-position: 100% 0;
+  }
+}
+
+.reasoning-thinking {
+  background-image: linear-gradient(
+    90deg,
+    var(--muted-foreground) 0%,
+    var(--muted-foreground) 33%,
+    var(--foreground) 50%,
+    var(--muted-foreground) 67%,
+    var(--muted-foreground) 100%
+  );
+  background-size: 300% 100%;
+  background-repeat: no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: reasoning-shimmer 1.9s ease-in-out infinite;
+}
+
+/* 关掉动效的系统偏好：退回纯色 —— 不这么做文字会一直是透明的（渐变靠裁剪显示，没有动画就等于不显示） */
+@media (prefers-reduced-motion: reduce) {
+  .reasoning-thinking {
+    animation: none;
+    background-image: none;
+    -webkit-background-clip: initial;
+    background-clip: initial;
+    color: var(--muted-foreground);
+  }
 }
 
 /* AI 浮窗横条输入框：hover/focus 也不出现边框/描边（antd cssinjs 是非 @layer 样式，
@@ -395,7 +466,7 @@
   --primary-foreground:
       oklch(0.985 0 0);
   --secondary:
-      oklch(0.97 0 0);
+      oklch(0.94 0 0);
   --secondary-foreground:
       oklch(0.205 0 0);
   --muted:

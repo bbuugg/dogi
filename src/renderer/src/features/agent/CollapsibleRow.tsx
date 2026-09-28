@@ -107,10 +107,18 @@ export function CollapsibleRow({
             open ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'
           )}
         >
+          {/*
+            open 时是滚动容器：`scrollbar-gutter: stable` 预留滚动条槽位。
+            不预留的话，展开的长内容一旦超过 max-h-64，滚动条出现 → 内容盒宽度少 8px →
+            整段文字重新折行、看着像「往左跳了一下」（长思考 / 长工具输出都踩得到）。
+          */}
           <div
             ref={bodyRef}
             onScroll={stickToBottom ? onBodyScroll : undefined}
-            className={cn('min-h-0', open ? 'max-h-64 overflow-y-auto' : 'overflow-hidden')}
+            className={cn(
+              'min-h-0',
+              open ? 'max-h-64 overflow-y-auto [scrollbar-gutter:stable]' : 'overflow-hidden'
+            )}
           >
             <div
               className={cn(

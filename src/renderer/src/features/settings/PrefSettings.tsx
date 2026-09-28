@@ -44,7 +44,7 @@ export function PrefSettings() {
     <div className="space-y-5">
       <div className="flex items-start justify-between gap-4 rounded-md">
         <div>
-          <label htmlFor="minimize-to-tray" className="font-medium text-foreground">
+          <label htmlFor="minimize-to-tray" className="font-medium text-foreground text-sm">
             关闭时最小化到系统托盘
           </label>
           <p className="mt-1 text-xs leading-4 text-muted-foreground">
@@ -60,7 +60,7 @@ export function PrefSettings() {
 
       <div className="flex items-start justify-between gap-4 rounded-md">
         <div>
-          <label htmlFor="confirm-close-tab" className="font-medium text-foreground">
+          <label htmlFor="confirm-close-tab" className="font-medium text-foreground text-sm">
             关闭标签前二次确认
           </label>
           <p className="mt-1 text-xs leading-4 text-muted-foreground">
@@ -77,7 +77,7 @@ export function PrefSettings() {
 
       <div className="flex items-start justify-between gap-4 rounded-md">
         <div>
-          <label htmlFor="notify-agent-finish" className="font-medium text-foreground">
+          <label htmlFor="notify-agent-finish" className="font-medium text-foreground text-sm">
             Agent 完成时发系统通知
           </label>
           <p className="mt-1 text-xs leading-4 text-muted-foreground">
@@ -92,7 +92,7 @@ export function PrefSettings() {
       </div>
 
       <div className="rounded-md">
-        <div className="text-sm font-medium">活动栏功能区</div>
+        <div className="text-sm font-medium text-sm">活动栏功能区</div>
         <p className="mt-1 mb-2.5 text-xs leading-4 text-muted-foreground">
           关闭的功能区不会出现在左侧活动栏，也不会被激活。至少保留一个。
         </p>
@@ -104,7 +104,7 @@ export function PrefSettings() {
             return (
               <div
                 key={id}
-                className="flex items-center justify-between gap-4 rounded-md px-1 py-1.5"
+                className="flex items-center justify-between gap-4 rounded-md px-1 py-1.5 text-xs"
               >
                 <div className="flex items-center gap-2">
                   <Icon className="size-4 text-muted-foreground" />

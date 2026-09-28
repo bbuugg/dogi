@@ -31,9 +31,11 @@ function requireWorkspace(id: string) {
 /**
  * 工作区 Agent IPC：工作区 CRUD、对话流、确认卡。
  *
- * 同一个 `agent:*` 通道下面是**两个可切换的后端**（按工作区的 backend 字段分派）：
- * 内置 AI SDK（agentService）与外部 ACP agent（acpAgentService）。
- * 确认卡两个后端共用同一通道 —— 渲染端不必关心是哪一个在要权限。
+ * 同一个 `agent:*` 通道下按后端分派（backend 字段，按会话独立）：
+ * - 非 ACP 模型默认走内置 Mastra agent（agentService.mastraChat，复用同一套模型配置与工具）；
+ * - 旧会话若存的是 `ai-sdk` 仍走原生 AI SDK 路径（agentService.chat）作为兜底；
+ * - `acp` 走外部 ACP agent（acpAgentService）。
+ * 确认卡所有后端共用同一通道 —— 渲染端不必关心是哪一个在要权限。
  */
 export function registerAgentIpc(ctx: IpcContext): void {
   /**
@@ -121,8 +123,18 @@ export function registerAgentIpc(ctx: IpcContext): void {
     // 其次回退到会话记录 / 工作区设置 —— 切一个会话的后端不该影响其它会话
     const conv = storage.listAgentConversations().find((c) => c.id === req.conversationId)
     const ws = storage.getAgentWorkspace(req.workspaceId)
-    const backend = req.backend ?? conv?.backend ?? ws?.backend ?? 'ai-sdk'
-    const result = await (backend === 'acp' ? acpAgentService : agentService).chat(req)
+    // 后端**按会话**独立：优先取请求里带的（渲染端是会话记录的唯一真源），
+    // 其次回退到会话记录 / 工作区设置 —— 切一个会话的后端不该影响其它会话。
+    // 非 ACP 默认走内置 Mastra agent；旧会话存的 'ai-sdk' 仍走原路径，不强制迁移。
+    const backend = req.backend ?? conv?.backend ?? ws?.backend ?? 'mastra'
+    let result: { requestId: string }
+    if (backend === 'acp') {
+      result = await acpAgentService.chat(req)
+    } else if (backend === 'ai-sdk') {
+      result = await agentService.chat(req)
+    } else {
+      result = await agentService.mastraChat(req)
+    }
     // 事件归属：**必须在这里登记**，因为「未配置模型」这种失败分支是用 setTimeout(0)
     // 发事件的，会比 invoke 的回包更早到达渲染端 —— 渲染端那时还不知道 requestId 属于谁，
     // 事件就被丢掉了（表现为转圈不结束、通知不弹）。这里同步微任务一定早于那个定时器。

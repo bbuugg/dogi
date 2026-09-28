@@ -3,7 +3,11 @@ import { registerAgentIpc } from './agent'
 import { registerAiIpc } from './ai'
 import { registerApiIpc } from './api'
 import { registerFollowupIpc } from './ask-followup'
+import { registerAutomationIpc } from './automation'
+import { registerGitIpc } from './git'
+import { registerBrowserIpc } from './browser'
 import { registerHostsIpc } from './hosts'
+import { registerLogsIpc } from './logs'
 import { registerMcpIpc } from './mcp'
 import { registerMonitorIpc } from './monitor'
 import { registerNotesIpc } from './notes'
@@ -16,6 +20,7 @@ import { registerSftpIpc } from './sftp'
 import { registerSystemIpc } from './system'
 import { registerTerminalIpc } from './terminal'
 import { registerTransferIpc } from './transfer'
+import { registerTunnelsIpc } from './tunnels'
 
 export { openExternalSafe } from './shared'
 
@@ -31,11 +36,14 @@ export { openExternalSafe } from './shared'
 export function registerIpc(win: () => BrowserWindow | null): void {
   const ctx = createIpcContext(win)
 
+  // 主机日志最先注册：隧道自启（registerTunnelsIpc 内同步触发）等早期事件也要能推给渲染端
+  registerLogsIpc(ctx)
   registerTerminalIpc(ctx)
   registerMonitorIpc(ctx)
   registerHostsIpc()
   registerScriptsIpc()
-  registerNotesIpc()
+  registerNotesIpc(ctx)
+  registerAutomationIpc()
   registerApiIpc(ctx)
   registerAiIpc(ctx)
   registerAgentIpc(ctx)
@@ -44,8 +52,13 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   registerMcpIpc()
   registerSkillsIpc()
   registerSftpIpc(ctx)
+  // SSH 隧道：状态变化经 ctx.broadcast 推给渲染端
+  registerTunnelsIpc(ctx)
   registerPluginsIpc()
   registerOpenerIpc()
   registerSystemIpc(ctx)
   registerTransferIpc(ctx)
+  registerGitIpc()
+  // 浏览器自动化：帧 / 状态 / 录制事件都经 ctx.broadcast 推给渲染端
+  registerBrowserIpc(ctx)
 }

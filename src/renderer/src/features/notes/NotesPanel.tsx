@@ -1,9 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronDown, ChevronRight, ChevronsLeft, FileText, FolderPlus, Pencil, Plus, Trash2 } from 'lucide-react'
-import { useDrag, useDrop } from 'react-dnd'
+import { ChevronsLeft, FileInput, FileText, FolderPlus, Pencil, Plus, Trash2 } from 'lucide-react'
+import { useDrag } from 'react-dnd'
 import { Button, Checkbox, Dropdown, Input, Modal, Tree, message, type MenuProps, type TreeDataNode } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'
+import { SidebarGroupRow } from '@/shared/components/SidebarGroupRow'
+import {
+  asRef,
+  DropLine,
+  mergeRefs,
+  useRowDrop,
+  type RowDragItem
+} from '@/shared/components/SidebarRowDnd'
 import type { NoteEntry, NoteGroup } from '@shared/types'
 
 /** 树节点 key 前缀：g: 分组、n: 笔记 */
@@ -14,11 +22,6 @@ const NOTE_KEY_PREFIX = 'n:'
 const DND_NOTE = 'note-item'
 const DND_GROUP = 'note-group'
 
-/** 拖拽载荷：两种类型都只需要被拖对象的 id */
-interface DragItem {
-  id: string
-}
-
 /** 列表块：未分组块（group 为空）恒在首位，其余每块是一个分组 */
 interface Block {
   group?: NoteGroup
@@ -27,86 +30,6 @@ interface Block {
 
 const groupKey = (id: string): string => GROUP_KEY_PREFIX + id
 const noteKey = (id: string): string => NOTE_KEY_PREFIX + id
-
-/**
- * react-dnd 的连接器签名是 `(node) => ReactElement | null`，与 React 的 ref 回调
- * （返回 void 或清理函数）不兼容，这里显式转成 ref 回调。
- * 必须配合 useMemo 使用：每次渲染新建 ref 会导致 React 卸载/重挂节点，拖拽中途断链。
- */
-function asRef<T extends HTMLElement>(connect: unknown) {
-  return (node: T | null): void => {
-    ;(connect as (el: T | null) => void)(node)
-  }
-}
-
-/** 同一个节点既要拖拽又要接掉落：合并两个 ref 回调 */
-function mergeRefs<T extends HTMLElement>(a: (node: T | null) => void, b: (node: T | null) => void) {
-  return (node: T | null): void => {
-    a(node)
-    b(node)
-  }
-}
-
-/**
- * 行的落点：接受「笔记」与「分组」两种拖拽。
- * 用指针落在行的上/下半区判定插入位置（after），行边缘画一条插入指示线。
- */
-function useRowDrop<T extends HTMLElement>(opts: {
-  /** 拖的是笔记时固定视为「追加到末尾」（拖到分组标题上 = 放进组尾） */
-  appendWhenNoteDrag?: boolean
-  canDrop?: (item: DragItem, type: string) => boolean
-  drop: (item: DragItem, type: string, after: boolean) => void
-}) {
-  const { appendWhenNoteDrag, canDrop, drop } = opts
-  const nodeRef = useRef<T | null>(null)
-  /** 落点在上半区还是下半区：drop 时读取（不放进 deps，避免拖拽中反复重建 spec） */
-  const afterRef = useRef(false)
-  const [after, setAfter] = useState(false)
-
-  const [{ over }, connectDrop] = useDrop<DragItem, void, { over: boolean }>(
-    () => ({
-      accept: [DND_NOTE, DND_GROUP],
-      canDrop: (item, monitor) => (canDrop ? canDrop(item, String(monitor.getItemType())) : true),
-      hover: (_item, monitor) => {
-        const node = nodeRef.current
-        const offset = monitor.getClientOffset()
-        if (!node || !offset) return
-        const rect = node.getBoundingClientRect()
-        const next =
-          appendWhenNoteDrag && String(monitor.getItemType()) === DND_NOTE
-            ? true
-            : offset.y > rect.top + rect.height / 2
-        afterRef.current = next
-        setAfter(next)
-      },
-      drop: (item, monitor) => drop(item, String(monitor.getItemType()), afterRef.current),
-      collect: (m) => ({ over: m.isOver() && m.canDrop() })
-    }),
-    [appendWhenNoteDrag, canDrop, drop]
-  )
-
-  const ref = useMemo(
-    () => (node: T | null) => {
-      nodeRef.current = node
-      ;(connectDrop as (el: T | null) => void)(node)
-    },
-    [connectDrop]
-  )
-
-  return { ref, over, after }
-}
-
-/** 插入指示线（行内绝对定位，配合行的 relative） */
-function DropLine({ after }: { after: boolean }) {
-  return (
-    <span
-      className={cn(
-        'pointer-events-none absolute inset-x-0 h-0.5 rounded bg-primary',
-        after ? '-bottom-px' : '-top-px'
-      )}
-    />
-  )
-}
 
 /**
  * 笔记侧边栏：笔记按分组列出，支持搜索 / 新建 / 打开 / 删除。
@@ -124,6 +47,7 @@ export function NotesPanel() {
   })
   const createNote = useAppStore((s) => s.createNote)
   const deleteNote = useAppStore((s) => s.deleteNote)
+  const importNotes = useAppStore((s) => s.importNotes)
   const openNoteTab = useAppStore((s) => s.openNoteTab)
   const saveNoteGroup = useAppStore((s) => s.saveNoteGroup)
   const deleteNoteGroup = useAppStore((s) => s.deleteNoteGroup)
@@ -257,6 +181,29 @@ export function NotesPanel() {
     }
   }
 
+  /**
+   * 从本地导入文件：每个文件生成一篇笔记，导入后打开第一篇。
+   * 取消选择（没新建也没跳过）时静默返回，不弹提示。
+   */
+  const handleImport = async () => {
+    try {
+      const { createdIds, skipped } = await importNotes()
+      if (createdIds.length === 0 && skipped.length === 0) return
+      if (createdIds.length === 0) {
+        message.warning(`没有可导入的文本文件，已跳过 ${skipped.length} 个`)
+        return
+      }
+      openNoteTab(createdIds[0])
+      message.success(
+        skipped.length > 0
+          ? `已导入 ${createdIds.length} 篇笔记，跳过 ${skipped.length} 个文件`
+          : `已导入 ${createdIds.length} 篇笔记`
+      )
+    } catch (e) {
+      message.error(`导入失败：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
   const confirmDelete = async () => {
     const target = pendingDelete
     if (!target) return
@@ -336,18 +283,31 @@ export function NotesPanel() {
       return {
         key: groupKey(group.id),
         title: (
-          <GroupRow
+          <SidebarGroupRow
             expanded={isEmpty ? false : expandedKeys.includes(groupKey(group.id))}
-            group={group}
+            name={group.name}
             count={count}
             onToggle={isEmpty ? () => {} : () => toggleKey(groupKey(group.id))}
-            onDropNote={dropNote}
+            itemType={DND_NOTE}
+            groupType={DND_GROUP}
+            groupId={group.id}
+            onDropItem={dropNote}
             onDropGroup={dropGroup}
             onNew={() => void handleCreate(group.id)}
-            onRename={() => setGroupEdit({ id: group.id, name: group.name })}
-            onDelete={() => {
-              setDeleteGroupNotes(false)
-              setPendingGroupDelete(group)
+            newTitle="在此分组新建笔记"
+            menuItems={[
+              { key: 'new', icon: <Plus className="size-3.5" />, label: '在此分组新建笔记' },
+              { key: 'rename', icon: <Pencil className="size-3.5" />, label: '重命名' },
+              { type: 'divider' },
+              { key: 'delete', icon: <Trash2 className="size-3.5" />, label: '删除分组', danger: true }
+            ]}
+            onMenuClick={(key) => {
+              if (key === 'new') void handleCreate(group.id)
+              else if (key === 'rename') setGroupEdit({ id: group.id, name: group.name })
+              else {
+                setDeleteGroupNotes(false)
+                setPendingGroupDelete(group)
+              }
             }}
           />
         ),
@@ -379,6 +339,14 @@ export function NotesPanel() {
             title="新建分组"
             icon={<FolderPlus className="size-3.5" />}
             onClick={() => setGroupEdit({ name: '' })}
+          />
+          <Button
+            type="text"
+            size="small"
+            className="px-0.5 text-muted-foreground"
+            title="从本地导入文件（每个文件一篇笔记）"
+            icon={<FileInput className="size-3.5" />}
+            onClick={() => void handleImport()}
           />
           <Button
             type="text"
@@ -508,108 +476,6 @@ type DropNote = (
 ) => void
 type DropGroup = (dragId: string, targetGroupId: string, after: boolean) => void
 
-/** 分组行：可拖动排序，也可接收笔记（追加进组）；右键可重命名 / 删除 */
-function GroupRow({
-  expanded,
-  group,
-  count,
-  onToggle,
-  onDropNote,
-  onDropGroup,
-  onNew,
-  onRename,
-  onDelete
-}: {
-  /** 当前是否为展开状态（决定箭头方向） */
-  expanded: boolean
-  group: NoteGroup
-  count: number
-  /** 点击整行切换展开/折叠 */
-  onToggle: () => void
-  onDropNote: DropNote
-  onDropGroup: DropGroup
-  onNew: () => void
-  onRename: () => void
-  onDelete: () => void
-}) {
-  const [{ isDragging }, drag] = useDrag<DragItem, void, { isDragging: boolean }>(
-    () => ({
-      type: DND_GROUP,
-      item: { id: group.id },
-      collect: (m) => ({ isDragging: m.isDragging() })
-    }),
-    [group.id]
-  )
-
-  const { ref: dropRef, over, after } = useRowDrop<HTMLDivElement>({
-    // 拖笔记落在分组标题上 = 放进组尾
-    appendWhenNoteDrag: true,
-    canDrop: (item, type) => type === DND_NOTE || item.id !== group.id,
-    drop: (item, type, at) => {
-      if (type === DND_GROUP) onDropGroup(item.id, group.id, at)
-      else onDropNote(item.id, null, group.id, true)
-    }
-  })
-
-  const dragRef = useMemo(() => asRef<HTMLDivElement>(drag), [drag])
-  const ref = useMemo(() => mergeRefs(dropRef, dragRef), [dropRef, dragRef])
-
-  const items: MenuProps['items'] = [
-    { key: 'new', icon: <Plus className="size-3.5" />, label: '在此分组新建笔记' },
-    { key: 'rename', icon: <Pencil className="size-3.5" />, label: '重命名' },
-    { type: 'divider' },
-    { key: 'delete', icon: <Trash2 className="size-3.5" />, label: '删除分组', danger: true }
-  ]
-
-  // 拖拽 ref 放在最外层：antd Dropdown 会给子节点合并自己的 ref（React 19 下 element.ref 已变更），
-  // 让 Dropdown 只包住内容，dnd 的连接器才不会被覆盖
-  return (
-    <div
-      ref={ref}
-      className={cn(
-        'group/grp row-own-bg relative flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-md pr-1 transition-colors hover:bg-foreground/5',
-        isDragging && 'opacity-40'
-      )}
-      onClick={onToggle}
-      title="点击展开/折叠（可拖动排序）"
-    >
-      {over && <DropLine after={after} />}
-      <Dropdown
-        trigger={['contextMenu']}
-        menu={{
-          items,
-          onClick: ({ key }) => {
-            if (key === 'new') onNew()
-            else if (key === 'rename') onRename()
-            else onDelete()
-          }
-        }}
-      >
-        <div className="flex min-w-0 flex-1 items-center gap-1.5">
-          {expanded ? (
-            <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-          ) : (
-            <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
-          )}
-          <span className="truncate text-sm font-medium text-muted-foreground">{group.name}</span>
-          <span className="text-xs text-muted-foreground/70">{count}</span>
-          <Button
-            type="text"
-            size="small"
-            className="ml-auto px-1 opacity-0 transition-opacity group-hover/grp:opacity-100"
-            title="在此分组新建笔记"
-            icon={<Plus className="size-3.5" />}
-            onClick={(e) => {
-              e.stopPropagation()
-              onNew()
-            }}
-          />
-        </div>
-      </Dropdown>
-    </div>
-  )
-}
-
 /** 笔记行：可拖动排序 / 跨组；点击打开，右键打开 / 移出分组 / 删除 */
 function NoteRow({
   note,
@@ -633,7 +499,7 @@ function NoteRow({
   onDropNote: DropNote
   onDropGroup: DropGroup
 }) {
-  const [{ isDragging }, drag] = useDrag<DragItem, void, { isDragging: boolean }>(
+  const [{ isDragging }, drag] = useDrag<RowDragItem, void, { isDragging: boolean }>(
     () => ({
       type: DND_NOTE,
       item: { id: note.id },
@@ -643,6 +509,8 @@ function NoteRow({
   )
 
   const { ref: dropRef, over, after } = useRowDrop<HTMLDivElement>({
+    itemType: DND_NOTE,
+    groupType: DND_GROUP,
     canDrop: (item, type) =>
       type === DND_GROUP ? hasGroup && item.id !== note.groupId : item.id !== note.id,
     drop: (item, type, at) => {

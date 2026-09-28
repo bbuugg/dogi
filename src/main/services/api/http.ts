@@ -40,8 +40,31 @@ export interface HttpResult {
  * signal：外部取消信号（如接口请求页的「取消」按钮）。与内部超时共用一个
  * AbortController：外部信号中止时同样中止 fetch，走 catch 返回 status=0 + error。
  */
+/**
+ * 补全协议头：用户输入的地址常不带 http(s)://（如直接填 api.example.com/users），
+ * Node 全局 fetch 必须有协议，否则直接抛 TypeError: Invalid URL。
+ * 仅当完全没有 http/https 协议时才补 http://；已有的其它协议（如 ftp://）原样保留，不强行改。
+ */
+function withProtocol(url: string): string {
+  if (!/^https?:\/\//i.test(url)) return 'http://' + url
+  return url
+}
+
 export async function executeHttp(req: HttpRequestInput, signal?: AbortSignal): Promise<HttpResult> {
   const start = performance.now()
+  // 空地址：fetch 同样会抛 Invalid URL，这里先给出人类可读的错误。
+  if (!req.url || !req.url.trim()) {
+    return {
+      ok: false,
+      status: 0,
+      statusText: '',
+      headers: {},
+      body: '',
+      timeMs: Math.round(performance.now() - start),
+      error: '请填写请求地址'
+    }
+  }
+  const targetUrl = withProtocol(req.url.trim())
   const ctrl = new AbortController()
   const timer =
     req.timeoutMs && req.timeoutMs > 0 ? setTimeout(() => ctrl.abort(), req.timeoutMs) : null
@@ -88,7 +111,7 @@ export async function executeHttp(req: HttpRequestInput, signal?: AbortSignal): 
     // 忽略：无 undici 时走默认 dispatcher
   }
   try {
-    const res = await fetch(req.url, init)
+    const res = await fetch(targetUrl, init)
     const body = await res.text()
     const headers: Record<string, string> = {}
     res.headers.forEach((v, k) => {

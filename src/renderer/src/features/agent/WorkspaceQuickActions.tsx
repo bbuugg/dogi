@@ -7,7 +7,7 @@
  * 刻意不做成独立的一栏，避免顶栏多出一条常驻空白。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Button, Dropdown, Tooltip, message } from 'antd'
+import { Dropdown, Tooltip, message } from 'antd'
 import type { MenuProps } from 'antd'
 import { Settings2, Zap } from 'lucide-react'
 import { useAppStore } from '@/stores/app-store'
@@ -94,12 +94,13 @@ export function WorkspaceQuickActions({
           placement="bottomRight"
           menu={{ items: menuItems, onClick: handleClick, style: { minWidth: 180 } }}
         >
-          <Button
-            type="text"
-            className="px-1.5 text-muted-foreground"
-            icon={<Zap className="size-4" />}
+          <button
+            type="button"
             aria-label="快捷功能"
-          />
+            className="flex size-7 items-center justify-center rounded-md border border-border bg-transparent text-foreground hover:bg-foreground/10"
+          >
+            <Zap className="size-4" />
+          </button>
         </Dropdown>
       </Tooltip>
       <QuickActionsDialog
