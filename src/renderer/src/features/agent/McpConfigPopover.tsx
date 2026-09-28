@@ -17,6 +17,7 @@ export function McpConfigPopover() {
   const [servers, setServers] = useState<Array<McpServerConfig & { error?: string }>>([])
   const [loading, setLoading] = useState(false)
   const preferences = useAppStore((s) => s.preferences)
+  const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const browserToolMode = (preferences.browserToolMode ?? 'in-app') as BrowserToolMode
   /** 关掉开关时记住「关之前用的是哪套」，重新打开能回到它 */
   const [lastOnMode, setLastOnMode] = useState<BrowserToolMode>(
@@ -159,7 +160,7 @@ export function McpConfigPopover() {
               type="text"
               onClick={() => {
                 setOpen(false)
-                void window.api.window.openSettings('mcp')
+                setSettingsOpen(true, 'mcp')
               }}
             >
               在设置中添加 / 编辑

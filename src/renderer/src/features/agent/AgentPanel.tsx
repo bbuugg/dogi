@@ -203,11 +203,7 @@ export function AgentPanel() {
       <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
         {workspaces.length === 0 ? (
           <div className="mx-2 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
-            还没有工作区。
-            <br />
-            点击右上角 + 选择一个本地目录，
-            <br />
-            Agent 将只在该目录内读写文件与执行命令。
+            空空如也。
           </div>
         ) : (
           <div className="flex flex-col gap-0.5">

@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { app, BrowserWindow, ipcMain, Menu, nativeTheme, Tray } from 'electron'
+import { app, BrowserWindow, Menu, nativeTheme, Tray } from 'electron'
 import { registerIpc, openExternalSafe } from './ipc/index'
 import { requestRendererFlush } from './ipc/system'
 import { browserSessions } from './services/browser/session'
@@ -17,8 +17,6 @@ import { resolveIconPath } from './services/system/icon'
 registerWorkspaceMediaScheme()
 
 let mainWindow: BrowserWindow | null = null
-/** 独立设置窗口（单例；渲染端 `?window=settings`）；关掉后置空 */
-let settingsWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 /** 真正退出程序的标志位：仅当用户从托盘「退出」触发，关闭窗口时置位 */
 let isQuiting = false
@@ -137,8 +135,8 @@ function createWindow(): void {
     height: bounds?.height ?? 800,
     x: bounds?.x,
     y: bounds?.y,
-    minWidth: 960,
-    minHeight: 600,
+    minWidth: 1280,
+    minHeight: 800,
     show: false,
     icon: iconPath,
     // 自定义标题栏：隐藏系统标题栏但保留窗口阴影/圆角/动画；
@@ -226,65 +224,6 @@ function createWindow(): void {
   }
 }
 
-/**
- * 独立设置窗口（单例）：同一份渲染端 + `?window=settings`，渲染端据此只渲染设置面板
- * （左分组菜单 + 右内容区，整窗铺满）。
- * 单例：已经开着就拉到前面，不再开第二个（连点设置按钮不该堆一屏窗口）。
- * 用与主窗口一致的自绘标题栏（渲染端画「设置 + 关闭」），Win/Linux 隐藏系统标题栏，
- * mac 保留交通灯。
- */
-function openSettingsWindow(tab?: string): void {
-  if (settingsWindow && !settingsWindow.isDestroyed()) {
-    if (settingsWindow.isMinimized()) settingsWindow.restore()
-    settingsWindow.show()
-    settingsWindow.focus()
-    return
-  }
-
-  const query = new URLSearchParams({ window: 'settings' })
-  if (tab) query.set('tab', tab)
-  const queryObj: Record<string, string> = { window: 'settings' }
-  if (tab) queryObj.tab = tab
-
-  settingsWindow = new BrowserWindow({
-    width: 880,
-    height: 540,
-    minWidth: 720,
-    minHeight: 520,
-    show: false,
-    title: '设置',
-    autoHideMenuBar: true,
-    // 与主窗口同一套自绘标题栏（渲染端画「设置 + 关闭」），Win/Linux 隐藏系统标题栏，
-    // mac 用 hiddenInset 保留交通灯
-    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
-    ...(process.platform === 'darwin' ? { trafficLightPosition: { x: 12, y: 12 } } : {}),
-    // 创建前 themeSource 已就位，按解析后的主题设底色避免闪白
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#0f1117' : '#ffffff',
-    webPreferences: {
-      preload: join(import.meta.dirname, '../preload/index.cjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      spellcheck: false,
-      // 与主窗口同理：设置窗口也可能在后台被使用，不吃 Chromium 后台节流
-      backgroundThrottling: false
-    }
-  })
-
-  settingsWindow.on('ready-to-show', () => settingsWindow?.show())
-  settingsWindow.on('closed', () => {
-    settingsWindow = null
-  })
-
-  const devUrl = process.env.VITE_DEV_SERVER_URL
-  if (devUrl) {
-    void settingsWindow.loadURL(`${devUrl}?${query.toString()}`)
-  } else {
-    void settingsWindow.loadFile(join(import.meta.dirname, '../renderer/index.html'), {
-      query: queryObj
-    })
-  }
-}
-
 function saveBounds(): void {
   if (mainWindow && !mainWindow.isMinimized() && !mainWindow.isDestroyed()) {
     storage.setWindowBounds(mainWindow.getBounds())
@@ -302,12 +241,6 @@ app.whenReady().then(async () => {
   // 主机日志：早于 IPC 注册初始化，隧道自启（注册期同步触发）等早期事件的日志同样要落盘
   await hostLogger.init()
   registerIpc(() => mainWindow)
-  // 设置窗口在主进程侧是「开一个独立窗口」，由渲染端的左下角菜单 / 命令面板触发
-  ipcMain.handle('window:openSettings', (_e, tab?: string) => openSettingsWindow(tab))
-  // 只关设置窗口本身（window:close 关的是主窗口，设置窗口的关闭按钮不能复用它）
-  ipcMain.handle('window:closeSettings', () => {
-    if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.close()
-  })
   createWindow()
   // 插件需在 IPC 注册后加载，使插件主进程 handler 可被路由
   await pluginHost.init()

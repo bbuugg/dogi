@@ -296,7 +296,7 @@ export function CommandPalette() {
       icon: Settings,
       run: () => {
         close()
-        setSettingsOpen(true, 'ai')
+        setSettingsOpen(true, 'models')
       }
     },
     {

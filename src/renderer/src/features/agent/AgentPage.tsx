@@ -966,7 +966,7 @@ export function AgentPage({
     if (!activeId || !conversationId || !value) return
     if (value === ACP_MANAGE_OPTION) {
       // 预置配置在设置页统一维护
-      setSettingsOpen(true, 'ai')
+      setSettingsOpen(true, 'models')
       return
     }
     if (value === ACP_OPTION) {

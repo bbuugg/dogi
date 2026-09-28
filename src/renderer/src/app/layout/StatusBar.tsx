@@ -197,7 +197,7 @@ function MenuButton({ onTransfer }: { onTransfer: (mode: TransferMode) => void }
     } else if (key.startsWith('color:')) {
       setOpen(false)
       const id = key.slice('color:'.length)
-      if (id === 'custom') void window.api.window.openSettings('prefs')
+      if (id === 'custom') setSettingsOpen(true, 'prefs')
       else void setColorTheme(id as ColorThemeName)
     }
   }

@@ -86,6 +86,37 @@ export type PanelTabType =
   | 'agent'
   | 'automation'
 
+/** 设置弹窗左侧分组（与 `features/settings/SettingsModal` 的菜单一一对应） */
+export type SettingsTab =
+  | 'prefs'
+  | 'shortcuts'
+  | 'terminal'
+  | 'models'
+  | 'acp'
+  | 'mcp'
+  | 'skills'
+  | 'timeouts'
+  | 'prompt'
+
+/** 全部合法分组（顺序即菜单顺序） */
+export const SETTINGS_TABS: readonly SettingsTab[] = [
+  'prefs',
+  'shortcuts',
+  'terminal',
+  'models',
+  'acp',
+  'mcp',
+  'skills',
+  'timeouts',
+  'prompt'
+]
+
+/** 归一化外部传入的分组（非法值或未传都回落到「偏好」） */
+export function normalizeSettingsTab(tab?: string): SettingsTab {
+  if (tab && (SETTINGS_TABS as readonly string[]).includes(tab)) return tab as SettingsTab
+  return 'prefs'
+}
+
 /** 编辑页（脚本 / 笔记）的保存状态，由页面自己投影到底部状态栏 */
 export type EditorSaveState = 'saving' | 'dirty' | 'saved'
 
@@ -839,7 +870,8 @@ interface UiState {
   sshDialog: { open: boolean; editing?: SshProfile | null; groupId?: string }
   /** 运行脚本对话框：scriptId 为预设脚本（可空，在对话框内选择） */
   runScriptDialog: { open: boolean; scriptId?: string }
-  settingsTab: 'ai' | 'terminal' | 'prefs' | 'shortcuts'
+  /** 设置弹窗当前选中的分组（打开时由入口参数写入，见 setSettingsOpen） */
+  settingsTab: SettingsTab
   /** 是否打开命令面板（Ctrl+Shift+P：脚本、终端、主机、设置等命令入口） */
   commandPaletteOpen: boolean
   /**
@@ -1765,6 +1797,8 @@ let flushWired = false
             const s = get()
             // 设置页正在录制：让路，否则按下的组合会被录进去的同时把动作也跑一遍
             if (s.ui.shortcutRecording) return
+            // 设置弹窗打开时同样让路：里面的输入框 / 下拉不该被主界面的快捷键抢键
+            if (s.ui.settingsOpen) return
             const hit = findShortcutByEvent(s.shortcuts, e)
             if (!hit) return
             // 捕获阶段拦下并阻止继续传播：让快捷键优先于 xterm / Monaco 自己的按键处理
@@ -2135,18 +2169,17 @@ let flushWired = false
 
     setAiFloatingPos: (pos) =>
       set((s) => ({ ui: { ...s.ui, aiFloatingPos: pos } })),
-    setSettingsOpen: (open, tab) => {
-      // 设置改为「独立窗口」承载（参考 fishwork 桌面版）：直接拉起主进程建好的设置窗口，
-      // 已开着则聚焦、不会重复开。仍保留 ui 中的状态，避免其它代码读到「没打开」。
-      if (open) void window.api.window.openSettings(tab)
+    setSettingsOpen: (open, tab) =>
+      // 设置就是主窗口里的一个 antd Modal：与主界面同一个渲染进程、同一个 store，
+      // 改完立即生效，不再需要「独立窗口 + 跨窗口广播回填」那套同步。
+      // 打开时按入口参数重置分组（未传 = 偏好），与旧独立窗口每次新开的行为一致。
       set((s) => ({
         ui: {
           ...s.ui,
           settingsOpen: open,
-          ...(tab ? { settingsTab: tab } : {})
+          ...(open ? { settingsTab: normalizeSettingsTab(tab) } : {})
         }
-      }))
-    },
+      })),
     setSshDialog: (open, editing = null, groupId) =>
       set((s) => ({ ui: { ...s.ui, sshDialog: { open, editing, groupId } } })),
 

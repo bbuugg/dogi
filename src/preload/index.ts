@@ -644,15 +644,10 @@ const api = {
     minimize: (): Promise<void> => ipcRenderer.invoke('window:minimize'),
     toggleMaximize: (): Promise<void> => ipcRenderer.invoke('window:toggleMaximize'),
     close: (): Promise<void> => ipcRenderer.invoke('window:close'),
-    /** 关闭独立设置窗口（区别于 close：close 关的是主窗口） */
-    closeSettings: (): Promise<void> => ipcRenderer.invoke('window:closeSettings'),
     isMaximized: (): Promise<boolean> => ipcRenderer.invoke('window:isMaximized'),
     /** 订阅最大化状态变化（自定义标题栏切换最大化/还原图标） */
     onMaximizedChange: (cb: (maximized: boolean) => void) =>
-      subscribe('window:maximized', cb),
-    /** 打开独立设置窗口（已开着则聚焦，不会重复开） */
-    openSettings: (tab?: string): Promise<void> =>
-      ipcRenderer.invoke('window:openSettings', tab)
+      subscribe('window:maximized', cb)
   },
   zmodem: {
     /** 打开文件选择框，返回选中文件的字节（用于 rz 上传） */

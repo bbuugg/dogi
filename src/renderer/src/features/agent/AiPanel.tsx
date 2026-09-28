@@ -567,7 +567,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const handleModelSelect = (value?: string): void => {
     if (!sessionId || !value) return
     if (value === ACP_MANAGE_OPTION) {
-      setSettingsOpen(true, 'ai')
+      setSettingsOpen(true, 'models')
       return
     }
     if (value.startsWith('cfg:')) {
@@ -879,7 +879,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               icon={<Settings2 className="size-3.5" />}
               className="h-7 w-7 shrink-0 p-0 text-muted-foreground"
               title="AI 设置"
-              onClick={() => setSettingsOpen(true, 'ai')}
+              onClick={() => setSettingsOpen(true, 'models')}
             />
             <Button
               type="text"
@@ -942,7 +942,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                       size="small"
                       variant="filled"
                       className="mt-2"
-                      onClick={() => setSettingsOpen(true, 'ai')}
+                      onClick={() => setSettingsOpen(true, 'models')}
                     >
                       先去配置模型
                     </Button>
