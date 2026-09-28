@@ -244,7 +244,7 @@ function MessageBubbleImpl({
         {/* 选中态用半透明白：主色底 + 白字下，浏览器的默认蓝色选区会把字压得看不清 */}
         <div
           className={cn(
-            'max-w-[85%] selection:bg-white/25 whitespace-pre-wrap rounded-lg rounded-br-sm bg-primary px-3 py-2 text-[15px] text-white',
+            'max-w-[85%] selection:bg-white/25 whitespace-pre-wrap rounded-lg rounded-br-sm bg-primary px-3 py-2 text-[15px] text-white break-all',
             // 正在编辑：压暗 + 描边，一眼能看出「改的是这条」，和参考实现一个路子
             editing && 'opacity-50 ring-2 ring-border ring-offset-2 ring-offset-background'
           )}
@@ -1161,7 +1161,8 @@ export function AgentPage({
           content: (
             <GitPanel
               cwd={active.path}
-              onClose={closeGitTab}
+              // 面板内部不再有关闭按钮：要关就用下面标签自己的 `onClose`（标签条上的 ×）
+              // 或顶栏的源码管理按钮
               onChanges={(info) => setGitCount(info ? info.count : 0)}
             />
           ),
@@ -1273,7 +1274,7 @@ export function AgentPage({
                 >
                   <GitBranch className="size-4" />
                   {gitCount > 0 && (
-                    <span className="absolute -right-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] leading-none text-primary-foreground">
+                    <span className="absolute -right-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] leading-none text-white">
                       {gitCount > 99 ? '99+' : gitCount}
                     </span>
                   )}

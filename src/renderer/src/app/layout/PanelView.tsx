@@ -65,6 +65,10 @@ const STRIP_HEIGHT = 32
 const TAB_SCROLL_CLEAR = 8
 /** 标签条右缘 sticky「新建」按钮的宽度（w-8）：它会盖住滚到最右侧的标签，得避开 */
 const NEW_TAB_BUTTON_WIDTH = 32
+/** 左右分屏时每个面板的最小宽度（px）：再窄终端/文件树就没法用了 */
+const MIN_PANE_WIDTH = 340
+/** 上下分屏时每个面板的最小高度占比（容器高度不足时按此兜底） */
+const MIN_PANE_RATIO = 0.05
 
 /** 根据指针位置判断落在组内的哪个分区 */
 function zoneOf(rect: DOMRect, x: number, y: number): DropZone {
@@ -212,7 +216,20 @@ function Splitter({
     const a0 = sizes[index] ?? 1
     const b0 = sizes[index + 1] ?? 1
     const total = a0 + b0
-    const MIN = 0.05 * total
+    /**
+     * 相邻两侧的最小权重。sizes 是**相对比例**（实际像素 = axisSize × 权重 ÷ 权重总和），
+     * 所以最小像素要先折算成权重：
+     * - 左右分屏：每个面板至少 MIN_PANE_WIDTH（px）；
+     * - 上下分屏：宽度不受分隔条影响，维持按比例的最小高度；
+     * 再统一封顶到「两侧各一半」—— 容器本身就塞不下两个最小面板时（窗口很窄 / 嵌套很深），
+     * 不封顶会让两侧互相顶死、分隔条完全拖不动。
+     */
+    const sumWeight = sizes.reduce((a, b) => a + b, 0) || total || 1
+    const minWeight =
+      direction === 'row'
+        ? (MIN_PANE_WIDTH / (axisSize || 1)) * sumWeight
+        : MIN_PANE_RATIO * total
+    const MIN = Math.min(minWeight, total / 2)
 
     const move = (ev: PointerEvent) => {
       const cur = direction === 'row' ? ev.clientX : ev.clientY

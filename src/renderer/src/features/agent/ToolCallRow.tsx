@@ -1,5 +1,9 @@
 import {
+  CircleCheck,
   CircleQuestionMark,
+  CircleSlash,
+  CircleX,
+  Clock,
   FilePenLine,
   FilePlus,
   FileSearch,
@@ -17,6 +21,7 @@ import {
   type LucideIcon
 } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
+import { Tooltip } from 'antd'
 import { cn } from 'cn'
 import { CollapsibleRow } from '@/features/agent/CollapsibleRow'
 import { MessageCopyButton } from '@/features/agent/MessageCopyButton'
@@ -94,12 +99,16 @@ export function toolRunStatus(args: {
   return args.streaming ? 'running' : 'cancelled'
 }
 
-const STATUS_META: Record<ToolRunStatus, { label: string; cls: string }> = {
-  pending: { label: '待批准', cls: 'text-amber-600 dark:text-amber-400' },
-  running: { label: '调用中', cls: 'text-primary' },
-  done: { label: '已完成', cls: 'text-emerald-600 dark:text-emerald-400' },
-  error: { label: '失败', cls: 'text-destructive' },
-  cancelled: { label: '已取消', cls: 'text-muted-foreground/60' }
+/**
+ * 状态以**图标**呈现（文字太占位，横条右侧只留一个记号），`label` 只做 hover 提示
+ * 与无障碍名称。running 的图标自转（见下方 render）。
+ */
+const STATUS_META: Record<ToolRunStatus, { label: string; Icon: LucideIcon; cls: string }> = {
+  pending: { label: '待批准', Icon: Clock, cls: 'text-amber-600 dark:text-amber-400' },
+  running: { label: '调用中', Icon: Loader2, cls: 'text-primary animate-spin' },
+  done: { label: '已完成', Icon: CircleCheck, cls: 'text-emerald-600 dark:text-emerald-400' },
+  error: { label: '失败', Icon: CircleX, cls: 'text-destructive' },
+  cancelled: { label: '已取消', Icon: CircleSlash, cls: 'text-muted-foreground/60' }
 }
 
 /** 优先当作「主参数」展示的字段名（按顺序取第一个命中的） */
@@ -176,7 +185,7 @@ function clip(text: string): string {
 /**
  * 工具调用横条（参考 ainav/sdk 的 ToolCallBlock，样式全部 Tailwind 重写）。
  *
- * 收起时就是一行：[工具图标] [中文名] [主参数预览] [状态] [›]；
+ * 收起时就是一行：[工具图标] [中文名] [主参数预览] [状态图标] [›]；
  * 展开后：
  * - **改文件的工具**（write_file / edit_file / delete_file）显示 git 风格的**前后对比**，
  *   不显示原始入参 / 结果 —— 参数里是整份文件内容，读起来毫无意义（见 tool-file-diff.ts）；
@@ -216,6 +225,7 @@ export function ToolCallRow({
 
   const Icon = toolIcon(toolName)
   const meta = STATUS_META[status]
+  const StatusIcon = meta.Icon
   /** 改文件的工具：展开体换成前后对比，入参 / 结果就不再摆出来了 */
   const fileDiff = buildFileDiff(toolName, input)
   /** 读取类（见 NO_PARAM_TOOLS）：展开体只有内容本身，连「结果」这个标题也省掉 */
@@ -282,8 +292,9 @@ export function ToolCallRow({
           {preview}
         </span>
       )}
-      {status === 'running' && <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />}
-      <span className={cn('shrink-0', meta.cls)}>{meta.label}</span>
+      <Tooltip title={meta.label}>
+        <StatusIcon aria-label={meta.label} className={cn('size-3.5 shrink-0', meta.cls)} />
+      </Tooltip>
     </CollapsibleRow>
   )
 }

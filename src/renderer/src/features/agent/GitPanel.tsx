@@ -13,8 +13,7 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
-  Upload,
-  X
+  Upload
 } from 'lucide-react'
 import type { GitBranchesResult, GitChange, GitCommit, GitStatusResult } from '@shared/types'
 import { buildRows, INDENT, type RowNode } from './git-tree'
@@ -113,12 +112,10 @@ function DiffBlock({ data }: { data?: { text: string | null; loading: boolean } 
 
 export function GitPanel({
   cwd,
-  onClose,
   onChanges
 }: {
   /** 工作区目录（用来定位仓库根） */
   cwd: string
-  onClose: () => void
   /** 刷新完状态后回报改动数（给入口图标的 badge 用）；null = 不是仓库 */
   onChanges?: (info: { count: number; truncated: boolean } | null) => void
 }) {
@@ -643,14 +640,6 @@ export function GitPanel({
             onClick={() => void refresh()}
             className="!px-0 !h-7 !w-7 !text-muted-foreground hover:!bg-foreground/10"
             icon={<RefreshCw className={cn('size-3.5', loading && 'animate-spin')} />}
-          />
-          <Button
-            type="text"
-            size="small"
-            title="关闭"
-            onClick={onClose}
-            className="!px-0 !h-7 !w-7 !text-muted-foreground hover:!bg-foreground/10"
-            icon={<X className="size-4" />}
           />
         </span>
       </div>
