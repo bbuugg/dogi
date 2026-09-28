@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { unlink } from 'node:fs/promises'
+import { readdir, rm, stat, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import type {
   GitAction,
@@ -191,8 +191,14 @@ export async function getGitStatus(cwd: string): Promise<GitStatusResult> {
   const root = await gitRoot(cwd)
   const repo = root || cwd
 
+  /**
+   * ⚠️ 未跟踪必须是 `-uall`，**不能**退回 `normal`：normal 会把整个未跟踪目录折叠成
+   * `dir/` 一条（git 的省行行为），面板上就是一个「文件夹」条目 —— 它既没有可展开的文件、
+   * 也没有 diff，展开只能显示「无可显示的差异」（用户报告：改的是文件夹下的一堆文件）。
+   * all 会把目录下的每个文件各列一行，渲染端再按路径把它们折成目录树。
+   */
   const [statusRes, remoteRes] = await Promise.all([
-    runGit(repo, ['status', '--porcelain=v1', '-b', '--untracked-files=normal']),
+    runGit(repo, ['status', '--porcelain=v1', '-b', '--untracked-files=all']),
     runGit(repo, ['remote', '-v'])
   ])
 
@@ -249,14 +255,57 @@ export async function getGitLog(cwd: string, n = 30): Promise<GitCommit[]> {
     .map(([hash, short, subject, author, date]) => ({ hash, short, subject, author, date }))
 }
 
-/** 取某个文件的 diff（staged=true 取已暂存；否则取工作区未暂存） */
+/**
+ * 取某个文件的 diff（staged=true 取已暂存；否则取工作区未暂存）。
+ *
+ * ⚠️ 未跟踪文件不在 git 的 index 里，`git diff` 对它**永远输出空** —— 面板上就是
+ * 「无可显示的差异」，新文件等于看不到内容。这类文件改用 `--no-index` 跟空设备比，
+ * 拿到「整份内容都是新增」的 diff（二进制文件 git 自己会输出 Binary files differ）。
+ * `/dev/null` 是 git 内部识别空设备的名字，Windows 上同样成立。
+ */
 export async function getGitDiff(cwd: string, path: string, staged: boolean): Promise<string> {
   const root = (await gitRoot(cwd)) || cwd
+  // 目录条目（`nested/`）没有 diff 可言：git 根本不列出目录里的文件
+  if (path.endsWith('/')) return ''
+  if (!staged && !(await isTracked(root, path))) {
+    // --no-index 有差异时退出码是 1（不是错误），runGit 不看退出码
+    const untracked = await runGit(root, ['diff', '--no-index', '--', '/dev/null', path])
+    return untracked.stdout
+  }
   const args = ['diff']
   if (staged) args.push('--staged')
   args.push('--', path)
   const res = await runGit(root, args)
   return res.stdout
+}
+
+/**
+ * 列出一个**目录条目**（未跟踪的目录 / 嵌套仓库，见 `buildRows` 的 dirEntry）里的文件。
+ *
+ * git 不跨仓库边界，`status` 对这种目录只给一行 `nested/` —— 想看里面有什么，只能自己读盘。
+ *
+ * ⚠️ 这是**只读预览，不参与提交**：里面的文件属于另一个仓库（或链接目录），父仓库 `add`
+ * 它们会被 git 拒绝，所以既不能逐个暂存也没有 diff。
+ * ⚠️ 默认只取前 **20** 项：整目录列全（曾经是 200）会让「更改」区看起来像几百条改动 ——
+ * 用户实测误以为「明明没改东西却列出一堆文件」（见 AGENTS 6.6 第 29 条）。
+ * 跳过 `.git`、限制条数并**不跟随符号链接 / junction**（避免绕圈），免得误把依赖目录读爆。
+ */
+export async function listGitDir(cwd: string, path: string, limit = 20): Promise<string[]> {
+  const root = (await gitRoot(cwd)) || cwd
+  const out: string[] = []
+  const walk = async (dir: string, prefix: string): Promise<void> => {
+    if (out.length >= limit) return
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
+    for (const e of entries) {
+      if (out.length >= limit) return
+      if (e.name === '.git') continue
+      const rel = prefix ? `${prefix}/${e.name}` : e.name
+      if (e.isDirectory()) await walk(join(dir, e.name), rel)
+      else out.push(rel)
+    }
+  }
+  await walk(join(root, path), '')
+  return out
 }
 
 /** 文件是否已被 git 跟踪（用来区分 rollback 里「删文件」还是「丢弃改动」） */
@@ -273,8 +322,12 @@ async function rollbackFile(root: string, path: string, mode: 'worktree' | 'all'
   const full = join(root, path)
   const tracked = await isTracked(root, path)
   if (!tracked) {
-    // 未跟踪：git 没有它的记录，只能从磁盘删
-    await unlink(full).catch(() => {})
+    // 未跟踪：git 没有它的记录，只能从磁盘删。
+    // ⚠️ 目录条目（未跟踪的目录 / 嵌套仓库，路径带尾斜杠）必须**递归**删 —— unlink 对目录
+    // 在 Windows 上直接失败，表现就是「点了回退没反应」。
+    const st = await stat(full).catch(() => null)
+    if (st?.isDirectory()) await rm(full, { recursive: true, force: true }).catch(() => {})
+    else await unlink(full).catch(() => {})
     return
   }
   if (mode === 'worktree') {

@@ -254,9 +254,12 @@ Session.onData → sessionManager.emit('data') → ipc/terminal.ts broadcast →
 - 请求里带上 `backend` + `configId` + `modelId`，主进程**优先用请求里的，取不到才回退设置里的默认值**；
   会话选的配置被删掉时也要回退，否则该会话直接报「未配置」。
 - `aiSettings.activeConfigId` / `activeAcpId` 降级为**新会话的初始值**，设置页那颗星叫「默认」。
-- ⚠️ `saveAgentConversation` 判断这两个字段用 **`'configId' in input`** 而不是 `??`：
-  落盘时每次显式带上它们，`undefined` 表示「这个会话没选、走默认」，必须能覆盖旧值 ——
-  否则从 ACP / 某模型切回默认就永远切不回来。
+- ⚠️ `saveAgentConversation` 判断 **`backend` / `configId` / `modelId` 三个字段**都用
+  **`'x' in input`** 而不是 `??`：落盘时每次显式带上它们，`undefined` 表示「这个会话没选、走默认」，
+  必须能覆盖旧值 —— 否则从 ACP / 某模型切回默认就永远切不回来。
+- ⚠️ **三个字段必须一起落盘**：`modelId` 曾经在整条链路上缺席（`persistConversation` → preload →
+  `ipc/agent.ts` → `storage.saveAgentConversation`），会话里换的模型永远写不进磁盘，重启后回退成
+  配置默认模型（用户报告「每个会话设置的模型重启后恢复成默认」）。加字段时一路对齐，别只改一头。
 - `setAgentConversationModel` **不动 `updatedAt`**（配置变更不该让会话跳到列表最前）。
 - ACP 常驻连接按 `conversationId` 缓存：同一工作区两个会话必须各有独立 agent 上下文，共用会串味。
 
@@ -556,6 +559,10 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 | `scripts/verify-port-killer.mjs` | 端口占用插件全链路：插件播种/视图注册 → 探针 spawn 的 node 子进程真占随机端口 → 查询命中（PID / 进程名 / 监听中）→ 行内复制命令（`killCommand` 平台格式）→ **Popconfirm 真杀**（子进程退出 + 端口连接被拒 + 自动复查为空）→ 保护/校验分支（kill PID 1 / 非法 / 不存在、search 70000）→ **UDP 占用**（netstat UDP 行没有状态列）→ 重新查询 |
 | `scripts/verify-terminal-logging.mjs` | 终端命令 + 输出记录：命令装配（普通 / 退格 / Ctrl+C / 不可还原行不记 / bracketed paste）、`[脚本]` 来源标记、输出增量回填同一条目、原始会话文件（含未记录命令的裸输出）、关闭条目、JSONL 同 seq 多行、面板终端过滤、清空连 `sessions/` 归零。⚠️ bracketed paste 用例必须放最后：部分 PowerShell（如本机 5.1）未启用 `?2004h`，合成标记会吞掉后续回显 |
 | `scripts/verify-terminal-prediction.mjs` | 终端命令预测：CDP 真键盘注入（先点终端给 xterm 焦点）——未输入无下拉、「键入 git → 'git status' 行渲染宽度带空格」、「前缀以空格结尾 → 仍带空格」、`→` 接受 → 下拉收起 + PTY 回显补全后的 `git log`、备用屏幕（tmux / vim）里按 `d` 不弹（见 6.5 第 25 条）。⚠️ 防的是 flex 子项边界空格被裁的坑（见 6.5 第 24 条）：断言必须量渲染宽度，`textContent` 测不出来 |
+| `scripts/verify-git-changes.ts` | 源代码管理「更改」列表的数据层：**直接跑 `services/git.ts` 真源码**（`node --experimental-strip-types`，不需要打包 / 不起 Electron）—— 临时仓库里验证未跟踪目录被 `-uall` 摊平成目录下的每个文件、列表里没有「以 `/` 结尾的折叠目录」条目、未跟踪文件用 `--no-index` 拿到「整份新增」的 diff、已跟踪文件的 diff 不受影响、未跟踪的**嵌套仓库**输出成带尾斜杠的目录条目（`nested/`，取 diff 返回空）、回退能**递归**删掉整个目录、`listGitDir` 能列出目录条目里的文件（跳过 `.git`，只读展示）且**预览上限 20 项** |
+| `scripts/verify-git-tree.ts` | 源代码管理列表的折树纯函数（`features/agent/git-tree.ts`，`node --experimental-strip-types` 直接跑）—— 多级 / 中文目录名取**路径末段**且非空、不含问号，根目录文件显示文件名，同一目录的多个文件合并成一个节点，完整路径留在 `path`（tooltip 用），重命名按新路径折树且 `origPath` 仍可读，git 的**目录条目**（`nested/`，尾斜杠）取到末段名而不是空串、目录节点带上其下**全部变更路径**（整目录暂存 / 回退用） |
+| `scripts/verify-acp-fs.ts` | ACP 客户端文件访问（`services/ai/acp-fs.ts`，`node --experimental-strip-types`）—— 工作区内读写（相对 / 绝对路径、父目录自动创建、覆盖写）、`line` / `limit` 按行截取、越界一律拒绝（`../`、工作区外绝对路径、工作区根、前缀相同的兄弟目录、`sub/../../`） |
+| `scripts/verify-agent-conversation-model.mjs` | Agent 会话「模型选择」的持久化：**真启动两次应用**（同一 `--user-data-dir`）—— 保存带 `modelId` 读得回、不带 `modelId` 再存时保留旧值（`in` 语义）、显式 `undefined` 才清空、重启后 `modelId` / `configId` / `backend` 仍在 |
 | `scripts/verify-skills.mjs` | 技能发现（含 junction 安装）、无 frontmatter 退化、额外根目录、设置页渲染与开关落盘 |
 | `scripts/check-missing-color-utils.mjs` | 扫描产物 CSS，找出「语义色令牌漏映射导致整族工具类没生成」 |
 | `scripts/shot-titlebar.mjs` | 强制 hover 截图 + 计算样式，查标题栏配色 |
@@ -985,9 +992,32 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   ⚠️ 别用返回新对象 / 新 `Set` 的 selector 取这两张表（zustand 用 `Object.is` 比快照，会无限重渲染）——
   取整表再在渲染里按行推导。
 
+**27. 会话选的模型重启后丢失 = `modelId` 没落盘**
+
+- **现场**：每个会话选的模型，重启应用后回到默认（用户报告；ACP 与内置后端都一样）。
+- **根因**：`modelId` 在**整条落盘链路上都缺席** —— `app-store.ts` 的 `persistConversation` 只传了
+  `backend` + `configId`，preload 的入参类型、`ipc/agent.ts` 的入参类型、`storage.saveAgentConversation`
+  都没有这个字段。于是「这个会话选了哪个模型」从来没写进磁盘，重启后只剩 `configId`，
+  看起来就是「恢复成默认模型」。
+- **正确做法**：`backend` / `configId` / `modelId` 三者同款处理（`'x' in input` + 每次显式带上），
+  从渲染端到 storage 一路对齐（见 4.3）。
+- **验证**：`scripts/verify-agent-conversation-model.mjs` —— 真启动两次应用（同一 userData）。
+
+**28. ACP agent 报 `Method not found: fs/write_text_file` = 客户端那两个方法没实现**
+
+- **现场**：用 opencode 等 ACP agent，写文件那一轮直接失败，agent 侧吐
+  `RequestError: "Method not found": fs/write_text_file`（用户报告）。
+- **根因**：ACP 里客户端要实现 `fs/read_text_file` / `fs/write_text_file`；`acp-agent.ts` 当时只注册了
+  `session/request_permission`，agent 发文件请求时服务端找不到 handler。
+- **正确做法**：① initialize 的 capabilities 里广告 `fs: { readTextFile: true, writeTextFile: true }`；
+  ② 用 `acp.methods.client.fs.readTextFile` / `.writeTextFile` 注册 handler；
+  ③ ⚠️ 路径必须限制在**工作区内**（`services/ai/acp-fs.ts` 的 `resolveInsideWorkspace`）——
+  agent 是我们 spawn 的外部进程，不能让它借这条通道读写工作区外的文件。
+- **验证**：`scripts/verify-acp-fs.ts`（不起 Electron，直接跑 `acp-fs.ts` 真源码）。
+
 ### 6.7 数据与文件
 
-**27. 导入 / 导出：zip 是自己实现的，凭据不导出**
+**29. 导入 / 导出：zip 是自己实现的，凭据不导出**
 
 - 入口：状态栏左下角菜单 →「导入 / 导出」二级菜单 → `DataTransferDialog`。
 - 压缩包结构：一类数据一个 JSON（`hosts.json` / `notes.json` / `api.json`），外壳统一是
@@ -1001,7 +1031,7 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 - 验证用**双向交叉验证**：我们生成的 zip 用系统 `Expand-Archive` 能解开且内容一致；
   系统 `Compress-Archive` 生成的 zip 用 `readZip` 能读出且内容一致（含 UTF-8 文件名）。
 
-**28. 应用图标一共 4 处，换图时必须同步**
+**30. 应用图标一共 4 处，换图时必须同步**
 
 改 `resources/app-icon.png` **不会**自动带动其他三处（否则标题栏、安装包、exe 还是旧图）。
 
@@ -1016,13 +1046,13 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 - 生成多尺寸 ICO 用 Pillow：`Image.save(path, format="ICO", sizes=[(s,s) for s in …])`；
   覆盖产物用 `shutil.copyfile` 先写临时目录再拷过去，别 `os.remove` 旧文件。
 
-**29. cURL 导入的协议头补齐**
+**31. cURL 导入的协议头补齐**
 
 - `features/api/api-client.ts` 的 `parseCurl` 在 return 前补：url 不以 `http(s)://` 开头则补 `http://`
   （正则 `/^https?:\/\//i`；已有的 `ftp://` 等原样保留）。
 - `--data-binary '@'` 这类「占位 / 空 body」按 cURL 规则**保持 POST**，不要自作主张解析成 GET。
 
-**30. 终端命令记录：PTY 输出没有边界标记，别按「命令→输出」严格配对**
+**32. 终端命令记录：PTY 输出没有边界标记，别按「命令→输出」严格配对**
 
 - 命中信号：命令条目的 detail 经常为空 / 相邻两条命令的输出混在一条上。根因：PTY 是裸字节流、无
   shell 集成（无 OSC 133），命令重建只能按控制序列推断；ConPTY/PSReadLine 的回显**迟到且分片**。
@@ -1037,11 +1067,25 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 
 ---
 
+**33. 「目录条目」展开成一大片文件名 = 被用户当成「一堆被修改的文件」**
+
+- **现场**：源码管理面板的「更改」区，用户「明明没有改动」，却列出了很多「被修改的文件」，
+  而且这些名字**点不开、也没有 diff**（原话：面板彻底崩了）。
+- **根因**：那些名字**不是变更行**，而是**未跟踪目录条目**（嵌套仓库 / 链接目录，`status` 里只有
+  `?? sub/` 一行）被展开后从磁盘递归列出来的**只读预览** —— 当时上限 200 条、且没有任何说明文字。
+  真实项目里一展开就铺满整屏（实测 `activity-platform` 里嵌着 `activity-platform-app-v2`）。
+- **正确做法**：目录条目展开必须①写明「只读、不参与提交」，②限制条数
+  （`services/git.ts` 的 `listGitDir` 默认 **20**），③整块用浅色卡片与变更行明显区分。
+  ⚠️ 不要因此去掉展开（用户会回头问「为什么点不开」），也不要放宽上限。
+- **排查提示**：先分清「更改列表本身」和「某一行展开后的内容」—— `git status --porcelain -uall` 的
+  行数才是前者（本次实测外层仓库只有 3 行：`M go.mod` + `?? activity-platform-app-v2/`）。
+- **验证**：`scripts/verify-git-changes.ts`（目录条目预览上限 20）。
+
 ## 七、已知限制与待办
 
 - **未实现**：批量命令下发、终端会话恢复（重启后不保留 scrollback）、
   本地终端与远程终端统一的历史搜索。
-- **mac 打包**：缺 `icon.icns` 与 `build.mac.icon`（见 6.7 第 28 条）。
+- **mac 打包**：缺 `icon.icns` 与 `build.mac.icon`（见 6.7 第 30 条）。
 - **浏览器自动化**：
   - 偏好 `browserChannel` 只有类型与存储，**设置页还没有选择入口**（目前只能靠 auto 模式兜）。
   - Agent 的浏览器工具**不走确认闸**（`confirm` 模式下点击 / 输入也直接执行）——

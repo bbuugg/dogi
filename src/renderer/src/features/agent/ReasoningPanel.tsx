@@ -86,7 +86,7 @@ export function ReasoningPanel({ text, streaming }: { text: string; streaming: b
           streaming ? 'reasoning-thinking' : 'text-muted-foreground'
         )}
       >
-        {streaming ? '思考中' : '思考了一会儿'}
+        {streaming ? '思考中...' : '思考了一会儿'}
       </span>
       {/* 单行预览只在「流式中且未展开」时出现：展开后内容已经在下面了。
           `h-[1.4em]` + `leading-[1.4]` 让视口**正好一行高**（em 取本元素 text-xs 的 12px），

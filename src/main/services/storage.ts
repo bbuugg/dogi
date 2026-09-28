@@ -1133,6 +1133,8 @@ class StorageService {
     messages?: AgentChatMessage[]
     backend?: AgentBackend
     configId?: string
+    /** 具体模型 id：`ai-sdk` 下是配置里的模型，`acp` 下是 agent 上报的模型 value */
+    modelId?: string
   }): AgentConversation {
     const conversations = this.store.get('agentConversations')
     const now = Date.now()
@@ -1147,6 +1149,10 @@ class StorageService {
       // 必须能覆盖掉旧值，否则从 ACP / 某个模型切回默认就永远切不回来了。
       backend: 'backend' in input ? input.backend : prev?.backend,
       configId: 'configId' in input ? input.configId : prev?.configId,
+      // ⚠️ modelId 与上面两个字段同款处理（`in` 而不是 `??`）：它也是「按会话选中的具体模型」。
+      // 之前**整条链路都漏了它**（store → preload → ipc → storage），会话里换的模型永远不落盘，
+      // 重启后回退到配置默认模型（用户报告「每个会话设置的模型重启后恢复成默认」）。
+      modelId: 'modelId' in input ? input.modelId : prev?.modelId,
       createdAt: prev?.createdAt ?? now,
       updatedAt: now
     }

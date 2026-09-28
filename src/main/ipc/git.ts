@@ -4,6 +4,7 @@ import {
   getGitDiff,
   getGitLog,
   getGitStatus,
+  listGitDir,
   runGitAction
 } from '../services/git'
 import type { GitAction } from '@shared/types'
@@ -22,4 +23,6 @@ export function registerGitIpc(): void {
     getGitDiff(cwd, path, staged)
   )
   ipcMain.handle('git:action', (_e, cwd: string, action: GitAction) => runGitAction(cwd, action))
+  // 目录条目（未跟踪的目录 / 嵌套仓库）里的文件列表：git 不跨仓库边界，只能自己读盘
+  ipcMain.handle('git:dirList', (_e, cwd: string, path: string) => listGitDir(cwd, path))
 }

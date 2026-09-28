@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Key } from 'react'
-import { Button, Dropdown, Input, Modal, Select, Tree, message as toast } from 'antd'
-import type { TreeDataNode } from 'antd'
+import type { ReactNode } from 'react'
+import { Button, Dropdown, Input, Modal, Select, message as toast } from 'antd'
 import { cn } from 'cn'
 import {
   ChevronDown,
+  ChevronRight,
+  Folder,
   GitBranch as GitBranchIcon,
   GitBranchPlus,
-  History,
   Loader2,
   Minus,
   Plus,
@@ -17,6 +17,7 @@ import {
   X
 } from 'lucide-react'
 import type { GitBranchesResult, GitChange, GitCommit, GitStatusResult } from '@shared/types'
+import { buildRows, INDENT, type RowNode } from './git-tree'
 
 /** git 状态码 → 人话（鼠标悬停显示） */
 const STATUS_LABEL: Record<string, string> = {
@@ -38,6 +39,15 @@ function statusTone(code: string): string {
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
+/** git 的目录条目（未跟踪的目录 / 嵌套仓库）：路径带尾斜杠，文案里要叫「目录」而不是「文件」 */
+const isDirEntryPath = (path: string): boolean => path.endsWith('/')
+
+/**
+ * 目录条目预览的条数上限（与 `services/git.ts` 的 `listGitDir` 默认值一致）。
+ * ⚠️ 别调大：整目录列全会让「更改」区看起来像几百条改动（用户实测以为面板崩了）。
+ */
+const DIR_PREVIEW_LIMIT = 20
+
 /** 回退会不会把文件本身删掉（决定确认文案） */
 function rollbackDeletes(change: GitChange, staged: boolean): boolean {
   const idx = staged ? change.index : change.worktree
@@ -49,7 +59,9 @@ function rollbackWarning(change: GitChange, staged: boolean, path: string): stri
       ? '只存在于暂存区的新文件'
       : '已暂存那份改动、以及之后的工作区改动'
     : change.worktree === '?'
-      ? '还没被 git 跟踪（新文件）'
+      ? path.endsWith('/')
+        ? '还没被 git 跟踪的目录（git 不会列出里面的文件）'
+        : '还没被 git 跟踪（新文件）'
       : '未暂存的改动'
   if (rollbackDeletes(change, staged)) {
     return `「${path}」${kind}：回退会把它从磁盘上删除。此操作无法撤销。`
@@ -96,6 +108,9 @@ function DiffBlock({ data }: { data?: { text: string | null; loading: boolean } 
   return <div className="text-xs text-muted-foreground">无可显示的差异</div>
 }
 
+/** 变更列表折树：纯逻辑在 `git-tree.ts`（可单独跑 `scripts/verify-git-tree.ts`） */
+
+
 export function GitPanel({
   cwd,
   onClose,
@@ -115,8 +130,8 @@ export function GitPanel({
   const [busy, setBusy] = useState(false)
   const [rowBusy, setRowBusy] = useState<{ key: string; kind: 'stage' | 'rollback' } | null>(null)
   const [message, setMessage] = useState('')
-  /** 树形列表的展开键：分组（staged/unstaged/history）+ 文件节点（s:|w: 前缀） */
-  const [expandedKeys, setExpandedKeys] = useState<Key[]>(['staged', 'unstaged', 'history'])
+  /** 展开键：分组（staged / unstaged / history）+ 目录节点（dir: 前缀）+ 文件节点（s: / w: 前缀） */
+  const [expandedKeys, setExpandedKeys] = useState<string[]>(['staged', 'unstaged', 'history'])
   /** 每个展开文件的 diff：key 同文件节点 key */
   const [diffs, setDiffs] = useState<Record<string, { text: string | null; loading: boolean }>>({})
   const [newBranchOpen, setNewBranchOpen] = useState(false)
@@ -187,18 +202,36 @@ export function GitPanel({
         }
       })
   }
+  /** 目录条目展开后的文件列表（git 不列，得自己读盘）；key 同该行 */
+  const [dirLists, setDirLists] = useState<Record<string, { items: string[]; loading: boolean }>>({})
+
+  /** 展开目录条目时读它的文件列表（只用于展示，不参与暂存 / 回退） */
+  function loadDirList(key: string, path: string): void {
+    setDirLists((d) => ({ ...d, [key]: { items: [], loading: true } }))
+    window.api.git
+      .dirList(cwd, path)
+      .then((items) => setDirLists((d) => ({ ...d, [key]: { items, loading: false } })))
+      .catch((err) => {
+        toast.error(errText(err))
+        setDirLists((d) => ({ ...d, [key]: { items: [], loading: false } }))
+      })
+  }
+
   /** 回退 / 批量回滚后清掉已展开文件的 diff 与展开态 */
   function clearDiffs(): void {
     diffReqRef.current = {}
-    setExpandedKeys((ks) => ks.filter((k) => !/^[sw]:/.test(String(k))))
+    setExpandedKeys((ks) => ks.filter((k) => !/^[sw]:/.test(k)))
     setDiffs({})
   }
 
-  async function toggleStage(path: string, staged: boolean): Promise<void> {
-    const key = `${staged ? 's' : 'w'}:${path}`
-    setRowBusy({ key, kind: 'stage' })
+  /**
+   * 暂存 / 取消暂存一批路径：
+   * 文件行传单个文件；目录行传该目录下**所有变更条目**（含子目录，由 buildRows 收好）。
+   */
+  async function toggleStage(paths: string[], staged: boolean, busyKey: string): Promise<void> {
+    setRowBusy({ key: busyKey, kind: 'stage' })
     try {
-      await window.api.git.action(cwd, { action: staged ? 'unstage' : 'stage', paths: [path] })
+      await window.api.git.action(cwd, { action: staged ? 'unstage' : 'stage', paths })
       await refreshRef.current()
     } catch (err) {
       toast.error(errText(err))
@@ -300,35 +333,88 @@ export function GitPanel({
   const branchLabel = status?.branch ?? (status?.detached ? '分离头指针' : '（无分支）')
   const canCommit = !!message.trim() && stagedChanges.length > 0 && !busy
   const canCommitAll = !!message.trim() && changes.length > 0 && !busy && !status?.truncated
+  /** 回退确认弹窗的措辞：是「整个删掉」还是「丢弃改动」，删的是目录还是文件 */
+  const rollbackDeletesRow = rollbackTarget
+    ? rollbackDeletes(rollbackTarget.change, rollbackTarget.staged)
+    : false
+  const rollbackIsDir = !!rollbackTarget && isDirEntryPath(rollbackTarget.change.path)
 
-  /** 树形展开/收起：文件节点展开时异步拉取 diff，收起时清掉对应 diff */
-  const handleExpand = (keys: Key[]): void => {
-    const added = keys.filter((k) => !expandedKeys.includes(k))
-    setExpandedKeys(keys)
-    for (const k of added) {
-      const m = /^([sw]):(.+)$/.exec(String(k))
-      if (m) loadDiff(`${m[1]}:${m[2]}`, m[2], m[1] === 's')
-    }
-    const removed = expandedKeys.filter((k) => !keys.includes(k))
-    for (const k of removed) {
-      if (!/^[sw]:/.test(String(k))) continue
-      delete diffReqRef.current[String(k)]
+  /**
+   * 展开 / 收起一个节点（分组、目录、文件共用同一个开关）：
+   * 文件节点展开时拉 diff，收起时清掉它的缓存。
+   */
+  const toggleNode = (key: string): void => {
+    const open = expandedKeys.includes(key)
+    setExpandedKeys(open ? expandedKeys.filter((k) => k !== key) : [...expandedKeys, key])
+    const m = /^([sw]):(.+)$/.exec(key)
+    if (!m) return
+    if (open) {
+      delete diffReqRef.current[key]
       setDiffs((d) => {
         const next = { ...d }
-        delete next[String(k)]
+        delete next[key]
         return next
       })
+      return
     }
+    loadDiff(key, m[2], m[1] === 's')
   }
 
-  /** 单个文件行的标题（状态字母 + 路径 + 暂存/回退按钮），放在 Tree 节点里，天然左对齐 */
-  const fileTitle = (change: GitChange, letter: string, staged: boolean) => {
-    const key = `${staged ? 's' : 'w'}:${change.path}`
-    const busyKey = rowBusy?.key === key ? rowBusy.kind : null
+  /**
+   * 行右侧的「暂存 / 回退」按钮。
+   * - 文件行：只作用于这一个文件；
+   * - 目录行：作用于该目录下**所有变更条目**（含子目录）—— 回退统一走批量确认弹窗，
+   *   避免手一抖丢掉一整个目录的改动。
+   */
+  const rowActions = (
+    target: { kind: 'file'; change: GitChange } | { kind: 'dir'; paths: string[] },
+    staged: boolean,
+    busyKey: string
+  ) => {
+    const busy = rowBusy?.key === busyKey ? rowBusy.kind : null
+    const paths = target.kind === 'file' ? [target.change.path] : target.paths
+    const scopeHint = target.kind === 'dir' ? `（该目录下 ${paths.length} 个改动）` : ''
     return (
-      <div className="flex min-w-0 items-center gap-2 py-0.5">
+      <>
+        <Button
+          type="text"
+          size="small"
+          title={staged ? `取消暂存${scopeHint}` : `暂存${scopeHint}`}
+          disabled={busy !== null}
+          onClick={(e) => {
+            e.stopPropagation()
+            void toggleStage(paths, staged, busyKey)
+          }}
+          className="!px-0 !h-6 !w-6 !text-muted-foreground hover:!bg-foreground/10"
+          icon={busy === 'stage' ? <Loader2 className="size-3.5 animate-spin" /> : staged ? <Minus className="size-3.5" /> : <Plus className="size-3.5" />}
+        />
+        <Button
+          type="text"
+          size="small"
+          title={target.kind === 'dir' ? `回退${scopeHint}` : '回退（丢弃未提交的改动）'}
+          disabled={busy !== null}
+          onClick={(e) => {
+            e.stopPropagation()
+            if (target.kind === 'file') setRollbackTarget({ change: target.change, staged })
+            else setRollbackAllPaths(paths)
+          }}
+          className="!px-0 !h-6 !w-6 !text-muted-foreground/70 hover:!bg-destructive/10 hover:!text-destructive"
+          icon={busy === 'rollback' ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCcw className="size-3.5" />}
+        />
+      </>
+    )
+  }
+
+  /**
+   * 单个文件行的内容（状态字母 + 文件名 + 暂存 / 回退按钮），挂在可点击的行容器里。
+   * `name` 是树里显示的短名（所在目录那一级已由父行表达），完整路径留在 tooltip 里。
+   */
+  const fileTitle = (change: GitChange, letter: string, staged: boolean, name: string) => {
+    const key = `${staged ? 's' : 'w'}:${change.path}`
+    return (
+      <div className="flex min-w-0 flex-1 items-center gap-2">
         <span
-          className={cn('w-3 shrink-0 text-center font-mono text-xs font-semibold', statusTone(letter))}
+          className={cn('w-3.5 shrink-0 text-center font-mono text-xs font-semibold', statusTone(letter))}
           title={STATUS_LABEL[letter] ?? letter}
         >
           {letter}
@@ -344,151 +430,193 @@ export function GitPanel({
               <span>{change.path}</span>
             </>
           ) : (
-            change.path
+            name
           )}
         </span>
-        <Button
-          type="text"
-          size="small"
-          title={staged ? '取消暂存' : '暂存'}
-          disabled={busyKey !== null}
-          onClick={(e) => {
-            e.stopPropagation()
-            void toggleStage(change.path, staged)
-          }}
-          className="!px-0 !h-6 !w-6 !text-muted-foreground hover:!bg-foreground/10"
-          icon={busyKey === 'stage' ? <Loader2 className="size-3.5 animate-spin" /> : staged ? <Minus className="size-3.5" /> : <Plus className="size-3.5" />}
-        />
-        <Button
-          type="text"
-          size="small"
-          title="回退（丢弃未提交的改动）"
-          disabled={busyKey !== null}
-          onClick={(e) => {
-            e.stopPropagation()
-            setRollbackTarget({ change, staged })
-          }}
-          className="!px-0 !h-6 !w-6 !text-muted-foreground/70 hover:!bg-destructive/10 hover:!text-destructive"
-          icon={busyKey === 'rollback' ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCcw className="size-3.5" />}
-        />
+        {rowActions({ kind: 'file', change }, staged, key)}
       </div>
     )
   }
 
-  /** 文件节点（可展开看 diff） */
-  const fileNode = (change: GitChange, letter: string, staged: boolean): TreeDataNode => {
-    const key = `${staged ? 's' : 'w'}:${change.path}`
-    const expanded = expandedKeys.includes(key)
-    return {
-      key,
-      isLeaf: false,
-      title: fileTitle(change, letter, staged),
-      children: expanded
-        ? [{ key: `diff:${key}`, selectable: false, isLeaf: true, title: <div className="pr-3 pb-1.5"><DiffBlock data={diffs[key]} /></div> }]
-        : undefined
-    }
-  }
+  /** 展开箭头：手写（antd Tree 的 switcher 样式 / 图标不受控），展开时转 90° */
+  const arrow = (open: boolean): ReactNode => (
+    <ChevronRight
+      className={cn(
+        'size-3.5 shrink-0 text-muted-foreground transition-transform',
+        open && 'rotate-90'
+      )}
+    />
+  )
 
-  /** 树形数据：已暂存的更改 / 更改 / 历史提交 三组，分别挂文件列表与提交列表 */
-  const treeData: TreeDataNode[] = []
-  if (stagedChanges.length > 0) {
-    treeData.push({
-      key: 'staged',
-      title: (
-        <div className="flex min-w-0 items-center gap-1.5 py-0.5">
-          <span className="shrink-0 font-medium text-muted-foreground">已暂存的更改</span>
-          <span className="shrink-0 text-muted-foreground/60">{stagedChanges.length}</span>
-          <Button
-            type="text"
-            size="small"
-            title={status?.truncated ? '改动过多、列表已截断，批量操作已停用' : '全部取消暂存'}
-            disabled={busy || status?.truncated}
-            onClick={(e) => {
-              e.stopPropagation()
-              void run(() => window.api.git.action(cwd, { action: 'unstage', paths: stagedChanges.map((c) => c.path) }), '已全部取消暂存')
-            }}
-            className="!ml-auto !px-1 !h-6 !text-muted-foreground hover:!bg-foreground/10"
-            icon={<Minus className="size-3" />}
-          >
-            全部
-          </Button>
-        </div>
-      ),
-      children: stagedChanges.map((c) => fileNode(c, c.index, true))
-    })
-  }
-  if (unstagedChanges.length > 0) {
-    treeData.push({
-      key: 'unstaged',
-      title: (
-        <div className="flex min-w-0 items-center gap-1.5 py-0.5">
-          <span className="shrink-0 font-medium text-muted-foreground">更改</span>
-          <span className="shrink-0 text-muted-foreground/60">{unstagedChanges.length}</span>
-          <span className="ml-auto flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-            <Button
-              type="text"
-              size="small"
-              title="回滚「更改」里列出的文件（未暂存 + 未跟踪）"
-              disabled={busy}
-              onClick={() => setRollbackAllPaths(unstagedChanges.map((c) => c.path))}
-              icon={<RotateCcw className="size-3" />}
-              className="!text-muted-foreground hover:!text-destructive"
+  /**
+   * 渲染一组树行（**手写树**，不用 antd Tree）。
+   *
+   * 缩进 = depth × INDENT，行高 / hover / 箭头全由自己控制；点整行 = 展开收起。
+   * 目录只做分组容器（展开列出子节点），diff 挂在文件节点下面。
+   */
+  const renderRows = (group: 's' | 'w', nodes: RowNode[], depth: number): ReactNode => (
+    <>
+      {nodes.map((node) => {
+        if (node.kind === 'dir') {
+          const key = `dir:${group}:${node.path}`
+          const open = expandedKeys.includes(key)
+          return (
+            <div key={key}>
+              <div
+                onClick={() => toggleNode(key)}
+                title={node.path}
+                style={{ paddingLeft: depth * INDENT + 2 }}
+                className="flex min-w-0 cursor-pointer items-center gap-1.5 rounded py-0.5 pr-1 hover:bg-foreground/5"
+              >
+                {arrow(open)}
+                <Folder className="size-3.5 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1 truncate text-sm">{node.name}</span>
+                {rowActions({ kind: 'dir', paths: node.paths }, group === 's', key)}
+              </div>
+              {open && renderRows(group, node.children, depth + 1)}
+            </div>
+          )
+        }
+        if (node.kind === 'dirEntry') {
+          // 目录条目（未跟踪的目录 / 嵌套仓库）：git 不列里面的文件，展开时我们自己读盘看
+          const key = `dirEntry:${group}:${node.change.path}`
+          const open = expandedKeys.includes(key)
+          const list = dirLists[key]
+          return (
+            <div key={key}>
+              <div
+                onClick={() => {
+                  const wasOpen = open
+                  toggleNode(key)
+                  if (!wasOpen && !dirLists[key]) loadDirList(key, node.change.path)
+                }}
+                title={`${node.change.path}\n未跟踪的目录（独立仓库 / 链接目录）：git 不列出里面的文件；展开只是磁盘内容预览，不参与提交`}
+                style={{ paddingLeft: depth * INDENT + 2 }}
+                className="flex min-w-0 cursor-pointer items-center gap-1.5 rounded py-0.5 pr-1 hover:bg-foreground/5"
+              >
+                {arrow(open)}
+                <Folder className="size-3.5 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1 truncate text-sm">{node.name}</span>
+                {rowActions({ kind: 'dir', paths: [node.change.path] }, group === 's', key)}
+              </div>
+              {open && (
+                <div style={{ paddingLeft: (depth + 1) * INDENT + 2 }} className="pb-1 pr-1">
+                  {list?.loading ? (
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <Loader2 className="size-3.5 animate-spin" /> 读取目录…
+                    </div>
+                  ) : (
+                    /* 明确写成「只读预览」：这里的名字不是变更行，点了也没有 diff 可看 ——
+                       否则一屏文件名会被当成「一堆被修改的文件」（用户实测误解）。 */
+                    <div className="rounded border border-border/50 bg-secondary/20 p-1.5">
+                      <div className="mb-1 text-[11px] leading-4 text-muted-foreground">
+                        目录内容预览（只读、不参与提交）：git 不跨入独立仓库 / 链接目录。
+                      </div>
+                      {list && list.items.length > 0 ? (
+                        <div className="max-h-40 overflow-y-auto font-mono text-[11px] text-muted-foreground/80">
+                          {list.items.map((p) => (
+                            <div key={p} className="truncate" title={p}>
+                              {p}
+                            </div>
+                          ))}
+                          {list.items.length >= DIR_PREVIEW_LIMIT && (
+                            <div className="text-muted-foreground/60">
+                              …（还有更多，只列前 {DIR_PREVIEW_LIMIT} 项）
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="text-[11px] text-muted-foreground">目录里没有文件</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )
+        }
+        const key = `${group}:${node.change.path}`
+        const open = expandedKeys.includes(key)
+        return (
+          <div key={key}>
+            <div
+              onClick={() => toggleNode(key)}
+              style={{ paddingLeft: depth * INDENT + 2 }}
+              className="flex min-w-0 cursor-pointer items-center gap-1.5 rounded py-0.5 pr-1 hover:bg-foreground/5"
             >
-              回滚
-            </Button>
-            <Button
-              type="text"
-              size="small"
-              title={status?.truncated ? '改动过多、列表已截断，批量操作已停用' : '全部暂存'}
-              disabled={busy || status?.truncated}
-              onClick={() => void run(() => window.api.git.action(cwd, { action: 'stage', paths: unstagedChanges.map((c) => c.path) }), '已全部暂存')}
-              icon={<Plus className="size-3" />}
-            >
-              全部
-            </Button>
-          </span>
-        </div>
-      ),
-      children: unstagedChanges.map((c) => fileNode(c, c.worktree, false))
-    })
-  }
-  if (commits.length > 0) {
-    treeData.push({
-      key: 'history',
-      title: (
-        <div className="flex min-w-0 items-center gap-1.5 py-0.5">
-          <History className="size-3.5 shrink-0 text-muted-foreground" />
-          <span className="shrink-0 font-medium text-muted-foreground">历史提交</span>
-          <span className="shrink-0 text-muted-foreground/60">{commits.length}</span>
-        </div>
-      ),
-      children: commits.map((c) => ({
-        key: `commit:${c.hash}`,
-        isLeaf: true,
-        title: (
-          <div className="flex min-w-0 items-center gap-2 py-0.5">
-            <span className="shrink-0 font-mono text-xs text-muted-foreground">{c.short}</span>
-            <span className="min-w-0 flex-1 truncate text-sm" title={`${c.subject}\n${c.author} · ${c.date}`}>
-              {c.subject}
-            </span>
-            <Button
-              type="text"
-              size="small"
-              title="检出这次提交（分离头指针）"
-              disabled={busy}
-              onClick={(e) => {
-                e.stopPropagation()
-                void run(() => window.api.git.action(cwd, { action: 'checkout', ref: c.hash }))
-              }}
-              className="!px-0 !h-6 !text-muted-foreground hover:!bg-foreground/10"
-            >
-              检出
-            </Button>
+              {arrow(open)}
+              {fileTitle(node.change, node.letter, group === 's', node.name)}
+            </div>
+            {open && (
+              <div className="pb-1.5 pr-1" style={{ paddingLeft: (depth + 1) * INDENT + 2 }}>
+                <DiffBlock data={diffs[key]} />
+              </div>
+            )}
           </div>
         )
-      }))
-    })
+      })}
+    </>
+  )
+
+  /** 分组行：可展开的标题（箭头 + 名称 + 计数）+ 右侧操作按钮，`body` 是展开后的内容 */
+  const groupRow = (
+    key: string,
+    label: string,
+    count: number,
+    actions: ReactNode,
+    body: ReactNode
+  ): ReactNode => {
+    const open = expandedKeys.includes(key)
+    return (
+      <div key={key} className="mb-1">
+        <div
+          onClick={() => toggleNode(key)}
+          className="flex min-w-0 cursor-pointer items-center gap-1.5 rounded px-1 py-1 hover:bg-foreground/5"
+        >
+          {arrow(open)}
+          <span className="shrink-0 text-sm font-medium text-muted-foreground">{label}</span>
+          <span className="shrink-0 text-xs text-muted-foreground/60">{count}</span>
+          {actions && (
+            <span className="ml-auto flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+              {actions}
+            </span>
+          )}
+        </div>
+        {open && body}
+      </div>
+    )
   }
+
+  /** 历史提交行（叶子，不可展开） */
+  const commitRow = (c: GitCommit): ReactNode => (
+    <div
+      key={`commit:${c.hash}`}
+      style={{ paddingLeft: INDENT + 2 }}
+      className="flex min-w-0 items-center gap-2 rounded py-0.5 pr-1 hover:bg-foreground/5"
+    >
+      <span className="w-3.5 shrink-0" />
+      <span className="shrink-0 font-mono text-xs text-muted-foreground">{c.short}</span>
+      <span
+        className="min-w-0 flex-1 truncate text-sm"
+        title={`${c.subject}\n${c.author} · ${c.date}`}
+      >
+        {c.subject}
+      </span>
+      <Button
+        type="text"
+        size="small"
+        title="检出这次提交（分离头指针）"
+        disabled={busy}
+        onClick={(e) => {
+          e.stopPropagation()
+          void run(() => window.api.git.action(cwd, { action: 'checkout', ref: c.hash }))
+        }}
+        className="!px-0 !h-6 !text-muted-foreground hover:!bg-foreground/10"
+      >
+        检出
+      </Button>
+    </div>
+  )
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -647,16 +775,84 @@ export function GitPanel({
             {changes.length === 0 && commits.length === 0 ? (
               <div className="px-3 py-2 text-sm text-muted-foreground">没有未提交的改动</div>
             ) : (
-              <Tree
-                blockNode
-                showLine={{ showLeafIcon: false }}
-                expandAction="click"
-                treeData={treeData}
-                expandedKeys={expandedKeys}
-                onExpand={handleExpand}
-                selectable={false}
-                className="git-tree px-1"
-              />
+              <div className="px-1">
+                {stagedChanges.length > 0 &&
+                  groupRow(
+                    'staged',
+                    '已暂存的更改',
+                    stagedChanges.length,
+                    <Button
+                      type="text"
+                      size="small"
+                      title={status?.truncated ? '改动过多、列表已截断，批量操作已停用' : '全部取消暂存'}
+                      disabled={busy || status?.truncated}
+                      onClick={() =>
+                        void run(
+                          () =>
+                            window.api.git.action(cwd, {
+                              action: 'unstage',
+                              paths: stagedChanges.map((c) => c.path)
+                            }),
+                          '已全部取消暂存'
+                        )
+                      }
+                      className="!px-1 !h-6 !text-muted-foreground hover:!bg-foreground/10"
+                      icon={<Minus className="size-3" />}
+                    >
+                      全部
+                    </Button>,
+                    renderRows(
+                      's',
+                      buildRows(stagedChanges.map((c) => ({ change: c, letter: c.index }))),
+                      0
+                    )
+                  )}
+                {unstagedChanges.length > 0 &&
+                  groupRow(
+                    'unstaged',
+                    '更改',
+                    unstagedChanges.length,
+                    <>
+                      <Button
+                        type="text"
+                        size="small"
+                        title="回滚「更改」里列出的文件（未暂存 + 未跟踪）"
+                        disabled={busy}
+                        onClick={() => setRollbackAllPaths(unstagedChanges.map((c) => c.path))}
+                        icon={<RotateCcw className="size-3" />}
+                        className="!text-muted-foreground hover:!text-destructive"
+                      >
+                        回滚
+                      </Button>
+                      <Button
+                        type="text"
+                        size="small"
+                        title={status?.truncated ? '改动过多、列表已截断，批量操作已停用' : '全部暂存'}
+                        disabled={busy || status?.truncated}
+                        onClick={() =>
+                          void run(
+                            () =>
+                              window.api.git.action(cwd, {
+                                action: 'stage',
+                                paths: unstagedChanges.map((c) => c.path)
+                              }),
+                            '已全部暂存'
+                          )
+                        }
+                        icon={<Plus className="size-3" />}
+                      >
+                        全部
+                      </Button>
+                    </>,
+                    renderRows(
+                      'w',
+                      buildRows(unstagedChanges.map((c) => ({ change: c, letter: c.worktree }))),
+                      0
+                    )
+                  )}
+                {commits.length > 0 &&
+                  groupRow('history', '历史提交', commits.length, null, <>{commits.map(commitRow)}</>)}
+              </div>
             )}
           </div>
 
@@ -761,10 +957,16 @@ export function GitPanel({
 
       <Modal
         open={rollbackTarget !== null}
-        title={rollbackDeletes(rollbackTarget?.change ?? { index: ' ', worktree: ' ', path: '' }, rollbackTarget?.staged ?? false) ? '删除这个文件？' : '放弃这个文件的改动？'}
+        title={
+          rollbackDeletesRow
+            ? rollbackIsDir
+              ? '删除这个目录？'
+              : '删除这个文件？'
+            : '放弃这个文件的改动？'
+        }
         onCancel={() => setRollbackTarget(null)}
         onOk={() => void rollbackRow()}
-        okText={rollbackDeletes(rollbackTarget?.change ?? { index: ' ', worktree: ' ', path: '' }, rollbackTarget?.staged ?? false) ? '删除文件' : '放弃改动'}
+        okText={rollbackDeletesRow ? (rollbackIsDir ? '删除目录' : '删除文件') : '放弃改动'}
         okButtonProps={{ danger: true }}
       >
         <p className="text-sm text-muted-foreground">

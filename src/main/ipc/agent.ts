@@ -87,6 +87,7 @@ export function registerAgentIpc(ctx: IpcContext): void {
         messages?: AgentChatMessage[]
         backend?: AgentBackend
         configId?: string
+        modelId?: string
       }
     ) => storage.saveAgentConversation(input)
   )

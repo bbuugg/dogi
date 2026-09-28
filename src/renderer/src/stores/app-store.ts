@@ -422,7 +422,9 @@ async function persistConversation(
     title: conversation.title,
     messages: conversation.messages,
     backend: conversation.backend,
-    configId: conversation.configId
+    configId: conversation.configId,
+    // ⚠️ 必须一起落盘：只存 configId 的话，会话选的具体模型重启后会回退成配置默认模型
+    modelId: conversation.modelId
   })
 }
 

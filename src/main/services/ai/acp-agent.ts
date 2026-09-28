@@ -33,6 +33,7 @@ import type {
 } from '@shared/types'
 import { storage } from '../storage'
 import type { AgentConfirmSink } from './agent'
+import { readWorkspaceTextFile, writeWorkspaceTextFile } from './acp-fs'
 import { armConfirmTimeout } from './timeouts'
 
 /** agent 上报的模型列表（configOptions 里 category=model 的下拉项） */
@@ -499,18 +500,30 @@ class AcpAgentService extends EventEmitter {
       .onRequest(acp.methods.client.session.requestPermission, (ctx) =>
         this.handlePermission(ws, ctx.params)
       )
+      // agent 借客户端读写文件（opencode 等都会请求）：不实现这两个 handler，agent 侧
+      // 收到的是 "Method not found"，那一轮工具调用直接失败。
+      .onRequest(acp.methods.client.fs.readTextFile, async (ctx) => {
+        const { path, line, limit } = ctx.params
+        return { content: await readWorkspaceTextFile(workspace.path, path, line, limit) }
+      })
+      .onRequest(acp.methods.client.fs.writeTextFile, async (ctx) => {
+        await writeWorkspaceTextFile(workspace.path, ctx.params.path, ctx.params.content)
+        return {}
+      })
 
     ws.connection = app2
       .connectWith(stream, async (ctx) => {
-        console.error('[acp-agent] connectWith op start')
         await ctx.request(acp.methods.agent.initialize, {
           protocolVersion: acp.PROTOCOL_VERSION,
-          clientCapabilities: { session: {} },
+          // fs 能力要在握手时广告，agent 才会发 fs/read_text_file / fs/write_text_file
+          // （两个 handler 见上面 client() 的 onRequest）
+          clientCapabilities: {
+            session: {},
+            fs: { readTextFile: true, writeTextFile: true }
+          },
           clientInfo: { name: 'Dogi', version: app.getVersion() }
         })
-        console.error('[acp-agent] initialized')
         const session = await ctx.buildSession(workspace.path).start()
-        console.error('[acp-agent] session started', session.sessionId)
         // 会话档位（可选能力）：agent 广告了档位，我们才能把「权限模式」映射过去
         // （协议不支持客户端强制它来问，见 pickModeId 的注释）。没广告时保持空数组，
         // 后续切档位一律静默跳过。
@@ -525,15 +538,9 @@ class AcpAgentService extends EventEmitter {
             modeId
           })
         }
-        if (ws.availableModes.length) {
-          console.error(
-            `[acp-agent] 可用档位：${ws.availableModes
-              .map((m) => `${m.id}(${m.name})`)
-              .join(', ')}；当前 ${ws.defaultModeId}`
-          )
-        }
         // 会话选了具体模型：在 agent 上报的 configOptions（category=model）里切换。
         // agent 不支持 configOptions 时静默跳过 —— 模型由 agent 自己决定。
+        let modelApplied = false
         if (modelId) {
           const option = session.newSessionResponse.configOptions?.find(
             (o) => o.type === 'select' && o.category === 'model'
@@ -545,12 +552,21 @@ class AcpAgentService extends EventEmitter {
                 configId: option.id,
                 value: modelId
               })
-              console.error('[acp-agent] model set to', modelId)
+              modelApplied = true
             } catch (err) {
-              console.error('[acp-agent] set model failed', describeError(err))
+              console.error('[acp-agent] 切换模型失败', describeError(err))
             }
           }
         }
+        // 启动链路只留这一条汇总：原来 connectWith / initialized / session started /
+        // model set / 档位各打一行，dev 终端每开一个会话都刷一屏。出错路径仍各自单独打。
+        console.error(
+          `[acp-agent] 会话就绪 session=${session.sessionId}` +
+            (modelApplied ? ` model=${modelId}` : '') +
+            (ws.availableModes.length
+              ? ` 档位=${ws.defaultModeId}（可选 ${ws.availableModes.map((m) => m.id).join('/')}）`
+              : '')
+        )
         resolveSession(session)
         await new Promise<void>((resolve) => {
           closeConnection = resolve

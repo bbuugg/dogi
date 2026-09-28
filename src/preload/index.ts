@@ -346,6 +346,7 @@ const api = {
       messages?: AgentChatMessage[]
       backend?: AgentBackend
       configId?: string
+      modelId?: string
     }): Promise<AgentConversation> => ipcRenderer.invoke('agent:conversations:save', input),
     deleteConversation: (id: string): Promise<void> =>
       ipcRenderer.invoke('agent:conversations:delete', id),
@@ -726,7 +727,10 @@ const api = {
     diff: (cwd: string, path: string, staged: boolean): Promise<string> =>
       ipcRenderer.invoke('git:diff', cwd, path, staged),
     action: (cwd: string, action: GitAction): Promise<string> =>
-      ipcRenderer.invoke('git:action', cwd, action)
+      ipcRenderer.invoke('git:action', cwd, action),
+    /** 列出一个目录条目（未跟踪的目录 / 嵌套仓库）里的文件，仅用于展示 */
+    dirList: (cwd: string, path: string): Promise<string[]> =>
+      ipcRenderer.invoke('git:dirList', cwd, path)
   }
 }
 
