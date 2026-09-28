@@ -43,29 +43,29 @@ const GROUPS: Array<{
   title: string
   items: Array<{ value: SettingsTab; label: string; icon: LucideIcon }>
 }> = [
-  {
-    title: '基础',
-    items: [
-      { value: 'prefs', label: '偏好', icon: Palette },
-      { value: 'shortcuts', label: '快捷键', icon: Keyboard }
-    ]
-  },
-  {
-    title: '终端',
-    items: [{ value: 'terminal', label: '终端', icon: TerminalSquare }]
-  },
-  {
-    title: 'AI',
-    items: [
-      { value: 'models', label: '模型配置', icon: Cpu },
-      { value: 'acp', label: 'ACP agent', icon: Bot },
-      { value: 'mcp', label: 'MCP 服务', icon: Plug },
-      { value: 'skills', label: '技能', icon: Sparkles },
-      { value: 'timeouts', label: '超时', icon: Timer },
-      { value: 'prompt', label: '系统提示词', icon: MessageSquareText }
-    ]
-  }
-]
+    {
+      title: '基础',
+      items: [
+        { value: 'prefs', label: '偏好', icon: Palette },
+        { value: 'shortcuts', label: '快捷键', icon: Keyboard }
+      ]
+    },
+    {
+      title: '终端',
+      items: [{ value: 'terminal', label: '终端', icon: TerminalSquare }]
+    },
+    {
+      title: 'AI',
+      items: [
+        { value: 'models', label: '模型配置', icon: Cpu },
+        { value: 'acp', label: 'ACP agent', icon: Bot },
+        { value: 'mcp', label: 'MCP 服务', icon: Plug },
+        { value: 'skills', label: '技能', icon: Sparkles },
+        { value: 'timeouts', label: '超时', icon: Timer },
+        { value: 'prompt', label: '系统提示词', icon: MessageSquareText }
+      ]
+    }
+  ]
 
 /**
  * 设置弹窗：主窗口内的 antd Modal，**不是**独立窗口。
@@ -100,14 +100,15 @@ export function SettingsModal() {
       centered
       width={880}
       footer={null}
-      mask={{closable: false}}
+      mask={{ closable: false }}
       // 点遮罩 / 按 Esc 都不关：避免编辑到一半被误关（与旧独立窗口只能点关闭一致）
       keyboard={false}
       destroyOnHidden
       styles={{
         container: { overflow: "hidden", padding: 0, background: 'var(--sidebar)' },
-        header: { padding: '8px 12px', marginBottom: 0, borderBottom: 'none' },
-        body: { padding: 0 }
+        header: { padding: '4px 12px', marginBottom: 0, borderBottom: 'none' },
+        body: { padding: 0 },
+        close: { top: 4 }
       }}
     >
       <div
