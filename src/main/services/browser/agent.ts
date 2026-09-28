@@ -11,14 +11,14 @@ import { browserSessions, type BrowserSession } from './session'
 /**
  * 给工作区 Agent 用的浏览器工具集。
  *
- * 与自动化面板共用同一个会话池，但用**自己的会话 id**（`agent-browser:<conversationId>`，
- * 见 @shared/browser）：一个 Agent 会话一份浏览器，互不串台；面板那边是
- * `automation-<scriptId>`，两边同池不同 id，事件按 sessionId 各回各家。
+ * 用**自己的会话 id**（`agent-browser:<conversationId>`，见 @shared/browser）：
+ * 一个 Agent 会话一份浏览器，互不串台；会话池与渲染端面板共用，
+ * 事件按 sessionId 各回各家。
  *
  * 定位方式用 **ref**（`aria-ref=eN`）而不是让模型拼 CSS 选择器：
  * `locator.ariaSnapshot({ mode: 'ai' })` 会为每个可交互元素生成 `[ref=eN]`
  * 并顺带标出 `[cursor=pointer]`，模型照着 ref 点就行 —— 这是 Playwright 自家 MCP
- * 的做法，也是**公开 API**（不需要像 recorder 那样碰 `_` 前缀的私有方法）。
+ * 的做法，也是**公开 API**。
  * ref 只在当前页面状态下有效，页面一变（导航 / 重渲染）就得重新 snapshot。
  */
 

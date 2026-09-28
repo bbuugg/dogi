@@ -37,6 +37,12 @@ export interface AgentToolOptions {
   }) => Promise<boolean>
   /** 可用技能（见 skills.ts）；有值时额外暴露 read_skill 工具，空值不暴露 */
   skills?: AgentSkill[]
+  /**
+   * Windows 上 execute_command 的 POSIX shell（Git Bash 的 bash.exe 绝对路径），由调用方注入
+   * （见 services/ai/agent.ts）。有值：命令经由 `<bash> -lc` 执行，模型拿到的是 Linux 工具链
+   * （ls / grep / sed / 管道……）；空值：回退 PowerShell。POSIX 平台不走这个字段（始终 bash）。
+   */
+  bashPath?: string | null
 }
 
 function clampInt(v: number | undefined, min: number, max: number, fallback: number): number {
@@ -277,29 +283,43 @@ function killChild(child: ReturnType<typeof spawn>, isWin: boolean): void {
 /**
  * 在工作区目录下执行 shell 命令：输出 stdout + stderr（截断），
  * 超时 / abortSignal 触发时终止整个进程树（POSIX 用进程组，Windows 用 taskkill /T）。
+ *
+ * shell 选择：POSIX 恒为 bash；Windows 优先用注入的 Git Bash（`bashPath`）——
+ * 模型拿到的是 POSIX 工具链（ls / grep / 管道…），与主流编码代理一致；
+ * 没有 Git Bash 时回退 PowerShell（强制 UTF-8 输出，cmd 的 GBK 会乱码）。
  */
 async function runCommand(
   command: string,
   cwd: string,
   timeoutMs: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  bashPath?: string | null
 ): Promise<string> {
   const isWin = process.platform === 'win32'
-  // Windows 用 PowerShell 并强制 UTF-8 输出（cmd 的 GBK 会乱码）；
-  // POSIX 用 bash -lc，进程组 detached 便于整树终止
-  const shellCmd = isWin ? 'powershell.exe' : '/bin/bash'
+  const useBash = !isWin || Boolean(bashPath)
+  const shellCmd = isWin ? (bashPath ?? 'powershell.exe') : '/bin/bash'
   const shellArgs = isWin
-    ? [
-        '-NoLogo',
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        `[Console]::OutputEncoding=[Text.Encoding]::UTF8;$OutputEncoding=[Text.Encoding]::UTF8;${command}`
-      ]
+    ? useBash
+      ? ['-lc', command]
+      : [
+          '-NoLogo',
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `[Console]::OutputEncoding=[Text.Encoding]::UTF8;$OutputEncoding=[Text.Encoding]::UTF8;${command}`
+        ]
     : ['-lc', command]
   const child = spawn(shellCmd, shellArgs, {
     cwd,
-    env: process.env,
+    // Git Bash 的 coreutils 在 <Git>\usr\bin：登录 profile 之外再显式置前，
+    // 保证 ls / grep 一定找得到（继承的 Windows PATH 里通常没有它）
+    env:
+      isWin && useBash
+        ? {
+            ...process.env,
+            PATH: `${join(dirname(bashPath!), '..', 'usr', 'bin')};${process.env.PATH ?? ''}`
+          }
+        : process.env,
     windowsHide: true,
     ...(isWin ? {} : { detached: true })
   })
@@ -364,6 +384,14 @@ async function runCommand(
 export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
   const confirm = opts.requestConfirm
   const needConfirm = opts.permissionMode === 'confirm' && !!confirm
+  const isWin = process.platform === 'win32'
+  const bashPath = opts.bashPath ?? null
+  // 工具描述必须如实描述执行环境，模型才会放心用对应风格的命令
+  const shellNote = isWin
+    ? bashPath
+      ? '命令运行在 Git Bash（POSIX）环境：可以用 ls / grep / sed / find / cat / 管道等 Unix 工具与语法；Windows 路径建议写成 C:/xxx 或 /c/xxx 形式。'
+      : '命令运行在 PowerShell 环境（未检测到 Git Bash）。'
+    : '命令运行在 bash 环境。'
 
   /**
    * 改动类工具的**统一闸门**（与 fishwork 的 `guardWrite` 同一套语义）。
@@ -578,7 +606,8 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
 
     execute_command: tool({
       description:
-        '在工作区目录下执行 shell 命令并返回输出（stdout + stderr，自动截断）。适用于运行构建 / 测试 / git 操作 / 安装依赖 / 启动服务等。命令默认超时 120 秒。注意这是真实执行环境，删除、覆盖、危险命令（rm -rf、git push --force 等）前先说明影响。',
+        '在工作区目录下执行 shell 命令并返回输出（stdout + stderr，自动截断）。适用于运行构建 / 测试 / git 操作 / 安装依赖 / 启动服务等。命令默认超时 120 秒。注意这是真实执行环境，删除、覆盖、危险命令（rm -rf、git push --force 等）前先说明影响。' +
+        shellNote,
       inputSchema: z.object({
         command: z.string().describe('要执行的命令'),
         timeoutMs: z.number().optional().describe('超时毫秒数，默认 120000，最大 300000'),
@@ -595,7 +624,7 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
         const stat = await fs.stat(execDir)
         if (!stat.isDirectory()) throw new Error(`执行目录不是目录：${cwd || '.'}`)
         const t = clampInt(timeoutMs, 1000, 300_000, 120_000)
-        return runCommand(command, execDir, t, options.abortSignal)
+        return runCommand(command, execDir, t, options.abortSignal, bashPath)
       }
     }),
 

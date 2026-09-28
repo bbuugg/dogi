@@ -15,12 +15,12 @@ import {
 } from './browser-input'
 
 /**
- * 自动化面板里的浏览器视图。
+ * Agent 会话页的内嵌浏览器视图。
  *
  * 浏览器本体是**无窗口**跑的（Playwright headless），这里看到的是 CDP screencast
  * 的帧流；用户的鼠标键盘再由 `input()` 转发回去。这样 Playwright 能完全控制它，
- * 而画面又嵌在 Dogi 的标签页里 —— 这是「用官方引擎录制」和「画面在面板内」
- * 能同时成立的关键（见 AGENTS.md 的浏览器自动化一节）。
+ * 而画面又嵌在 Dogi 的会话页里 —— Agent 的 `browser_*` 工具操作哪一页，这里就镜像哪一页
+ * （见 AGENTS.md 的浏览器一节）。
  *
  * ⚠️ 视口**不跟随面板尺寸**：面板宽度是用户拖出来的，拿它当视口会让同一个页面
  * 在不同窗口大小下走不同的响应式断点。视口固定成预设（PC / 手机），画面由
@@ -31,11 +31,11 @@ interface BrowserPaneProps {
   sessionId: string
   /** 点「打开浏览器」时的落点 */
   startUrl?: string
-  /** 浏览器启动成功后通知（父组件据此点亮录制 / 运行按钮） */
+  /** 浏览器启动成功后通知（父组件据此更新状态） */
   onStarted?: () => void
   /**
-   * 当前视口预设。**受控**：父组件的「录制 / 运行」要在浏览器还没启动时
-   * 自己调 `open()`，它必须知道该用哪个预设，所以状态放在父组件。
+   * 当前视口预设。**受控**：父组件要在浏览器还没启动时自己调 `open()`，
+   * 它必须知道该用哪个预设，所以状态放在父组件。
    */
   mode: BrowserViewportMode
   onModeChange: (mode: BrowserViewportMode) => void

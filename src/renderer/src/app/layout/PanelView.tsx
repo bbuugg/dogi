@@ -24,7 +24,6 @@ import {
   Puzzle,
   ScrollText,
   TerminalSquare,
-  Workflow,
   X
 } from 'lucide-react'
 import { cn } from 'cn'
@@ -37,7 +36,6 @@ import { ApiPage } from '@/features/api/ApiPage'
 import { WsPage } from '@/features/api/WsPage'
 import { ScriptsPage } from '@/features/scripts/ScriptsPage'
 import { NotesPage } from '@/features/notes/NotesPage'
-import { AutomationPage } from '@/features/automation/AutomationPage'
 import { PluginsPage } from '@/features/plugins/PluginsPage'
 import { SftpPage } from '@/features/sftp/SftpPage'
 import { RdpPage } from '@/features/rdp/RdpPage'
@@ -117,8 +115,6 @@ function TabIcon({ tab }: { tab: PanelTab }) {
       return <ScrollText className="size-3.5 shrink-0" />
     case 'agent':
       return <Bot className="size-3.5 shrink-0" />
-    case 'automation':
-      return <Workflow className="size-3.5 shrink-0" />
   }
 }
 
@@ -772,11 +768,6 @@ function TabContent({ tab, active }: { tab: PanelTab; active: boolean }) {
       // `visible` 给会话页用来「切过来的那一帧先把内容区宽度量准」（见 AgentPage 的 contentWidth）
       return tab.agentConversationId ? (
         <AgentPage conversationId={tab.agentConversationId} visible={active} />
-      ) : null
-    case 'automation':
-      // 脚本视图由 scriptId 驱动；浏览器会话 id 就是标签 id（见 AutomationPage）
-      return tab.automationScriptId ? (
-        <AutomationPage scriptId={tab.automationScriptId} />
       ) : null
     default:
       return null

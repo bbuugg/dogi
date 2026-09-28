@@ -1,4 +1,5 @@
-import { ipcMain } from 'electron'
+import { ipcMain, app } from 'electron'
+import { join } from 'node:path'
 import type {
   BrowserChannel,
   BrowserInputEvent,
@@ -6,17 +7,18 @@ import type {
   BrowserViewportMode
 } from '@shared/types'
 import { DEFAULT_BROWSER_VIEWPORT } from '@shared/browser'
-import { browserSessions } from '../services/browser/session'
+import {
+  browserSessions,
+  setBrowserProfilesRoot
+} from '../services/browser/session'
 import { createBrowserSessionHandlers, setBrowserBroadcaster } from '../services/browser/handlers'
-import { detectBrowsers } from '../services/browser/resolver'
-import { runScript, type RunResult } from '../services/browser/runner'
 import { storage } from '../services/storage'
 import type { IpcContext } from './shared'
 
 /**
- * 浏览器自动化的 IPC。
+ * 浏览器会话的 IPC（Agent 的 browser_* 工具与内嵌面板共用）。
  *
- * 所有流式事件（帧 / 状态 / 录制 / 日志 / 关闭）都带 sessionId 并走 ctx.broadcast ——
+ * 所有流式事件（帧 / 状态 / 关闭）都带 sessionId 并走 ctx.broadcast ——
  * 渲染端一个浏览器面板一个 sessionId，据此把事件路由到对应的面板（AGENTS.md 4.2）。
  */
 export function registerBrowserIpc(ctx: IpcContext): void {
@@ -26,9 +28,10 @@ export function registerBrowserIpc(ctx: IpcContext): void {
    * 它拿不到 ctx，但能拿到同一个 broadcaster —— 两边的帧走同一组 `browser:*` 通道。
    */
   setBrowserBroadcaster((channel, payload) => ctx.broadcast(channel, payload))
+  // 持久化 profile 的落点：登录态要活得过会话重启（关标签 / browser_close / 应用重启），
+  // 见 session.ts —— 只有删除会话 / 工作区才清 profile
+  setBrowserProfilesRoot(join(app.getPath('userData'), 'browser-profiles'))
   const handlers = createBrowserSessionHandlers
-
-  ipcMain.handle('browser:detect', () => detectBrowsers())
 
   /**
    * 启动会话。`mode` 是视口预设（PC / 手机），**不是面板尺寸** ——
@@ -99,91 +102,6 @@ export function registerBrowserIpc(ctx: IpcContext): void {
     'browser:viewport',
     async (_e, p: { sessionId: string; mode: BrowserViewportMode }) => {
       await browserSessions.get(p.sessionId)?.setViewportMode(p.mode)
-    }
-  )
-
-  ipcMain.handle('browser:record:start', async (_e, sessionId: string) => {
-    await browserSessions.get(sessionId)?.startRecording()
-  })
-
-  ipcMain.handle('browser:record:stop', async (_e, sessionId: string) => {
-    await browserSessions.get(sessionId)?.stopRecording()
-  })
-
-  /** 停止正在跑的脚本：只保证「不再执行下一步」，当前那步要等它自己超时 */
-  ipcMain.handle('browser:abort', (_e, sessionId: string) => {
-    browserSessions.get(sessionId)?.requestAbort()
-  })
-
-  /**
-   * 运行脚本。浏览器没启动就顺手启动 —— 用户点「运行」时不该被要求
-   * 先手动点一次「打开浏览器」。
-   */
-  ipcMain.handle(
-    'browser:run',
-    async (
-      _e,
-      p: { sessionId: string; code: string; mode?: BrowserViewportMode }
-    ): Promise<RunResult> => {
-      const session = browserSessions.get(p.sessionId)
-      if (!session) return { ok: false, steps: 0, error: '会话不存在，请先打开浏览器' }
-
-      if (!session.isAlive()) {
-        const pref = (storage.getPreferences().browserChannel ?? 'auto') as BrowserChannel
-        try {
-          await session.start(pref, p.mode ?? DEFAULT_BROWSER_VIEWPORT)
-        } catch (err) {
-          return { ok: false, steps: 0, error: err instanceof Error ? err.message : String(err) }
-        }
-      }
-
-      const page = session.getPage()
-      const context = page.context()
-      const browser = context.browser()
-      if (!browser) return { ok: false, steps: 0, error: '浏览器连接已失效' }
-
-      // 复位上一轮的停止标记：否则点过一次「停止」之后，本会话每次运行都会在第 0 步
-      // 直接判定为已中止（见 session.beginRun 的注释）
-      session.beginRun()
-      const log = (message: string): void =>
-        ctx.broadcast('browser:log', {
-          sessionId: p.sessionId,
-          level: 'info' as const,
-          message,
-          at: Date.now()
-        })
-
-      try {
-        const result = await runScript(
-          p.code,
-          { page, context, browser, log },
-          {
-            onStep: (index, total, line) =>
-              ctx.broadcast('browser:log', {
-                sessionId: p.sessionId,
-                level: 'step' as const,
-                message: `第 ${index}/${total} 步  ${line}`,
-                at: Date.now()
-              }),
-            shouldAbort: () => session.aborted
-          }
-        )
-        // 用户主动停止不是失败：单列一条 info 日志，别把它渲染成红色报错
-        const stopped = !result.ok && result.aborted === true
-        ctx.broadcast('browser:log', {
-          sessionId: p.sessionId,
-          level: result.ok ? ('success' as const) : stopped ? ('info' as const) : ('error' as const),
-          message: result.ok
-            ? `脚本执行完成，共 ${result.steps} 步`
-            : stopped
-              ? `脚本已停止（已完成 ${result.steps} 步）`
-              : `脚本失败${result.failedStep ? `（第 ${result.failedStep} 步）` : ''}：${result.error ?? ''}`,
-          at: Date.now()
-        })
-        return result
-      } finally {
-        session.setRunning(false)
-      }
     }
   )
 }

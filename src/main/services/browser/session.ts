@@ -1,3 +1,5 @@
+import { rm } from 'node:fs/promises'
+import { join } from 'node:path'
 import {
   chromium,
   type Browser,
@@ -9,8 +11,6 @@ import type {
   BrowserChannel,
   BrowserFrame,
   BrowserInputEvent,
-  BrowserLogEvent,
-  BrowserRecordEvent,
   BrowserSessionState,
   BrowserViewportMode
 } from '@shared/types'
@@ -25,7 +25,8 @@ import { nextButtonsMask, toCdpCommand } from './input'
 import { launchAttempts } from './resolver'
 
 /**
- * 浏览器会话：一个自动化标签页 = 一个会话。
+ * 浏览器会话：一个浏览器面板 = 一个会话（Agent 会话页的内嵌面板，与
+ * `browser_*` 工具操作的会话同池同 id，见 @shared/browser）。
  *
  * 画面走 CDP screencast（`Page.startScreencast`）而不是 Electron 的 WebContentsView ——
  * 因为 Playwright 只能控制它自己启动的浏览器，而那个浏览器不是 Electron 的 webContents。
@@ -45,39 +46,48 @@ import { launchAttempts } from './resolver'
  */
 const MIN_FRAME_INTERVAL = 33
 
+// ---------------------------------------------------------------------------
+// 持久化 profile
+// ---------------------------------------------------------------------------
+
+/**
+ * 持久化 profile 的根目录（`userData/browser-profiles`），由 `registerBrowserIpc` 注入。
+ *
+ * 本模块刻意保持与 Electron 解耦（`scripts/verify-agent-browser-tools.mjs` 会在纯 Node 下
+ * 直接跑这份源码），拿不到 `app.getPath`，所以走和事件 broadcaster 同款的
+ * 「注册时注入一次」模式（AGENTS.md 4.2 的归属思想）。
+ *
+ * 没注入（探针 / 单测）时回退为**临时上下文**：会话一关登录态即失，不落任何盘。
+ */
+let profilesRoot: string | null = null
+
+export function setBrowserProfilesRoot(dir: string): void {
+  profilesRoot = dir
+}
+
+/** 会话的持久化 profile 目录；未配置根目录时返回 null = 用临时上下文 */
+function profileDirOf(sessionId: string): string | null {
+  if (!profilesRoot) return null
+  // 会话 id 含 `:`（agent-browser:<uuid>），文件系统里换成安全的字符；uuid 本身不需要防碰撞
+  return join(profilesRoot, sessionId.replace(/[^a-zA-Z0-9._-]/g, '-'))
+}
+
 export interface BrowserSessionHandlers {
   onFrame: (frame: BrowserFrame) => void
   onState: (state: BrowserSessionState) => void
-  onRecord: (event: BrowserRecordEvent) => void
-  onLog: (log: BrowserLogEvent) => void
   onClosed: (sessionId: string, reason: string) => void
-}
-
-/**
- * `_enableRecorder` / `_disableRecorder` 是 Playwright 的**未公开 API**（不在 types 里），
- * 但它是 codegen 的底层实现，也是唯一能在「不开 Inspector 窗口」的前提下拿到
- * 官方录制事件流的入口 —— 见 AGENTS.md 的浏览器自动化一节。
- *
- * 升级 Playwright 时必须重新验证：`recorderMode: 'api'` 是否仍走
- * `ProgrammaticRecorderApp`（不弹窗）、`actionAdded` 的第二个参数是否仍是代码字符串。
- */
-interface RecorderCapableContext extends BrowserContext {
-  _enableRecorder(params: Record<string, unknown>, sink: Record<string, unknown>): Promise<void>
-  _disableRecorder(): Promise<void>
 }
 
 export class BrowserSession {
   readonly id: string
 
   private browser: Browser | null = null
-  private context: RecorderCapableContext | null = null
+  private context: BrowserContext | null = null
   private page: Page | null = null
   private cdp: CDPSession | null = null
 
   private readonly handlers: BrowserSessionHandlers
   private buttonsMask = 0
-  private recording = false
-  private running = false
   private channelLabel: string | null = null
   private title = ''
   private loading = false
@@ -103,8 +113,6 @@ export class BrowserSession {
    * 时静止页面既没有新帧也没有状态推送 —— 留着这一帧，重挂载时补一次即可出图。
    */
   private lastFrame: BrowserFrame | null = null
-  /** 脚本运行时的中断标记：await 前后都要查，见 runner.ts */
-  private abortRequested = false
 
   constructor(id: string, handlers: BrowserSessionHandlers) {
     this.id = id
@@ -134,17 +142,35 @@ export class BrowserSession {
 
     for (const attempt of attempts) {
       try {
-        const browser = await chromium.launch({ headless: true, ...attempt.options })
-        this.browser = browser
         this.channelLabel = attempt.label
-        this.context = (await browser.newContext({
+        const contextOptions = {
           viewport: this.viewport,
           // deviceScaleFactor 建 context 时定死，之后只能靠 CDP 改（见 applyDeviceScaleFactor）
           deviceScaleFactor: preset.dpr,
-          // 自动化场景下页面常常是本地/内网地址，证书自签很常见
+          // 页面常常是本地/内网地址，证书自签很常见
           ignoreHTTPSErrors: true
-        })) as RecorderCapableContext
-        this.page = await this.context.newPage()
+        }
+        const profileDir = profileDirOf(this.id)
+        if (profileDir) {
+          // 持久化上下文：登录态（cookie / localStorage / IndexedDB）活得过会话重启 ——
+          // `newContext()` 每次都是「无痕窗口」，关标签 / 重开应用就等于登出。
+          // profile 按会话 id 一份（一个 Agent 会话一份浏览器，互不串台）；
+          // 关标签 / browser_close / 应用退出都不删它，只有删会话（manager.purge）才落盘清理。
+          this.context = await chromium.launchPersistentContext(profileDir, {
+            headless: true,
+            ...attempt.options,
+            ...contextOptions
+          })
+          this.browser = this.context.browser()
+        } else {
+          this.browser = await chromium.launch({ headless: true, ...attempt.options })
+          this.context = await this.browser.newContext(contextOptions)
+        }
+        // 持久化上下文启动即带一个起始页（上次异常退出还可能恢复出多页）：收敛到第一页，
+        // 多余的关掉，避免帧流 / 导航作用在不确定的那页上
+        const existing = this.context.pages()
+        this.page = existing[0] ?? (await this.context.newPage())
+        for (const extra of existing.slice(1)) void extra.close().catch(() => {})
         this.bindPage(this.page)
         // 先记下宿主真实 UA（切模式时据它派生），再起 screencast 拿到 CDP 会话下发覆盖
         this.desktopUserAgent = await this.readUserAgent()
@@ -154,12 +180,13 @@ export class BrowserSession {
         // context / browser 级监听放最后：这时首屏已是 this.page，
         // 不会被 context 的 page 事件误判成「新标签页」
         this.bindSessionListeners()
-        this.log('info', `已启动浏览器：${attempt.label}`)
         this.pushState()
         return
       } catch (err) {
         failures.push(`${attempt.label}: ${errText(err)}`)
         this.browser = null
+        this.context = null
+        this.page = null
       }
     }
 
@@ -169,7 +196,6 @@ export class BrowserSession {
   async close(reason = '用户关闭'): Promise<void> {
     if (this.closed) return
     this.closed = true
-    this.abortRequested = true
     await this.stopScreencast().catch(() => {})
     // browser.close() 会连带关掉 context / page，不必逐个关
     await this.browser?.close().catch(() => {})
@@ -200,32 +226,6 @@ export class BrowserSession {
   getPage(): Page {
     if (!this.page) throw new Error('浏览器尚未启动')
     return this.page
-  }
-
-  requestAbort(): void {
-    this.abortRequested = true
-  }
-
-  get aborted(): boolean {
-    return this.abortRequested
-  }
-
-  /**
-   * 开始一次脚本运行。
-   *
-   * ⚠️ 必须在这里**清掉上一次的停止标记**：`abortRequested` 只在停止 / 关闭会话时置位，
-   * 若不在新一轮开始时复位，用户点过一次「停止」后这个会话**以后每次运行都会在第 0 步
-   * 直接中止**，日志只有干巴巴一句「脚本失败：已停止」—— 看起来就是「什么都没干就失败」。
-   */
-  beginRun(): void {
-    this.abortRequested = false
-    this.running = true
-    this.pushState()
-  }
-
-  setRunning(running: boolean): void {
-    this.running = running
-    this.pushState()
   }
 
   // ---------------------------------------------------------------------
@@ -273,7 +273,6 @@ export class BrowserSession {
     // 新 target 不继承旧页的覆盖：视口 / DPR / UA 重新下发一遍
     await this.applyPageEmulation()
     await this.refreshNavigation()
-    this.log('info', `新标签页：${p.url()}`)
   }
 
   private bindPage(page: Page): void {
@@ -305,13 +304,6 @@ export class BrowserSession {
         return this.close('页面已关闭')
       })
     })
-    page.on('console', (msg) => {
-      const type = msg.type()
-      if (type === 'error' || type === 'warning') {
-        this.log(type === 'error' ? 'error' : 'info', `[console.${type}] ${msg.text()}`)
-      }
-    })
-    page.on('pageerror', (err) => this.log('error', `[页面异常] ${err.message}`))
   }
 
   /** 把当前预设的视口 / DPR / UA 下发到当前页面（首屏、切模式、接管新页共用一条路径） */
@@ -352,14 +344,8 @@ export class BrowserSession {
       canGoForward: this.canGoForward,
       viewport: { ...this.viewport },
       viewportMode: this.viewportMode,
-      recording: this.recording,
-      running: this.running,
       channel: this.channelLabel
     }
-  }
-
-  private log(level: BrowserLogEvent['level'], message: string): void {
-    this.handlers.onLog({ sessionId: this.id, level, message, at: Date.now() })
   }
 
   // ---------------------------------------------------------------------
@@ -372,8 +358,7 @@ export class BrowserSession {
     if (!this.cdp) {
       try {
         this.cdp = await this.context.newCDPSession(this.page)
-      } catch (err) {
-        this.log('error', `无法建立 CDP 会话：${errText(err)}`)
+      } catch {
         return
       }
     }
@@ -409,8 +394,8 @@ export class BrowserSession {
         everyNthFrame: 1
       })
       this.screencasting = true
-    } catch (err) {
-      this.log('error', `启动画面流失败：${errText(err)}`)
+    } catch {
+      // 画面流起不来不影响会话存活；工具侧的导航 / 快照仍可用
     }
   }
 
@@ -445,8 +430,7 @@ export class BrowserSession {
       await this.startScreencast()
       // UA 只对**之后的请求**生效：按 UA 分流的站点（m.xxx 跳转、服务端模板）
       // 不重新导航就一直是老页面 —— 而「切了视口却还是老样子」正是最迷惑的状态。
-      // 脚本运行中不打断（页面状态可能正被脚本用着）。
-      if (!this.running) await this.page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {})
+      await this.page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {})
     }
     this.pushState()
   }
@@ -493,8 +477,8 @@ export class BrowserSession {
     this.pushState()
     try {
       await this.page.goto(target, { waitUntil: 'domcontentloaded', timeout: 30_000 })
-    } catch (err) {
-      this.log('error', `打开 ${target} 失败：${errText(err)}`)
+    } catch {
+      // 导航失败不算会话失败：状态里 loading 复位即可，调用方（工具 / 地址栏）自会收到回执
     } finally {
       this.loading = false
       await this.refreshNavigation()
@@ -528,61 +512,6 @@ export class BrowserSession {
     const command = toCdpCommand(input, this.buttonsMask)
     if (!command) return
     await this.cdp.send(command.method as never, command.params as never).catch(() => {})
-  }
-
-  // ---------------------------------------------------------------------
-  // 录制
-  // ---------------------------------------------------------------------
-
-  async startRecording(): Promise<void> {
-    if (!this.context) throw new Error('浏览器尚未启动')
-    if (this.recording) return
-    await this.context._enableRecorder(
-      {
-        mode: 'recording',
-        // ⚠️ 'api' 才会走 ProgrammaticRecorderApp（不弹 Inspector 窗口）；
-        // 默认值 'default' 会开一个独立窗口，画面就不在 Dogi 面板里了。
-        recorderMode: 'api',
-        language: 'javascript',
-        testIdAttributeName: 'data-testid',
-        handleSIGINT: false,
-        // 浏览器里的录制浮层：画面已经镜像到面板里了，再叠一层浮层只会碍事
-        hideToolbar: true
-      },
-      {
-        actionAdded: (_page: unknown, action: { action?: { name?: string } }, code: string) =>
-          this.emitRecord('added', action, code),
-        actionUpdated: (_page: unknown, action: { action?: { name?: string } }, code: string) =>
-          this.emitRecord('updated', action, code),
-        signalAdded: (_page: unknown, action: { action?: { name?: string } }, code: string) =>
-          this.emitRecord('signal', action, code)
-      }
-    )
-    this.recording = true
-    this.log('info', '开始录制')
-    this.pushState()
-  }
-
-  private emitRecord(
-    kind: BrowserRecordEvent['kind'],
-    action: { action?: { name?: string } } | undefined,
-    code: string
-  ): void {
-    if (!code) return
-    this.handlers.onRecord({
-      sessionId: this.id,
-      kind,
-      code,
-      action: action?.action?.name ?? kind
-    })
-  }
-
-  async stopRecording(): Promise<void> {
-    if (!this.recording || !this.context) return
-    this.recording = false
-    await this.context._disableRecorder().catch(() => {})
-    this.log('info', '已停止录制')
-    this.pushState()
   }
 }
 
@@ -632,6 +561,20 @@ export class BrowserSessionManager {
     if (!session) return
     this.sessions.delete(id)
     await session.close(reason)
+  }
+
+  /**
+   * 关闭会话并**删除**它的持久化 profile（登录态一并清除）。
+   *
+   * 只在「会话本身被删除」时调用（删 Agent 会话 / 删工作区）——
+   * 关标签、`browser_close` 工具、应用退出都必须**保留** profile，
+   * 登录态要活得过它们，否则持久化就失去意义。
+   */
+  async purge(id: string): Promise<void> {
+    await this.close(id, '会话已删除').catch(() => {})
+    const dir = profileDirOf(id)
+    if (!dir) return
+    await rm(dir, { recursive: true, force: true }).catch(() => {})
   }
 
   /** 应用退出时调用：不留孤儿浏览器进程 */

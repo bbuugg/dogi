@@ -458,44 +458,12 @@ export interface NoteGroup {
   createdAt: number
 }
 
-/** 自动化脚本分组：侧边栏里的分组节点（只承担归类 + 排序，不设颜色） */
-export interface AutomationGroup {
-  id: string
-  name: string
-  createdAt: number
-}
-
-/**
- * 自动化脚本：一个脚本 = 一个 PanelView 标签。
- *
- * `code` 是 Playwright 的 JS 片段（官方 recorder 产出的形态），执行时被包进
- * 一个 async 函数体，作用域里注入 `page` / `context` / `browser` / `expect`，
- * 所以录制出来的 `await page.getByRole('button').click()` 可以直接跑。
- * 见 services/browser/runner.ts —— 刻意不用子进程，规避打包后的模块解析问题。
- */
-export interface AutomationScript {
-  id: string
-  /** 脚本名，兼作标签标题与搜索 */
-  name: string
-  /** Playwright JS 代码（多行片段，录制产出） */
-  code: string
-  /** 点「打开浏览器」时的起始地址，缺省 about:blank */
-  startUrl?: string
-  /**
-   * 所属分组；undefined = 未分组。
-   * 只由 `automation:arrange`（拖拽重排）改动 —— 普通的保存/新建不要碰它。
-   */
-  groupId?: string
-  createdAt: number
-  updatedAt: number
-}
-
 // ---------------------------------------------------------------------------
-// 浏览器自动化（自动化面板 + AI 的浏览器工具共用一套会话）
+// 浏览器（AI 的浏览器工具与内嵌面板共用一套会话）
 // ---------------------------------------------------------------------------
 
 /**
- * 自动化面板用哪个浏览器。
+ * 浏览器会话用哪个浏览器。
  * - `auto`：自带 Chromium（若已下载）→ Edge → Chrome，逐级回退
  * - `bundled`：Playwright 自带的 Chromium（需要先下载）
  * - `msedge` / `chrome`：系统的 Edge / Chrome（Windows 上 Edge 必定存在）
@@ -538,10 +506,6 @@ export interface BrowserSessionState {
   viewport: { width: number; height: number }
   /** 当前视口预设（PC / 手机） */
   viewportMode: BrowserViewportMode
-  /** 是否正在录制（官方 recorder 已启用） */
-  recording: boolean
-  /** 是否正在跑脚本 */
-  running: boolean
   /** 实际使用的浏览器（启动后确定，如 'msedge' / 'chromium'），未启动为 null */
   channel: string | null
 }
@@ -552,21 +516,6 @@ export interface BrowserFrame {
   data: string
   width: number
   height: number
-}
-
-/** 录制事件：官方 recorder 产出的代码增量 */
-export interface BrowserRecordEvent {
-  sessionId: string
-  /**
-   * - `added`：新增一个动作，代码**追加**到脚本末尾
-   * - `updated`：同一个动作被改写（连续输入会走这条），代码**替换最后一条**
-   * - `signal`：非动作信号（如弹窗、下载），只记日志
-   */
-  kind: 'added' | 'updated' | 'signal'
-  /** 官方生成器产出的代码，含缩进与结尾分号 */
-  code: string
-  /** 动作名（click / fill / navigate / press …），用于日志展示 */
-  action: string
 }
 
 /** 鼠标键（与 CDP 的取值一致） */
@@ -612,30 +561,7 @@ export type BrowserInputEvent =
   /** 输入法 / 粘贴这类不经过按键的文本，走 Input.insertText */
   | { kind: 'text'; text: string }
 
-/** 脚本运行日志级别 */
-export type BrowserLogLevel = 'info' | 'step' | 'success' | 'error'
-
-/** 脚本运行时的一行日志 */
-export interface BrowserLogEvent {
-  sessionId: string
-  level: BrowserLogLevel
-  message: string
-  at: number
-}
-
-/** 脚本执行结果 */
-export interface BrowserRunResult {
-  ok: boolean
-  /** 实际执行的步骤数 */
-  steps: number
-  error?: string
-  /** 出错时是第几步（从 1 开始） */
-  failedStep?: number
-  /** 用户点了「停止」（不是失败）—— 日志据此区分「已停止」与「失败」，别把取消当报错 */
-  aborted?: boolean
-}
-
-/** 已发现的浏览器可执行文件（设置页用来展示与选择） */
+/** 已发现的浏览器可执行文件（主进程挑浏览器用，见 services/browser/resolver.ts） */
 export interface BrowserCandidate {
   /** 与 BrowserChannel 对应，但排除了 auto */
   channel: 'bundled' | 'msedge' | 'chrome'

@@ -179,16 +179,10 @@
 }
 
 /*
- * Virtuoso 消息列表的滚动容器：**预留**滚动条槽位。
- *
- * 展开一段长思考、或流式内容把列表撑高时，列表会从「不可滚」变成「可滚」—— 滚动条
- * 一出现，内容可用宽度就少 8px，居中的消息列会整体横移一下（就是那种「内容跳了一下」）。
- * `scrollbar-gutter: stable` 让这条槽位常驻：有没有滚动条，内容宽度都一样。
- * 定位靠 Virtuoso 自己打在滚动容器上的属性（不是我们的类名，不受组件换实现影响）。
+ * 消息列表的滚动条槽位（`scrollbar-gutter: stable`）不再在这里兜底：虚拟列表已移除，
+ * 滚动容器改由 Conversation 组件自己带 `[scrollbar-gutter:stable]`
+ * （见 features/agent/Conversation.tsx）。这条槽位的意义是「滚动条出现时内容不横向跳」。
  */
-[data-virtuoso-scroller] {
-  scrollbar-gutter: stable;
-}
 
 /* xterm 终端容器 */
 .xterm {

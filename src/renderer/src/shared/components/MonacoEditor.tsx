@@ -4,7 +4,7 @@ import Editor, { loader } from '@monaco-editor/react'
 import { Button, Select, Tag } from 'antd'
 import { Braces, Check, Code, Copy, Download, Hash, Lock, WrapText } from 'lucide-react'
 import type { FC, ReactNode } from 'react'
-import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 // ── 本地化 Monaco Editor ─────────────────────────────────────────
 // 默认情况下 @monaco-editor/react 会从 CDN（cdn.jsdelivr.net）加载 Monaco 资源。
@@ -99,38 +99,15 @@ export async function syncModelEol(uriText: string, content: string): Promise<vo
   }
 }
 
-/** Monaco 选区（结构类型：够用即可，不为几个方法引入 monaco-editor 类型依赖） */
-type MonacoRange = {
-  startLineNumber: number
-  startColumn: number
-  endLineNumber: number
-  endColumn: number
-}
-
 /** Monaco 编辑器实例的最小接口 */
 type EditorInstance = {
   getAction: (id: string) => { run: () => void } | null
   layout: () => void
-  getSelection: () => MonacoRange | null
   getModel: () => {
-    getLineContent: (lineNumber: number) => string
     uri: { toString: () => string }
   } | null
-  executeEdits: (
-    source: string,
-    edits: Array<{ range: MonacoRange; text: string; forceMoveMarkers?: boolean }>
-  ) => boolean
-  pushUndoStop: () => void
   focus: () => void
 } | null
-
-/** 经 `apiRef` 暴露给外部的编辑器操作（如自动化页的「插入等待」） */
-export interface MonacoEditorHandle {
-  /** 在光标处插入一段代码（整行插入；多行按当前行缩进对齐；有选区则替换选区） */
-  insertSnippet: (snippet: string) => void
-  /** 聚焦编辑器 */
-  focus: () => void
-}
 
 interface MonacoEditorProps {
   value?: string
@@ -175,8 +152,6 @@ interface MonacoEditorProps {
   onDownload?: () => void
   /** 是否显示顶部工具栏（语言标签 / 各切换按钮 / toolbar / actions），默认 true */
   showHeader?: boolean
-  /** 挂载后把编辑器操作写进这个 ref（插入片段 / 聚焦），供外部工具条调用 */
-  apiRef?: RefObject<MonacoEditorHandle | null>
 }
 
 const MonacoEditor: FC<MonacoEditorProps> = ({
@@ -196,8 +171,7 @@ const MonacoEditor: FC<MonacoEditorProps> = ({
   showCopyButton = false,
   showDownloadButton = false,
   onDownload,
-  showHeader = true,
-  apiRef
+  showHeader = true
 }) => {
   const isDark = useIsDarkTheme()
   const [currentLanguage, setCurrentLanguage] = useState(language)
@@ -212,57 +186,6 @@ const MonacoEditor: FC<MonacoEditorProps> = ({
   const containerRef = useRef<HTMLDivElement | null>(null)
   /** 上一次已同步过的容器尺寸，用来避免 layout → 尺寸回调 → layout 的来回触发 */
   const laidOutSize = useRef({ w: 0, h: 0 })
-
-  /**
-   * 在光标处插入一段代码（供外部工具条调用，如自动化页的「插入等待」）。
-   *
-   * 规则（保证插完是**合法代码**，不会把语句拼进相邻行）：
-   * - 有选区 → 直接替换选区；
-   * - 光标所在行是空行 → 填这一行（沿用它的缩进，不叠加）；
-   * - 光标所在行有内容 → 在**该行之后**另起一行插入（整行插入）。
-   * 多行片段除首行外每行按当前行缩进对齐；结束前 pushUndoStop 让整次插入可一步撤销。
-   */
-  const insertSnippet = useCallback((snippet: string): void => {
-    const editor = editorRef.current
-    const model = editor?.getModel()
-    const selection = editor?.getSelection()
-    if (!editor || !model || !selection) return
-    const lineNumber = selection.startLineNumber
-    const line = model.getLineContent(lineNumber)
-    const indent = line.match(/^[ \t]*/)?.[0] ?? ''
-    const body = snippet
-      .split('\n')
-      .map((l, i) => (i === 0 || !l ? l : indent + l))
-      .join('\n')
-    const isEmpty =
-      selection.startLineNumber === selection.endLineNumber &&
-      selection.startColumn === selection.endColumn
-
-    let range: MonacoRange = selection
-    let text = body
-    if (isEmpty) {
-      if (line.trim() === '') {
-        // 空行：整行替换（把原有缩进也让出来，避免叠加成双份缩进）
-        range = {
-          startLineNumber: lineNumber,
-          startColumn: 1,
-          endLineNumber: lineNumber,
-          endColumn: line.length + 1
-        }
-        text = `${indent}${body}`
-      } else {
-        // 有内容：在本行之后另起一行，插入一条独立语句
-        const end = line.length + 1
-        range = { startLineNumber: lineNumber, startColumn: end, endLineNumber: lineNumber, endColumn: end }
-        text = `\n${indent}${body}`
-      }
-    }
-
-    editor.pushUndoStop()
-    editor.executeEdits('dogi-insert-snippet', [{ range, text, forceMoveMarkers: true }])
-    editor.pushUndoStop()
-    editor.focus()
-  }, [])
 
   const handleEditorDidMount = (editor: unknown): void => {
     editorRef.current = editor as EditorInstance
@@ -287,27 +210,6 @@ const MonacoEditor: FC<MonacoEditorProps> = ({
     const uri = editorRef.current?.getModel()?.uri.toString()
     onChangeRef.current?.(v || '', uri)
   }, [])
-
-  const focusEditor = useCallback((): void => {
-    editorRef.current?.focus()
-  }, [])
-
-  /**
-   * 把编辑器句柄挂到外部 ref 上。
-   *
-   * ⚠️ 赋值必须放在 **effect 的执行体**里（依赖 `mounted`），不能只写在 onMount 里：
-   * Monaco 是异步加载的，第二次及以后挂载编辑器时（资源已缓存）`onMount` 可能早于本组件
-   * 首次 effect 执行，紧接着 StrictMode 的 effect 清理会把它抹成 null —— 之后没有任何
-   * 时机再赋值，外部拿到的永远是 null，表现就是「点了插入没反应」。
-   * 放在 effect 体里：只要 mounted 为真就（重新）赋值，真正的卸载才清空。
-   */
-  useEffect(() => {
-    if (!apiRef || !mounted) return
-    apiRef.current = { insertSnippet, focus: focusEditor }
-    return () => {
-      apiRef.current = null
-    }
-  }, [apiRef, mounted, insertSnippet, focusEditor])
 
   /**
    * 补一次 `layout()`，把编辑器从 5×5 的保底尺寸拉回容器真实大小。

@@ -43,7 +43,6 @@
 | **AI Agent** | 工作区 → 会话两层树，会话行带状态图标（等回答 / 运行中 / 静止） | Agent 会话页（对话流 + 内嵌终端 + 工作区文件树/预览 + 快捷功能） |
 | **笔记** | 笔记列表（分组 / 拖拽 / 搜索） | Monaco 编辑器标签，语言可选 |
 | **接口请求** | 保存的请求列表（分组 / 拖拽 / 历史） | HTTP 调试页 / WebSocket 调试页 |
-| **自动化** | 自动化脚本列表（分组 / 拖拽 / 搜索，按名称或代码搜） | 脚本页（左 Monaco 编辑器 + 右内嵌浏览器 + 底部运行日志） |
 | **插件管理** | 已安装插件列表 | 插件视图（以标签页打开）；内置：Redis 客户端（🔴）、端口占用（🔌） |
 
 **终端**
@@ -84,12 +83,13 @@
 - 思考内容（reasoning）与工具调用渲染成**可折叠横条**，不是卡片（见 6.5 第 18 条）。
 - 一轮结束且应用不在前台时发系统通知。
 
-**浏览器自动化**（Playwright，机制见 4.11）
+**浏览器（Playwright，机制见 4.11）**
 
-- **脚本管理**：脚本列表（分组 / 拖拽 / 搜索）+ Monaco 编辑器；一个脚本 = 一个标签 = 一个浏览器会话。
-- **内嵌浏览器**：浏览器**无窗口**跑（headless），画面走 CDP screencast 镜像进面板；面板里的鼠标 / 键盘 / 滚轮再转发回页面，所以「用官方引擎录制」和「画面在面板内」能同时成立。
-- **录制**：官方 codegen（`context._enableRecorder({ recorderMode: 'api' })`），操作实时生成 Playwright 代码写进编辑器；停止录制时统一落盘。
-- **运行**：逐行执行脚本（`page` / `context` / `browser` / `expect` / `log` 注入作用域），每步与结果广播到底部日志，可中途中止。
+> 旧的「自动化」功能区（脚本管理 / 录制 / 脚本运行）**已整体移除，别恢复**；
+> Playwright 基础设施现在只服务 Agent 的浏览器能力。
+
+- **内嵌浏览器**：浏览器**无窗口**跑（headless），画面走 CDP screencast 镜像进 Agent 会话页的
+  内嵌面板；面板里的鼠标 / 键盘 / 滚轮再转发回页面。
 - **浏览器来源**：偏好 `browserChannel`（`auto` / `bundled` / `msedge` / `chrome`），auto 按「自带 → Edge → Chrome」逐个尝试启动。
 - **Agent 浏览器工具**：`browser_navigate` / `browser_snapshot` / `browser_click` / `browser_type` / `browser_press` / `browser_wait_for` / `browser_evaluate` / `browser_screenshot` / `browser_close`；定位用可访问性快照里的 `[ref=eN]`（`aria-ref` 选择器引擎），页面一变 ref 失效需重新快照。
 
@@ -130,7 +130,7 @@ src/
                            # agent-core/（工具集 / 系统提示词 / 事件适配 / 路径与忽略规则）
       api/                 # http.ts ws.ts
       browser/             # session.ts（Playwright 会话 + screencast）resolver.ts input.ts
-                           # runner.ts（脚本逐行执行）handlers.ts（事件出口）agent.ts（Agent 工具集）
+                           # handlers.ts（事件出口）agent.ts（Agent 工具集）
       sftp/ transfer/      # sftp.ts；transfer/（zip.ts + 导入导出编排）
       rdp/                 # bridge.ts（RDP 本地桥：WebSocket ↔ TCP/TLS，RDCleanPath，见 4.17）
       log/                 # logger.ts（主机日志：环形缓冲 + JSONL 落盘，见 4.13）
@@ -370,7 +370,11 @@ Session.onData → sessionManager.emit('data') → ipc/terminal.ts broadcast →
   PID 0 是系统保留、Windows ≤ 4 与 POSIX ≤ 1 是系统关键进程，一律拒绝结束。
   主结果只收「监听 / 绑定」行；端口只被 TIME_WAIT 等瞬态连接占着时，仍返回并附 note。
 
-### 4.11 浏览器自动化：headless Playwright + CDP screencast
+### 4.11 浏览器：headless Playwright + CDP screencast
+
+> 旧的「自动化」功能区（脚本管理 / Monaco 编辑器 / 官方 codegen 录制 / `runner.ts` 逐行执行）
+> **已整体移除，别恢复**。Playwright 基础设施现在只服务 Agent：`browser_*` 工具 +
+> 会话页内嵌浏览器面板（`features/agent/BrowserPane.tsx`）。
 
 **为什么是「无窗口浏览器 + 帧流」而不是 WebContentsView / `<webview>`**：Playwright 只能控制
 它**自己启动**的浏览器进程，而 Electron 的 webContents 不是它启动的。所以浏览器 headless 跑，
@@ -387,15 +391,6 @@ Session.onData → sessionManager.emit('data') → ipc/terminal.ts broadcast →
 - Playwright 在 Electron 主进程里是 **in-process** 的（`playwright-core` 的 Node 绑定不 spawn driver
   子进程），所以**打包后目标机器上不需要装 Node**。代价是 `playwright` / `playwright-core` 必须在
   `asarUnpack` 里（要能落地执行，不能压在 asar 内）。
-
-**录制用官方 codegen**：`context._enableRecorder({ recorderMode: 'api' }, sink)`。
-
-- `recorderMode: 'api'` 才走 `ProgrammaticRecorderApp`（**不弹 Inspector 窗口**）；默认的 `'default'`
-  会开一个独立窗口，画面就不在 Dogi 面板里了 —— 这正是「官方引擎录制」和「画面在面板内」能同时成立的原因。
-- `hideToolbar: true` 关掉浏览器内的录制浮层（画面已经镜像进面板，再叠一层只会碍事）。
-- ⚠️ 这是**未公开 API**（`_` 前缀、不在 types 里）。**升级 Playwright 必须重验两件事**：
-  ① `recorderMode: 'api'` 是否仍不弹窗；② `actionAdded(page, action, code)` 的第三个参数是否仍是代码字符串。
-- 「停止录制才落盘」是刻意的：录制中每个动作都写一次盘既没必要也写得太频（见 `AutomationPage` 的 `markDirty(true)`）。
 
 **视口不跟随面板尺寸**（设计）：面板宽度是用户拖出来的，按它当视口会让同一个页面在不同窗口
 大小下走不同的响应式断点（窗口窄了页面就成「手机版」），不可复现也不能跟用户自己在浏览器里看到的
@@ -424,28 +419,34 @@ y=368（偏 **268px**）。
 （视口 = 面板尺寸的时代这个 bug 看不出来，换了固定预设才暴露 —— 所以任何「视口与面板
 不再同宽高比」的改动都要重验点击精度。）
 
-**会话 id 是主进程与渲染端之间的唯一契约**：自动化面板用 `automation-<scriptId>`（一个脚本 = 一个标签 = 一个会话），
-Agent 用 `agent-browser:<conversationId>`。推导函数在 `@shared/browser` —— **别在两端各写一份字符串**，
+**会话 id 是主进程与渲染端之间的唯一契约**：Agent 用 `agent-browser:<conversationId>`
+（一个会话 = 一份浏览器）。推导函数在 `@shared/browser` —— **别在两端各写一份字符串**，
 漂了之后的表现是「帧收不到 / 面板一直转圈」，很难查。
+
+**登录态要活得过会话重启**（用户报告过「登录一个账号，重开就没了」）：会话用
+`launchPersistentContext(userData/browser-profiles/<会话id>)`，profile 按**会话 id** 一份
+（一个 Agent 会话一份浏览器、一份登录态，互不串台）。保留 / 清理的边界 ——
+关标签、`browser_close` 工具、应用退出都**保留** profile；只有删 Agent 会话 / 删工作区
+（`ipc/agent.ts` → `browserSessions.purge`）才落盘清理。`profilesRoot` 由 `registerBrowserIpc`
+注入（session.ts 保持与 Electron 解耦，探针在纯 Node 下跑真源码），没注入就回退临时上下文。
+⚠️ 别改回 `browser.newContext()` —— 那是无痕窗口，登录态必丢。
+（Chromium 对**不带有效期的会话 cookie** 本就不落盘，真浏览器同理，不算回归。）
+验证：`scripts/verify-browser-persistent-profile.mjs`。
 
 - **事件出口只有一处**：`services/browser/handlers.ts`。会话有两条创建路径（面板的 `browser:open`、
   Agent 工具第一次调用时的懒启动），两条都要把帧推到同一组 `browser:*` 通道；broadcaster 由
   `registerBrowserIpc(ctx)` 注入一次（那时才拿得到 `IpcContext`）。所有事件**自带 sessionId**（见 4.2）。
 - ⚠️ **面板必须在「会话首次可用」时补报一次尺寸**：`ResizeObserver` 只在面板**自身**尺寸变化时触发，
-  而浏览器常常是别人先启动的（Agent 用默认视口起、或脚本运行里的懒启动）—— 不补报，页面就按旧视口
+  而浏览器常常是别人先启动的（Agent 用默认视口起的懒启动）—— 不补报，页面就按旧视口
   比例被压扁、两侧留白。
-
-**脚本执行不用子进程**：`new AsyncFunction('page','context','browser','expect','log', line)` 逐行注入
-（`runner.ts`）。逐行模式只在「行内括号自平衡且行尾是 `;` / `}`」时启用，否则整段执行 ——
-判定放宽会把多行语句拆坏，宁可整段跑。
 
 **Agent 工具定位用 ref，别让模型拼 CSS 选择器**：`locator.ariaSnapshot({ mode: 'ai' })` 产出带
 `[ref=eN]` 的可访问性快照（**公开 API**），回解析用 `page.locator('aria-ref=eN')`（公开选择器引擎）。
 ref 只在当前页面状态下有效，页面一变（导航 / 重渲染）就得重新快照。
 
-**验证**（都要跑，见 5.2）：`scripts/verify-automation.mjs`（面板全链路 + 视口预设 + **点击坐标精度**
-+ 录制 + 运行）、`scripts/verify-agent-browser.mjs`（Agent 内嵌面板与 id 契约）、
+**验证**（都要跑，见 5.2）：`scripts/verify-agent-browser.mjs`（Agent 内嵌面板与 id 契约）、
 `scripts/verify-agent-browser-tools.mjs`（Agent 工具行为，直接跑 `services/browser/agent.ts` 的真源码）、
+`scripts/verify-browser-persistent-profile.mjs`（持久化 profile：登录态跨会话重启存活 / purge 清理 / 无根目录回退）、
 `scripts/browser-input.test.ts`（坐标映射纯函数，可直接 `node --experimental-strip-types` 跑）。
 
 ### 4.12 Mosh 会话：SSH 只做引导，终端数据走本地 mosh-client
@@ -630,9 +631,11 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 
 | 脚本 | 覆盖 |
 | --- | --- |
-| `scripts/verify-automation.mjs` | 浏览器自动化全链路：功能区注册 → 新建脚本 → 开标签 → 启动浏览器 → screencast 帧到达渲染端 → **点真实「录制」按钮** → 官方 recorder 产出 `getByTestId` 代码 → **点「停止录制」** → 落盘 → 运行脚本 → 关会话 |
 | `scripts/verify-agent-browser.mjs` | Agent 内嵌浏览器面板：工作区/会话准备 → 点工具栏浏览器按钮 → 面板出现且拿到帧（**验证会话 id 契约**）→ 收起面板不关会话 |
 | `scripts/verify-agent-browser-tools.mjs` | Agent 浏览器工具行为：**直接跑 `services/browser/agent.ts` 真源码**（本地假站点），覆盖 navigate → ref 点击 → evaluate 验状态 → 中文输入 → press → wait_for → 截图落盘 → close → 关闭后能重建 |
+| `scripts/verify-browser-persistent-profile.mjs` | 浏览器会话持久化 profile：**直接跑 `services/browser/session.ts` 真源码**（本地假站点发持久 cookie）—— 登录态（cookie + localStorage）跨会话重启存活、关会话不删 profile 目录、`purge` 连目录一起清、未注入 profilesRoot 回退临时上下文且不落盘 |
+| `scripts/verify-builtin-playwright-mcp.mjs` | 内置 Playwright MCP（`browserToolMode: system` 用的那个）stdio 冒烟：真实子进程跑 CLI —— initialize → tools/list → **真实 browser_navigate**（headless Edge 打开页面）→ browser_snapshot 看到内容。防的是 overrides 强制 mcp 用顶层 playwright 1.63 稳定版后，某次升级 mcp 引入了 1.64+ 才有的 API |
+| `scripts/verify-agent-posix-command.mjs` | Agent `execute_command` 的 Windows POSIX 执行环境（`agent-core` 真源码）：注入 Git Bash 后 `ls` / 管道 + 通配 / `grep -n` / for 循环 / `$HOME` 按 POSIX 语义工作；不注入时回退 PowerShell 且仍可执行；工具描述如实声明环境。需 `DOGI_TEST_BASH=<bash.exe>` 指定 Git Bash |
 | `scripts/verify-agent-status.mjs` | 会话列表三态图标 + 系统通知三条路径（前台挡下 / 开关关闭 / 最小化后真发出 —— **会真的弹一条通知**） |
 | `scripts/verify-agent-file-preview.mjs` | `dogi-ws://` 图片解码、SVG 预览↔编辑、`<video>` 的 206 Range、压缩包提示、`../` 越界 |
 | `scripts/verify-quick-actions.mjs` | `.dogi/workspace.json` 自动建目录、脏数据降级、下拉入口与顶栏同排、执行命令开终端、弹窗开关 |
@@ -685,7 +688,7 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 
 ⚠️ 跑浏览器相关脚本时，**DOM 里可能同时存在多个 `alt="浏览器画面"` 的 `<img>`**（历史遗留的隐藏面板）。
 按 `querySelectorAll` 取第一个会命中隐藏的那个（rect 为 0），断言全落空 ——
-`verify-automation.mjs` 开头会先关掉遗留的 automation 标签，取 img 时也要挑 rect 非零的那个。
+取 img 时要挑 rect 非零的那个。
 
 ⚠️ 定位 Agent 顶栏按钮**别按图标类名找**：活动栏的「接口请求」用的也是 `lucide-globe`，
 所以那个按钮带 `aria-label="浏览器"`，脚本按它精确定位。
@@ -772,6 +775,25 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 - 渲染端的 `emptyOutDir` 会**先删掉 `index.html` + `assets/` 再报错**，产物直接没了（safe-delete 保护）。
 - 正确姿势：`npx vite build --outDir <临时目录>` 再 `cp -rf` 拷回去（复制不算删除）。
 
+**9. electron-builder：平台级 `files` 会让顶层白名单整体失效（整个 `src/` 进安装包）**
+
+- **触发信号**：安装包异常大 / 解包 asar 发现根目录有 `src`、`tmp`、`vite.*.mts`、`tsconfig*.json` 等非运行时内容
+  （0.0.5 修复前实测：asar 372MB、安装包 185MB，其中 `src/` 占 100MB —— `src/renderer/public` 的
+  monaco/vditor/rdp 与 `out/renderer` 下的拷贝完全重复）。
+- **根因**（app-builder-lib 25.1.8 源码级实测）：`doMergeConfigs` 的 `normalizeFiles` 把字符串数组
+  `files` 归一化成 `[{ filter: [...] }]` 对象形态 → 对象形态在 `getFileMatchers` 里生成**独立 matcher**，
+  而平台级 `files`（win/mac/linux 段）的规则走 `defaultMatcher` 并被排到 **matchers[0]**；
+  `getMainFileMatchers` 见 matchers[0] **只含负向规则**，按「用户只写排除项」的假设自动补 `**/*`
+  全量基座 → 整个应用目录（除内置排除）都进包。顶层白名单是另一个 matcher，两者取并集，形同虚设。
+  只要**任何一个平台段写了 `files`** 就触发；字符串形态 + 无平台级 files 时白名单才生效。
+- **正确做法**：所有规则放**顶层 `files` 一个列表里**（单一 matcher，纯白名单语义），**任何平台段都不要再写
+  `files`**。node-pty prebuilds 的平台差异合并时统一排除 `win32-arm64`（28MB，没人需要）即可；
+  darwin（200KB）全平台带着、win32-x64（2.5MB）mac/linux 多带着，都无伤大雅 —— 别为省它们把规则拆回平台段。
+  `out/{main,preload}-tmp` 是 vite 构建残留，同样在顶层 files 里排除。
+- **验证**：`npx electron-builder --dir` 后解包 asar，根目录应**只有** `node_modules` / `out` /
+  `package.json` / `plugins` 四项；0.0.5 修复后实测 win-unpacked 734MB→493MB、asar 372MB→131MB、
+  安装包 185MB→**132MB**。若以后要恢复平台级 `files`，先解包确认 `src` 没有回来。
+
 ### 6.3 依赖 API 版本差异（升级时必看）
 
 **9. AI SDK v7 / `@ai-sdk/openai` v4**
@@ -813,7 +835,7 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 - antd 的 cssinjs 是**非 `@layer` 样式**，优先级高于 Tailwind 的 `@layer utilities` ——
   覆盖 antd 内部样式必须写进 `index.css` 并带 `!important`，用 Tailwind 类名压不住。
 
-**12. Playwright 1.63（浏览器自动化，机制见 4.11）**
+**12. Playwright 1.63（浏览器，机制见 4.11）**
 
 - ⚠️ **`headless: true` 默认走 `chromium-headless-shell`**（与完整 Chromium 是两个 build），
   它不保证提供 screencast，画面会是黑的 → 自带 Chromium 必须写 `channel: 'chromium'`。
@@ -823,9 +845,15 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   「Executable doesn't exist」而不是自动跳过，留着只会多一次失败往返。
   本机 `~/AppData/Local/ms-playwright` 里缓存的版本号与 1.63 期望的（chromium-1243）**可能不匹配**，
   此时 auto 模式会回退到系统 Edge / Chrome —— 这是正常的，不是 bug。
-- `context._enableRecorder` 是**私有 API**（升级必须重验，见 4.11）；而
-  `locator.ariaSnapshot({ mode: 'ai' })` 与 `page.locator('aria-ref=eN')` 是**公开 API**，可以放心用。
+- `locator.ariaSnapshot({ mode: 'ai' })` 与 `page.locator('aria-ref=eN')` 是**公开 API**，可以放心用。
 - 安装时用 `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`（项目不依赖自带 Chromium，优先用系统浏览器）。
+- ⚠️ **`@playwright/mcp` 官方钉的是 playwright alpha 版**（0.0.82 → `1.64.0-alpha-*`，历史上各版本全都跟
+  alpha 走），与顶层 `playwright` 1.63 不同版 → npm 会装**两份 playwright 全家**（19MB）。项目用
+  `overrides` 把它强制解析到顶层 1.63 稳定版。**实测 0.0.82 在 1.63.0 上完全可用**（alpha 钉版不是硬依赖；
+  验证：`scripts/verify-builtin-playwright-mcp.mjs`，MCP stdio 握手 + 真实导航 + 快照）。
+  ⚠️ npm 的 arborist 有坑：改/加 overrides 后嵌套副本**不会自动重装**（`npm ls` 显示 `invalid` 却照旧），
+  要把 `node_modules/@playwright/mcp`、顶层 `playwright`/`playwright-core` 连同 package-lock 里对应
+  `node_modules/...` 条目一起删掉再 `npm install` 才会重构。升级 mcp 版本后必须重跑冒烟探针。
 
 **13. wasm-bindgen 的 init 在生产渲染端（file://）拿不到 URL 形式的 wasm**
 
@@ -969,9 +997,9 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 - **根因**：antd 6 的样式是运行时注入的 cssinjs，**不在 `@layer` 里**，优先级高于 Tailwind 的
   `@layer utilities`。所以 `<Input className="w-56" />` 里那个 `w-56` **不生效也不报错** ——
   `.ant-input { width: 100% }` 直接把它压掉。
-- **踩坑现场**：自动化脚本页的起始地址栏原本写的是 `<Input className="w-56 shrink-0" />`，
+- **踩坑现场**：旧自动化脚本页的起始地址栏写的是 `<Input className="w-56 shrink-0" />`，
   实测计算宽度 **951px**（不是 224px）。它又带 `shrink-0`（不许被压缩），于是整条工具栏被顶出容器：
-  溢出 190px，右侧「保存 / 录制 / 运行」按钮组整个跑到可视区外，**用户直接看不到按钮**。
+  溢出 190px，右侧按钮组整个跑到可视区外，**用户直接看不到按钮**。（该功能区已移除，案例保留。）
 - **正确写法**：宽度交给**外层 div**，别写在 antd 组件上。
   ```tsx
   <div className="w-56 shrink-0">
@@ -981,8 +1009,6 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 - **同类风险的判定**：不是所有 antd 组件都这样。`Select` 实测 `className="w-28"` 是 **112px = w-28，正常生效** ——
   因为 antd 没有给 `.ant-select` 根节点设整体 `width`。**只有那些 antd 自己写了 `width: 100%` 的组件
   （`Input` / `Input.TextArea` 等）才会被压掉**。改之前先用 CDP 读一次 `getBoundingClientRect().width` 实测，别猜。
-- **回归**：`scripts/verify-automation.mjs` 已固化三条断言（工具栏无横向溢出 / 所有控件都在工具栏内 /
-  起始地址栏宽度等于 224px），改工具栏布局时它们会拦住这类回归。
 - 顺带记一条 antd 6 的结构变化：`Select` 的边框画在根节点 `.ant-select` 上，内层是 `.ant-select-content`
   （`border-width: 0`），**antd 5 的 `.ant-select-selector` 已经不存在** —— 照旧写法改它不报错也不生效。
 
@@ -992,14 +1018,12 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 - `invert = true` 时取相反数，意思是「往左拖 = 右边的面板变宽」。
 - 规则：**分隔条左边的面板用 `invert={false}`**，**右边的面板用 `invert={true}`**（浏览器面板在分隔条右侧，
   往左拖才是把它拉宽）。
-- 用户报告「拖动改变宽度方向反了」就是这个：自动化页一开始没传 `invert`，鼠标往右拖面板反而变窄，
-  体验像坏了。`scripts/verify-automation.mjs` 已固化两条断言（往右拖变小、往左拖变大）—— 改拖拽行为时
-  它会拦住回归。
+- 用户报告「拖动改变宽度方向反了」就是这个：旧自动化页一开始没传 `invert`，鼠标往右拖面板反而变窄，
+  体验像坏了（该功能区已移除，案例保留）。
 - `ResizeHandle` 还用在侧边栏宽度（`app/App.tsx`）、Agent 页（`agent/AgentPage.tsx`）等多处；
   验证脚本**不能** `document.querySelector('[title="拖动调整宽度"]')` 一把抓，否则命中的可能是旁人的
   那个（实测踩过 —— 跑出来 pane 是 991 / editor 是 288，比例 3.44，根因就是选错了侧边栏的把手）。
-  从「录制」按钮反推到 AutomationPage 根，再在根内 query —— `scripts/verify-automation.mjs` 的
-  `SPLIT_HANDLE` 是这写法。
+  从页内一个已知按钮反推到页面根组件，再在根内 query。
 
 **23. 标签内容宿主必须是 flex 列，否则面板根的 flex-1 静默失效、长列表滚不动**
 
@@ -1178,6 +1202,28 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   agent 是我们 spawn 的外部进程，不能让它借这条通道读写工作区外的文件。
 - **验证**：`scripts/verify-acp-fs.ts`（不起 Electron，直接跑 `acp-fs.ts` 真源码）。
 
+**29. Windows 上 Agent 的 `execute_command` 要走 Git Bash（模型发的是 Linux 风格命令）**
+
+- **触发信号**：Windows 上 Agent 执行 `ls` / `grep foo | wc -l` / `for f in *.md; do …; done` 全部报
+  「不是内部或外部命令」「无法将…识别为 cmdlet」，而同样的命令在别的编码代理（Claude Code / Codex）里正常。
+- **根因**：模型受训练语料影响，绝大多数时候按 POSIX 习惯写命令，**它不知道该改写成 PowerShell 语法**。
+  原来的实现 Windows 走 PowerShell，等于每条 Linux 风格命令都要模型自己翻译一遍 —— 失败率高且 token 浪费。
+- **正确做法**：Windows 上优先用 **Git Bash**（`<Git>\bin\bash.exe -lc <cmd>`）执行，模型直接拿到
+  POSIX 工具链（ls / grep / sed / find / 管道 / `$VAR` / 通配）。
+  - 探测复用 `services/terminal/shells.ts` 的 `findGitBash()`（**已导出**，与终端下拉同一份逻辑：
+    常见安装路径 + `where git.exe` 推导）；结果在 `services/ai/agent.ts` 里**进程级缓存**（含扫盘）。
+  - 注入方式是 `AgentToolOptions.bashPath`（**由调用方传，agent-core 不 import electron/shells**）——
+    agent-core 保持零环境依赖，才能脱离 Electron 跑真源码做单测。
+  - PATH 里显式前置 `<Git>\usr\bin`：coreutils 在那里，继承的 Windows PATH 通常不含它。
+  - **没有 Git Bash 时回退 PowerShell**（不能因为缺 Git 就让工具不可用）；POSIX 平台恒为 bash。
+  - 工具描述按实际环境措辞（「命令运行在 Git Bash（POSIX）环境…」/「…在 PowerShell 环境」）——
+    模型要据此决定命令风格，描述与实际不符比不写更糟。
+- ⚠️ **不要**改成 WSL：`wsl.exe` 里 `cwd` 得换成 `/mnt/c/...` 做路径翻译、且默认发行版可能没装，
+  比 Git Bash 脆得多（终端里的 WSL 是另一回事，那是用户显式选的 shell）。
+- **验证**：`scripts/verify-agent-posix-command.mjs`（跑 agent-core 真源码）—— 注入 bashPath 后
+  `ls` / 管道 + 通配 / `grep -n` / for 循环 / `$HOME` 全按 POSIX 语义工作；不注入时回退 PowerShell
+  且仍能执行；工具描述如实声明环境。需要 Git 时用 `DOGI_TEST_BASH` 指定 bash.exe 路径。
+
 ### 6.7 数据与文件
 
 **29. 导入 / 导出：zip 是自己实现的，凭据不导出**
@@ -1248,15 +1294,20 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 
 - **未实现**：批量命令下发、终端会话恢复（重启后不保留 scrollback）、
   本地终端与远程终端统一的历史搜索。
+- **打包体积后续**（files 白名单失效 + @playwright/mcp 嵌套 playwright 去重已修，安装包 129MB，
+  Electron 运行时占 ~100MB 地板）：
+  - `vditor` 的 `dist/js` 22MB（highlight 全语言 + mermaid/katex/echarts/abcjs/wavedrom），
+    按 `VditorEditor` 实际用到功能裁剪；
+  - `ironrdp-wasm` 只有渲染端在用（主进程 `rdp:wasm` 读的是 `out/renderer/rdp/` 拷贝），
+    可移到 devDependencies 省掉 asar 里 4MB。
 - **mac 打包**：缺 `icon.icns` 与 `build.mac.icon`（见 6.7 第 30 条）。
-- **浏览器自动化**：
+- **浏览器（Agent 浏览器工具与内嵌面板）**：
   - 偏好 `browserChannel` 只有类型与存储，**设置页还没有选择入口**（目前只能靠 auto 模式兜）。
   - Agent 的浏览器工具**不走确认闸**（`confirm` 模式下点击 / 输入也直接执行）——
     理由是与面板里用户手动点同一个浏览器属同一风险等级，但若之后要收紧，改
     `services/browser/agent.ts` 的 `browser_click` / `browser_type` / `browser_evaluate` 即可。
   - `browser_screenshot` 返回的是**文件路径**（存进工作区 `.dogi/screenshots/`），不是图片内容 ——
     多模态模型要「看图」得另做（当前 `toToolOutput` 会把 base64 截断成废数据）。
-  - 自动化标签的关闭**没走** `preferences.confirmCloseTab` 的二次确认（走的是 `closePlainTab`）。
 - **验证覆盖的空白**：`ask_followup_question`（追问卡）、命令面板、快捷键分发、SFTP 传输取消、
   WebSocket 各帧类型目前**没有**端到端脚本，改动这些区域时优先补脚本或至少手动过一遍。
 - **历史脚本已移除**：见 5.2 末尾说明。

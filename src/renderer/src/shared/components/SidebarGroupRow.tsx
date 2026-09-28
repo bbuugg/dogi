@@ -8,7 +8,7 @@ import { asRef, DropLine, mergeRefs, useRowDrop, type RowDragItem } from '@/shar
 import { tintText } from '@/shared/lib/color'
 
 /**
- * 侧栏分组行（主机 / 脚本 / 笔记 / 接口 / 自动化共用）。
+ * 侧栏分组行（主机 / 脚本 / 笔记 / 接口共用）。
  *
  * 视觉对齐 AI 侧栏的工作区行：
  * 文件夹图标 → 名称 → 展开箭头（紧随名称）→【afterCount 槽】→ 悬浮出现的新建按钮。

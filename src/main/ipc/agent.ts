@@ -12,6 +12,8 @@ import {
   saveWorkspaceConfig
 } from '../services/ai/workspace-config'
 import { storage } from '../services/storage'
+import { browserSessions } from '../services/browser/session'
+import { agentBrowserSessionId } from '@shared/browser'
 import type {
   AgentBackend,
   AgentChatMessage,
@@ -70,9 +72,17 @@ export function registerAgentIpc(ctx: IpcContext): void {
       return workspaces
     }
   )
-  ipcMain.handle('agent:workspaces:delete', (_e, id: string) =>
-    storage.deleteAgentWorkspace(id)
-  )
+  ipcMain.handle('agent:workspaces:delete', async (_e, id: string) => {
+    // 会话由 storage 一并清掉；它们的浏览器 profile（登录态等持久化数据）不能留在盘上
+    // 变成没人认领的孤儿目录 —— 先记下受害者再删，逐个 purge
+    const victims = storage
+      .listAgentConversations()
+      .filter((c) => c.workspaceId === id)
+      .map((c) => c.id)
+    const workspaces = storage.deleteAgentWorkspace(id)
+    for (const cid of victims) await browserSessions.purge(agentBrowserSessionId(cid))
+    return workspaces
+  })
 
   // ---------- 会话（一个工作区下可以有多个） ----------
   ipcMain.handle('agent:conversations:list', () => storage.listAgentConversations())
@@ -91,9 +101,11 @@ export function registerAgentIpc(ctx: IpcContext): void {
       }
     ) => storage.saveAgentConversation(input)
   )
-  ipcMain.handle('agent:conversations:delete', (_e, id: string) =>
+  ipcMain.handle('agent:conversations:delete', async (_e, id: string) => {
     storage.deleteAgentConversation(id)
-  )
+    // 会话没了，它的浏览器 profile（登录态等）跟着删 —— 见 session.ts 的 purge 说明
+    await browserSessions.purge(agentBrowserSessionId(id))
+  })
 
   // ---------- 工作区文件（右侧文件树的懒加载列表 + 编辑器读写） ----------
   ipcMain.handle('agent:fs:list', (_e, payload: { workspaceId: string; dir?: string }) =>

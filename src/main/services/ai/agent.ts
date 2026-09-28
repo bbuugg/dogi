@@ -28,11 +28,23 @@ import { resolveModel } from './ai'
 import { askFollowupBroker, buildAskFollowupTool } from './ask-followup'
 import { armConfirmTimeout, modelRunTimeout, modelStreamTimeout } from './timeouts'
 import { skillsForAgent } from './skills'
+import { findGitBash } from '../terminal/shells'
 import { ASK_FOLLOWUP_HINT } from '@shared/ask-followup'
 import { agentBrowserSessionId } from '@shared/browser'
 import { buildBrowserAgentTools, BROWSER_PROMPT_SECTION } from '../browser/agent'
 import { mcpManager } from './mcp'
 import { storage } from '../storage'
+
+/**
+ * Windows 上 execute_command 的 POSIX 环境（Git Bash）：检测一次并缓存。
+ * 检测含 `where git.exe` 扫盘，别每轮对话都跑；装了 Git 之后无需重启（缓存进程级即可接受）。
+ */
+let cachedBashPath: string | null | undefined
+function agentBashPath(): string | null {
+  if (process.platform !== 'win32') return null
+  if (cachedBashPath === undefined) cachedBashPath = findGitBash()
+  return cachedBashPath
+}
 
 /**
  * 应用**自带**的浏览器工具：浏览器无窗口运行，画面通过 screencast 镜像到界面里的浏览器面板
@@ -258,7 +270,8 @@ class AgentService extends EventEmitter {
         permissionMode: settings.permissionMode === 'confirm' ? 'confirm' : 'full',
         requestConfirm: (r) =>
           this.requestConfirm(workspace.name, { requestId, ...r }),
-        skills
+        skills,
+        bashPath: agentBashPath()
       }),
       // 浏览器能力：默认用应用自带的（无窗口、画面在面板里）；只有内置 Playwright MCP
       // 被显式打开时才让位给它（两者同名工具互斥，见 appBrowserTools）
@@ -394,7 +407,8 @@ class AgentService extends EventEmitter {
       ...buildAgentTools(workspace.path, {
         permissionMode: settings.permissionMode === 'confirm' ? 'confirm' : 'full',
         requestConfirm: (r) => this.requestConfirm(workspace.name, { requestId, ...r }),
-        skills
+        skills,
+        bashPath: agentBashPath()
       }),
       // 同上：自带浏览器工具与内置 MCP 的 browser_* 互斥
       ...appBrowserTools(req, workspace.path, mcpTools),

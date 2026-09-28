@@ -1,5 +1,5 @@
 /**
- * 浏览器自动化：跨端共享的纯逻辑。
+ * 浏览器自动化（Agent 的 `browser_*` 工具 + 会话页内嵌面板）：跨端共享的纯逻辑。
  *
  * 会话 id 是主进程与渲染端之间的唯一契约 —— 渲染端用同一个 id 订阅 screencast 帧，
  * 主进程用它路由事件。所以推导规则必须放在共享层，两边各写一份迟早会漂。
@@ -8,7 +8,7 @@
  */
 import type { BrowserViewportMode } from './types'
 
-/** Agent 浏览器会话的 id 前缀（与自动化标签的 `automation-<scriptId>` 区分开） */
+/** Agent 浏览器会话的 id 前缀 */
 const AGENT_BROWSER_PREFIX = 'agent-browser:'
 
 /**

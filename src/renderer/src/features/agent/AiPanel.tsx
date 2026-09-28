@@ -8,7 +8,11 @@ import { TOOL_LABELS, ToolCallRow, toolRunStatus } from '@/features/agent/ToolCa
 import { findTailStart, TurnFold, turnStepSummary } from '@/features/agent/turn-fold'
 import { TokenUsageRow } from '@/features/agent/TokenUsageRow'
 import { TypingDots } from '@/features/agent/TypingDots'
-import { VirtualMessageList } from '@/features/agent/VirtualMessageList'
+import {
+  Conversation,
+  ConversationContent,
+  ConversationScrollButton
+} from '@/features/agent/Conversation'
 import { configModels, hasUsableConfig, modelNameOnly } from '@/features/agent/model-options'
 import { Button, Dropdown, Input, Select } from 'antd'
 import { useAppStore } from '@/stores/app-store'
@@ -241,7 +245,7 @@ function MessageBubbleImpl({
     if (unit.kind === 'text') {
       return (
         <div key={i} className="p-2">
-          <AiMarkdown content={unit.text} className="text-xs" />
+          <AiMarkdown content={unit.text} />
         </div>
       )
     }
@@ -484,8 +488,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     ro.observe(parent)
     return () => ro.disconnect()
   }, [])
-  // 消息流的滚动定位（吸底跟随 / 发送回底 / 回底按钮）都在 VirtualMessageList 内部管理；
-  // `extra` 传 minimized：卡片从折叠态展开时高度才有值，列表要重算一次落点。
+  // 消息流的滚动定位（吸底跟随 / 发送回底 / 回底按钮）都在 Conversation 内部管理；
+  // 卡片从折叠态展开时高度才有值，靠 resetKey 里的 minimized 触发一次瞬时落底。
 
   // 助手在折叠态（只剩一条横条）时提问会把卡片藏住，用户根本看不到 —— 有提问就撑开
   const hasFollowupForSession = useAppStore((s) => {
@@ -582,6 +586,16 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const PermissionIcon = permissionMeta.icon
   const hasMessages = messages.length > 0 || aiStreaming
   const showList = !minimized
+  /** 触发 Conversation 瞬时落底的序号：自己发消息 / 卡片展开（高度过渡结束）后递增 */
+  const [scrollResetSeq, setScrollResetSeq] = useState(0)
+
+  // 卡片从折叠态展开时高度有 200ms 过渡（见下方 transition-[height]），等它结束再落底 ——
+  // 否则按 0 高度算出的落点是错的（沿用原 VirtualMessageList 的 extra=minimized 时序）
+  useEffect(() => {
+    if (minimized) return
+    const t = setTimeout(() => setScrollResetSeq((s) => s + 1), 260)
+    return () => clearTimeout(t)
+  }, [minimized])
   // 折叠态流式日志：最新消息的完整文本（保留换行），按行向上滚动展示
   const collapsedText = buildCollapsedText(messages)
 
@@ -805,6 +819,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     if (!input.trim() || aiStreaming || !sessionId) return
     const text = input
     setInput('')
+    // 自己发消息 / 编辑重发：让消息区瞬时落底（用户翻在上方也要回到底部）
+    setScrollResetSeq((s) => s + 1)
     if (editing) {
       const id = editing.id
       setEditing(null)
@@ -951,33 +967,34 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                 {aiError && <p className="text-xs text-destructive px-3">{aiError}</p>}
               </div>
             ) : (
-              <VirtualMessageList
-                listKey={sessionId ?? '__no_session__'}
-                messages={messages}
-                className="h-full"
-                topGap={12}
-                extra={minimized}
-                footer={aiError ? <p className="text-xs text-destructive px-3">{aiError}</p> : null}
-                renderItem={(msg, index) => (
-                  <div className="pb-3">
-                    <MessageBubble
-                      role={msg.role}
-                      parts={msg.parts}
-                      streaming={
-                        aiStreaming && index === messages.length - 1 && msg.role === 'assistant'
-                      }
-                      canEdit={!aiStreaming && msg.role === 'user'}
-                      editing={editing?.id === msg.id}
-                      onEdit={() => startEdit(msg)}
-                      canDelete={!aiStreaming}
-                      tailCount={messages.length - index}
-                      onDelete={() => deleteAiMessagesFrom(sessionId ?? '', msg.id)}
-                      pendingConfirm={pendingConfirm}
-                      usage={msg.usage}
-                    />
-                  </div>
-                )}
-              />
+              <Conversation
+                className="h-full pt-3"
+                resetKey={`${sessionId ?? '__no_session__'}#${scrollResetSeq}`}
+              >
+                <ConversationContent>
+                  {messages.map((msg, index) => (
+                    <div key={msg.id} data-message-id={msg.id} className="pb-3">
+                      <MessageBubble
+                        role={msg.role}
+                        parts={msg.parts}
+                        streaming={
+                          aiStreaming && index === messages.length - 1 && msg.role === 'assistant'
+                        }
+                        canEdit={!aiStreaming && msg.role === 'user'}
+                        editing={editing?.id === msg.id}
+                        onEdit={() => startEdit(msg)}
+                        canDelete={!aiStreaming}
+                        tailCount={messages.length - index}
+                        onDelete={() => deleteAiMessagesFrom(sessionId ?? '', msg.id)}
+                        pendingConfirm={pendingConfirm}
+                        usage={msg.usage}
+                      />
+                    </div>
+                  ))}
+                  {aiError && <p className="text-xs text-destructive px-3">{aiError}</p>}
+                </ConversationContent>
+                <ConversationScrollButton />
+              </Conversation>
             )}
           </div>
         </div>

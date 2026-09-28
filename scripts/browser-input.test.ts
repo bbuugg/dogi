@@ -1,5 +1,5 @@
 /**
- * `features/automation/browser-input.ts` 的纯函数单测 —— 跑的是**真源码**，不是手抄副本。
+ * `features/agent/browser-input.ts` 的纯函数单测 —— 跑的是**真源码**，不是手抄副本。
  *
  * 为什么能直接用 `node --experimental-strip-types` 跑（不需要 `.tooltest` 包装）：
  * 该文件只有 `import type { ... } from '@shared/types'`（类型导入会被擦除），
@@ -11,7 +11,7 @@
  * 和视口宽高比不再一致，图片上下/左右会留黑边。元素 rect ≠ 画面 rect，
  * 拿元素 rect 映射坐标会导致点击**整体偏移**，偏移量随离中心的距离线性增长。
  */
-import { containedRect, toPageCoords, wheelEvent } from '../src/renderer/src/features/automation/browser-input.ts'
+import { containedRect, toPageCoords, wheelEvent } from '../src/renderer/src/features/agent/browser-input.ts'
 
 let pass = 0
 let fail = 0

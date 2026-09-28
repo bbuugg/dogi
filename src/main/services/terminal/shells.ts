@@ -45,8 +45,8 @@ function idFromCommand(command: string): string {
   return base || command
 }
 
-/** Git Bash 探测：常见安装路径 + 由 where git 的路径推导 */
-function findGitBash(): string | null {
+/** Git Bash 探测：常见安装路径 + 由 where git 的路径推导（终端下拉与 Agent 的 execute_command 共用） */
+export function findGitBash(): string | null {
   const candidates = [
     'C:\\Program Files\\Git\\bin\\bash.exe',
     'C:\\Program Files (x86)\\Git\\bin\\bash.exe',

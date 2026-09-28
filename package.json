@@ -1,6 +1,6 @@
 {
   "name": "dogi",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "AI 驱动的研发运维工作台",
   "author": "Dogi",
   "main": "./out/main/index.js",
@@ -44,6 +44,10 @@
     "ws": "^8.22.0",
     "zod": "^4.6.4"
   },
+  "overrides": {
+    "playwright": "^1.63.0",
+    "playwright-core": "^1.63.0"
+  },
   "devDependencies": {
     "@agentclientprotocol/codex-acp": "^1.12.0",
     "@fontsource-variable/inter": "^5.3.0",
@@ -81,7 +85,6 @@
     "react-dom": "^19.3.0",
     "react-jsx-parser": "^2.4.1",
     "react-markdown": "^10.1.0",
-    "react-virtuoso": "^4.18.15",
     "remark-gfm": "^4.0.1",
     "shadcn": "^4.21.0",
     "shiki": "^4.4.3",
@@ -113,6 +116,7 @@
     },
     "files": [
       "out/**/*",
+      "!out/{main,preload}-tmp/**",
       "plugins/**/*",
       "!plugins/**/node_modules/**",
       "!plugins/**/src/**",
@@ -121,7 +125,8 @@
       "!**/*.map",
       "!**/*.test.js",
       "!**/*.spec.js",
-      "!**/{test,tests,__tests__,__mocks__,spec,docs,example,examples}/**"
+      "!**/{test,tests,__tests__,__mocks__,spec,docs,example,examples}/**",
+      "!**/node_modules/node-pty/prebuilds/win32-arm64/**"
     ],
     "electronLanguages": [
       "en-US",
@@ -148,11 +153,7 @@
         "nsis"
       ],
       "icon": "build/icon.ico",
-      "artifactName": "${productName}-${version}-setup.${ext}",
-      "files": [
-        "!**/node_modules/node-pty/prebuilds/darwin-*/**",
-        "!**/node_modules/node-pty/prebuilds/win32-arm64/**"
-      ]
+      "artifactName": "${productName}-${version}-setup.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -166,9 +167,6 @@
       "electronLanguages": [
         "en",
         "zh_CN"
-      ],
-      "files": [
-        "!**/node_modules/node-pty/prebuilds/win32-*/**"
       ]
     },
     "linux": {
@@ -177,11 +175,7 @@
         "deb"
       ],
       "category": "Development",
-      "maintainer": "Dogi",
-      "files": [
-        "!**/node_modules/node-pty/prebuilds/win32-*/**",
-        "!**/node_modules/node-pty/prebuilds/darwin-*/**"
-      ]
+      "maintainer": "Dogi"
     }
   }
 }

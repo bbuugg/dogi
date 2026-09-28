@@ -12,11 +12,15 @@ import { findTailStart, TurnFold, turnStepSummary } from '@/features/agent/turn-
 import { TokenUsageRow } from '@/features/agent/TokenUsageRow'
 import { TypingDots } from '@/features/agent/TypingDots'
 import { WorkspaceQuickActions } from '@/features/agent/WorkspaceQuickActions'
-import { VirtualMessageList, type VirtualMessageListHandle } from '@/features/agent/VirtualMessageList'
+import {
+  Conversation,
+  ConversationContent,
+  ConversationScrollButton
+} from '@/features/agent/Conversation'
 import { SidePanel, type SidePanelTab } from '@/features/agent/SidePanel'
 import { configModels, hasUsableConfig, modelNameOnly } from '@/features/agent/model-options'
 import { McpConfigPopover } from '@/features/agent/McpConfigPopover'
-import { BrowserPane } from '@/features/automation/BrowserPane'
+import { BrowserPane } from '@/features/agent/BrowserPane'
 import { TerminalView } from '@/features/terminal/TerminalView'
 import { useAppStore } from '@/stores/app-store'
 import { ASK_FOLLOWUP_TOOL } from '@shared/ask-followup'
@@ -480,12 +484,15 @@ export function AgentPage({
   /** 正在编辑的用户消息（内容已灌进输入框；发送时先删这条及其之后，再重发） */
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(null)
   const textareaRef = useRef<ComponentRef<typeof Input.TextArea> | null>(null)
-  // 消息流的滚动定位（吸底跟随 / 发送回底 / 回底按钮）都在 VirtualMessageList 内部管理
-  const listRef = useRef<VirtualMessageListHandle>(null)
+  // 消息流的滚动定位（吸底跟随 / 发送回底 / 回底按钮）都在 Conversation 内部管理；
+  // 这里只留「消息目录跳转」——非虚拟列表下每条消息都在 DOM 里，直接按锚点滚。
+  /** 自己发消息 / 编辑重发后递增：让 Conversation 瞬时落底（见其 resetKey 注释） */
+  const [scrollResetSeq, setScrollResetSeq] = useState(0)
 
-  /** 消息目录点击：把那条消息滚到可视区顶部（虚拟列表按下标定位，未渲染的消息也能跳） */
+  /** 消息目录点击：把那条消息滚到可视区顶部（按 data-message-id 锚点定位） */
   const jumpToMessage = (messageId: string): void => {
-    listRef.current?.scrollToMessage(messageId)
+    const node = contentRef.current?.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`)
+    node?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
   // ------------- 右侧多标签面板：标签的存在性 / 活动标签（宽度由 SidePanel 自持） -------------
@@ -1072,6 +1079,8 @@ export function AgentPage({
     if (streaming || !input.trim() || !hasConfig || !conversationId) return
     const text = input
     setInput('')
+    // 自己发消息 / 编辑重发：让消息区瞬时落底（用户翻在上方也要回到底部）
+    setScrollResetSeq((s) => s + 1)
     if (editing) {
       const id = editing.id
       setEditing(null)
@@ -1082,7 +1091,7 @@ export function AgentPage({
   }
 
   // 换了工作区或会话后清空草稿与编辑态，避免把上一段的输入带进新对话
-  // （滚动状态由 VirtualMessageList 按 listKey 重挂自行重置）
+  // （滚动状态由 Conversation 按 resetKey 重置）
   useEffect(() => {
     setInput('')
     setEditing(null)
@@ -1425,38 +1434,42 @@ export function AgentPage({
                 </div>
               </div>
             ) : (
-              <VirtualMessageList
-                ref={listRef}
-                listKey={conversationId ?? '__none__'}
-                messages={messages}
-                className="min-h-0 flex-1"
-                footer={
-                  error && !streaming ? (
+              <Conversation
+                className="min-h-0 flex-1 pt-4"
+                resetKey={`${conversationId ?? '__none__'}#${scrollResetSeq}`}
+              >
+                <ConversationContent>
+                  {messages.map((m, index) => (
+                    <div
+                      key={m.id}
+                      data-message-id={m.id}
+                      className="mx-auto w-full max-w-3xl px-5 scroll-mt-6"
+                    >
+                      <MessageBubble
+                        conversationId={conversationId}
+                        message={m}
+                        streaming={
+                          streaming && index === messages.length - 1 && m.role === 'assistant'
+                        }
+                        canEdit={!streaming && m.role === 'user'}
+                        editing={editing?.id === m.id}
+                        onEdit={startEdit}
+                        canDelete={!streaming}
+                        tailCount={messages.length - index}
+                        pendingConfirm={pendingConfirm}
+                      />
+                    </div>
+                  ))}
+                  {error && !streaming && (
                     <div className="mx-auto w-full max-w-3xl px-2">
                       <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                         {error}
                       </div>
                     </div>
-                  ) : null
-                }
-                renderItem={(m, index) => (
-                  <div className="mx-auto w-full max-w-3xl px-5">
-                    <MessageBubble
-                      conversationId={conversationId}
-                      message={m}
-                      streaming={
-                        streaming && index === messages.length - 1 && m.role === 'assistant'
-                      }
-                      canEdit={!streaming && m.role === 'user'}
-                      editing={editing?.id === m.id}
-                      onEdit={startEdit}
-                      canDelete={!streaming}
-                      tailCount={messages.length - index}
-                      pendingConfirm={pendingConfirm}
-                    />
-                  </div>
-                )}
-              />
+                  )}
+                </ConversationContent>
+                <ConversationScrollButton />
+              </Conversation>
             )}
             {/* 右侧「消息目录」：用户消息各占一段，悬停预览、点击跳转 */}
             <MessageOutline messages={messages} onJump={jumpToMessage} />

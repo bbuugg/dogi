@@ -3,7 +3,6 @@ import { registerAgentIpc } from './agent'
 import { registerAiIpc } from './ai'
 import { registerApiIpc } from './api'
 import { registerFollowupIpc } from './ask-followup'
-import { registerAutomationIpc } from './automation'
 import { registerGitIpc } from './git'
 import { registerBrowserIpc } from './browser'
 import { registerHostsIpc } from './hosts'
@@ -44,7 +43,6 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   registerHostsIpc()
   registerScriptsIpc()
   registerNotesIpc(ctx)
-  registerAutomationIpc()
   registerApiIpc(ctx)
   registerAiIpc(ctx)
   registerAgentIpc(ctx)
@@ -62,6 +60,6 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   registerSystemIpc(ctx)
   registerTransferIpc(ctx)
   registerGitIpc()
-  // 浏览器自动化：帧 / 状态 / 录制事件都经 ctx.broadcast 推给渲染端
+  // 浏览器会话（Agent 的 browser_* 工具与内嵌面板）：帧 / 状态事件经 ctx.broadcast 推给渲染端
   registerBrowserIpc(ctx)
 }

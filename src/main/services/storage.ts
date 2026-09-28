@@ -11,8 +11,6 @@ import type {
   ApiGroup,
   ApiHistoryEntry,
   ApiRequestEntry,
-  AutomationGroup,
-  AutomationScript,
   McpServerConfig,
   NoteEntry,
   NoteGroup,
@@ -45,9 +43,6 @@ interface StoreSchema {
   apiRequests: ApiRequestEntry[]
   apiGroups: ApiGroup[]
   apiHistory: ApiHistoryEntry[]
-  /** 浏览器自动化脚本与分组（脚本代码就是 Playwright JS 片段） */
-  automationScripts: AutomationScript[]
-  automationGroups: AutomationGroup[]
   shortcuts: ShortcutConfig[]
   agentWorkspaces: AgentWorkspace[]
   agentConversations: AgentConversation[]
@@ -105,8 +100,6 @@ class StorageService {
       apiRequests: [],
       apiGroups: [],
       apiHistory: [],
-      automationScripts: [],
-      automationGroups: [],
       shortcuts: DEFAULT_SHORTCUTS,
       agentWorkspaces: [],
       agentConversations: [],
@@ -677,113 +670,6 @@ class StorageService {
     this.store.set('notes', next)
 
     return { groups: this.listNoteGroups(), notes: this.listNotes() }
-  }
-
-  // ---------- 浏览器自动化 ----------
-  listAutomationScripts(): AutomationScript[] {
-    return this.store.get('automationScripts')
-  }
-
-  /** 保存脚本（upsert）：不传 id 视为新增 */
-  saveAutomationScript(input: AutomationScript): AutomationScript[] {
-    const scripts = this.store.get('automationScripts')
-    const now = Date.now()
-    const prev = input.id ? scripts.find((s) => s.id === input.id) : undefined
-    const entry: AutomationScript = {
-      // 旧记录兜底：编辑页保存只带草稿字段，groupId 等未带字段继承旧记录
-      ...prev,
-      ...input,
-      id: input.id || crypto.randomUUID(),
-      name: input.name?.trim() || prev?.name || '未命名脚本',
-      code: input.code ?? prev?.code ?? '',
-      createdAt: prev?.createdAt ?? now,
-      updatedAt: now
-    }
-    const next = prev
-      ? scripts.map((s) => (s.id === entry.id ? entry : s))
-      : [...scripts, entry]
-    this.store.set('automationScripts', next)
-    return next
-  }
-
-  deleteAutomationScript(id: string): AutomationScript[] {
-    this.store.set(
-      'automationScripts',
-      this.store.get('automationScripts').filter((s) => s.id !== id)
-    )
-    return this.listAutomationScripts()
-  }
-
-  listAutomationGroups(): AutomationGroup[] {
-    return this.store.get('automationGroups')
-  }
-
-  saveAutomationGroup(input: { id?: string; name: string }): AutomationGroup[] {
-    const groups = this.store.get('automationGroups')
-    const prev = input.id ? groups.find((g) => g.id === input.id) : undefined
-    const group: AutomationGroup = {
-      id: input.id || crypto.randomUUID(),
-      name: input.name.trim(),
-      createdAt: prev?.createdAt ?? Date.now()
-    }
-    this.store.set(
-      'automationGroups',
-      prev ? groups.map((g) => (g.id === group.id ? group : g)) : [...groups, group]
-    )
-    return this.listAutomationGroups()
-  }
-
-  deleteAutomationGroup(
-    id: string,
-    deleteScripts = false
-  ): { groups: AutomationGroup[]; scripts: AutomationScript[] } {
-    const members = this.store
-      .get('automationScripts')
-      .filter((s) => s.groupId === id)
-      .map((s) => s.id)
-    const doomed = new Set(deleteScripts ? members : [])
-    this.store.set(
-      'automationGroups',
-      this.store.get('automationGroups').filter((g) => g.id !== id)
-    )
-    this.store.set(
-      'automationScripts',
-      this.store
-        .get('automationScripts')
-        .filter((s) => !doomed.has(s.id))
-        .map((s) => (s.groupId === id ? { ...s, groupId: undefined } : s))
-    )
-    return { groups: this.listAutomationGroups(), scripts: this.listAutomationScripts() }
-  }
-
-  arrangeAutomation(payload: {
-    groupIds: string[]
-    scripts: Array<{ id: string; groupId?: string }>
-  }): { groups: AutomationGroup[]; scripts: AutomationScript[] } {
-    const groups = this.store.get('automationGroups')
-    const groupById = new Map(groups.map((g) => [g.id, g]))
-    const ordered = payload.groupIds
-      .map((id) => groupById.get(id))
-      .filter((g): g is AutomationGroup => Boolean(g))
-    for (const g of groups) {
-      if (!payload.groupIds.includes(g.id)) ordered.push(g)
-    }
-    this.store.set('automationGroups', ordered)
-
-    const scripts = this.store.get('automationScripts')
-    const scriptById = new Map(scripts.map((s) => [s.id, s]))
-    const next: AutomationScript[] = []
-    for (const item of payload.scripts) {
-      const s = scriptById.get(item.id)
-      if (!s) continue
-      next.push(s.groupId === item.groupId ? s : { ...s, groupId: item.groupId })
-    }
-    for (const s of scripts) {
-      if (!next.some((x) => x.id === s.id)) next.push(s)
-    }
-    this.store.set('automationScripts', next)
-
-    return { groups: this.listAutomationGroups(), scripts: this.listAutomationScripts() }
   }
 
   // ---------- 接口请求（内置的 API 调试功能） ----------

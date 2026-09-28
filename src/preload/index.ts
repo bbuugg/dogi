@@ -25,14 +25,8 @@ import type {
   ApiHttpResponse,
   ApiRequestEntry,
   AppInfo,
-  AutomationGroup,
-  AutomationScript,
-  BrowserCandidate,
   BrowserFrame,
   BrowserInputEvent,
-  BrowserLogEvent,
-  BrowserRecordEvent,
-  BrowserRunResult,
   BrowserSessionState,
   BrowserViewportMode,
   DetectedAcpAgent,
@@ -499,36 +493,11 @@ const api = {
     /** 从本地选择文件导入为笔记（每个文件一篇），返回最新列表与新建 id */
     importFiles: (): Promise<NoteImportResult> => ipcRenderer.invoke('notes:import')
   },
-  /** 内置的「自动化」功能：浏览器自动化脚本（Playwright） */
-  automation: {
-    list: (): Promise<AutomationScript[]> => ipcRenderer.invoke('automation:list'),
-    save: (script: AutomationScript): Promise<AutomationScript[]> =>
-      ipcRenderer.invoke('automation:save', script),
-    remove: (id: string): Promise<AutomationScript[]> =>
-      ipcRenderer.invoke('automation:delete', id),
-    /** 拖拽排序 / 换组后的整体重排（数组顺序即显示顺序） */
-    arrange: (payload: {
-      groupIds: string[]
-      scripts: Array<{ id: string; groupId?: string }>
-    }): Promise<{ groups: AutomationGroup[]; scripts: AutomationScript[] }> =>
-      ipcRenderer.invoke('automation:arrange', payload),
-    listGroups: (): Promise<AutomationGroup[]> => ipcRenderer.invoke('automation:groups:list'),
-    saveGroup: (input: { id?: string; name: string }): Promise<AutomationGroup[]> =>
-      ipcRenderer.invoke('automation:groups:save', input),
-    /** 删除分组；deleteScripts=true 时连同组内脚本一起删除 */
-    removeGroup: (
-      id: string,
-      deleteScripts?: boolean
-    ): Promise<{ groups: AutomationGroup[]; scripts: AutomationScript[] }> =>
-      ipcRenderer.invoke('automation:groups:delete', id, deleteScripts)
-  },
   /**
-   * 浏览器会话控制。画面走 screencast 帧流（onFrame），输入靠 input() 转发 ——
-   * 浏览器本身是无窗口跑的，面板里看到的就是这一路帧。
+   * 浏览器会话控制（Agent 的浏览器工具与内嵌面板共用）。画面走 screencast 帧流
+   * （onFrame），输入靠 input() 转发 —— 浏览器本身是无窗口跑的，面板里看到的就是这一路帧。
    */
   browser: {
-    /** 探测本机可用的浏览器（自带 Chromium / Edge / Chrome） */
-    detect: (): Promise<BrowserCandidate[]> => ipcRenderer.invoke('browser:detect'),
     /** 启动会话；mode 是视口预设（PC / 手机），与面板尺寸无关 */
     open: (payload: {
       sessionId: string
@@ -549,25 +518,10 @@ const api = {
     /** 切换视口预设（PC / 手机） */
     viewport: (sessionId: string, mode: BrowserViewportMode): Promise<void> =>
       ipcRenderer.invoke('browser:viewport', { sessionId, mode }),
-    startRecord: (sessionId: string): Promise<void> =>
-      ipcRenderer.invoke('browser:record:start', sessionId),
-    stopRecord: (sessionId: string): Promise<void> =>
-      ipcRenderer.invoke('browser:record:stop', sessionId),
-    /** 运行脚本（浏览器没启动会自动启动） */
-    run: (
-      sessionId: string,
-      code: string,
-      mode?: BrowserViewportMode
-    ): Promise<BrowserRunResult> => ipcRenderer.invoke('browser:run', { sessionId, code, mode }),
-    /** 停止运行：只保证不再执行下一步 */
-    abort: (sessionId: string): Promise<void> => ipcRenderer.invoke('browser:abort', sessionId),
     onFrame: (cb: (frame: BrowserFrame) => void): Unsubscribe =>
       subscribe('browser:frame', cb),
     onState: (cb: (state: BrowserSessionState) => void): Unsubscribe =>
       subscribe('browser:state', cb),
-    onRecord: (cb: (event: BrowserRecordEvent) => void): Unsubscribe =>
-      subscribe('browser:record', cb),
-    onLog: (cb: (log: BrowserLogEvent) => void): Unsubscribe => subscribe('browser:log', cb),
     onClosed: (cb: (payload: { sessionId: string; reason: string }) => void): Unsubscribe =>
       subscribe('browser:closed', cb)
   },

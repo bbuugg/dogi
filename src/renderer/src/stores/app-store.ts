@@ -38,8 +38,6 @@ import type {
   ApiProtocol,
   ApiRequestEntry,
   AppShortcutAction,
-  AutomationGroup,
-  AutomationScript,
   ColorThemeName,
   HostLogEntry,
   MonitorUnsupportedReason,
@@ -86,7 +84,6 @@ export type PanelTabType =
   | 'tunnels'
   | 'logs'
   | 'agent'
-  | 'automation'
 
 /** 设置弹窗左侧分组（与 `features/settings/SettingsModal` 的菜单一一对应） */
 export type SettingsTab =
@@ -179,13 +176,6 @@ export interface PanelTab {
   /** rdp：对应的主机配置 id（kind = 'rdp'：地址 / 端口 / 凭据都取自它） */
   rdpProfileId?: string
   pluginViewId?: string
-  /**
-   * 自动化：对应的脚本 id。
-   *
-   * 同时也是这个标签的浏览器会话 id（`automation-<scriptId>`）—— 一个脚本标签
-   * 一份浏览器会话，关标签就关会话，两者用同一个标识免得再维护一张映射表。
-   */
-  automationScriptId?: string
 }
 
 /**
@@ -1026,12 +1016,6 @@ interface AppStore {
   /** 笔记分组（侧边栏里的分组节点，数组顺序即显示顺序） */
   noteGroups: NoteGroup[]
 
-  // ---------- 浏览器自动化 ----------
-  /** 自动化脚本（侧边栏列表；一个脚本对应 PanelView 里的一个标签 + 一份浏览器会话） */
-  automationScripts: AutomationScript[]
-  /** 自动化脚本分组（数组顺序即显示顺序） */
-  automationGroups: AutomationGroup[]
-
   // ---------- 接口请求 ----------
   /** 保存的接口请求（侧边栏列表；一个请求对应 PanelView 里的一个标签） */
   apiRequests: ApiRequestEntry[]
@@ -1303,25 +1287,6 @@ interface AppStore {
     groupIds: string[]
     notes: Array<{ id: string; groupId?: string }>
   }) => Promise<void>
-
-  // ----- 浏览器自动化 -----
-  refreshAutomationScripts: () => Promise<void>
-  /** 新建脚本（返回新脚本 id），并把它写进列表 */
-  createAutomationScript: (groupId?: string) => Promise<string>
-  saveAutomationScript: (script: AutomationScript) => Promise<void>
-  deleteAutomationScript: (id: string) => Promise<void>
-  refreshAutomationGroups: () => Promise<void>
-  /** 新建（不传 id）或重命名（传 id）自动化分组 */
-  saveAutomationGroup: (input: { id?: string; name: string }) => Promise<void>
-  /** 删除分组；deleteScripts=true 时连同组内脚本一起删除 */
-  deleteAutomationGroup: (id: string, deleteScripts?: boolean) => Promise<void>
-  /** 拖拽排序 / 换组后的整体重排：数组顺序即显示顺序 */
-  arrangeAutomation: (payload: {
-    groupIds: string[]
-    scripts: Array<{ id: string; groupId?: string }>
-  }) => Promise<void>
-  /** 在 PanelView 中打开自动化标签（已存在则激活） */
-  openAutomationTab: (scriptId: string) => void
 
   /** 选择要查看的插件（null 表示取消选择） */
   selectPlugin: (id: string | null) => void
@@ -1678,8 +1643,6 @@ let flushWired = false
     scriptGroups: [],
     notes: [],
     noteGroups: [],
-    automationScripts: [],
-    automationGroups: [],
     apiRequests: [],
     apiGroups: [],
     apiHistory: [],
@@ -1742,7 +1705,7 @@ let flushWired = false
     monitorUnsupported: {},
 
     bootstrap: async () => {
-      const [profiles, sshGroups, knownHosts, tunnelInit, configs, settings, preferences, shells, scripts, scriptGroups, notes, noteGroups, automationScripts, automationGroups, apiRequests, apiGroups, apiHistory, shortcuts, agentWorkspaces, agentConversations, hostLogs] = await Promise.all([
+      const [profiles, sshGroups, knownHosts, tunnelInit, configs, settings, preferences, shells, scripts, scriptGroups, notes, noteGroups, apiRequests, apiGroups, apiHistory, shortcuts, agentWorkspaces, agentConversations, hostLogs] = await Promise.all([
         window.api.ssh.list(),
         window.api.ssh.listGroups(),
         window.api.ssh.knownHostsList(),
@@ -1755,8 +1718,6 @@ let flushWired = false
         window.api.scripts.listGroups(),
         window.api.notes.list(),
         window.api.notes.listGroups(),
-        window.api.automation.list(),
-        window.api.automation.listGroups(),
         window.api.apiClient.list(),
         window.api.apiClient.listGroups(),
         window.api.apiClient.listHistory(),
@@ -1788,8 +1749,6 @@ let flushWired = false
         scriptGroups,
         notes,
         noteGroups,
-        automationScripts,
-        automationGroups,
         apiRequests,
         apiGroups,
         apiHistory,
@@ -2462,71 +2421,6 @@ let flushWired = false
       set({ noteGroups: groups, notes })
     },
 
-    refreshAutomationScripts: async () => {
-      set({ automationScripts: await window.api.automation.list() })
-    },
-
-    createAutomationScript: async (groupId) => {
-      const prevIds = new Set(get().automationScripts.map((s) => s.id))
-      const list = await window.api.automation.save({
-        id: '',
-        name: '未命名脚本',
-        code: '',
-        groupId,
-        createdAt: 0,
-        updatedAt: 0
-      })
-      const created = list.find((s) => !prevIds.has(s.id))
-      set({ automationScripts: list })
-      return created?.id ?? ''
-    },
-
-    saveAutomationScript: async (script) => {
-      set({ automationScripts: await window.api.automation.save(script) })
-    },
-
-    deleteAutomationScript: async (id) => {
-      const automationScripts = await window.api.automation.remove(id)
-      // 该脚本若正在标签页里打开，一并关掉（closePanelTab 会顺手关掉它的浏览器会话）
-      const tabId = `automation-${id}`
-      const hasTab = get().ui.panelTabs.some((t) => t.id === tabId)
-      if (hasTab) get().closePanelTab(tabId)
-      set({ automationScripts })
-    },
-
-    refreshAutomationGroups: async () => {
-      set({ automationGroups: await window.api.automation.listGroups() })
-    },
-
-    saveAutomationGroup: async (input) => {
-      set({ automationGroups: await window.api.automation.saveGroup(input) })
-    },
-
-    deleteAutomationGroup: async (id, deleteScripts) => {
-      const { groups, scripts } = await window.api.automation.removeGroup(id, deleteScripts)
-      const alive = new Set(scripts.map((s) => s.id))
-      set((s) => {
-        let patch: Partial<AppStore> = { automationGroups: groups, automationScripts: scripts }
-        for (const tab of s.ui.panelTabs) {
-          if (tab.type !== 'automation' || !tab.automationScriptId) continue
-          if (alive.has(tab.automationScriptId)) continue
-          patch = { ...patch, ...closePlainTab({ ...s, ...patch } as AppStore, tab.id) }
-        }
-        return patch
-      })
-      // 会话资源单独收尾：被删脚本的浏览器不能留着
-      for (const tab of get().ui.panelTabs) {
-        if (tab.type === 'automation' && tab.automationScriptId && !alive.has(tab.automationScriptId)) {
-          void window.api.browser.close(tab.id)
-        }
-      }
-    },
-
-    arrangeAutomation: async (payload) => {
-      const { groups, scripts } = await window.api.automation.arrange(payload)
-      set({ automationGroups: groups, automationScripts: scripts })
-    },
-
     selectPlugin: (id) => {
       set((s) => ({ ui: { ...s.ui, activePluginId: id } }))
     },
@@ -2668,19 +2562,6 @@ let flushWired = false
           title: note?.title ?? '未命名笔记',
           closable: true,
           noteId
-        })
-      })
-    },
-
-    openAutomationTab: (scriptId) => {
-      set((s) => {
-        const script = s.automationScripts.find((x) => x.id === scriptId)
-        return addOrFocusTab(s, {
-          id: `automation-${scriptId}`,
-          type: 'automation',
-          title: script?.name ?? '未命名脚本',
-          closable: true,
-          automationScriptId: scriptId
         })
       })
     },
@@ -2841,11 +2722,6 @@ let flushWired = false
       if (tab.type === 'terminal' && tab.sessionId) {
         void get().closeSession(tab.sessionId)
         return
-      }
-      // 自动化标签：连带关掉它那份浏览器会话（headless 进程，不关就成孤儿）。
-      // 会话 id 就是标签 id，见 PanelTab.automationScriptId 的说明。
-      if (tab.type === 'automation') {
-        void window.api.browser.close(tab.id)
       }
       set((st) => closePlainTab(st, id))
     },
