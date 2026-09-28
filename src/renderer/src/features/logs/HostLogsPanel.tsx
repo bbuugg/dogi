@@ -17,7 +17,8 @@ const SCOPE_META: Record<HostLogScope, { label: string; color: string }> = {
   ssh: { label: 'SSH', color: 'blue' },
   terminal: { label: '终端', color: 'green' },
   tunnel: { label: '隧道', color: 'purple' },
-  sftp: { label: 'SFTP', color: 'cyan' }
+  sftp: { label: 'SFTP', color: 'cyan' },
+  rdp: { label: 'RDP', color: 'orange' }
 }
 
 type ScopeFilter = 'all' | HostLogScope
@@ -27,7 +28,8 @@ const SCOPE_OPTIONS: Array<{ label: string; value: ScopeFilter }> = [
   { label: 'SSH', value: 'ssh' },
   { label: '终端', value: 'terminal' },
   { label: '隧道', value: 'tunnel' },
-  { label: 'SFTP', value: 'sftp' }
+  { label: 'SFTP', value: 'sftp' },
+  { label: 'RDP', value: 'rdp' }
 ]
 
 /** 单条日志：时间（悬停看完整日期）+ 级别点 + 作用域标签 + 正文；有 detail 时补一行等宽详情 */

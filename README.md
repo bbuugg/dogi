@@ -3,7 +3,7 @@
 ![截图](./screenshots/image.png)
 
 Electron + React 的桌面研发运维工具：把「连机器 → 干活 → 记下来 → 调接口 → 让 AI 代办」收在一个应用里。
-左侧是活动栏功能区，右侧是 VS Code 式的分屏标签组；内置终端 / SSH / SFTP / 服务器监控 / 接口调试 /
+左侧是活动栏功能区，右侧是 VS Code 式的分屏标签组；内置终端 / SSH / 远程桌面 / SFTP / 服务器监控 / 接口调试 /
 笔记 / 脚本 / 插件宿主，以及一个能读写文件、执行命令、调用技能的 AI Agent。
 
 ## 功能
@@ -12,11 +12,14 @@ Electron + React 的桌面研发运维工具：把「连机器 → 干活 → �
 
 - **本地终端**：`node-pty`，自动探测 PowerShell / pwsh / CMD / Git Bash / WSL / bash / zsh / fish，可指定默认 shell
 - **SSH**：`ssh2`，密码或私钥认证，握手进度实时推送、失败自动重连、keepalive、多会话
-- **多标签 + 分屏**：`@xterm/xterm` v6（WebGL 渲染），VS Code 式面板树 —— 向上下左右拆分、拖拽调比例、标签跨组移动
+- **Windows 服务器**：直连系统内置 OpenSSH；会话就绪后自动探测主机平台（Linux / Windows），AI 按平台给出对应语法的命令提示；每主机终端编码（UTF-8 / GBK，中文服务器乱码时切 GBK）
+- **多标签 + 分屏**：`@xterm/xterm` v6（DOM 渲染），VS Code 式面板树 —— 向上下左右拆分、拖拽调比例、标签跨组移动
 - **zmodem**：终端里直接 `sz` / `rz` 传文件（走系统对话框选文件 / 存文件）
-- **服务器监控**：经 SSH 采集 `/proc` + `df`，实时展示 CPU / 内存 / 负载 / 网速 / 磁盘 / uptime，间隔可配
+- **服务器监控**：经 SSH 采集 `/proc` + `df`，实时展示 CPU / 内存 / 负载 / 网速 / 磁盘 / uptime，间隔可配；
+  目前仅支持 Linux —— 非 Linux 主机显式显示「不支持监控」标识，而不是监控条静默消失
 - **SFTP 文件管理**：浏览、上传、下载（含目录递归）、远端复制 / 移动、重命名 / 删除 / 新建目录；
   传输进度汇总到状态栏的传输托盘，可随时取消
+- **远程桌面（RDP）**：主机三类类型之一（SSH / 远程桌面 / 本地终端，新建后仍可改）；内嵌 WASM 客户端（`ironrdp-wasm`）画到 canvas，独立标签；主进程本地 WebSocket 桥直连主机配置的地址与端口（不调 mstsc），支持缩放 / 键盘鼠标 / Ctrl+Alt+Del；凭据读自主机配置（`safeStorage` 加密），连接时也可勾选保存回配置
 - 会话输出环形缓冲（256KB / 会话），供 AI 与调试读取
 - 终端配色方案（跟随主题 / 深色 / 浅色 / Solarized Dark / Dracula / Nord）、字号缩放、选中即复制、右键粘贴、命令预测
 
@@ -71,8 +74,8 @@ Electron + React 的桌面研发运维工具：把「连机器 → 干活 → �
 
 ### 安全
 
-- SSH 密码 / 私钥 / 口令用 Electron `safeStorage`（Windows DPAPI）加密，**只在主进程解密**，渲染端永远拿不到
-- 渲染进程与主进程隔离（`contextIsolation` + preload 白名单 IPC），严格 CSP（`script-src 'self' blob:`）
+- SSH 密码 / 私钥 / 口令与 RDP 密码用 Electron `safeStorage`（Windows DPAPI）加密，**只在主进程解密**；RDP 凭据是例外 —— NLA / CredSSP 票据必须在渲染进程计算，仅连接时经 `rdp:credentials` 单次下发（列表里只有脱敏标记）
+- 渲染进程与主进程隔离（`contextIsolation` + preload 白名单 IPC），严格 CSP（`script-src 'self' blob: 'wasm-unsafe-eval'`；仅为本地 RDP 桥放行 `connect-src ws://127.0.0.1:*`）
 - Agent 的所有文件操作都经 `resolveInside` 做工作区越界检查；媒体预览走受限的自定义协议 `dogi-ws://`
 - 密钥类字段在列表接口中脱敏（`hasPassword` / `hasPrivateKey` 等标记）
 
@@ -93,6 +96,7 @@ src/
                            # agent-core/  工具集 / 系统提示词 / 事件适配 / 路径与忽略规则
       api/                 # http ws
       sftp/ transfer/      # sftp；transfer（zip + 导入导出编排）
+      rdp/bridge.ts        # 远程桌面本地桥（WebSocket ↔ TCP/TLS，RDCleanPath 握手 + 透传）
       plugins/host.ts      # 插件宿主（主进程侧）
       system/              # icon notify opener
   preload/index.ts         # contextBridge 白名单 + 首帧主题

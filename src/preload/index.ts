@@ -44,12 +44,15 @@ import type {
   IdeInfo,
   McpServerConfig,
   McpToolInfo,
+  MonitorUnsupportedPayload,
   MoshClientStatus,
   NoteEntry,
   NoteGroup,
   NoteImportResult,
   OpenResult,
   Preferences,
+  RdpBridgeInfo,
+  RdpCredentials,
   ScriptEntry,
   ScriptGroup,
   ServerMetrics,
@@ -256,6 +259,12 @@ const api = {
       ipcRenderer.invoke('sftp:open', connId, profileId),
     list: (connId: string, path: string): Promise<SftpEntry[]> =>
       ipcRenderer.invoke('sftp:list', connId, path),
+    /**
+     * 解析远端路径为绝对路径（realpath）；传 '.' 由服务端解析默认工作目录。
+     * 初始目录以 `/` 列不出内容时（win32-openssh）用它兜底
+     */
+    realpath: (connId: string, path: string): Promise<string> =>
+      ipcRenderer.invoke('sftp:realpath', connId, path),
     mkdir: (connId: string, path: string): Promise<void> =>
       ipcRenderer.invoke('sftp:mkdir', connId, path),
     rename: (connId: string, from: string, to: string): Promise<void> =>
@@ -287,6 +296,28 @@ const api = {
     onProgress: (cb: (payload: SftpTransferProgress) => void) => subscribe('sftp:progress', cb),
     /** 连接断开（远端断连 / 网络错误），渲染端据此提示并停止操作 */
     onClosed: (cb: (payload: { connId: string }) => void) => subscribe('sftp:closed', cb)
+  },
+  /** 远程桌面（RDP）：主进程本地桥（RDCleanPath）+ 渲染端 WASM 客户端（ironrdp-wasm）
+   *
+   * 远程桌面是独立的主机类型（kind = 'rdp'）：host / port / 凭据都来自主机配置。
+   */
+  rdp: {
+    /**
+     * 为该主机配置开一座本地桥（幂等），返回 WASM 客户端要连的 ws 地址。
+     * 主机地址与 RDP 端口都取自 kind = 'rdp' 的主机配置
+     */
+    open: (connId: string, profileId: string): Promise<RdpBridgeInfo> =>
+      ipcRenderer.invoke('rdp:open', connId, profileId),
+    /** 关闭本地桥（标签关闭时调用） */
+    close: (connId: string): Promise<void> => ipcRenderer.invoke('rdp:close', connId),
+    /**
+     * 读取连接凭据（用户名 / 密码 / 域 / 端口）：密码在存储层已解密。
+     * WASM 客户端要在渲染进程完成 NLA / CredSSP 票据计算，只能在连接时取用。
+     */
+    credentials: (profileId: string): Promise<RdpCredentials> =>
+      ipcRenderer.invoke('rdp:credentials', profileId),
+    /** 读取 WASM 字节（打包后 file:// 下 fetch 不可用，靠它加载 ironrdp-wasm） */
+    wasm: (): Promise<Uint8Array> => ipcRenderer.invoke('rdp:wasm')
   },
   ai: {
     listConfigs: (): Promise<AiModelConfig[]> => ipcRenderer.invoke('ai:config:list'),
@@ -670,7 +701,13 @@ const api = {
      * 采集不到数据的主机不会有推送（前端据此不显示指标）
      */
     onData: (cb: (payload: { sessionId: string; metrics: ServerMetrics }) => void) =>
-      subscribe('monitor:data', cb)
+      subscribe('monitor:data', cb),
+    /**
+     * 订阅「该主机不支持监控」状态（非 Linux 主机，或采集持续无效）：
+     * 每会话最多推送一次终态，渲染端据此展示「不支持监控」标识
+     */
+    onUnsupported: (cb: (payload: MonitorUnsupportedPayload) => void) =>
+      subscribe('monitor:unsupported', cb)
   },
   plugins: {
     /** 列出已加载插件的 manifest（含启用状态与渲染端入口信息） */

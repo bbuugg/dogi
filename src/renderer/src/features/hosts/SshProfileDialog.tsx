@@ -5,7 +5,8 @@ import type {
   MoshClientStatus,
   ShellProfile,
   SshAuthType,
-  SshProfile
+  SshProfile,
+  TerminalCharset
 } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import {
@@ -45,7 +46,10 @@ interface FormValues {
   password: string
   privateKey: string
   passphrase: string
+  /** 仅 rdp：AD 域（可空） */
+  domain: string
   useMosh: boolean
+  terminalCharset: TerminalCharset
   jumpProfileId: string
   keepaliveInterval: number | null
   shellId: string
@@ -65,7 +69,9 @@ function toForm(profile: SshProfile | null | undefined): Partial<FormValues> {
       password: '',
       privateKey: '',
       passphrase: '',
+      domain: '',
       useMosh: false,
+      terminalCharset: 'utf-8',
       jumpProfileId: '',
       keepaliveInterval: null,
       shellId: '',
@@ -77,13 +83,16 @@ function toForm(profile: SshProfile | null | undefined): Partial<FormValues> {
     groupId: profile.groupId ?? '',
     kind: profile.kind ?? 'ssh',
     host: profile.host,
-    port: profile.port ?? 22,
+    // 端口语义随 kind：rdp 主机存的就是 RDP 端口
+    port: profile.port || (profile.kind === 'rdp' ? 3389 : 22),
     username: profile.username,
     authType: profile.authType,
     password: '',
     privateKey: '',
     passphrase: '',
+    domain: profile.domain ?? '',
     useMosh: profile.useMosh ?? false,
+    terminalCharset: profile.terminalCharset ?? 'utf-8',
     jumpProfileId: profile.jumpProfileId ?? '',
     keepaliveInterval: profile.keepaliveInterval ?? null,
     shellId: '',
@@ -91,13 +100,15 @@ function toForm(profile: SshProfile | null | undefined): Partial<FormValues> {
   }
 }
 
-/** 仅在 ssh 主机下才必填 */
-function sshRequired(msg: string, form: ReturnType<typeof Form.useForm>[0]): FormRule {
+/** 仅在 ssh / rdp 远程主机下才必填 */
+function remoteRequired(msg: string, form: ReturnType<typeof Form.useForm>[0]): FormRule {
   return {
-    validator: (_rule: unknown, value: unknown) =>
-      form.getFieldValue('kind') === 'ssh' && !String(value ?? '').trim()
+    validator: (_rule: unknown, value: unknown) => {
+      const k = form.getFieldValue('kind') as HostKind
+      return (k === 'ssh' || k === 'rdp') && !String(value ?? '').trim()
         ? Promise.reject(new Error(msg))
         : Promise.resolve()
+    }
   }
 }
 
@@ -238,6 +249,8 @@ export function SshProfileDialog() {
     const autoCommand =
       values.kind === 'local' ? values.autoCommand?.trim() || undefined : undefined
     const isSsh = values.kind === 'ssh'
+    const isRdp = values.kind === 'rdp'
+    const isRemote = isSsh || isRdp
     return {
       id: editing?.id ?? '',
       kind: values.kind,
@@ -245,17 +258,21 @@ export function SshProfileDialog() {
       // 颜色不在表单里维护，编辑时原样带回，避免保存时被清掉
       color: editing?.color,
       name: values.name.trim(),
-      // ssh 专用字段；本地主机不填写（类型上必填，置空标记）
-      host: isSsh ? values.host.trim() : '',
-      port: isSsh ? Number(values.port) || 22 : 0,
-      username: isSsh ? values.username.trim() : '',
-      authType: isSsh ? values.authType : (editing?.authType ?? 'password'),
+      // 远程字段（ssh / rdp 共用）；本地主机不填写（类型上必填，置空标记）
+      host: isRemote ? values.host.trim() : '',
+      port: isRemote ? Number(values.port) || (isRdp ? 3389 : 22) : 0,
+      username: isRemote ? values.username.trim() : '',
+      authType: isRemote ? values.authType : (editing?.authType ?? 'password'),
       // 留空传 undefined：主进程保留旧密码 / 密钥 / 口令
-      password: !isSsh || values.password === '' ? undefined : values.password,
+      password: !isRemote || values.password === '' ? undefined : values.password,
       privateKey:
         !isSsh || !values.privateKey ? undefined : values.privateKey.replace(/\r\n/g, '\n'),
       passphrase: !isSsh || values.passphrase === '' ? undefined : values.passphrase,
+      // 域：仅 rdp；显式 undefined 表示清空
+      domain: isRdp && values.domain.trim() ? values.domain.trim() : undefined,
       useMosh: isSsh ? values.useMosh : undefined,
+      // 终端编码：仅 ssh 有意义；utf-8 为缺省语义，存 undefined（不落多余字段）
+      terminalCharset: isSsh && values.terminalCharset === 'gbk' ? 'gbk' : undefined,
       // 跳板机 / 保活：显式传 undefined 表示清空（回到直连 / 默认 15 秒）
       jumpProfileId: isSsh && values.jumpProfileId ? values.jumpProfileId : undefined,
       keepaliveInterval:
@@ -366,7 +383,7 @@ export function SshProfileDialog() {
       width={520}
       destroyOnHidden
       footer={
-        <div className="flex items-center gap-2">
+        <div className="flex items-center justify-end gap-2">
           {kind === 'ssh' && (
             <Button
               className="mr-auto"
@@ -378,7 +395,7 @@ export function SshProfileDialog() {
             </Button>
           )}
           <Button onClick={() => setSshDialog(false, null)}>取消</Button>
-          <Button loading={saving} onClick={() => void handleSave(false)}>
+          <Button type='primary' loading={saving} onClick={() => void handleSave(false)}>
             保存
           </Button>
           {!isEdit && (
@@ -394,13 +411,28 @@ export function SshProfileDialog() {
           <div className="grid grid-cols-3 gap-3">
             <div className="col-span-3 grid gap-1.5">
               <span className="text-xs font-medium text-foreground">主机类型</span>
+              {/* 三类主机；切换时端口 / 用户名从旧类型默认值换成新类型默认值（自己改过的不动）。
+                  必须包在 Form.Item 里 —— useWatch 只看得见「已注册字段」的值，裸 value+setFieldValue 会让 kind 的 watch 永远是 undefined（分支区不渲染） */}
               <Field name="kind">
                 <Segmented
+                  block
                   options={[
                     { label: '远程 SSH', value: 'ssh' },
+                    { label: '远程桌面', value: 'rdp' },
                     { label: '本地终端', value: 'local' }
                   ]}
-                  block
+                  onChange={(value) => {
+                    if (value === 'local') return
+                    const current = form.getFieldValue('port') as number | null | undefined
+                    if (!current || current === 22 || current === 3389) {
+                      form.setFieldValue('port', value === 'rdp' ? 3389 : 22)
+                    }
+                    // 用户名同理：还停在（空或）另一类默认值时一起切换（ssh → root，rdp → administrator）
+                    const user = String(form.getFieldValue('username') ?? '').trim()
+                    if (!user || user === 'root' || user === 'administrator') {
+                      form.setFieldValue('username', value === 'rdp' ? 'administrator' : 'root')
+                    }
+                  }}
                 />
               </Field>
             </div>
@@ -409,7 +441,7 @@ export function SshProfileDialog() {
               <Field name="name" rules={[{ required: true, message: '请填写名称' }]}>
                 <Input
                   id="ssh-name"
-                  placeholder={kind === 'ssh' ? '如：生产环境 Web 服务器' : '如：Git Bash'}
+                  placeholder={kind === 'local' ? '如：Git Bash' : '如：生产环境 Web 服务器'}
                 />
               </Field>
             </div>
@@ -433,7 +465,7 @@ export function SshProfileDialog() {
               <div className="grid grid-cols-3 gap-3">
                 <div className="col-span-2 grid gap-1.5">
                   <label htmlFor="ssh-host" className="text-xs font-medium text-foreground">主机地址</label>
-                  <Field name="host" rules={[sshRequired('请填写主机地址', form)]}>
+                  <Field name="host" rules={[remoteRequired('请填写主机地址', form)]}>
                     <Input id="ssh-host" placeholder="ip 或域名" />
                   </Field>
                 </div>
@@ -448,7 +480,7 @@ export function SshProfileDialog() {
               <div className="grid grid-cols-3 gap-3">
                 <div className="col-span-1 grid gap-1.5">
                   <label htmlFor="ssh-user" className="text-xs font-medium text-foreground">用户名</label>
-                  <Field name="username" rules={[sshRequired('请填写用户名', form)]}>
+                  <Field name="username" rules={[remoteRequired('请填写用户名', form)]}>
                     <Input id="ssh-user" />
                   </Field>
                 </div>
@@ -566,6 +598,22 @@ export function SshProfileDialog() {
                 )}
               </div>
 
+              <div className="grid gap-1.5">
+                <span className="text-xs font-medium text-foreground">终端编码</span>
+                <Field name="terminalCharset">
+                  <Select
+                    style={{ width: '100%' }}
+                    options={[
+                      { value: 'utf-8', label: 'UTF-8（默认）' },
+                      { value: 'gbk', label: 'GBK' }
+                    ]}
+                  />
+                </Field>
+                <p className="text-[11px] leading-4 text-muted-foreground">
+                  中文 Windows 服务器输出乱码时切到 GBK
+                </p>
+              </div>
+
               <Collapse
                 ghost
                 size="small"
@@ -639,6 +687,54 @@ export function SshProfileDialog() {
                   }
                 ]}
               />
+            </>
+          ) : kind === 'rdp' ? (
+            <>
+              <div className="grid grid-cols-3 gap-3">
+                <div className="col-span-2 grid gap-1.5">
+                  <label htmlFor="rdp-host" className="text-xs font-medium text-foreground">主机地址</label>
+                  <Field name="host" rules={[remoteRequired('请填写主机地址', form)]}>
+                    <Input id="rdp-host" placeholder="ip 或域名" />
+                  </Field>
+                </div>
+                <div className="grid gap-1.5">
+                  <label htmlFor="rdp-port" className="text-xs font-medium text-foreground">端口</label>
+                  <Field name="port" rules={portRules}>
+                    <InputNumber id="rdp-port" style={{ width: '100%' }} />
+                  </Field>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div className="col-span-1 grid gap-1.5">
+                  <label htmlFor="rdp-user" className="text-xs font-medium text-foreground">用户名</label>
+                  <Field name="username" rules={[remoteRequired('请填写用户名', form)]}>
+                    <Input id="rdp-user" />
+                  </Field>
+                </div>
+                <div className="col-span-2 grid gap-1.5">
+                  <label htmlFor="rdp-domain" className="text-xs font-medium text-foreground">域（可选）</label>
+                  <Field name="domain">
+                    <Input id="rdp-domain" placeholder="AD 域账号填域名（如 CORP），本机账户留空" />
+                  </Field>
+                </div>
+              </div>
+
+              <div className="grid gap-1.5">
+                <label htmlFor="rdp-password" className="text-xs font-medium text-foreground">密码</label>
+                <Field name="password">
+                  <Input
+                    id="rdp-password"
+                    type="password"
+                    placeholder={
+                      isEdit && editing?.hasPassword ? '已保存（留空保持不变）' : '留空则连接时输入'
+                    }
+                  />
+                </Field>
+                <p className="text-[11px] leading-4 text-muted-foreground">
+                  密码经系统加密保存，连接远程桌面时自动使用；留空时打开标签页会提示输入
+                </p>
+              </div>
             </>
           ) : (
             <>

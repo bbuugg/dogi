@@ -13,6 +13,7 @@ import { registerMonitorIpc } from './monitor'
 import { registerNotesIpc } from './notes'
 import { registerOpenerIpc } from './opener'
 import { registerPluginsIpc } from './plugins'
+import { registerRdpIpc } from './rdp'
 import { registerScriptsIpc } from './scripts'
 import { registerSkillsIpc } from './skills'
 import { createIpcContext } from './shared'
@@ -52,6 +53,8 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   registerMcpIpc()
   registerSkillsIpc()
   registerSftpIpc(ctx)
+  // 远程桌面：本地 RDP 桥（rdp:open / rdp:close）
+  registerRdpIpc()
   // SSH 隧道：状态变化经 ctx.broadcast 推给渲染端
   registerTunnelsIpc(ctx)
   registerPluginsIpc()

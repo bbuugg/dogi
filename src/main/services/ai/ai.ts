@@ -6,7 +6,8 @@ import type {
   AiChatRequest,
   AiConfirmRequest,
   AiPermissionMode,
-  AiStreamEvent
+  AiStreamEvent,
+  HostPlatform
 } from '@shared/types'
 import { sessionManager } from '../terminal/sessions'
 import { storage } from '../storage'
@@ -28,7 +29,7 @@ const DEFAULT_SYSTEM_PROMPT = [
   '使用 run_in_terminal 执行命令后，终端原始输出即为事实依据；失败时结合输出排查原因再尝试。',
   '需要工具时直接调用工具，不要在正文里用「[调用工具 xxx]」「[工具 xxx 返回]」这类文字复述调用过程或结果 —— 写出来只会让用户看到一串假动作。',
   '终端命令按队列串行执行：前一条命令执行完毕并读取到输出后，下一条才会开始，不会出现并发冲突。',
-  '注意根据会话标题判断操作系统（PowerShell 与 bash 语法不同）。',
+  '注意：不同操作系统的命令语法不同（Windows 的 cmd/PowerShell 与 Linux 的 bash）。会话绑定提示标注了「主机平台」时以它为准，未标注时结合终端输出判断，不要仅凭会话标题猜测。',
   '部分命令会启动交互式 / 前台程序（如 htop、top、vim、nano、less、man、watch、python、node 等），它们占据终端且不返回 shell 提示符。执行这类命令后，不要继续向该会话输入新命令，应先用 send_keys 工具发送退出指令（多数程序用 "q"，卡死用 "C-c"，个别用 "exit" / "C-d"），并用 read_terminal_output 确认已回到 shell 提示符后再继续。'
 ].join('\n')
 
@@ -45,6 +46,20 @@ export interface ConfirmSink {
 function describeError(err: unknown): string {
   if (err instanceof Error) return err.message
   return String(err)
+}
+
+/** 绑定会话的宿主平台提示（平台探测已知时注入，驱动模型使用对应语法的命令） */
+function sessionPlatformHint(platform: HostPlatform | undefined): string {
+  if (platform === 'windows') {
+    return '本会话主机平台：Windows（默认 shell 可能是 cmd/PowerShell）——请使用对应语法的命令（dir/type/ipconfig/Get-ChildItem 等），不要使用 apt/htop 等 Linux 命令。'
+  }
+  if (platform === 'linux') {
+    return '本会话主机平台：Linux——请使用 Linux / POSIX 命令（ls/cat/ps 等）。'
+  }
+  if (platform === 'other') {
+    return '本会话主机平台：类 Unix（BSD / macOS 等）——基础命令与 Linux 接近，但部分参数（如 ps/df）有差异，注意甄别。'
+  }
+  return ''
 }
 
 /** 将 Mastra 流事件转换为终端 AI 流事件。
@@ -173,7 +188,9 @@ function buildTerminalTools(
           sessionId: s.id,
           type: s.type,
           title: s.title,
-          exited: s.exited
+          exited: s.exited,
+          /** 探测到的主机平台（unknown = 未探测 / 探测失败） */
+          platform: s.platform ?? 'unknown'
         }))
       }
     }
@@ -420,8 +437,9 @@ class AiAssistant extends EventEmitter {
 
     // 终端绑定提示：本段对话固定作用于绑定的会话
     const boundSession = targetSessionId ? sessionManager.get(targetSessionId) : undefined
+    const boundPlatformHint = boundSession ? sessionPlatformHint(boundSession.info.platform) : ''
     const boundHint = boundSession
-      ? `\n本次对话绑定了一个终端会话（${boundSession.info.title}）。除非用户明确要求操作其他会话，终端工具一律作用于该会话，不要切换。`
+      ? `\n本次对话绑定了一个终端会话（${boundSession.info.title}）。除非用户明确要求操作其他会话，终端工具一律作用于该会话，不要切换。${boundPlatformHint ? `\n${boundPlatformHint}` : ''}`
       : ''
 
     const systemPrompt = [
@@ -497,8 +515,9 @@ class AiAssistant extends EventEmitter {
         ? '\n当前处于「确认模式」：执行任何终端命令都会先请求用户确认，用户可能拒绝。被拒绝时不要反复重试同一条命令，先询问用户的意见。'
         : ''
     const boundSession = targetSessionId ? sessionManager.get(targetSessionId) : undefined
+    const boundPlatformHint = boundSession ? sessionPlatformHint(boundSession.info.platform) : ''
     const boundHint = boundSession
-      ? `\n本次对话绑定了一个终端会话（${boundSession.info.title}）。除非用户明确要求操作其他会话，终端工具一律作用于该会话，不要切换。`
+      ? `\n本次对话绑定了一个终端会话（${boundSession.info.title}）。除非用户明确要求操作其他会话，终端工具一律作用于该会话，不要切换。${boundPlatformHint ? `\n${boundPlatformHint}` : ''}`
       : ''
     const systemPrompt = [
       settings.systemPrompt?.trim() || DEFAULT_SYSTEM_PROMPT,

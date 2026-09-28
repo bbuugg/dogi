@@ -2,7 +2,7 @@ import { ipcMain } from 'electron'
 import { monitorService } from '../services/terminal/monitor'
 import { sessionManager } from '../services/terminal/sessions'
 import { storage } from '../services/storage'
-import type { ServerMetrics, SessionInfo } from '@shared/types'
+import type { MonitorUnsupportedPayload, ServerMetrics, SessionInfo } from '@shared/types'
 import type { IpcContext } from './shared'
 
 /**
@@ -15,7 +15,12 @@ export function registerMonitorIpc(ctx: IpcContext): void {
   monitorService.on('data', (payload: { sessionId: string; metrics: ServerMetrics }) =>
     ctx.broadcast('monitor:data', payload)
   )
-  // 连接到主机后即在后台采集指标；采集不到数据的主机会自动停止（前端不显示）
+  // 非 Linux 主机（Windows / 其他 Unix）不支持采集：上报明确状态，渲染端据此展示
+  // 「不支持监控」的标识（而非静默无数据）
+  monitorService.on('unsupported', (payload: MonitorUnsupportedPayload) =>
+    ctx.broadcast('monitor:unsupported', payload)
+  )
+  // 连接到主机后即在后台采集指标；Linux 以外的平台会在探测后上报不支持状态
   sessionManager.on('created', (info: SessionInfo) => monitorService.start(info.id))
   // 会话关闭时停止其监控，避免泄漏
   sessionManager.on('closed', ({ sessionId }: { sessionId: string }) =>

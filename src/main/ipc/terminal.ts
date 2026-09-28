@@ -54,6 +54,8 @@ export function registerTerminalIpc(ctx: IpcContext): void {
     (_e, profileId: string, cols?: number, rows?: number) => {
       const profile = storage.getSshProfile(profileId)
       if (!profile) throw new Error(`主机配置不存在: ${profileId}`)
+      // rdp 主机是图形化远程桌面，没有终端会话（防护：渲染端应直接开 RDP 标签）
+      if (profile.kind === 'rdp') throw new Error('远程桌面主机不能创建终端会话')
       // Mosh 走 UDP，无法经 SSH 隧道；组合使用直接拒绝（放在 mosh-client 探测之前，未装也先报这个）
       if (profile.useMosh && profile.jumpProfileId) {
         throw new Error(

@@ -3,13 +3,16 @@ import { exec as cpExec } from 'node:child_process'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import * as pty from 'node-pty'
+import iconv from 'iconv-lite'
 import { Client, type ClientChannel } from 'ssh2'
 import type {
+  HostPlatform,
   SessionInfo,
   SessionType,
   SshConnectProgress,
   SshConnectStage,
-  SshProfile
+  SshProfile,
+  TerminalCharset
 } from '@shared/types'
 import { moshClientStatus, resolveMoshClient, type ResolvedMoshClient } from './mosh'
 import { resolveLocalShell } from './shells'
@@ -176,7 +179,13 @@ class SshSession implements InternalSession {
   /** 目标 PTY 尺寸：SSH 握手完成前收到的 resize 需缓存，待 shell 流建立后补应用 */
   private desiredCols: number
   private desiredRows: number
-  private onData: (data: Buffer) => void
+  /** 会话字符集：utf-8（缺省，字节原样透传）/ gbk（主进程解码为 UTF-8 后下发） */
+  private readonly charset: TerminalCharset
+  /**
+   * 输出下发回调：data 是渲染端消费的 UTF-8 字节；非 UTF-8 会话下 raw 携带远端原始
+   * 字节（记录器用它保持会话日志字节级保真），UTF-8 会话两者相同。
+   */
+  private onData: (data: Buffer, raw?: Buffer) => void
   private onExit: (exitCode: number) => void
   /** 连接阶段上报（渲染端据此显示「握手中」等进度提示） */
   private onStatus: (progress: Omit<SshConnectProgress, 'sessionId'>) => void
@@ -187,7 +196,7 @@ class SshSession implements InternalSession {
     cols: number,
     rows: number,
     handlers: {
-      onData: (data: Buffer) => void
+      onData: (data: Buffer, raw?: Buffer) => void
       onExit: (code: number) => void
       onStatus: (progress: Omit<SshConnectProgress, 'sessionId'>) => void
     }
@@ -202,6 +211,7 @@ class SshSession implements InternalSession {
     }
     this.desiredCols = Math.max(2, cols)
     this.desiredRows = Math.max(2, rows)
+    this.charset = profile.terminalCharset === 'gbk' ? 'gbk' : 'utf-8'
     this.onData = handlers.onData
     this.onExit = handlers.onExit
     this.onStatus = handlers.onStatus
@@ -307,10 +317,13 @@ class SshSession implements InternalSession {
         hostLogger.info('ssh', `[终端会话] 会话已就绪：${this.info.title}`)
         // 握手期间收到的 resize 在此补应用，避免远端 PTY 停在创建时的初始尺寸
         this.applySize()
+        // 平台探测（监控 / AI 提示据此分支）：异步执行，失败不影响会话
+        void this.probePlatform()
+        // 非 UTF-8 会话：每个流一份有状态解码器（多字节字符可能跨 chunk 到达）
+        const stdoutDecoder = this.charset === 'utf-8' ? null : iconv.getDecoder(this.charset)
+        const stderrDecoder = this.charset === 'utf-8' ? null : iconv.getDecoder(this.charset)
         stream.on('data', (data: Buffer | string) => {
-          const buf = Buffer.isBuffer(data) ? data : Buffer.from(data)
-          this.appendOutput(buf.toString('utf8'))
-          this.onData(buf)
+          this.emitOutput(stdoutDecoder, data)
         })
         stream.on('close', () => {
           this.ready = false
@@ -319,9 +332,7 @@ class SshSession implements InternalSession {
           this.onExit(0)
         })
         stream.stderr?.on('data', (data: Buffer | string) => {
-          const buf = Buffer.isBuffer(data) ? data : Buffer.from(data)
-          this.appendOutput(buf.toString('utf8'))
-          this.onData(buf)
+          this.emitOutput(stderrDecoder, data)
         })
       }
     )
@@ -334,9 +345,38 @@ class SshSession implements InternalSession {
     }
   }
 
+  /**
+   * shell 输出统一出口（stdout / stderr 各带一份有状态解码器）。
+   * - utf-8（缺省）：原字节透传，行为与历史一致；
+   * - 其他字符集（如 gbk）：解码为文本后重编码成 UTF-8 下发（渲染端始终按 UTF-8
+   *   渲染），远端原始字节作为 raw 交给记录器，会话日志保持字节级保真。
+   * 已知限制：zmodem 等二进制协议帧在非 UTF-8 会话中会被解码破坏（Windows 无
+   * sz/rz，UTF-8 会话不受影响）。
+   */
+  private emitOutput(
+    decoder: ReturnType<typeof iconv.getDecoder> | null,
+    data: Buffer | string
+  ): void {
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data)
+    if (!decoder) {
+      this.appendOutput(buf.toString('utf8'))
+      this.onData(buf)
+      return
+    }
+    const text = decoder.write(buf)
+    if (text) this.appendOutput(text)
+    // 文本为空（多字节字符尚不完整）时也要下发：记录器依赖 raw 保持字节完整
+    this.onData(Buffer.from(text, 'utf8'), buf)
+  }
+
   write(data: string | Uint8Array): boolean {
     if (!this.stream) return false
-    this.stream.write(typeof data === 'string' ? data : Buffer.from(data))
+    if (typeof data === 'string') {
+      // 非 UTF-8 会话：键入文本按会话字符集编码后发往远端；Uint8Array 为二进制直通（zmodem 等）
+      this.stream.write(this.charset === 'utf-8' ? data : iconv.encode(data, this.charset))
+    } else {
+      this.stream.write(Buffer.from(data))
+    }
     return true
   }
 
@@ -401,16 +441,63 @@ class SshSession implements InternalSession {
           reject(err ?? new Error('exec 通道建立失败'))
           return
         }
-        let out = ''
-        stream.on('data', (data: Buffer | string) => {
-          out += Buffer.isBuffer(data) ? data.toString('utf8') : data
+        // 先整段累积、关闭时一次性解码：多字节字符跨 chunk 时不会被截断
+        const chunks: Buffer[] = []
+        const collect = (data: Buffer | string): void => {
+          chunks.push(Buffer.isBuffer(data) ? data : Buffer.from(data))
+        }
+        stream.on('data', collect)
+        stream.stderr?.on('data', collect)
+        stream.on('close', () => {
+          const buf = Buffer.concat(chunks)
+          resolve(
+            this.charset === 'utf-8' ? buf.toString('utf8') : iconv.decode(buf, this.charset)
+          )
         })
-        stream.stderr?.on('data', (data: Buffer | string) => {
-          out += Buffer.isBuffer(data) ? data.toString('utf8') : data
-        })
-        stream.on('close', () => resolve(out))
       })
     })
+  }
+
+  /** 单条探测命令的超时（毫秒）：超时后放弃探测（保持未识别状态），不阻塞会话 */
+  private readonly platformProbeTimeout = 4000
+
+  /**
+   * 平台探测（会话就绪后执行一次，重连后重新探测）：
+   * `cmd /c ver` 命中 Microsoft Windows 判为 windows（cmd / PowerShell 默认 shell
+   * 均可执行）；否则 `uname -s` 区分 linux / 其他 Unix；都失败或超时保持未探测
+   * （undefined），监控等按旧行为降级。探测结果只记在会话上，不写入主机配置。
+   */
+  private async probePlatform(): Promise<void> {
+    let platform: HostPlatform | undefined
+    const ver = await this.execTimed('cmd /c ver')
+    if (/microsoft windows/i.test(ver)) {
+      platform = 'windows'
+    } else {
+      const uname = await this.execTimed('uname -s')
+      if (/linux/i.test(uname)) platform = 'linux'
+      else if (/(darwin|bsd|sunos)/i.test(uname)) platform = 'other'
+    }
+    if (!platform || this.killed) return
+    this.info.platform = platform
+    const label = platform === 'windows' ? 'Windows' : platform === 'linux' ? 'Linux' : '其他 Unix'
+    hostLogger.info('ssh', `[终端会话] 已识别主机平台：${label}（${this.info.title}）`)
+  }
+
+  /** 带超时的一次性命令：失败 / 超时返回空串（探测场景只关心特征输出是否存在） */
+  private async execTimed(command: string): Promise<string> {
+    let timer: NodeJS.Timeout | null = null
+    try {
+      return await Promise.race([
+        this.exec(command),
+        new Promise<string>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('探测命令超时')), this.platformProbeTimeout)
+        })
+      ])
+    } catch {
+      return ''
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
   }
 }
 
@@ -871,7 +958,7 @@ class SessionManager extends EventEmitter {
   createSsh(profile: SshProfile, cols = 80, rows = 24): SessionInfo {
     const id = crypto.randomUUID()
     const session = new SshSession(id, profile, cols, rows, {
-      onData: (data) => this.handleData(id, data),
+      onData: (data, raw) => this.handleData(id, data, raw),
       onExit: (code) => this.handleExit(id, code),
       onStatus: (progress) => this.handleStatus(id, progress)
     })
@@ -902,10 +989,11 @@ class SessionManager extends EventEmitter {
     this.emit('created', { ...session.info })
   }
 
-  private handleData(id: string, data: Buffer | string): void {
-    // 输出先喂记录器（落原始会话文件 / 回填进行中命令）；会话可能已不在 map（kill 后的迟到数据）
+  private handleData(id: string, data: Buffer | string, raw?: Buffer): void {
+    // 输出先喂记录器（落原始会话文件 / 回填进行中命令）；非 UTF-8 会话下 data 是重编码的
+    // UTF-8 字节，记录器改用 raw 保持字节级保真。会话可能已不在 map（kill 后的迟到数据）
     const session = this.sessions.get(id)
-    if (session) terminalRecorder.feedOutput(id, session.info, data)
+    if (session) terminalRecorder.feedOutput(id, session.info, raw ?? data)
     this.emit('data', { sessionId: id, data })
   }
 

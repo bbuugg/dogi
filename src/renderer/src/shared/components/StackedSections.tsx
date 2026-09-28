@@ -177,7 +177,7 @@ export function SectionHeader({
   const collapsed = useAppStore((s) => Boolean(s.ui.collapsedSections[id]))
   const setSectionCollapsed = useAppStore((s) => s.setSectionCollapsed)
   return (
-    <div className={cn('mb-1 flex h-9 shrink-0 items-center gap-1 px-1.5', className)}>
+    <div className={cn('mb-1 flex h-8 shrink-0 items-center gap-1 px-1.5', className)}>
       <button
         type="button"
         aria-expanded={!collapsed}

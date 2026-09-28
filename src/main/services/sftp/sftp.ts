@@ -200,6 +200,18 @@ class SftpService extends EventEmitter {
     await call<void>((cb) => sftp.mkdir(normalizeSftpPath(path), cb as never))
   }
 
+  /**
+   * 解析远端路径为标准绝对路径（SFTP realpath）。
+   * 用于兜底：win32-openssh 的默认目录不是 `/` 而是形如 `/C:/Users/xxx` 的
+   * 盘符风格路径，渲染端初始以 `/` 列表失败时改用它拿准起始目录。
+   * 传 `.` 表示由服务端解析默认工作目录；失败原样抛错（由调用方决定是否降级）。
+   */
+  async realpath(connId: string, rawPath: string): Promise<string> {
+    const { sftp } = this.must(connId)
+    const path = rawPath.trim() || '.'
+    return call<string>((cb) => sftp.realpath(path, cb as never))
+  }
+
   async rename(connId: string, from: string, to: string): Promise<void> {
     const { sftp } = this.must(connId)
     await call<void>((cb) => sftp.rename(normalizeSftpPath(from), normalizeSftpPath(to), cb as never))

@@ -18,6 +18,7 @@ import {
   FileText,
   FolderOpen,
   Globe,
+  Monitor,
   Network,
   Plus,
   Puzzle,
@@ -39,6 +40,7 @@ import { NotesPage } from '@/features/notes/NotesPage'
 import { AutomationPage } from '@/features/automation/AutomationPage'
 import { PluginsPage } from '@/features/plugins/PluginsPage'
 import { SftpPage } from '@/features/sftp/SftpPage'
+import { RdpPage } from '@/features/rdp/RdpPage'
 import { TunnelsPanel } from '@/features/tunnels/TunnelsPanel'
 import { HostLogsPanel } from '@/features/logs/HostLogsPanel'
 import { Dropdown } from 'antd'
@@ -103,6 +105,8 @@ function TabIcon({ tab }: { tab: PanelTab }) {
       return <Puzzle className="size-3.5 shrink-0" />
     case 'sftp':
       return <FolderOpen className="size-3.5 shrink-0" />
+    case 'rdp':
+      return <Monitor className="size-3.5 shrink-0" />
     case 'tunnels':
       return <Network className="size-3.5 shrink-0" />
     case 'logs':
@@ -740,6 +744,8 @@ function TabContent({ tab, active }: { tab: PanelTab; active: boolean }) {
       return tab.pluginViewId ? <PluginTabContent tab={tab} /> : null
     case 'sftp':
       return tab.sftpProfileId ? <SftpPage profileId={tab.sftpProfileId} /> : null
+    case 'rdp':
+      return tab.rdpProfileId ? <RdpPage profileId={tab.rdpProfileId} /> : null
     case 'tunnels':
       return <TunnelsPanel />
     case 'logs':

@@ -186,7 +186,7 @@ export function AgentPanel() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="mb-1 flex items-center justify-between gap-1 px-3 py-2">
+      <div className="mb-1 flex items-center justify-between gap-1 px-3 py-1">
         <span className="text-sm font-medium text-muted-foreground">
           工作区 ({workspaces.length})
         </span>

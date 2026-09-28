@@ -42,6 +42,7 @@ import type {
   AutomationScript,
   ColorThemeName,
   HostLogEntry,
+  MonitorUnsupportedReason,
   NoteEntry,
   NoteGroup,
   NoteImportResult,
@@ -81,6 +82,7 @@ export type PanelTabType =
   | 'plugins'
   | 'plugin'
   | 'sftp'
+  | 'rdp'
   | 'tunnels'
   | 'logs'
   | 'agent'
@@ -174,6 +176,8 @@ export interface PanelTab {
   apiGroupId?: string
   /** sftp：对应的 SSH 主机配置 id（凭据在主进程按它解密） */
   sftpProfileId?: string
+  /** rdp：对应的主机配置 id（kind = 'rdp'：地址 / 端口 / 凭据都取自它） */
+  rdpProfileId?: string
   pluginViewId?: string
   /**
    * 自动化：对应的脚本 id。
@@ -379,13 +383,22 @@ function ensureConversation(
   return { conversations: [...conversations, created], activeId: created.id }
 }
 
-/** 修改某个会话（浅合并），同时把 updatedAt 推到当前时刻 */
+/**
+ * 修改某个会话（浅合并）。
+ *
+ * `bumpUpdatedAt` 控制是否把 updatedAt 推到当前时刻：**默认 true**（发消息、改名、删消息等
+ * 低频用户操作都该让它跳到列表最前）。流式输出每个 token 也会走这里追加 part —— 那种高频路径
+ * 必须传 false，否则 updatedAt 每帧都变，会话列表（按 updatedAt 降序）会被持续重排、闪烁。
+ */
 function patchConversation(
   conversations: AgentConversation[],
   id: string,
-  patch: Partial<AgentConversation>
+  patch: Partial<AgentConversation>,
+  bumpUpdatedAt = true
 ): AgentConversation[] {
-  return conversations.map((c) => (c.id === id ? { ...c, ...patch, updatedAt: Date.now() } : c))
+  return conversations.map((c) =>
+    c.id === id ? { ...c, ...patch, updatedAt: bumpUpdatedAt ? Date.now() : c.updatedAt } : c
+  )
 }
 
 /**
@@ -608,6 +621,7 @@ function applyTabClose(
     | 'activeSessionId'
     | 'exitedSessions'
     | 'monitors'
+    | 'monitorUnsupported'
     | 'aiChats'
     | 'connectStages'
     | 'ui'
@@ -632,6 +646,9 @@ function applyTabClose(
   exited.delete(id)
   const monitors = { ...s.monitors }
   delete monitors[id]
+  // 「不支持监控」标记随会话关闭一并清理
+  const monitorUnsupported = { ...s.monitorUnsupported }
+  delete monitorUnsupported[id]
   // 会话关闭，其独立的 AI 对话与 AI 面板开关随之清理
   const aiChats = { ...s.aiChats }
   delete aiChats[id]
@@ -650,6 +667,7 @@ function applyTabClose(
     activeSessionId: focus.activeSessionId,
     exitedSessions: exited,
     monitors,
+    monitorUnsupported,
     aiChats,
     connectStages,
     ui: { ...s.ui, panelTabs: tabs, aiOpenSessions, aiMinimizedSessions }
@@ -1099,12 +1117,20 @@ interface AppStore {
   // ---------- 服务器监控 ----------
   /** 各会话最新指标，key 为 sessionId；无该 key 表示取不到数据（不显示指标） */
   monitors: Record<string, ServerMetrics>
+  /**
+   * 被判定为「不支持监控」的会话（非 Linux 主机 / 采集持续无效），key 为 sessionId，
+   * 值为判定原因（windows / other / unavailable）。有新鲜指标推送时自动清除。
+   */
+  monitorUnsupported: Record<string, MonitorUnsupportedReason>
 
   bootstrap: () => Promise<void>
   /** 新建本地终端标签（不传 shellId 时用偏好设置的默认本地终端），落在当前激活组 */
   createLocalSession: (shellId?: string) => Promise<void>
-  /** 连接一个已保存的主机（ssh 远程 / local 本地）：作为新标签打开，返回新会话信息 */
-  connectHost: (profile: SshProfile) => Promise<SessionInfo>
+  /**
+   * 连接一个已保存的主机：ssh / local 作为终端会话标签打开，rdp 打开远程桌面标签。
+   * 终端会话返回新会话信息；rdp 主机没有终端会话，返回 null
+   */
+  connectHost: (profile: SshProfile) => Promise<SessionInfo | null>
   /** 连接指定主机并在其上执行脚本：连接就绪后把脚本写入该会话，返回是否执行成功 */
   runScriptOnHost: (profile: SshProfile, script: ScriptEntry) => Promise<boolean>
   closeSession: (id: string) => Promise<void>
@@ -1316,6 +1342,8 @@ interface AppStore {
   consumeApiDraftSeed: () => void
   /** 打开主机的 SFTP 文件管理标签（已打开则聚焦） */
   openSftpTab: (profileId: string) => void
+  /** 打开主机的远程桌面（RDP）标签（已打开则聚焦；标签内弹凭据对话框再连接） */
+  openRdpTab: (profileId: string) => void
   /** 打开「隧道」管理标签（已打开则聚焦；传 profileId 时预选该主机新建隧道） */
   openTunnelsTab: (profileId?: string) => void
   /** 隧道面板取走预选主机（取走即清空，避免之后打开又带上旧预选） */
@@ -1611,7 +1639,19 @@ let flushWired = false
       })
     })
     window.api.monitor.onData(({ sessionId, metrics }) => {
-      set((s) => ({ monitors: { ...s.monitors, [sessionId]: metrics } }))
+      set((s) => {
+        const monitors = { ...s.monitors, [sessionId]: metrics }
+        // 新鲜指标到手：清掉该会话的「不支持监控」标记（重连后平台可能已可采集）
+        if (!(sessionId in s.monitorUnsupported)) return { monitors }
+        const monitorUnsupported = { ...s.monitorUnsupported }
+        delete monitorUnsupported[sessionId]
+        return { monitors, monitorUnsupported }
+      })
+    })
+    window.api.monitor.onUnsupported(({ sessionId, reason }) => {
+      set((s) => ({
+        monitorUnsupported: { ...s.monitorUnsupported, [sessionId]: reason }
+      }))
     })
   }
 
@@ -1699,6 +1739,7 @@ let flushWired = false
     },
 
     monitors: {},
+    monitorUnsupported: {},
 
     bootstrap: async () => {
       const [profiles, sshGroups, knownHosts, tunnelInit, configs, settings, preferences, shells, scripts, scriptGroups, notes, noteGroups, automationScripts, automationGroups, apiRequests, apiGroups, apiHistory, shortcuts, agentWorkspaces, agentConversations, hostLogs] = await Promise.all([
@@ -1835,6 +1876,12 @@ let flushWired = false
     },
 
     connectHost: async (profile) => {
+      // 远程桌面是独立主机类型：聚焦 / 打开远程桌面标签，不建立终端会话
+      if (profile.kind === 'rdp') {
+        get().openRdpTab(profile.id)
+        get().selectActivity(HOSTS_ACTIVITY_ID)
+        return null
+      }
       const info = await openSession(profile.id)
       set((s) => attachSessionTab(s, info))
       // 连接后：切到主机侧边栏
@@ -1845,6 +1892,8 @@ let flushWired = false
     runScriptOnHost: async (profile, script) => {
       // connectHost 内部已切回终端功能区
       const info = await get().connectHost(profile)
+      // rdp 主机没有终端会话（入口层已过滤，这里兜底）
+      if (!info) throw new Error('远程桌面主机不能执行脚本')
       return window.api.terminal.runScript(info.id, scriptToTerminalInput(script.content))
     },
 
@@ -1910,6 +1959,9 @@ let flushWired = false
         // 旧会话的指标随之作废（新会话的指标由主进程重新采集）
         const monitors = { ...s.monitors }
         delete monitors[id]
+        // 旧会话的「不支持监控」标记同样作废（新会话会重新探测平台）
+        const monitorUnsupported = { ...s.monitorUnsupported }
+        delete monitorUnsupported[id]
         // 该会话的 AI 对话随重连迁移到新会话 ID（上下文保留）
         const aiChats = { ...s.aiChats }
         if (aiChats[id]) {
@@ -1924,6 +1976,7 @@ let flushWired = false
           activeSessionId: s.activeSessionId === id ? info.id : s.activeSessionId,
           exitedSessions: exited,
           monitors,
+          monitorUnsupported,
           aiChats
         }
       })
@@ -2691,6 +2744,23 @@ let flushWired = false
           title: `${profile?.name || profile?.host || 'SFTP'} 文件`,
           closable: true,
           sftpProfileId: profileId
+        })
+      })
+    },
+
+    /**
+     * 打开主机的远程桌面（RDP）标签：标签 id 按主机 id 推导，同一主机只开一个。
+     * 标签 id 同时用作 RDP 本地桥的 connId（确定性、幂等）；凭据由页面从主机配置取。
+     */
+    openRdpTab: (profileId) => {
+      set((s) => {
+        const profile = s.profiles.find((p) => p.id === profileId)
+        return addOrFocusTab(s, {
+          id: `rdp-${profileId}`,
+          type: 'rdp',
+          title: `${profile?.name || profile?.host || 'RDP'} 桌面`,
+          closable: true,
+          rdpProfileId: profileId
         })
       })
     },
@@ -3637,7 +3707,7 @@ let flushWired = false
             messages[messages.length - 1] = { ...last, usage: event.usage }
           }
           return {
-            agentConversations: patchConversation(s.agentConversations, cid, { messages })
+            agentConversations: patchConversation(s.agentConversations, cid, { messages }, false)
           }
         })
         return
@@ -3694,9 +3764,14 @@ let flushWired = false
         const conversation = s.agentConversations.find((c) => c.id === cid)
         if (!conversation) return {}
         return {
-          agentConversations: patchConversation(s.agentConversations, cid, {
-            messages: appendToLast(conversation.messages, event)
-          })
+          agentConversations: patchConversation(
+            s.agentConversations,
+            cid,
+            { messages: appendToLast(conversation.messages, event) },
+            // 流式 token（text/reasoning/tool-call/tool-result）高频追加：不 bump updatedAt，
+            // 否则会话列表（按 updatedAt 降序）会被持续重排、闪烁
+            false
+          )
         }
       })
       // 流式期间增量落盘：中途关掉应用也不至于丢掉这一轮已有的产出

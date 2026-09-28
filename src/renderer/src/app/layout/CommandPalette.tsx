@@ -6,6 +6,7 @@ import {
   ChevronLeft,
   Globe,
   ListPlus,
+  Monitor,
   Plug,
   ScrollText,
   Search,
@@ -340,7 +341,7 @@ export function CommandPalette() {
     description:
       p.kind === 'local' ? p.command ?? '本地终端' : `${p.username}@${p.host}:${p.port}`,
     keywords: p.kind === 'local' ? p.command ?? '' : `${p.host} ${p.username}`,
-    icon: p.kind === 'local' ? TerminalSquare : Server,
+    icon: p.kind === 'local' ? TerminalSquare : p.kind === 'rdp' ? Monitor : Server,
     run: () => {
       close()
       // 连接前置检查失败（如 Mosh 缺本地 mosh-client）会同步报错，这里给用户提示

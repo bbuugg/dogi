@@ -1,4 +1,4 @@
-import { shell, type BrowserWindow } from 'electron'
+import { BrowserWindow, shell } from 'electron'
 
 /**
  * 各 IPC 模块共用的上下文。
@@ -15,10 +15,13 @@ export interface IpcContext {
 export function createIpcContext(win: () => BrowserWindow | null): IpcContext {
   return {
     win,
+    // 广播到**所有**渲染端窗口（主窗口 + 独立设置窗口），否则设置窗口收不到跨窗口同步事件
+    // （如 `prefs:updated`，在设置页改了偏好、控件却不刷新）。除主窗口外本项目只有设置窗口是
+    // 独立 BrowserWindow，插件视图等都在主窗口内以标签页打开，不会误伤。
     broadcast: (channel, payload) => {
-      const window = win()
-      if (!window || window.isDestroyed()) return
-      window.webContents.send(channel, payload)
+      for (const window of BrowserWindow.getAllWindows()) {
+        if (!window.isDestroyed()) window.webContents.send(channel, payload)
+      }
     }
   }
 }

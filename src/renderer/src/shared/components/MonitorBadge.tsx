@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, Cpu, MemoryStick, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, Cpu, MemoryStick, MonitorOff, X } from 'lucide-react'
 import { cn } from 'cn'
 import { useAppStore } from '@/stores/app-store'
-import { Popover } from 'antd'
+import { Popover, Tooltip } from 'antd'
 import { formatBytes, formatDuration, formatRate } from '@/shared/lib/format'
 import type { ServerMetrics } from '@shared/types'
 
@@ -188,11 +188,17 @@ function MetricsDetail({
 /**
  * 状态栏中的服务器指标条（渲染在 StatusBar 右侧，AI 助手入口的左邻）：
  * - 常显 CPU / 内存 / 网速概览，仅在能采集到当前会话数据时出现（数据陈旧则消失）
+ * - 主机被判定「不支持监控」（非 Linux 主机 / 采集持续无效）时，退化为静态的
+ *   「不支持监控」标识（带解释性 Tooltip），不再显示任何指标
  * - 点击指标条在上方展开详情气泡：只能通过气泡内的关闭按钮收起
  *   （点击外部 / ESC 均不关闭）；气泡内可切换采集间隔
  */
 export function MonitorBadge({ sessionId }: { sessionId: string | null }) {
   const metrics = useAppStore((s) => (sessionId ? s.monitors[sessionId] : undefined))
+  // 主进程判定「不支持监控」的标记（非 Linux 主机 / 采集持续无效）
+  const unsupported = useAppStore((s) =>
+    sessionId ? s.monitorUnsupported[sessionId] : undefined
+  )
   const interval = useAppStore((s) => s.preferences.monitorInterval)
   const [open, setOpen] = useState(false)
   // 需要按时间重新渲染，才能判断已有指标是否已陈旧
@@ -212,7 +218,21 @@ export function MonitorBadge({ sessionId }: { sessionId: string | null }) {
     if (!visible) setOpen(false)
   }, [visible])
 
-  if (!visible || !metrics) return null
+  // 新鲜指标优先；指标不存在 / 已陈旧但主机被判为不支持监控时，退化为静态标识
+  if (!visible || !metrics) {
+    if (!unsupported) return null
+    return (
+      <Tooltip title="该主机暂不支持服务器监控（目前仅支持 Linux）">
+        <span
+          aria-label="不支持服务器监控"
+          className="flex h-6 cursor-default items-center gap-1 rounded px-1.5 text-xs whitespace-nowrap text-muted-foreground/60"
+        >
+          <MonitorOff className="size-3" />
+          不支持监控
+        </span>
+      </Tooltip>
+    )
+  }
 
   return (
     <Popover

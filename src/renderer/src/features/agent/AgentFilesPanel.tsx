@@ -462,8 +462,13 @@ export function AgentFilesPanel({
   }
 
   const refresh = (): void => {
-    setDirs({})
+    // 不清空 dirs：否则整棵树会瞬间消失再重绘（闪烁），且展开状态全部丢失。
+    // loadDir 在重新拉取时会保留旧 entries 直到新数据到达，界面平稳无闪烁；
+    // 顺带把当前已展开/已读的目录一并重拉，让子目录的新增/删除也同步出来。
     void loadDir('')
+    for (const [dir, state] of Object.entries(dirs)) {
+      if (dir !== '' && state.entries) void loadDir(dir)
+    }
   }
 
   /**

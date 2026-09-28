@@ -15,6 +15,11 @@ export function registerSftpIpc(ctx: IpcContext): void {
     sftpService.open(connId, profileId)
   )
   ipcMain.handle('sftp:list', (_e, connId: string, path: string) => sftpService.list(connId, path))
+  // 解析远端路径（realpath）：win32-openssh 的默认目录是盘符风格路径（/C:/…），
+  // 渲染端初始以 `/` 列表失败时用它兜底拿准起始目录
+  ipcMain.handle('sftp:realpath', (_e, connId: string, path: string) =>
+    sftpService.realpath(connId, path)
+  )
   ipcMain.handle('sftp:mkdir', (_e, connId: string, path: string) => sftpService.mkdir(connId, path))
   ipcMain.handle('sftp:rename', (_e, connId: string, from: string, to: string) =>
     sftpService.rename(connId, from, to)

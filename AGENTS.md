@@ -15,7 +15,7 @@
 
 **Dogi** 是一个 AI 驱动的桌面运维工作台：把「连机器 → 干活 → 记下来 → 调接口 → 让 AI 代办」
 收在一个 Electron 应用里。左侧是活动栏功能区，右侧是 VS Code 式的分屏标签组，
-内置终端 / SSH / SFTP / 服务器监控 / 接口调试 / 笔记 / 脚本 / 插件宿主，
+内置终端 / SSH / 远程桌面（RDP）/ SFTP / 服务器监控 / 接口调试 / 笔记 / 脚本 / 插件宿主，
 以及一个能读写文件、执行命令、调用技能的 AI Agent。
 
 ### 1.2 技术栈
@@ -25,7 +25,8 @@
 | 桌面容器 | Electron 44（`contextIsolation` + preload 白名单 IPC，无 nodeIntegration） |
 | 渲染端 | React 19 + TypeScript 7 + Tailwind v4 + **antd 6**（唯一 UI 库） |
 | 状态 | zustand（单一 store：`src/renderer/src/stores/app-store.ts`） |
-| 终端 | `@xterm/xterm` v6（WebGL 渲染）+ `node-pty`（本地）/ `ssh2`（远程）+ `zmodem.js`（rz/sz 传文件） |
+| 终端 | `@xterm/xterm` v6（DOM 渲染）+ `node-pty`（本地）/ `ssh2`（远程）+ `zmodem.js`（rz/sz 传文件） |
+| 远程桌面 | `ironrdp-wasm`（IronRDP 编译的 WASM 客户端，画到 canvas）+ 主进程本地桥（WebSocket ↔ TCP/TLS，RDCleanPath 协议） |
 | 编辑器 | Monaco（本地资源，`scripts/copy-monaco.cjs` 拷贝到 `public/`） |
 | AI | Vercel AI SDK v7（openai / anthropic / deepseek / google / openai 兼容）+ `@modelcontextprotocol/sdk`（MCP）+ `@agentclientprotocol/sdk`（外部 ACP agent） |
 | 持久化 | `electron-store` + `safeStorage`（凭据加密，Windows 走 DPAPI） |
@@ -38,7 +39,7 @@
 
 | 功能区 | 侧边栏 | 主区域 |
 | --- | --- | --- |
-| **主机** | 主机列表（分组 / 拖拽 / 颜色）+ 下半区「脚本」分区（可折叠、可拖高） | 终端标签、SFTP 文件管理标签 |
+| **主机** | 主机列表（分组 / 拖拽 / 颜色）+ 下半区「脚本」分区（可折叠、可拖高） | 终端标签、SFTP 文件管理标签、远程桌面标签 |
 | **AI Agent** | 工作区 → 会话两层树，会话行带状态图标（等回答 / 运行中 / 静止） | Agent 会话页（对话流 + 内嵌终端 + 工作区文件树/预览 + 快捷功能） |
 | **笔记** | 笔记列表（分组 / 拖拽 / 搜索） | Monaco 编辑器标签，语言可选 |
 | **接口请求** | 保存的请求列表（分组 / 拖拽 / 历史） | HTTP 调试页 / WebSocket 调试页 |
@@ -59,7 +60,8 @@
 
 **主机与运维**
 
-- 主机分组 / 强调色 / 拖拽排序；`kind: 'ssh' | 'local'` 统一建模。
+- 主机分组 / 强调色 / 拖拽排序；**三类主机** `kind: 'ssh' | 'rdp' | 'local'` 统一建模 —— 新建 / 编辑主机对话框三分段选择，已建的也能改类型。
+- **远程桌面（RDP）**：rdp 主机走普通「连接」动作开远程桌面标签（**不是**菜单直达 —— 旧「远程桌面 (RDP)」右键入口已移除，别恢复）；WASM 客户端 + 主进程本地桥，读主机配置自动连接 / 弹凭据对话框，机制见 4.17。
 - **SFTP**：浏览、上传文件 / **上传文件夹（递归，目录内每个文件一笔独立传输）**、下载（含目录递归）、远端复制 / 移动、删除 / 新建目录、重命名；进度经 `sftp:progress` 广播到状态栏的传输托盘；用户取消不算错误（`TransferCancelledError`）。
 - **传输托盘**（状态栏右下）：结束的任务**不自动移除**（用户要求：完成后留在面板里，由用户逐条 × 或「清除已完成」清理）；已完成的上传 / 下载条目带**「打开文件位置」图标**（`shell:revealPath`：目录直接打开，文件在所在目录中选中；复制 / 移动没有本地侧、已取消 / 失败不给图标）。
 - **服务器监控**：经 SSH `exec` 周期采集 `/proc` + `df`（CPU / 内存 / 负载 / 网速 / 磁盘 / uptime），间隔可配（`monitorInterval`）。
@@ -130,6 +132,7 @@ src/
       browser/             # session.ts（Playwright 会话 + screencast）resolver.ts input.ts
                            # runner.ts（脚本逐行执行）handlers.ts（事件出口）agent.ts（Agent 工具集）
       sftp/ transfer/      # sftp.ts；transfer/（zip.ts + 导入导出编排）
+      rdp/                 # bridge.ts（RDP 本地桥：WebSocket ↔ TCP/TLS，RDCleanPath，见 4.17）
       log/                 # logger.ts（主机日志：环形缓冲 + JSONL 落盘，见 4.13）
       plugins/host.ts      # 插件宿主（主进程侧）
       system/              # icon.ts notify.ts opener.ts
@@ -515,6 +518,85 @@ WSL 回退用 `wsl.exe -e env MOSH_KEY=... mosh-client ...` —— Windows 环�
 - 验证：`scripts/verify-host-logs.mjs`（见 5.2）—— 测试服务器故意拒绝 SFTP 子系统，专门走
   「失败也进日志」的路径。
 
+### 4.14 平台探测：会话就绪后异步探一次，只记在会话上
+
+「这台机器是 Windows 还是 Linux」由 `terminal/sessions.ts` 的 `SshSession.probePlatform()` 在
+shell 就绪后异步执行（每次重连重新探测；Mosh 不探测 —— 其本身 Linux-only）：
+
+- **探测顺序**：`cmd /c ver` → `/microsoft windows/i` ⇒ `windows`；否则 `uname -s` → `/linux/i` ⇒ `linux`、
+  `/(darwin|bsd|sunos)/i` ⇒ `other`；两条都失败 / 超时（单条 4s，`execTimed`）⇒ 保持 `undefined`
+  （旧行为：监控靠「无效结果」兜底，见 4.16）。
+- **结果只写 `SessionInfo.platform`（会话级）**，不写进主机配置 —— 同一主机多会话各探各的；
+  识别成功落一条 `hostLogger`（「已识别主机平台：Windows（user@host）」）。
+- **下游消费者**：监控门控（4.16）、AI 的 `boundHint` 与 `list_terminal_sessions` 输出（`ai/ai.ts`）。
+  Windows 的默认 shell 可能是 cmd 也可能是 PowerShell，所以 AI 提示按「平台」措辞而不是按标题猜。
+
+### 4.15 每主机终端编码：只在 SshSession 边界转码，下游契约恒为 UTF-8
+
+中文 Windows（GBK 代码页）的输出会乱码，而 SSH 传输的是裸字节。方案是**主机级开关 + 边界转码**：
+
+- `SshProfile.terminalCharset: 'utf-8'（缺省）| 'gbk'`（主机对话框「终端编码」字段，仅 `kind === 'ssh'` 显示）。
+  **不做自动探测** —— 手工切换是显式操作；探测错了是随机乱码，用户会以为是 bug。
+- **转码只发生在 `SshSession`**（`terminal/sessions.ts`），渲染端与记录器契约一律 UTF-8：
+  - 输出：stdout / stderr 各一份**有状态** `iconv.getDecoder`（多字节字符跨 chunk 不破），统一走 `emitOutput`：
+    utf-8 原字节透传 `onData(buf)`；gbk 解码后重编码为 UTF-8 下发 `onData(utf8Buf, rawBuf)`。
+  - `raw` 给 `SessionManager.handleData` 喂 `terminalRecorder`（`raw ?? data`）—— 原始会话日志保持
+    **字节级保真**（4.13 的逐字节文件）。
+  - 输入：`write()` 里字符串按会话字符集 `iconv.encode`；`Uint8Array` 直通（zmodem 二进制）。
+  - `exec()`（监控 / 探测走它）：先整段累积 buffer、close 时一次性 decode —— 分块 decode 会把跨 chunk 的
+    多字节字符切成两个替换符。
+- **已知限制**（刻意不修，代码有注释）：非 UTF-8 会话里 zmodem 等二进制协议帧会被解码破坏 ——
+  Windows 本就没有 sz/rz，UTF-8 会话不受影响。
+- 依赖 `iconv-lite`（仅主进程）。
+
+### 4.16 监控不支持态：非 Linux 是**明确终态**，不是静默停
+
+监控采集依赖 Linux 的 `/proc` 与 `df`，Windows / BSD / macOS 永远采不到数据。旧行为是「采不到就不推」，
+用户看到的是「监控条没了」而不是「为什么不支持」—— 现在做成显式状态：
+
+- **判定**（`terminal/monitor.ts`）：平台已识别且 ≠ `linux` ⇒ 立即上报 `unsupported(platform)` 并自停；
+  平台未知但连续 3 轮结果无效（`MAX_INVALID`）⇒ `unsupported('unavailable')`（覆盖探测失败的 Unix 系）；
+  采集命令连续失败 15 次（`MAX_EXEC_FAILURES`）才停 —— 连接抖动要能自愈，不能一失败就判死。
+- **链路**：`SessionMonitor('unsupported')` → `MonitorService`（转发 + 移除管理表）→ `ipc/monitor.ts`
+  广播 `monitor:unsupported` → preload `monitor.onUnsupported` → store `monitorUnsupported[sessionId]` →
+  状态栏 `MonitorBadge` 退化为「不支持监控」静态标识（带 Tooltip；仅当无新鲜指标时显示）。
+- **清理时机**（store）：收到新鲜 `monitor:data`、`terminal:closed`、会话重连迁移 —— 三处都会清标记。
+- 本地终端且本机非 Linux：`MonitorService.start` 直接静默跳过（不给徽标噪音）。
+- 验证：`scripts/verify-windows-host.mjs`（Windows 会话 0 条 `monitor:data` + 恰好一次 `unsupported`）。
+
+### 4.17 RDP 子系统：独立主机类型 + 主进程本地桥 + 渲染端 WASM 客户端
+
+Win 服务器图形化操作走内嵌 RDP（不调 mstsc）。**远程桌面是主机的一等类型**
+（`kind: 'rdp'`，与 `ssh` / `local` 并列，新建 / 编辑主机对话框三分段可选、可改）——
+主机右键菜单的「远程桌面 (RDP)」直达入口**已移除，别再恢复**：rdp 主机走普通「连接」动作开标签。
+
+- **主机配置**：`host` / `port`（默认 3389，即 RDP 端口）/ `username` / `domain`（`SshProfile.domain`，
+  域环境填域名）/ `password`（safeStorage 加密，列表只给 `hasPassword`）。终端 / SFTP / 隧道都不服务
+  rdp 主机（菜单不出现对应项；`terminal:create` 主进程侧直接拒绝）。新建对话框切到「远程桌面」时
+  端口与用户名同步预填 3389 / `administrator`（与 ssh 的 22 / `root` 对切；用户改过的值不动）。
+- **渲染端** `features/rdp/RdpPage.tsx`：`ironrdp-wasm`（IronRDP 编译成 WASM）画到 canvas，负责键盘 / 鼠标
+  转发（scancode 表见文件内 `KEY_SCANCODES`，扩展键 0xE0xx）、缩放、Ctrl+Alt+Del。开标签先经
+  `rdp:credentials` 读主机配置：有密码直接自动连接；没密码弹凭据对话框，勾选「保存到主机配置」会把
+  用户名 / 域 / 密码写回主机（加密存储）；「修改凭据」/「重新连接」都复用同一个对话框。
+- **主进程** `services/rdp/bridge.ts`：每座桥一个 `WebSocketServer`（127.0.0.1 随机端口 + 24 字节随机 token
+  路径），把 WebSocket 流量接到目标 `host:port` 的 TCP/TLS 上。协议是 **RDCleanPath**（WASM 客户端的第一条
+  二进制消息是 DER 请求）：桥替它完成 TCP 连接、X.224 交换、TLS 握手（`rejectUnauthorized: false` 是协议
+  设计 —— 证书链随应答回填，由 WASM 客户端自己校验），随后双向透传（NLA / CredSSP 在透传的 RDP 层内，
+  与 TLS 无关）。握手失败统一回错误 PDU（1/502），**真实原因在主机日志（别只看错误码）** —— 对端
+  证书缺 `digitalSignature` 用途位时 BoringSSL 会掐断默认握手（`KEY_USAGE_BIT_INCORRECT`），
+  桥自动降级 TLS 1.2 静态 RSA 套件重试一次（机制与套件命名坑见 6.4 第 17 条）。
+- **安全基线**：桥只连 open 时固定的 `host:port`（请求里的 destination 必须一致，拒绝任意转发）；
+  渲染端拿到的只是本地 wsUrl。`rdp:open(connId, profileId)` 的 host / port **全部取自主机配置**
+  （非法端口兜底 3389；`rdp:credentials` 的端口口径与桥一致）。
+- **标签**：`PanelTabType` 新增 `'rdp'`，标签 id = connId = `rdp-<profileId>`（一主机一标签一座桥，
+  `rdp:open` 幂等；store 的 `connectHost` 对 rdp 主机走这条分支）。关标签 → `rdp:close` + 会话 dispose。
+- **wasm 资产**：`scripts/copy-rdp.cjs`（predev / prebuild 钩子）把 `ironrdp-wasm` 的 wasm 复制进
+  `renderer/public/rdp/`；**生产渲染端是 `file://`，fetch 拿不到 URL**（见 6.3 第 13 条），运行时改走
+  `rdp:wasm` IPC 读字节喂给 init。CSP 相应放行 `'wasm-unsafe-eval'` 与 `connect-src ws://127.0.0.1:*`。
+- **本轮不做**（刻意）：剪贴板 / 音频 / 磁盘重定向、跳板机链路。
+- **验证**：`scripts/verify-rdp-bridge.mjs`（桥协议端到端）+ `scripts/verify-rdp-host-ui.mjs`（三分段对话框
+  → 保存 → 编辑回填 → 连接 → 凭据回写全链路）。表单侧坑见 6.5 第 31 条。
+
 ---
 
 ## 五、验证工具链
@@ -555,6 +637,9 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 | `scripts/verify-agent-file-preview.mjs` | `dogi-ws://` 图片解码、SVG 预览↔编辑、`<video>` 的 206 Range、压缩包提示、`../` 越界 |
 | `scripts/verify-quick-actions.mjs` | `.dogi/workspace.json` 自动建目录、脏数据降级、下拉入口与顶栏同排、执行命令开终端、弹窗开关 |
 | `scripts/verify-host-logs.mjs` | 主机日志全链路：隔离实例 + 进程内 ssh2 测试服务器 —— SSH 四类来源标签与实时推送（`logs:entry`）、TOFU 指纹、隧道强断（error 级）/ 改名重启 / 停止、SFTP 失败路径、JSONL 落盘与清空归零、面板单例标签 / 过滤 / 搜索 |
+| `scripts/verify-windows-host.mjs` | Windows 主机支持全链路：三台进程内 ssh2 假服务器（Windows / GBK / Linux）—— `cmd /c ver` 平台探测、Windows 会话 0 条 `monitor:data` + `monitor:unsupported(windows)` + 徽标「不支持监控」、GBK 输出 xterm 渲染与输入字节=GBK 编码比对、Linux UTF-8 透传 + `monitor:data` 回归 |
+| `scripts/verify-rdp-bridge.mjs` | RDP 本地桥：假 RDP 服务器（X.224 确认 + STARTTLS 升级 + 回显）—— RDCleanPath 应答同构（3390 / X.224 / 证书链 / server_addr）、WS↔TLS 透传字节一致、脏数据与 destination 不匹配回错误 PDU 且不触碰目标、错误 token 连不上、open 幂等 / 目标 host:port 取自主机配置 / 非法端口兜底 3389 / ssh 类型主机被拒 / `rdp:credentials` 与桥端口同口径 / close 后端口关闭 / `rdp:wasm` 魔数 / **坏 keyUsage 证书降级**（第二台假服务器：默认握手被拒后自动重试 TLS 1.2 静态 RSA 成功、对端恰两次连接、主机日志告警与成功留痕） |
+| `scripts/verify-rdp-host-ui.mjs` | 远程桌面主机类型界面链路（隔离实例 + CDP）：新建对话框三分段（默认 SSH → 切「远程桌面」出 rdp 字段、端口 3389 与用户名 administrator 同步预填）→ 保存落库（kind=rdp / 域 / 加密密码）→ 主机菜单无「远程桌面 (RDP)」直达、rdp 无 SFTP / 隧道项 → 编辑对话框类型可切换与回填 → 「连接」开 `rdp-<id>` 标签且不建终端会话 → 读配置开桥自动连接（无真实服务器 → 进入断开态）→ 无密码主机弹凭据对话框、勾选保存把凭据写回配置、rdp 弹窗 footer 按钮贴右缘（防 flex 布局回归）。⚠️ 目标端口无真实 RDP 服务，断言的是流程不是画面 |
 | `scripts/verify-sftp-transfers.mjs` | SFTP 上传文件夹 + 传输托盘：进程内假 SFTP 服务器（ssh2 服务端事件式 API，见下方 ⚠️）——「上传 → 上传文件夹…」逐层 MKDIR + 每文件 WRITE（内容比对）、3 笔独立传输落 store（含 `localPath`）、完成条目 6.5s 后仍在（不自动移除）、上传 / 下载带「打开文件位置」/ 已取消不带、`revealPath` 错误路径 `ok:false`、清除已完成清空且入口消失。⚠️ 会真实弹出一次系统文件管理器 |
 | `scripts/verify-port-killer.mjs` | 端口占用插件全链路：插件播种/视图注册 → 探针 spawn 的 node 子进程真占随机端口 → 查询命中（PID / 进程名 / 监听中）→ 行内复制命令（`killCommand` 平台格式）→ **Popconfirm 真杀**（子进程退出 + 端口连接被拒 + 自动复查为空）→ 保护/校验分支（kill PID 1 / 非法 / 不存在、search 70000）→ **UDP 占用**（netstat UDP 行没有状态列）→ 重新查询 |
 | `scripts/verify-terminal-logging.mjs` | 终端命令 + 输出记录：命令装配（普通 / 退格 / Ctrl+C / 不可还原行不记 / bracketed paste）、`[脚本]` 来源标记、输出增量回填同一条目、原始会话文件（含未记录命令的裸输出）、关闭条目、JSONL 同 seq 多行、面板终端过滤、清空连 `sessions/` 归零。⚠️ bracketed paste 用例必须放最后：部分 PowerShell（如本机 5.1）未启用 `?2004h`，合成标记会吞掉后续回显 |
@@ -581,6 +666,17 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 `OPEN` 的 pflags 里 `0x02` 是 WRITE（只有写句柄在 CLOSE 时落盘）；句柄自建 4 字节 uint32 编号。
 主进程侧对应的旁路契约：原生目录选择框无法自动化，`sftp:uploadDir` 读 `DOGI_SFTP_UPLOAD_DIR`
 环境变量（**仅探针设置**，正常运行不设就走真对话框；新增「弹原生对话框」的能力照此留旁路）。
+
+⚠️ **假 RDP 服务器（`verify-rdp-bridge.mjs`）的 STARTTLS 升级**：先按 TPKT 长度读齐 X.224 连接请求、
+回确认，然后 `socket.pause()` 再把裸 socket 交给 `tls.createServer(...)` 实例 `emit('connection', socket)`
+完成服务端 TLS 握手（tls.Server 的 STARTTLS 标准做法）。证书用脚本内嵌的一次性自签固件（仅 127.0.0.1
+回环）即可 —— 桥端本就是 `rejectUnauthorized: false`（RDCleanPath 设计：证书链回传给 WASM 客户端判定），
+探针只断言「链完整 / 字段对」。坏 keyUsage 的第二台假服务器（29390）沿用同一 STARTTLS 骨架，只换证书固件（keyUsage 仅 `keyEncipherment`）与服务端套件（只留 RSA 密钥交换）—— 专门复现 BoringSSL 的 `KEY_USAGE_BIT_INCORRECT` 与桥的降级重试（见 6.4 第 17 条）。
+
+⚠️ **本地回环 WebSocket 拨号偶发失败**：Windows 负载中极少数情况下，对刚建好的桥的首条 WS 连接会直接
+`onerror`（重跑即过，与桥实现无关 —— 已实测复现一次、重跑两次全绿）。探针的 `wsOpen` 为此带 2 次退避重试；
+负路径（`expectWsFail`）传 `0` 不重试，保持「单次拨不通 = 连不上」的断言语义。再遇到同类失败先怀疑它，
+别急着改桥代码。
 
 ⚠️ `verify-port-killer.mjs` 里「被占用的端口」都是**探针自己 spawn 的 node 子进程**（TCP 监听 / UDP 绑定）：
 结束时杀的是这个子进程，能拿准退出码、且伤不到任何真实服务 —— **永远不要拿宿主或系统进程当靶子**。
@@ -693,10 +789,14 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   自行管理（`services/ai/mcp.ts`），工具用 `dynamicTool` + `jsonSchema` 包装。
 - `streamText` 默认单步，自动工具循环需要 `stopWhen: stepCountIs(N)`。
 
-**10. xterm 6 默认 WebGL 渲染**
+**10. xterm 6 只有 DOM 渲染器；验证终端内容优先走 `recentOutput`**
 
-- DOM 里 `.xterm-rows` 的 textContent 始终为空是正常的（不是没输出）。
-  **验证终端内容不要读 DOM**，走主进程 `recentOutput`（IPC `terminal:recentOutput`）。
+- **实测纠正（6.0.0）**：core bundle 里只有 `DomRenderer` / `xterm-rows`，**没有任何 WebGL 代码路径**
+  （唯一的 canvas 是装饰总览尺）；`.xterm-rows` 的 textContent 能读到文本 —— 旧记录「始终为空」已不成立
+  （`scripts/verify-windows-host.mjs` 用 GBK / UTF-8 中文实测）。
+- ⚠️ 但直读 DOM 仍有时机陷阱：`term.write` 异步解析、文本下一帧才落进 DOM，**刚写完就断言会读到空**（必须轮询）。
+- **验证终端内容首选主进程 `recentOutput`**（IPC `terminal:recentOutput`）：不受渲染时机影响；DOM 读取只当补充，
+  两处口径都要对（`verify-windows-host.mjs` 同时断言两者）。
 
 **11. antd 6 的 Select 与 antd 5 差别很大**
 
@@ -726,6 +826,16 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 - `context._enableRecorder` 是**私有 API**（升级必须重验，见 4.11）；而
   `locator.ariaSnapshot({ mode: 'ai' })` 与 `page.locator('aria-ref=eN')` 是**公开 API**，可以放心用。
 - 安装时用 `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`（项目不依赖自带 Chromium，优先用系统浏览器）。
+
+**13. wasm-bindgen 的 init 在生产渲染端（file://）拿不到 URL 形式的 wasm**
+
+- wasm-bindgen 胶水对 string / URL / Response 入参走 **`fetch()`**：dev（http://localhost）没问题，
+  生产渲染端是 `loadFile`（`file://`），Chromium 的 fetch **不支持 file: 协议** —— 直接
+  `init({ module_or_path: '/rdp/xxx.wasm' })` 会失败。`BufferSource`（字节）入参则直接实例化、不经过 fetch。
+- 本项目的路子（`RdpPage.loadIronRdp`）：dev 走 `fetch('/rdp/rdp_client_bg.wasm')`（Vite 的 public），
+  生产走 **`rdp:wasm` IPC 主进程 readFile 字节**再交给 `init`。配套两个 CSP 项：`script-src` 加
+  `'wasm-unsafe-eval'`（否则 WASM 编译被 CSP 拦）、`connect-src` 放行 `ws://127.0.0.1:*`（RDP 本地桥）。
+- wasm 资产由 `scripts/copy-rdp.cjs` 随 predev / prebuild 钩子复制进 `renderer/public/rdp/`。
 
 ### 6.4 主进程与生命周期
 
@@ -762,7 +872,23 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 - **菜单**：自定义菜单刻意**去掉 zoom 角色**，否则 Ctrl +/-/0 会缩放整个页面并抢在渲染端之前触发；
   Reload / Force Reload **不注册加速键**（Ctrl+R 必须透传给终端：vim 的 redo、readline 反向搜索都靠它）；
   F5 在 `before-input-event` 里拦掉（会毁掉终端会话）。
-- **凭据只在主进程解密**：`storage.getSshProfile` 返回明文，渲染端永远拿不到；列表接口只给 `hasPassword` 这类脱敏标记。
+- **凭据只在主进程解密**：`storage.getSshProfile` 返回明文，渲染端永远拿不到；列表接口只给 `hasPassword` 这类脱敏标记。⚠️ RDP 是刻意的例外：NLA / CredSSP 票据必须在渲染进程算，仅连接时经 `rdp:credentials` 单次下发（见 4.17）。
+
+**17. BoringSSL 会拒绝「缺 digitalSignature 用途位」的服务器证书 —— OpenSSL / SChannel 不查这一位**
+
+- **触发信号**：RDP 连接报「接入握手失败：received an RDCleanPath error: general error (code 1); HTTP 502
+  bad gateway」时别只信错误码 —— 换个客户端（mstsc / 纯 Node）连同一台服务器往往正常。
+- **根因**：Electron 主进程里的 Node 用 **BoringSSL**（`process.versions.openssl` 报 `0.0.0`），客户端会校验
+  服务器证书 keyUsage 与协商套件的一致性：证书没有 `digitalSignature` 位时，一切靠证书签名的套件（全部
+  TLS 1.3、全部 ECDHE）都被 `KEY_USAGE_BIT_INCORRECT` 掐断；云镜像工具生成的自签证书经常只带
+  `keyEncipherment`。OpenSSL / SChannel / rustls 都不做这个检查 —— 「只有我们的桥连不上」的经典现场。
+  （RDCleanPath 把一切握手失败统一归成错误 PDU 1/502，真实原因只在主机日志。）
+- **正确做法**：识别该错误后自动降级 **TLS 1.2 + 静态 RSA 密钥交换套件**重试一次（证书此时用于加密而非
+  签名，语义合法），成功与失败都写主机日志。⚠️ 套件清单必须写 **OpenSSL 风格名**（`AES256-GCM-SHA384`…）
+  —— BoringSSL 不认 IANA 全名（`TLS_RSA_WITH_*` 解析成空列表 → `NO_CIPHERS_AVAILABLE`）；也别因
+  `tls.getCiphers()` 里看不到 `TLS_RSA_*` 就以为静态 RSA 不可用（实测可协商）。
+- **验证**：`scripts/verify-rdp-bridge.mjs` 坏 keyUsage 假服务器场景（默认握手被拒 → 降级成功 → 对端恰两次
+  连接 → 日志有告警与成功留痕）。
 
 ### 6.5 渲染端 UI 细节
 
@@ -828,7 +954,7 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   `sessions`/`groups`/`layout`/`ui.panelTabs`，直接调 `createLocalSession()` + `setSessionAiOpen(sid, true)` + `setAiMinimized(sid, false)`。
 - 共用的页面内小工具在 `scripts/lib/agent-dom.mjs`（**选择器不写死宽度类**，从 fixture 文本反推容器）。
 
-**20. antd 组件与 CDP 脚本的三个静默陷阱（写验证脚本时必踩）**
+**20. antd 组件与 CDP 脚本的静默陷阱（写验证脚本时必踩）**
 
 - **antd 会给恰好两个汉字的按钮中间插空格**（`关闭` 的 `textContent` 是 `关 闭`）——
   按 `textContent === '关闭'` 找按钮永远找不到，而 `if (btn)` 会把「没点到」静默咽掉。**比对前先去掉空白。**
@@ -836,6 +962,7 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   关不掉的后果是后面切换工作区时，旧标签那个**已展开的下拉仍留在 DOM 里**（`offsetParent !== null`），
   数菜单条目时把两层一起数进来 → 断言假 FAIL。正确姿势：Dropdown 的 `trigger=['click']` 是开关，**再点一次触发器**。
 - `console.log('文案：', value)` 多参数之间会**插一个空格**，脚本里别按整句比对。
+- **探针里 `cdp.eval` 的代码经 Node 模板字面量插值：正则转义会被吃掉一层** —— 源码里写 `/\s+/g`（单反斜杠），页面实际执行的是 `/s+/g`，去空白**静默失效**（按钮按去空白文本匹配永远 `NOT-FOUND`；旁边独立写的同类表达式却正常，因为那里写的是 `\\s`）。**探针源码里的正则一律写 `\\s`**；排查「同名逻辑一处好一处坏」先 dump 页面侧函数源码（`.toString()`）对字节。
 
 **21. antd 的 cssinjs 压过 Tailwind：给 antd 组件写宽度类会被静默吃掉**
 
@@ -902,6 +1029,7 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 - **验证**：`scripts/verify-terminal-prediction.mjs` 按**渲染宽度**断言（range 联合包围盒 vs 同字体「带空格 / 粘连」两个基准）；
   **结构断言测不出来** —— 两种结构渲染出的文本内容一致，只有宽度 / 截图能看出差别。
 
+<<<<<<< HEAD
 **25. 全屏程序里「组合键之后的可打印键」被当成命令行输入（tmux 的 `Ctrl+B d` 误弹命令预测）**
 
 - **现场**：tmux 里按 `Ctrl+B` 再按 `d`（detach），终端里没有任何输入回显，却弹出了命令预测面板 ——
@@ -918,6 +1046,41 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   想要「tmux 内也能预测」需要 shell 集成（OSC 133 之类）给出命令行边界，目前没做。
 - **验证**：`scripts/verify-terminal-prediction.mjs` 用例 5 —— 先确认普通提示符下按 `d` 确实会弹
   （否则「不弹」说明不了问题），再用 shell 打印 `?1049h` 真进备用屏幕，断言按 `d` 不弹，最后 `?1049l` 回主屏。
+=======
+**25. 面板组里所有标签常驻挂载：隐藏标签的 ResizeObserver 要防「尺寸塌缩」**
+
+- `PanelView` 的标签不是按需挂载：切走的标签留在 DOM 里（加 `hidden` 类），RDP / 终端这类**有连接状态的页面
+  切回来不用重连** —— 代价是**隐藏时观察者回调照样触发**。
+- `RdpPage` 的尺寸守卫（`phase === 'connected'` 的 ResizeObserver）：回调里先防抖 400ms（拖拽分屏一秒几十次），
+  再量容器 rect，`width < 200 || height < 150` 直接跳过 —— `display:none` 下 rect 全 0，把 0×0 当 resize
+  发给远端会让桌面缩成一团；切回可见时观察者会再触发一次，不用手动补。
+- 「标签是否可见」不要自己加 prop 透传：量 rect 就够，任何显示层变化都自动覆盖。
+
+**26. React StrictMode 下「异步建连接」的 effect 不能用 cleanup 无脑拆**
+
+- **现场**：dev 下 StrictMode 让 effect「建立 → 清理 → 再建立」跑两遍。天真写法（cleanup 里直接
+  `rdp.close(connId)`）：第一次的 cleanup 若晚于第二次 run 的 `rdp.open` 落地，会把新 run 正在用的桥关掉
+  （表现为偶发「连不上 / 秒断」，release 正常，只在 dev 复现）。
+- **正确做法**（`RdpPage` 的 epoch 守卫）：`epochRef` 世代号 —— 每个 run 开头 `const myToken = ++epochRef.current`，
+  每个 await 之后先查 `myToken !== epochRef.current` 就静默退出（让位给新 run，**不动桥**）；只有
+  `cancelled && myToken === epochRef.current`（真卸载）才 `rdp.close`。
+- 同类竞态：`build.connect()` 的结果回来时若已换代 / 已卸载，要先把 session `shutdown()` 再释放桥，别只丢引用
+  —— WASM 会话里跑着 Rust 事件循环。
+- 判据：这类 effect 的清理必须**幂等且可归属**（是谁建的谁清）—— 与 4.2「流式事件自带归属」同一思想。
+
+**31. `Form.useWatch` 只看得见「已注册字段」—— 别把 Form.Item 拆掉**
+
+- **现场**：新建主机对话框的主机类型分段（Segmented）用 `Form.useWatch('kind')` 驱动分支字段区。
+  点击切换后选中态变了（store 里 `kind` 也已是新值），但字段区**永远渲染默认分支**，无任何报错。
+- **根因**（@rc-component/form 1.8.6 源码级实测）：WatcherCenter 每批变更后把 `formInst.getFieldsValue()`
+  （**不带 `true`**）交给 watcher —— 只遍历 **Form.Item 注册过的**字段实体。分段选择器写成裸
+  `<Segmented value={...} onChange={form.setFieldValue('kind', ...)}/>`（没包 `<Form.Item name="kind">`）时，
+  store 有值但 watch 永远收到 `undefined`，三元分支静默走错。
+- **正确做法**：受 watch 驱动的控件必须包在对应 name 的 `Form.Item` 里（Field 注入 value / onChange）；
+  子控件 `onChange` 只放「切换时的副作用」（如端口从 22 换成 3389），不要再手写
+  `setFieldValue('kind', ...)` —— Field 先派发 store 更新、再调子组件 onChange，顺序安全。
+- **验证**：`scripts/verify-rdp-host-ui.mjs`（切「远程桌面」→ rdp 字段齐备、端口自动 3389）。
+>>>>>>> feature/rdp
 
 ### 6.6 AI / Agent 专项
 

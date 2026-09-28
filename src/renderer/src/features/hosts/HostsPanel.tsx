@@ -6,6 +6,7 @@ import {
   Fingerprint,
   FolderOpen,
   FolderPlus,
+  Monitor,
   Network,
   Pencil,
   Plus,
@@ -396,7 +397,6 @@ function HostsSection() {
           <SidebarGroupRow
             expanded={isEmpty ? false : expandedKeys.includes(groupKey(group.id))}
             name={group.name}
-            count={b.items.length}
             color={group.color}
             onToggle={isEmpty ? () => {} : () => toggleKey(groupKey(group.id))}
             itemType={DND_PROFILE}
@@ -494,8 +494,9 @@ function HostsSection() {
       />
 
       <SectionContent id={HOSTS_LIST_SECTION_ID}>
-        <div className="px-3 pb-2">
+        <div className="px-3">
           <Input
+            size='small'
             placeholder="搜索主机…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -685,13 +686,15 @@ function ProfileRow({
       icon:
         profile.kind === 'local' ? (
           <TerminalSquare className="size-3.5" />
+        ) : profile.kind === 'rdp' ? (
+          <Monitor className="size-3.5" />
         ) : (
           <Server className="size-3.5" />
         ),
       label: '连接'
     },
     { key: 'edit', icon: <Pencil className="size-3.5" />, label: '编辑' },
-    // 仅远程主机提供 SFTP 文件管理与隧道入口（本地主机没有远程连接）
+    // 仅 ssh 主机提供 SFTP 文件管理与隧道入口（远程桌面是独立主机类型，直接「连接」即可）
     ...(profile.kind === 'ssh'
       ? [
           { key: 'sftp', icon: <FolderOpen className="size-3.5" />, label: 'SFTP 文件管理' },
@@ -754,6 +757,11 @@ function ProfileRow({
           <div className="flex min-w-0 flex-1 items-center gap-2">
             {profile.kind === 'local' ? (
               <TerminalSquare
+                className="size-4 shrink-0 text-muted-foreground"
+                style={color ? { color } : undefined}
+              />
+            ) : profile.kind === 'rdp' ? (
+              <Monitor
                 className="size-4 shrink-0 text-muted-foreground"
                 style={color ? { color } : undefined}
               />

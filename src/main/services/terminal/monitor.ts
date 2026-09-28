@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { sessionManager } from './sessions'
-import type { ServerMetrics } from '@shared/types'
+import type { MonitorUnsupportedReason, ServerMetrics } from '@shared/types'
 
 /** 采集间隔（毫秒）缺省值 */
 const DEFAULT_INTERVAL_MS = 2000
@@ -16,8 +16,8 @@ function normalizeInterval(ms: number): number {
 }
 
 /**
- * 结果无效（目标系统没有 /proc，如 Windows / BSD / macOS）的连续次数上限：
- * 这类目标不会自愈，几轮后即停止采集，避免持续空转。
+ * 结果无效（目标系统没有 /proc，如未识别出平台的 Windows / BSD / macOS）的连续次数
+ * 上限：这类目标不会自愈，几轮后上报「不支持监控」（unavailable）并停止采集。
  */
 const MAX_INVALID = 3
 
@@ -84,13 +84,21 @@ class SessionMonitor extends EventEmitter {
 
   start(): void {
     if (this.timer) return
-    void this.tick()
+    // 先建定时器再执行首轮：首轮可能同步判定「不支持监控」并 stop()，此时定时器
+    // 已在 stop() 中正常清理；反之（先 tick 后建定时器）会把已停止的采集带回来。
     this.timer = setInterval(() => void this.tick(), this.intervalMs)
+    void this.tick()
   }
 
   stop(): void {
     if (this.timer) clearInterval(this.timer)
     this.timer = null
+  }
+
+  /** 上报「不支持监控」并停止采集（MonitorService 转发给渲染端展示状态） */
+  private reportUnsupported(reason: MonitorUnsupportedReason): void {
+    this.stop()
+    this.emit('unsupported', reason)
   }
 
   /** 调整采集间隔：正在采集时立即按新节奏重建定时器 */
@@ -110,6 +118,13 @@ class SessionMonitor extends EventEmitter {
       this.stop()
       return
     }
+    // 平台已识别且不是 Linux（Windows / 其他 Unix）：明确上报「不支持监控」并停止
+    // （采集依赖 /proc，继续空转只会持续失败）
+    const platform = session.info.platform
+    if (platform && platform !== 'linux') {
+      this.reportUnsupported(platform)
+      return
+    }
     // 连接尚未就绪（SSH 握手中 / 本地 shell 未启动），跳过本轮，下个周期再试
     if (!session.isReady()) return
     let raw = ''
@@ -127,7 +142,8 @@ class SessionMonitor extends EventEmitter {
     // 采集不到有效数据时不推送（前端据此不显示指标）
     if (!isSupported(metrics)) {
       this.invalidResults++
-      if (this.invalidResults >= MAX_INVALID) this.stop()
+      // 平台未知（探测失败）的目标也走到这里：连续多轮无效视为系统不支持监控
+      if (this.invalidResults >= MAX_INVALID) this.reportUnsupported('unavailable')
       return
     }
     this.execFailures = 0
@@ -274,6 +290,11 @@ class MonitorService extends EventEmitter {
     const sm = new SessionMonitor(sessionId, this.intervalMs)
     sm.on('data', (metrics: ServerMetrics) => {
       this.emit('data', { sessionId, metrics })
+    })
+    // 「不支持监控」是终态：转发给渲染端后立即从管理表移除（采集器已自停）
+    sm.on('unsupported', (reason: MonitorUnsupportedReason) => {
+      this.emit('unsupported', { sessionId, reason })
+      this.stop(sessionId)
     })
     this.monitors.set(sessionId, sm)
     sm.start()

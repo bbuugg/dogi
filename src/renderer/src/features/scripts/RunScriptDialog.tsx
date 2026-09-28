@@ -38,6 +38,9 @@ export function RunScriptDialog() {
   /** 预设时直接用 scriptId，否则用下拉选择的脚本 */
   const effectiveScriptId = hasPreset ? scriptId : selectedScript
 
+  /** 可执行脚本的主机：远程桌面（rdp）是图形会话，没有可写入命令的终端，从候选中剔除 */
+  const runnableProfiles = profiles.filter((p) => p.kind !== 'rdp')
+
   useEffect(() => {
     if (!open) {
       presetApplied.current = false
@@ -50,11 +53,11 @@ export function RunScriptDialog() {
       setSelectedScript((cur) => pickId(cur, scripts.map((s) => s.id), preferred))
     }
     setError(null)
-    setSelectedProfile((cur) => pickId(cur, profiles.map((p) => p.id)))
+    setSelectedProfile((cur) => pickId(cur, runnableProfiles.map((p) => p.id)))
   }, [open, scriptId, hasPreset, scripts, profiles])
 
   const script = scripts.find((s) => s.id === effectiveScriptId)
-  const profile = profiles.find((p) => p.id === selectedProfile)
+  const profile = runnableProfiles.find((p) => p.id === selectedProfile)
   const canRun = Boolean(script && profile) && !running
 
   const handleRun = async () => {
@@ -121,7 +124,7 @@ export function RunScriptDialog() {
 
         <div className="grid gap-1.5">
           <span className="text-xs font-medium text-foreground">主机</span>
-          {profiles.length === 0 ? (
+          {runnableProfiles.length === 0 ? (
             <div className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
               还没有主机，请先添加主机。
               <div className="mt-2">
@@ -144,7 +147,7 @@ export function RunScriptDialog() {
               onChange={setSelectedProfile}
               placeholder="选择主机"
               style={{ width: '100%' }}
-              options={profiles.map((p) => ({
+              options={runnableProfiles.map((p) => ({
                 value: p.id,
                 label: `${p.name}（${p.username}@${p.host}:${p.port}）`
               }))}

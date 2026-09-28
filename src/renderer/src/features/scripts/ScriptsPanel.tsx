@@ -287,7 +287,6 @@ export function ScriptsPanel() {
           <SidebarGroupRow
             expanded={isEmpty ? false : expandedKeys.includes(groupKey(group.id))}
             name={group.name}
-            count={count}
             onToggle={isEmpty ? () => {} : () => toggleKey(groupKey(group.id))}
             itemType={DND_SCRIPT}
             groupType={DND_GROUP}
@@ -363,8 +362,9 @@ export function ScriptsPanel() {
       />
 
       <SectionContent id={HOSTS_SCRIPTS_SECTION_ID}>
-        <div className="px-3 pb-2">
+        <div className="px-3">
           <Input
+            size='small'
             placeholder="搜索脚本…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}

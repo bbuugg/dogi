@@ -80,8 +80,9 @@ export function PluginsPanel() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="px-3 pb-2">
+      <div className="px-3">
         <Input
+          size='small'
           placeholder="搜索插件…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}

@@ -126,6 +126,12 @@ export interface MoshClientStatus {
 
 export type SessionType = 'local' | 'ssh'
 
+/**
+ * 主机平台：SSH 会话就绪后探测一次（`cmd /c ver` → Windows，否则 `uname -s`）并
+ * 记在会话上；探测失败保持缺省（undefined）。监控采集、AI 提示等据此分支。
+ */
+export type HostPlatform = 'linux' | 'windows' | 'other'
+
 export interface SessionInfo {
   id: string
   type: SessionType
@@ -137,6 +143,8 @@ export interface SessionInfo {
   exited: boolean
   /** 是否为 Mosh 会话（SSH 引导 + 本地 mosh-client，见 4.12）；仅用于展示区分 */
   mosh?: boolean
+  /** 探测到的主机平台；未探测 / 探测失败时为 undefined */
+  platform?: HostPlatform
 }
 
 /**
@@ -171,8 +179,8 @@ export interface SshConnectProgress {
 
 export type SshAuthType = 'password' | 'privateKey'
 
-/** 主机类型：远程 SSH / 本地终端 */
-export type HostKind = 'ssh' | 'local'
+/** 主机类型：远程 SSH / 远程桌面 RDP / 本地终端 */
+export type HostKind = 'ssh' | 'rdp' | 'local'
 
 /**主机分组：仅用于侧边栏归类；删除分组时组内连接回到「未分组」 */
 export interface SshGroup {
@@ -183,23 +191,26 @@ export interface SshGroup {
   createdAt: number
 }
 
+/** 终端字符集：SSH 会话的输入 / 输出字符集（缺省 = utf-8） */
+export type TerminalCharset = 'utf-8' | 'gbk'
+
 export interface SshProfile {
   id: string
-  /** 主机类型：ssh 远程连接 / local 本地终端 */
+  /** 主机类型：ssh 远程连接 / rdp 远程桌面 / local 本地终端 */
   kind: HostKind
   /** 所属分组 id；缺省表示未分组 */
   groupId?: string
   /** 连接自身的强调色；缺省表示继承所属分组的颜色 */
   color?: string
   name: string
-  /** 仅 ssh：主机地址 */
+  /** ssh / rdp：主机地址 */
   host: string
-  /** 仅 ssh：端口 */
+  /** ssh / rdp：端口（名称随 kind 变化：SSH 默认 22，RDP 默认 3389） */
   port: number
-  /** 仅 ssh：登录用户名 */
+  /** ssh / rdp：登录用户名 */
   username: string
   authType: SshAuthType
-  /** 仅用于传输，存储时主进程会用 safeStorage 加密，读取列表时不返回 */
+  /** ssh / rdp：仅用于传输，存储时主进程会用 safeStorage 加密，读取列表时不返回 */
   password?: string
   privateKey?: string
   passphrase?: string
@@ -207,6 +218,8 @@ export interface SshProfile {
   hasPassword?: boolean
   hasPrivateKey?: boolean
   hasPassphrase?: boolean
+  /** 仅 rdp：登录域（AD 域账号填域名，本机账户留空） */
+  domain?: string
   /** 仅 local：启动环境（可执行文件，PATH 可解析） */
   command?: string
   /** 仅 local：启动参数 */
@@ -224,6 +237,11 @@ export interface SshProfile {
    * 与 Mosh 互斥（mosh 走 UDP，无法经 SSH 隧道）。
    */
   jumpProfileId?: string
+  /**
+   * 仅 ssh：终端字符集。中文 Windows 服务器（控制台代码页 936）上老程序输出
+   * GBK、终端显示乱码时切到 gbk；缺省 utf-8（Linux 主机的标准情况）。
+   */
+  terminalCharset?: TerminalCharset
   keepaliveInterval?: number
   createdAt: number
   updatedAt: number
@@ -287,7 +305,7 @@ export interface SshKnownHost {
 export type HostLogLevel = 'info' | 'warn' | 'error'
 
 /** 日志分类：按产生日志的子系统划分，界面按它过滤 */
-export type HostLogScope = 'ssh' | 'terminal' | 'tunnel' | 'sftp'
+export type HostLogScope = 'ssh' | 'terminal' | 'tunnel' | 'sftp' | 'rdp'
 
 /**
  * 一条主机日志（主进程的 hostLogger 追加；渲染端只读展示）。
@@ -1395,6 +1413,40 @@ export interface ServerMetrics {
   uptime: number
   /** 采集时间戳 */
   timestamp: number
+}
+
+/**
+ * 主机不支持监控的原因：
+ * - windows / other：会话探测到的非 Linux 平台（采集命令依赖 Linux 的 /proc 与 df）
+ * - unavailable：命令执行成功但连续多轮解析不出有效数据（权限受限 / 未知系统等）
+ */
+export type MonitorUnsupportedReason = 'windows' | 'other' | 'unavailable'
+
+/** 「主机不支持监控」通知载荷（渲染端据此在状态栏显示明确的不支持状态） */
+export interface MonitorUnsupportedPayload {
+  sessionId: string
+  reason: MonitorUnsupportedReason
+}
+
+// ---------- 远程桌面（RDP） ----------
+
+/** RDP 本地桥信息（主进程 rdp:open 返回）：渲染端 WASM 客户端经它连真实 RDP 服务器 */
+export interface RdpBridgeInfo {
+  connId: string
+  wsUrl: string
+}
+
+/**
+ * RDP 连接凭据（主进程 rdp:credentials 返回）：从主机配置解密后交给渲染端。
+ * WASM 客户端（NLA / CredSSP）必须在渲染进程完成票据计算，只能这样流转；
+ * 只在发起连接时读取，不随主机列表下发（列表里只有 hasPassword 标记）。
+ */
+export interface RdpCredentials {
+  username: string
+  password: string
+  domain: string
+  /** 规范化后的 RDP 端口（与桥固定的目标端口一致） */
+  port: number
 }
 
 // ---------- 数据导入 / 导出（左下角菜单：主机 / 笔记 / 接口请求 打成 zip） ----------

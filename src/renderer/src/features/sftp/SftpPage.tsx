@@ -78,18 +78,20 @@ export function SftpPage({ profileId }: { profileId: string }) {
   }, [connId])
 
   const load = useCallback(
-    async (dir: string) => {
+    async (dir: string): Promise<boolean> => {
       setLoading(true)
       setError(null)
       try {
         const list = await window.api.sftp.list(connId, dir)
-        if (!aliveRef.current) return
+        if (!aliveRef.current) return true
         setEntries(list)
         setPath(dir)
         setPathInput(dir)
+        return true
       } catch (e) {
-        if (!aliveRef.current) return
+        if (!aliveRef.current) return true
         setError(e instanceof Error ? e.message : String(e))
+        return false
       } finally {
         if (aliveRef.current) setLoading(false)
       }
@@ -108,7 +110,16 @@ export function SftpPage({ profileId }: { profileId: string }) {
           return
         }
         setConnecting(false)
-        await load('/')
+        // 初始目录先试 `/`；win32-openssh 的默认目录是盘符风格路径（/C:/…），
+        // 只会出现在 readdir 报错时改用 realpath('.') 拿准工作目录再试一次
+        if (!(await load('/'))) {
+          try {
+            const home = normalizeSftpPath(await window.api.sftp.realpath(connId, '.'))
+            await load(home)
+          } catch {
+            // realpath 也失败：保留 `/` 那次的错误提示（load 内部已 setError）
+          }
+        }
       } catch (e) {
         if (!aliveRef.current) return
         setConnecting(false)

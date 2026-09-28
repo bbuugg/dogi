@@ -255,7 +255,6 @@ export function AutomationPanel() {
           <SidebarGroupRow
             expanded={isEmpty ? false : expandedKeys.includes(groupKey(group.id))}
             name={group.name}
-            count={count}
             onToggle={isEmpty ? () => {} : () => toggleKey(groupKey(group.id))}
             itemType={DND_SCRIPT}
             groupType={DND_GROUP}
@@ -295,7 +294,7 @@ export function AutomationPanel() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="mb-1 flex items-center justify-between gap-1 px-3 py-2">
+      <div className="mb-1 flex items-center justify-between gap-1 px-3 py-1">
         <span className="text-sm font-medium text-muted-foreground">
           自动化 ({scripts.length})
         </span>
@@ -319,8 +318,9 @@ export function AutomationPanel() {
         </div>
       </div>
 
-      <div className="px-3 pb-2">
+      <div className="px-3">
         <Input
+          size='small'
           placeholder="搜索脚本名或代码…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}

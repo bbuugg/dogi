@@ -286,7 +286,6 @@ export function NotesPanel() {
           <SidebarGroupRow
             expanded={isEmpty ? false : expandedKeys.includes(groupKey(group.id))}
             name={group.name}
-            count={count}
             onToggle={isEmpty ? () => {} : () => toggleKey(groupKey(group.id))}
             itemType={DND_NOTE}
             groupType={DND_GROUP}
@@ -329,7 +328,7 @@ export function NotesPanel() {
   return (
     <div className="flex h-full flex-col">
       {/* 笔记（左侧 tab 名 + 右侧新建分组 / 新建，与「主机」面板同款） */}
-      <div className="mb-1 flex items-center justify-between gap-1 px-3 py-2">
+      <div className="mb-1 flex items-center justify-between gap-1 px-3 py-1">
         <span className="text-sm font-medium text-muted-foreground">笔记 ({notes.length})</span>
         <div className="flex items-center gap-1">
           <Button
@@ -359,8 +358,9 @@ export function NotesPanel() {
         </div>
       </div>
 
-      <div className="px-3 pb-2">
+      <div className="px-3">
         <Input
+          size='small'
           placeholder="搜索笔记…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}

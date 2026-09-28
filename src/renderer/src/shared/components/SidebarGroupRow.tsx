@@ -11,7 +11,7 @@ import { tintText } from '@/shared/lib/color'
  * 侧栏分组行（主机 / 脚本 / 笔记 / 接口 / 自动化共用）。
  *
  * 视觉对齐 AI 侧栏的工作区行：
- * 文件夹图标 → 名称 → 展开箭头（紧随名称）→ 数量 →【afterCount 槽】→ 悬浮出现的新建按钮。
+ * 文件夹图标 → 名称 → 展开箭头（紧随名称）→【afterCount 槽】→ 悬浮出现的新建按钮。
  *
  * 行为：
  * - 点击整行展开/折叠；右键弹 menuItems（各功能区自建菜单项与分发）；
@@ -21,7 +21,6 @@ import { tintText } from '@/shared/lib/color'
  */
 export function SidebarGroupRow({
   name,
-  count,
   expanded,
   onToggle,
   color,
@@ -37,7 +36,6 @@ export function SidebarGroupRow({
   onMenuClick
 }: {
   name: string
-  count: number
   /** 当前是否为展开状态（决定箭头方向） */
   expanded: boolean
   /** 点击整行切换展开/折叠 */
@@ -136,7 +134,6 @@ export function SidebarGroupRow({
               style={color ? { color } : undefined}
             />
           </button>
-          <span className="text-xs text-muted-foreground/70">{count}</span>
           {afterCount}
           <Button
             type="text"

@@ -391,7 +391,6 @@ function ApiRequestsSection() {
           <SidebarGroupRow
             expanded={isEmpty ? false : expandedKeys.includes(groupKey(group.id))}
             name={group.name}
-            count={count}
             onToggle={isEmpty ? () => {} : () => toggleKey(groupKey(group.id))}
             itemType={DND_REQUEST}
             groupType={DND_GROUP}
@@ -483,8 +482,9 @@ function ApiRequestsSection() {
       />
 
       <SectionContent id={API_LIST_SECTION_ID}>
-        <div className="px-3 pb-2">
+        <div className="px-3">
           <Input
+            size='small'
             placeholder="搜索请求…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
