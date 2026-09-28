@@ -697,6 +697,19 @@ export function TerminalView({
       }
       // ZMODEM 传输期间禁用手动输入，避免破坏协议
       if (zsessionRef.current) return
+      /**
+       * 备用屏幕（tmux / screen / vim / less / htop…）：全屏程序里没有 shell 的行编辑，
+       * 本地缓冲也无从跟踪，而且它们会把「组合键之后的可打印键」当成自己的命令执行
+       * —— tmux 的 Ctrl+B 再按 d 是 detach、vim 的 dd 是删行，屏幕上不会出现任何输入回显。
+       * 若照常累积就会在什么都没输入的情况下弹出预测面板（用户报告），所以全屏期间
+       * 既不跟踪也不拦截按键，原样交给程序。
+       */
+      if (term.buffer.active.type === 'alternate') {
+        if (suggestionsRef.current.length > 0) clearSuggestions()
+        inputBufferRef.current = ''
+        void window.api.terminal.write(session.id, data)
+        return
+      }
       // 下拉框开着时只吃「接受」与「Ctrl+↑/↓ 选择」这几个键：
       // 普通 ↑/↓/← 一律放行 —— 它们是 shell 的历史与光标移动，
       // 在 tmux / vim 这类全屏程序里更是必须原样送达（Ctrl+B 之后的调整也靠它们）。

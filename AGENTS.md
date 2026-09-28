@@ -555,7 +555,7 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 | `scripts/verify-sftp-transfers.mjs` | SFTP 上传文件夹 + 传输托盘：进程内假 SFTP 服务器（ssh2 服务端事件式 API，见下方 ⚠️）——「上传 → 上传文件夹…」逐层 MKDIR + 每文件 WRITE（内容比对）、3 笔独立传输落 store（含 `localPath`）、完成条目 6.5s 后仍在（不自动移除）、上传 / 下载带「打开文件位置」/ 已取消不带、`revealPath` 错误路径 `ok:false`、清除已完成清空且入口消失。⚠️ 会真实弹出一次系统文件管理器 |
 | `scripts/verify-port-killer.mjs` | 端口占用插件全链路：插件播种/视图注册 → 探针 spawn 的 node 子进程真占随机端口 → 查询命中（PID / 进程名 / 监听中）→ 行内复制命令（`killCommand` 平台格式）→ **Popconfirm 真杀**（子进程退出 + 端口连接被拒 + 自动复查为空）→ 保护/校验分支（kill PID 1 / 非法 / 不存在、search 70000）→ **UDP 占用**（netstat UDP 行没有状态列）→ 重新查询 |
 | `scripts/verify-terminal-logging.mjs` | 终端命令 + 输出记录：命令装配（普通 / 退格 / Ctrl+C / 不可还原行不记 / bracketed paste）、`[脚本]` 来源标记、输出增量回填同一条目、原始会话文件（含未记录命令的裸输出）、关闭条目、JSONL 同 seq 多行、面板终端过滤、清空连 `sessions/` 归零。⚠️ bracketed paste 用例必须放最后：部分 PowerShell（如本机 5.1）未启用 `?2004h`，合成标记会吞掉后续回显 |
-| `scripts/verify-terminal-prediction.mjs` | 终端命令预测：CDP 真键盘注入（先点终端给 xterm 焦点）——未输入无下拉、「键入 git → 'git status' 行渲染宽度带空格」、「前缀以空格结尾 → 仍带空格」、`→` 接受 → 下拉收起 + PTY 回显补全后的 `git log`。⚠️ 防的是 flex 子项边界空格被裁的坑（见 6.5 第 24 条）：断言必须量渲染宽度，`textContent` 测不出来 |
+| `scripts/verify-terminal-prediction.mjs` | 终端命令预测：CDP 真键盘注入（先点终端给 xterm 焦点）——未输入无下拉、「键入 git → 'git status' 行渲染宽度带空格」、「前缀以空格结尾 → 仍带空格」、`→` 接受 → 下拉收起 + PTY 回显补全后的 `git log`、备用屏幕（tmux / vim）里按 `d` 不弹（见 6.5 第 25 条）。⚠️ 防的是 flex 子项边界空格被裁的坑（见 6.5 第 24 条）：断言必须量渲染宽度，`textContent` 测不出来 |
 | `scripts/verify-skills.mjs` | 技能发现（含 junction 安装）、无 frontmatter 退化、额外根目录、设置页渲染与开关落盘 |
 | `scripts/check-missing-color-utils.mjs` | 扫描产物 CSS，找出「语义色令牌漏映射导致整族工具类没生成」 |
 | `scripts/shot-titlebar.mjs` | 强制 hover 截图 + 计算样式，查标题栏配色 |
@@ -894,6 +894,23 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   空格变成行内文本流的中段空格，不会被裁。⚠️ 前后缀高亮类渲染（diff / 搜索命中标注）都别把边界空格留在两个 flex 子项之间。
 - **验证**：`scripts/verify-terminal-prediction.mjs` 按**渲染宽度**断言（range 联合包围盒 vs 同字体「带空格 / 粘连」两个基准）；
   **结构断言测不出来** —— 两种结构渲染出的文本内容一致，只有宽度 / 截图能看出差别。
+
+**25. 全屏程序里「组合键之后的可打印键」被当成命令行输入（tmux 的 `Ctrl+B d` 误弹命令预测）**
+
+- **现场**：tmux 里按 `Ctrl+B` 再按 `d`（detach），终端里没有任何输入回显，却弹出了命令预测面板 ——
+  凭 `d` 前缀匹配出 `df` / `du` / `docker`…（用户报告）。vim 里按 `dd`、less 里按 `d`（翻页）同理。
+- **根因**：本地预测只按「是不是可打印文本」跟踪缓冲。`Ctrl+B`（`\x02`）是控制字符，会把缓冲重置；
+  但紧随其后的 `d` 是可打印字符，于是被当成用户在 shell 里敲的内容累积起来。tmux / vim / less
+  这类全屏程序会把「组合键之后的可打印键」当作自己的命令消费掉，屏幕不回显 —— 本地缓冲与真实
+  命令行彻底脱节。**本地无从区分 tmux 的 prefix 与 readline 的同类按键**（`\x02` 本身也被 tmux 吞掉），
+  所以「精确修复」不成立。
+- **正确做法**：这些全屏程序都跑在 xterm 的**备用屏幕**里 —— `term.buffer.active.type === 'alternate'`
+  时整段按键都不参与预测（既不累积缓冲、也不拦截 `→` / `Ctrl+↑↓`），原样交给程序。
+  ⚠️ 别退回「只看控制字符」的做法，那正是这个坑；也别把判断挪到 `recompute` 之外更宽松的位置。
+- **代价**：tmux 窗口里的 shell 提示符下也不再有命令预测（那些键从本地看与 tmux 命令键无法区分）。
+  想要「tmux 内也能预测」需要 shell 集成（OSC 133 之类）给出命令行边界，目前没做。
+- **验证**：`scripts/verify-terminal-prediction.mjs` 用例 5 —— 先确认普通提示符下按 `d` 确实会弹
+  （否则「不弹」说明不了问题），再用 shell 打印 `?1049h` 真进备用屏幕，断言按 `d` 不弹，最后 `?1049l` 回主屏。
 
 ### 6.6 AI / Agent 专项
 

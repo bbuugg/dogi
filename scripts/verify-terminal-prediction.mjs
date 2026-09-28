@@ -11,7 +11,10 @@
  *   1. 新建本地终端 → 点一下终端给焦点 → 无输入时无下拉；
  *   2. 键入 "git" → 下拉出现，'git status' 行渲染宽度 ≈ 带空格基准（而不是粘连宽度）；
  *   3. 再敲一个空格（前缀以空格结尾的另一种边界）→ 同样带空格；
- *   4. →（右方向键）接受首个建议 → 下拉收起 → PTY 回显出现补全后的 'git log'（含空格）。
+ *   4. →（右方向键）接受首个建议 → 下拉收起 → PTY 回显出现补全后的 'git log'（含空格）；
+ *   5. 备用屏幕（全屏程序）里不弹预测：让 shell 打印 ?1049h 切到备用屏幕（tmux / vim / less
+ *      都跑在那里），此时按 'd' 必须**不**弹下拉 —— 防的是「tmux 里 Ctrl+B 再按 d（detach）
+ *      凭 'd' 前缀匹配出 df / du / docker 而弹出预测面板」这个坑。
  *
  * 跑：node scripts/verify-terminal-prediction.mjs（项目根目录执行；需先 npm run build）
  * ⚠️ 键盘注入前必须 bringToFront + 点击终端：xterm 的 helper textarea 没焦点时按键不派发。
@@ -72,6 +75,27 @@ async function pressKey(cdp, { key, code, vk, text }) {
   )
   await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base })
 }
+
+/** 带 Ctrl 的按键注入（modifiers: 2 = Ctrl）：让 xterm 自己产出 \x03 这类控制字节 */
+async function pressCtrlKey(cdp, key, code, vk) {
+  const base = {
+    key,
+    code,
+    modifiers: 2,
+    windowsVirtualKeyCode: vk,
+    nativeVirtualKeyCode: vk
+  }
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', ...base })
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base })
+}
+
+/**
+ * 切换备用屏幕的 shell 命令（跨 PowerShell / bash 都能跑）。
+ * 走 `terminal.write` 直接写进 PTY，不经过 xterm 的按键路径 —— 只借 shell 的手把
+ * `?1049h / ?1049l` 写到终端，让 xterm 真的进 / 出备用屏幕。
+ */
+const altScreenCmd = (on) =>
+  `node -e "process.stdout.write(String.fromCharCode(27)+'[?1049${on ? 'h' : 'l'}')"`
 
 /** 去掉 ANSI 转义序列（PSReadLine 会在字符间插光标 / 颜色序列，直接 includes 会漏） */
 const stripAnsi = (s) =>
@@ -222,6 +246,49 @@ try {
   }
   check("PTY 回显含补全后的 'git log'", out.includes('git log'))
   check("回显中无粘连的 'gitlog'", !out.includes('gitlog'))
+
+  // ---------- 5. 备用屏幕（tmux / vim / less…）里不该弹预测 ----------
+  // 上一步接受建议后命令行上还留着未执行的内容，先 Ctrl+C 丢掉（控制字符同时清掉本地缓冲）
+  await pressCtrlKey(cdp, 'c', 'KeyC', 67)
+  await sleep(300)
+  check('Ctrl+C 后下拉收起', (await cdp.eval(DROPDOWN_OPEN_EXPR)) === false)
+
+  // 5a. 普通提示符下按 'd' 会弹（证明预测链路本身正常，「备用屏幕里不弹」才有意义）
+  await pressKey(cdp, { key: 'd', code: 'KeyD', vk: 68, text: 'd' })
+  await waitFor("普通提示符下键入 d 弹出预测", DROPDOWN_OPEN_EXPR, 8000)
+  check('普通提示符下键入 d 弹出预测', true)
+  await pressKey(cdp, { key: 'Backspace', code: 'Backspace', vk: 8 })
+  await waitFor('退格后下拉收起', `!(${DROPDOWN_OPEN_EXPR})`, 5000)
+
+  // 5b. 切到备用屏幕（tmux / vim 这类全屏程序都跑在 alt buffer 里）
+  const writeCmd = (text) =>
+    `window.api.terminal.write(${JSON.stringify(sessionId)}, ${JSON.stringify(text + '\r')})`
+  await cdp.eval(writeCmd(altScreenCmd(true)))
+  await waitFor(
+    '备用屏幕切换序列已到达终端',
+    `window.api.terminal.recentOutput(${JSON.stringify(sessionId)}).then((o) => String(o).includes('[?1049h'))`,
+    10000
+  )
+  check('已切到备用屏幕（?1049h 已送达终端）', true)
+
+  // 5c. 备用屏幕里按 'd'：屏幕上不会出现任何输入回显，预测也绝不该弹
+  //（对应 tmux 的 Ctrl+B d detach / vim 的 dd —— 都是「组合键之后的可打印键被程序消费」）
+  await pressKey(cdp, { key: 'd', code: 'KeyD', vk: 68, text: 'd' })
+  await sleep(700)
+  check(
+    '备用屏幕里键入 d 不再弹预测下拉',
+    (await cdp.eval(DROPDOWN_OPEN_EXPR)) === false
+  )
+
+  // 退出备用屏幕，让终端留在可用状态
+  await cdp.eval(writeCmd(altScreenCmd(false)))
+  await sleep(400)
+  check(
+    '已退出备用屏幕（?1049l 已送达终端）',
+    (await cdp.eval(
+      `window.api.terminal.recentOutput(${JSON.stringify(sessionId)}).then((o) => String(o).includes('[?1049l'))`
+    )) === true
+  )
 
   console.log('\nALL PASS')
 } catch (err) {

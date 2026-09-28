@@ -117,7 +117,7 @@ export function CollapsibleRow({
             onScroll={stickToBottom ? onBodyScroll : undefined}
             className={cn(
               'min-h-0',
-              open ? 'max-h-64 overflow-y-auto [scrollbar-gutter:stable]' : 'overflow-hidden'
+              open ? 'max-h-64 overflow-y-auto [scrollbar-gutter:stable] mt-4' : 'overflow-hidden'
             )}
           >
             <div
