@@ -197,7 +197,7 @@ function MessageBubbleImpl({
         {/* 选中态用半透明白：主色底 + 白字下，浏览器的默认蓝色选区会把字压得看不清 */}
         <div
           className={cn(
-            'max-w-[85%] selection:bg-white/25 whitespace-pre-wrap rounded-lg rounded-br-sm bg-primary px-3 py-2 text-sm text-white',
+            'max-w-[85%] selection:bg-white/25 whitespace-pre-wrap rounded-lg rounded-br-sm bg-primary px-3 py-2 text-xs text-white',
             // 正在编辑：压暗 + 描边，一眼能看出「改的是这条」
             editing && 'opacity-50 ring-2 ring-border ring-offset-2 ring-offset-background'
           )}
@@ -240,8 +240,8 @@ function MessageBubbleImpl({
   const renderUnit = (unit: RenderUnit, i: number): ReactNode => {
     if (unit.kind === 'text') {
       return (
-        <div key={i} className="px-3 py-2">
-          <AiMarkdown content={unit.text} className="text-sm" />
+        <div key={i} className="p-2">
+          <AiMarkdown content={unit.text} className="text-xs" />
         </div>
       )
     }
@@ -326,29 +326,48 @@ const MessageBubble = memo(
     a.usage === b.usage
 )
 
+/**
+ * 折叠态单行：直接展示文本（逐 token 更新即打字效果），垂直居中、超出宽度省略。
+ * 横向滚动与打字效果在感知上冲突（溢出时变成滚动条就看不出在打字），故不启用横向滚动。
+ */
+function ScrollLine({ text }: { text: string }) {
+  return (
+    <div
+      className="flex items-center overflow-hidden"
+      style={{ height: COLLAPSED_LINE_H }}
+    >
+      <div className="truncate whitespace-nowrap text-[12px] leading-4 text-muted-foreground">
+        {text}
+      </div>
+    </div>
+  )
+}
+
 /** 稳定的空消息数组：避免每次渲染新引用导致滚动 effect 误触发 */
 const NO_MESSAGES: AiChatMessage[] = []
 
-/** 折叠状态条文本：取最后一条消息的最新一段（流式增长时取尾部，呈现「闪过」效果） */
-function buildCollapsedLine(messages: AiChatMessage[]): string {
+/**
+ * 折叠态流式日志的完整文本：保留换行（工具调用 / 错误各占一行），
+ * 供「逐行向上滚动」展示 —— 只在出现新行（换行）时整体上移一次，
+ * 正在输入的当前行原地更新、不重挂载、不淡入，避免逐 token 替换造成的闪烁。
+ */
+function buildCollapsedText(messages: AiChatMessage[]): string {
   const last = messages[messages.length - 1]
   if (!last) return ''
-  let line = ''
+  // 最后一条还是用户消息（助手还没开口）：对齐 Codex 的「思考中」文案
+  if (last.role === 'user') return '思考中…'
+  let text = ''
   for (const p of last.parts) {
-    if (p.type === 'text' && p.text.trim()) line = p.text.trim()
-    // 思考内容也在状态条里闪过（后面若有正文/工具调用会被覆盖，取最新的那个）
-    else if (p.type === 'reasoning' && p.text.trim()) line = p.text.trim()
-    else if (p.type === 'tool-call') line = `⚙ ${TOOL_LABELS[p.toolName] ?? p.toolName}`
+    if (p.type === 'text') text += p.text
+    else if (p.type === 'reasoning') text += p.text
+    else if (p.type === 'tool-call') text += `\n⚙ ${TOOL_LABELS[p.toolName] ?? p.toolName}\n`
     else if (p.type === 'tool-result' && p.isError) {
-      line = `⚠ ${TOOL_LABELS[p.toolName] ?? p.toolName}失败`
+      text += `\n⚠ ${TOOL_LABELS[p.toolName] ?? p.toolName}失败\n`
     }
   }
-  const flat = line.replace(/\s+/g, ' ')
-  if (last.role === 'user') return flat ? `你：${flat}` : ''
-  // AI 消息还没吐出文字（含工具执行中）：对齐 Codex 的思考态文案
-  if (!flat) return '思考中…'
-  // 取尾部而不是一行开头：流式增长时看起来像文字在往下闪过
-  return flat.length > 100 ? `…${flat.slice(-100)}` : `AI：${flat}`
+  // 助手已开始流式但还没吐出任何内容（含工具执行中、纯思考未落字）：保持「思考中」
+  if (!text.trim()) return '思考中…'
+  return text
 }
 
 /** 浮窗容器与面板组内容区的边距下限（px） */
@@ -360,11 +379,15 @@ const DEFAULT_BOTTOM = 24
 /** 横条输入栏固定高度（px）：py-1.5×2 + 内容 h-8，锚点翻转/拖拽钳制都以此为准 */
 const BAR_HEIGHT = 44
 
+/** 折叠态流式日志的单行高度（px，与 text-[12px] leading-4 一致）与可见行数 */
+const COLLAPSED_LINE_H = 16
+const COLLAPSED_VISIBLE = 1
+
 /** 浮窗展开时的最小高度（px）：输入横条 + 至少能看到一小段消息区 */
 const MIN_PANEL_HEIGHT = 180
 
 /** 浮窗最小宽度（px）：卡片头部一排控件挤得下即可 */
-const MIN_PANEL_WIDTH = 260
+const MIN_PANEL_WIDTH = 320
 
 /**
  * 浮窗缩放方向：n/s 上下边、e/w 左右边、四角为两两组合。
@@ -559,7 +582,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const PermissionIcon = permissionMeta.icon
   const hasMessages = messages.length > 0 || aiStreaming
   const showList = !minimized
-  const collapsedLine = buildCollapsedLine(messages)
+  // 折叠态流式日志：最新消息的完整文本（保留换行），按行向上滚动展示
+  const collapsedText = buildCollapsedText(messages)
 
   // pos.y 语义恒为「横条底边距容器底部的距离」，翻转与否不改基准
   const anchoredBottom = floatingPos ? floatingPos.y : DEFAULT_BOTTOM
@@ -779,8 +803,6 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
 
   const handleSend = () => {
     if (!input.trim() || aiStreaming || !sessionId) return
-    // 用户刚发出新消息：向上展开消息列表，随后由滚动 hook 跟随到底部
-    setAiMinimized(sessionId, false)
     const text = input
     setInput('')
     if (editing) {
@@ -899,7 +921,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
 
           {/* 消息区：占满卡片剩余高度并在内部滚动（高度固定，不随消息多少伸缩），
               AI 回复属于「内容」，保持可选中复制 */}
-          <div className="relative min-h-0 flex-1">
+          <div className="relative min-h-0 flex-1 px-2">
             {messages.length === 0 ? (
               <div className="flex h-full flex-col p-3">
                 <div className="flex flex-1 flex-col items-center justify-center gap-3 py-6 text-center text-muted-foreground">
@@ -1001,7 +1023,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
 
       {/* 横条输入栏（始终显示）：拖拽手柄 · 权限模式图标 · 输入框/状态条 · 展开按钮 · 发送/停止；
           展开态下手柄与展开按钮隐藏（拖拽/收起由卡片头部承担）；
-          折叠且有对话时仅输入框让位给一行状态条（Codex「思考中」风格），
+          折叠且会话进行中时输入框让位给一行状态条（Codex「思考中」风格），
+          折叠但会话空闲时中央区域直接是输入框，无需先点开；
           权限模式与发送/停止照常可用 */}
       <div
         ref={barRef}
@@ -1052,25 +1075,38 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             )}
           />
         </Dropdown>
-        {minimized && hasMessages ? (
-          /* 折叠态的输入框位置：一行最新对话内容闪过，点击展开对话；
-             h-8 对齐 antd 输入框默认高度（32px），两种中心内容切换时条高不变 */
-          <div
-            className="flex h-8 min-w-0 flex-1 cursor-pointer items-center gap-1.5 px-1"
-            title="展开对话"
-            onClick={() => sessionId && setAiMinimized(sessionId, false)}
-          >
-            {aiStreaming && (
-              <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />
-            )}
-            {/* key=文本：每次替换重新触发淡入上移动画，制造「闪过」感 */}
-            <div
-              key={collapsedLine}
-              className="ai-line min-w-0 flex-1 truncate text-[12px] text-muted-foreground"
-            >
-              {collapsedLine}
-            </div>
-          </div>
+        {minimized && hasMessages && aiStreaming ? (
+          /* 仅折叠且会话进行中才显示：逐行向上滚动的流式日志（点击展开对话）。
+             每行按换行切分；只有新增一行（出现换行）时整列上移一次（transform 过渡），
+             正在输入的当前行原地更新文本、不重挂载、不淡入，消除逐 token 替换的闪烁；
+             单行可见、垂直居中，超长行不省略、改为横向滚动；
+             会话未进行时中央区域直接是输入框（见 else 分支），无需先点开 */
+          (() => {
+            const lines = collapsedText.split('\n')
+            const shift = Math.max(0, lines.length - COLLAPSED_VISIBLE)
+            return (
+              <div
+                className="flex h-8 min-w-0 flex-1 cursor-pointer items-center gap-1.5 px-1"
+                title="展开对话"
+                onClick={() => sessionId && setAiMinimized(sessionId, false)}
+              >
+                <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />
+                <div
+                  className="relative min-w-0 flex-1 overflow-hidden"
+                  style={{ height: COLLAPSED_LINE_H * COLLAPSED_VISIBLE }}
+                >
+                  <div
+                    className="transition-transform duration-300 ease-out"
+                    style={{ transform: `translateY(-${shift * COLLAPSED_LINE_H}px)` }}
+                  >
+                    {lines.map((ln, i) => (
+                      <ScrollLine key={i} text={ln} />
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )
+          })()
         ) : (
           <Input
             ref={inputRef}

@@ -1,11 +1,13 @@
 {
   "name": "dogi",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "AI 驱动的研发运维工作台",
+  "author": "Dogi",
   "main": "./out/main/index.js",
   "type": "module",
   "private": true,
   "scripts": {
+    "postinstall": "node node_modules/electron/install.js",
     "copy:monaco": "node scripts/copy-monaco.cjs",
     "copy:vditor": "node scripts/copy-vditor.cjs",
     "predev": "npm run copy:monaco && npm run copy:vditor",
@@ -17,10 +19,10 @@
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "pack": "npm run build && electron-builder --dir",
-    "dist": "npm run build && electron-builder",
-    "dist:win": "npm run build && electron-builder --win",
-    "dist:mac": "npm run build && electron-builder --mac",
-    "dist:linux": "npm run build && electron-builder --linux"
+    "dist": "npm run build && electron-builder --publish never",
+    "dist:win": "npm run build && electron-builder --win --publish never",
+    "dist:mac": "npm run build && electron-builder --mac --publish never",
+    "dist:linux": "npm run build && electron-builder --linux --publish never"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",
@@ -134,8 +136,7 @@
       "**/node_modules/cpu-features/**",
       "**/node_modules/playwright/**",
       "**/node_modules/playwright-core/**",
-      "**/node_modules/@playwright/mcp/**",
-      "plugins/**"
+      "**/node_modules/@playwright/mcp/**"
     ],
     "win": {
       "target": [

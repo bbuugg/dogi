@@ -1,0 +1,117 @@
+name: Build Desktop Clients
+
+# 触发：推送 tag（v*）或手动触发
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# 创建 Release 需要写权限（默认 GITHUB_TOKEN 对 contents 只读）
+permissions:
+  contents: write
+
+# 允许并发上传产物（不同平台互不干扰）
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+          - os: macos-latest
+            platform: mac
+          - os: windows-latest
+            platform: win
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          # Vite 8 需要 Node >= 20.19 / 22.12，Electron 44 亦兼容
+          node-version: 22
+          cache: npm
+
+      # 依赖带原生模块（node-pty / cpu-features / ssh2），用 npm ci 依据 lockfile 安装，
+      # 安装脚本会拉取各平台的 N-API 预编译二进制（无需 node-gyp 现场编译）
+      - name: Install dependencies
+        run: npm ci
+
+      # Electron 44 起取消了 postinstall（改为惰性下载），本项目用 electronDist 指向本地 dist，
+      # 由根 package.json 的 postinstall 在 npm ci 时预下载。这里再幂等兜底跑一次
+      #（已装则秒过），并确保原生模块就位。
+      - name: Ensure Electron binary & native prebuilds
+        run: |
+          node node_modules/electron/install.js
+          npm rebuild node-pty
+
+      # 清理上一次构建产物（避免 app.asar.unpacked 等中途残留导致解包 EEXIST 冲突）
+      - name: Clean release output
+        run: |
+          node -e "require('fs').rmSync('release', { recursive: true, force: true })"
+
+      - name: Build (Linux)
+        if: matrix.platform == 'linux'
+        run: npm run dist:linux
+        env:
+          CI: true
+
+      - name: Build (macOS)
+        if: matrix.platform == 'mac'
+        run: npm run dist:mac
+        env:
+          CI: true
+          # 如需公证/签名，取消注释并配置对应 Secrets（不配置则打出未签名 dmg）
+          # CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          # CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Build (Windows)
+        if: matrix.platform == 'win'
+        run: npm run dist:win
+        env:
+          CI: true
+          # 如需代码签名，取消注释并配置 Secrets（不配置则打出未签名安装包）
+          # CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          # CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+
+      # 产物落盘到 release/，按平台上传为Artifact，方便未打 tag 时也能取包
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dogi-${{ matrix.platform }}
+          path: |
+            release/*.exe
+            release/*.dmg
+            release/*.AppImage
+            release/*.deb
+            release/*.zip
+          if-no-files-found: ignore
+
+      # 仅当推送 v* tag 时，把产物附加到自动创建的 GitHub Release
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            release/*.exe
+            release/*.dmg
+            release/*.AppImage
+            release/*.deb
+            release/*.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
