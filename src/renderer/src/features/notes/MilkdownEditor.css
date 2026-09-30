@@ -1,0 +1,131 @@
+/* ------------------------------------------------------------------ */
+/* Crepe 主题变量：直接映射到项目主题变量                                 */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Crepe 的配色/字体全部走 `--crepe-*` 变量。官方主题色文件（classic / nord）
+ * 是把浅色值写死在 `.milkdown` 上的，用它就得再引一份 `*-dark.css` 并让
+ * 两份文件跟着项目明暗切换 —— 没必要。这里改成映射项目变量：明暗与强调色
+ * 一变全部跟随。
+ *
+ * ⚠️ 定义在 `:root` 而不是 `.notes-milkdown`：Crepe 的工具栏 / 斜杠菜单 /
+ * 块手柄是 floating UI，会 portal 到 body 上（编辑器外），挂在编辑器宿主上的
+ * 变量它们拿不到，会掉成无效值、样式全崩。
+ */
+:root {
+    --crepe-color-background: var(--background);
+    --crepe-color-on-background: var(--foreground);
+    --crepe-color-surface: var(--card);
+    --crepe-color-surface-low: var(--muted);
+    --crepe-color-on-surface: var(--foreground);
+    --crepe-color-on-surface-variant: var(--muted-foreground);
+    --crepe-color-outline: var(--foreground);
+    --crepe-color-primary: var(--primary);
+    --crepe-color-secondary: var(--secondary);
+    --crepe-color-on-secondary: var(--secondary-foreground);
+    --crepe-color-inverse: var(--foreground);
+    --crepe-color-on-inverse: var(--background);
+    --crepe-color-inline-code: var(--primary);
+    --crepe-color-error: var(--destructive);
+    --crepe-color-hover: var(--accent);
+    --crepe-color-selected: color-mix(in oklab, var(--primary) 22%, transparent);
+    --crepe-color-inline-area: var(--muted);
+
+    --crepe-base-font-size: 15px;
+    /* `inherit` 让 Crepe 跟随项目字体（含浮动 UI），不引官方那套 Noto 字体 */
+    --crepe-font-title: inherit;
+    --crepe-font-default: inherit;
+    --crepe-font-code: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+
+    --crepe-shadow-1: 0 1px 3px 1px rgb(0 0 0 / 0.15), 0 1px 2px 0 rgb(0 0 0 / 0.3);
+    --crepe-shadow-2: 0 2px 6px 2px rgb(0 0 0 / 0.15), 0 1px 2px 0 rgb(0 0 0 / 0.3);
+}
+
+/* ------------------------------------------------------------------ */
+/* 高度与滚动链：Crepe 官方主题不管这块，得自己接                          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * 编辑器这一侧的 DOM 是：
+ *   .notes-milkdown > [data-milkdown-root]（@milkdown/react 的 <Milkdown />）> .milkdown > .ProseMirror
+ * 官方主题只给 `.milkdown` 一个 `position: relative`、给 `.ProseMirror` 一个
+ * `padding: 60px 120px`，既没有高度也没有滚动容器 —— 长笔记会一路把编辑器
+ * 撑到全文长度，超出的部分被面板容器的 overflow-hidden 裁掉，表现为
+ * 「笔记不能滚动，底部内容看不见」。
+ *
+ * 所以这里把链路串成撑满的 flex 链，滚动落在 .ProseMirror 自己身上。
+ * ⚠️ 中间两层都不能省：只给 `.ProseMirror` 写 flex: 1 的话，它的父级是裸块级，
+ * flex 无从发挥，滚动会静默失效。
+ */
+.notes-milkdown {
+    height: 100%;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.notes-milkdown > [data-milkdown-root] {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.notes-milkdown .milkdown {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.notes-milkdown .milkdown .ProseMirror {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 12px 100px 80px;
+    font-size: 15px;
+    line-height: 1.8;
+    outline: none;
+    /*
+     * 文本区要给出可见的插入光标与 I 形鼠标指针：Crepe 的 reset.css 把
+     * `:focus-visible` 的 outline 去掉了，但不负责 caret/指针，
+     * 少了这两条会出现「点进去看不到光标、鼠标也是箭头」的错觉。
+     *
+     * ⚠️ 这里点亮的必须是**原生**光标：Crepe 的 Cursor feature 会另外画一个
+     * 绝对定位的虚拟光标，两者同时可见就是「两个光标」（已在 FEATURE_CONFIGS
+     * 里关掉它，见 MilkdownEditor.tsx）。别为了「光标看不见」再把虚拟光标打开。
+     */
+    cursor: text;
+    caret-color: var(--foreground);
+    /* 代码块 / 表格自带滚动，别让它们把编辑区顶宽 */
+    overflow-wrap: break-word;
+}
+
+/* Crepe 的块手柄 / 浮动工具条压在编辑区之上，留一点层级余量 */
+.notes-milkdown .milkdown .ProseMirror ::selection {
+    background: color-mix(in oklab, var(--primary) 25%, transparent);
+}
+
+/* ------------------------------------------------------------------ */
+/* 笔记侧边栏文件树：隐藏 antd Tree 自带的展开箭头（DirRow 内自绘箭头） */
+/* ------------------------------------------------------------------ */
+
+.notes-tree .ant-tree-switcher {
+    display: none !important;
+}
+
+/* 目录行和文件行占满整行 */
+.notes-tree .ant-tree-node-content-wrapper {
+    flex: 1;
+    min-width: 0;
+}
+
+/* 去掉 antd Tree 节点的内边距，由行组件自己控制 */
+.notes-tree .ant-tree-treenode {
+    padding: 0;
+}
+
+.milkdown .milkdown-slash-menu .tab-group {
+    padding: 0;
+    border: none;
+}

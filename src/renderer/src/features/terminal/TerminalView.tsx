@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, Check, RefreshCw, RotateCw, X } from 'lucide-react'
+import { AlertTriangle, Check, Loader2, RefreshCw, RotateCw, Upload, X } from 'lucide-react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -43,6 +43,8 @@ function adjustTerminalFontSize(delta: number | 'reset'): void {
 interface TerminalViewProps {
   session: SessionInfo
   isActive: boolean
+  /** 当前标签 id（用于注册关闭拦截 guard）；外部 PanelView 传入 */
+  tabId?: string
   /** 会话结束后按 Enter 的自定义动作（如内嵌终端就地重开）；不传则走全局 reconnectSession */
   onExitedReconnect?: () => void
   /** 会话结束后按 Ctrl+D 的自定义动作（如内嵌终端就地关闭）；不传则走全局 closeSession */
@@ -58,6 +60,21 @@ interface ZmodemState {
   text: string
   /** 进度百分比 0-100 */
   progress: number
+}
+
+/**
+ * 拖拽上传（把本地文件/文件夹拖到终端，经 SFTP 送到远端）的确认条状态。
+ *
+ * 目标目录由用户确认：终端当前工作目录拿不到（Shell 默认不发 OSC 7、解析提示符不可靠），
+ * 所以默认给远端家目录，允许编辑，并在会话内记住上次用过的目录。
+ */
+interface DropUploadState {
+  /** 要上传的本地绝对路径（文件或目录） */
+  paths: string[]
+  /** 目标远端目录（可编辑） */
+  dir: string
+  phase: 'connecting' | 'connectFailed' | 'ready' | 'uploading' | 'failed'
+  error?: string
 }
 
 /** SSH 连接阶段标题（连接进度卡片顶部文案） */
@@ -169,7 +186,7 @@ function SshConnectCard({
               <span className={done || running ? 'text-foreground' : 'text-muted-foreground'}>
                 {step.label}
               </span>
-              <span className="ml-auto text-[10px] text-muted-foreground">
+              <span className="ml-auto text-xs text-muted-foreground">
                 {done ? '已完成' : running ? '进行中' : '等待'}
               </span>
             </div>
@@ -198,6 +215,7 @@ function SshConnectCard({
 export function TerminalView({
   session,
   isActive,
+  tabId,
   onExitedReconnect,
   onExitedClose
 }: TerminalViewProps) {
@@ -231,6 +249,16 @@ export function TerminalView({
   const zmodemCancelledRef = useRef(false)
   // 取消动作回调（effect 内定义，浮层按钮调用）
   const zmodemCancelRef = useRef<(() => void) | null>(null)
+  // 拖拽上传：外层容器（拖拽监听挂这里，确认条也覆盖在这里）
+  const wrapRef = useRef<HTMLDivElement>(null)
+  // 拖拽上传：SFTP 连接 id（一个终端会话一个，首次拖入时懒建，卸载时关闭）
+  const dropConnRef = useRef<string | null>(null)
+  // 拖拽上传：该会话上次用过的目标目录（记住用户的选择）
+  const lastUploadDirRef = useRef<string | null>(null)
+  // 拖拽进入的深度计数：指针在子元素间移动会连发 enter/leave，只看深度归零才算真的离开
+  const dragDepthRef = useRef(0)
+  const [dragOver, setDragOver] = useState(false)
+  const [dropUpload, setDropUpload] = useState<DropUploadState | null>(null)
   // 命令预测（历史 / 常见命令补全）相关状态
   const commandPrediction = useAppStore((s) => s.preferences.commandPrediction)
   const commandPredictionRef = useRef(commandPrediction)
@@ -906,9 +934,163 @@ export function TerminalView({
     term.write('\x1b[90m  按 Enter 重连 · 按 Ctrl+D 关闭标签\x1b[0m\r\n')
   }, [exited, session.title])
 
+  /*
+   * 拖拽上传：把本地文件 / 文件夹拖到终端，经 SFTP 送到远端。
+   *
+   * 为什么走 SFTP 而不是复用 rz（ZMODEM）：ZMODEM 只能逐个文件落到远端当前目录，
+   * 协议本身不支持目录；SFTP 有现成的递归上传（sftpService.uploadDir）。
+   * 仅 SSH 会话可用（本地会话没有远端）；Mosh 会话也可用 —— SFTP 是独立的 SSH 连接，
+   * 不走 mosh 的数据通道。
+   */
+  useEffect(() => {
+    const wrap = wrapRef.current
+    if (!wrap) return
+    /** 只接管「拖的是文件」，放行标签拖拽等其它拖放 */
+    const hasFiles = (e: DragEvent): boolean =>
+      !!e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files')
+    const hint = (text: string): void => {
+      termRef.current?.write(`\r\n\x1b[33m● ${text}\x1b[0m\r\n`)
+    }
+    const onDragEnter = (e: DragEvent) => {
+      if (!hasFiles(e)) return
+      e.preventDefault()
+      dragDepthRef.current += 1
+      setDragOver(true)
+    }
+    const onDragOver = (e: DragEvent) => {
+      if (!hasFiles(e)) return
+      // 必须 preventDefault：否则 drop 不触发，浏览器会直接打开被拖入的文件
+      e.preventDefault()
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+    }
+    const onDragLeave = (e: DragEvent) => {
+      if (!hasFiles(e)) return
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+      if (dragDepthRef.current === 0) setDragOver(false)
+    }
+    const onDrop = (e: DragEvent) => {
+      if (!hasFiles(e)) return
+      e.preventDefault()
+      dragDepthRef.current = 0
+      setDragOver(false)
+      if (exitedRef.current) return
+      // rz/sz 传输中不接管：两套通道同时在跑容易互相干扰
+      if (zsessionRef.current) {
+        hint('正在传输（rz/sz），暂时不能拖拽上传')
+        return
+      }
+      // 拖入的 File 只有经 webUtils 才拿得到本地真实路径（Electron 32 起没有 File.path）
+      const paths = Array.from(e.dataTransfer?.files ?? [])
+        .map((f) => window.api.app.getPathForFile(f))
+        .filter((p) => !!p)
+      if (!paths.length) return
+      const profileId = session.type === 'ssh' ? session.profileId : undefined
+      if (!profileId) {
+        hint('拖拽上传仅支持 SSH 会话（本地终端没有远端）')
+        return
+      }
+      const connId = `sftp-drop-${session.id}`
+      dropConnRef.current = connId
+      setDropUpload({ paths, dir: lastUploadDirRef.current ?? '', phase: 'connecting' })
+      void (async () => {
+        try {
+          await window.api.sftp.open(connId, profileId)
+          // 默认目标目录：该会话上次用过的；没有则取远端家目录（realpath('.')）
+          const dir =
+            lastUploadDirRef.current ||
+            (await window.api.sftp.realpath(connId, '.').catch(() => '/'))
+          setDropUpload((p) => (p ? { ...p, dir, phase: 'ready' } : p))
+        } catch (err) {
+          setDropUpload((p) =>
+            p
+              ? {
+                  ...p,
+                  phase: 'connectFailed',
+                  error: err instanceof Error ? err.message : String(err)
+                }
+              : p
+          )
+        }
+      })()
+    }
+    wrap.addEventListener('dragenter', onDragEnter)
+    wrap.addEventListener('dragover', onDragOver)
+    wrap.addEventListener('dragleave', onDragLeave)
+    wrap.addEventListener('drop', onDrop)
+    return () => {
+      wrap.removeEventListener('dragenter', onDragEnter)
+      wrap.removeEventListener('dragover', onDragOver)
+      wrap.removeEventListener('dragleave', onDragLeave)
+      wrap.removeEventListener('drop', onDrop)
+      dragDepthRef.current = 0
+      setDragOver(false)
+    }
+  }, [session.id, session.type, session.profileId])
+
+  // 卸载 / 换会话时关掉拖拽上传用的 SFTP 连接（没连过时 close 是 no-op）
+  useEffect(
+    () => () => {
+      const connId = dropConnRef.current
+      dropConnRef.current = null
+      if (connId) void window.api.sftp.close(connId)
+    },
+    [session.id]
+  )
+
+  const cancelDropUpload = (): void => {
+    setDropUpload(null)
+    termRef.current?.focus()
+  }
+
+  /** 确认目标目录并开始上传（进度由状态栏传输托盘统一展示） */
+  const confirmDropUpload = async (): Promise<void> => {
+    const state = dropUpload
+    const connId = dropConnRef.current
+    if (!state || !connId || state.phase === 'uploading') return
+    const dir = state.dir.trim()
+    if (!dir) return
+    setDropUpload({ ...state, phase: 'uploading', error: undefined })
+    try {
+      const result = await window.api.sftp.uploadPaths(connId, dir, state.paths)
+      if (result.ok) {
+        lastUploadDirRef.current = dir
+        termRef.current?.write(
+          `\r\n\x1b[32m● 已上传 ${result.count ?? state.paths.length} 项到 ${dir}\x1b[0m\r\n`
+        )
+        setDropUpload(null)
+      } else if (result.canceled) {
+        termRef.current?.write('\r\n\x1b[33m● 上传已取消\x1b[0m\r\n')
+        setDropUpload(null)
+      } else {
+        setDropUpload({ ...state, phase: 'failed', error: result.error || '上传失败' })
+      }
+    } catch (e) {
+      setDropUpload({
+        ...state,
+        phase: 'failed',
+        error: e instanceof Error ? e.message : String(e)
+      })
+    }
+    termRef.current?.focus()
+  }
+
   return (
-    <div className="relative h-full w-full" style={{ backgroundColor: theme.background }}>
+    <div
+      ref={wrapRef}
+      className="relative h-full w-full"
+      style={{ backgroundColor: theme.background }}
+    >
       <div ref={containerRef} className="h-full w-full" />
+      {/* 拖拽高亮：pointer-events-none 保证拖拽事件继续落在容器上（不然会打断 dragenter/dragleave 计数） */}
+      {dragOver && (
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-md border-2 border-dashed border-primary bg-primary/10">
+          <div className="rounded-md border border-border bg-card/95 px-3 py-1.5 text-xs text-foreground shadow">
+            {session.type === 'ssh' && session.profileId
+              ? '松手即可上传到远端（SFTP）'
+              : '拖拽上传仅支持 SSH 会话'}
+          </div>
+        </div>
+      )}
       {connecting && connectStage && (
         <div
           className="absolute inset-0 z-10 flex items-center justify-center p-4"
@@ -933,6 +1115,88 @@ export function TerminalView({
           <RotateCw className="size-3.5" />
           重新连接
         </button>
+      )}
+      {dropUpload && (
+        <div className="absolute left-1/2 top-3 z-20 w-96 max-w-[calc(100%-1.5rem)] -translate-x-1/2 rounded-md border border-border bg-card p-3 text-xs text-foreground shadow-lg">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <span className="flex items-center gap-1.5 truncate font-medium">
+              <Upload className="size-3.5 shrink-0" />
+              上传 {dropUpload.paths.length} 项到远端
+            </span>
+            <button
+              type="button"
+              title="关闭"
+              onClick={cancelDropUpload}
+              className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+            >
+              <X className="size-3" />
+            </button>
+          </div>
+          {dropUpload.phase === 'connecting' ? (
+            <div className="flex items-center gap-1.5 text-muted-foreground">
+              <Loader2 className="size-3.5 animate-spin" />
+              正在连接 SFTP…
+            </div>
+          ) : dropUpload.phase === 'connectFailed' ? (
+            <div className="space-y-2">
+              <div className="break-all text-destructive">连接失败：{dropUpload.error}</div>
+              <div className="text-muted-foreground">可关闭后重新拖入重试</div>
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={cancelDropUpload}
+                  className="rounded border border-border px-2 py-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <label className="mb-1 block text-muted-foreground">目标目录</label>
+              <input
+                value={dropUpload.dir}
+                autoFocus
+                disabled={dropUpload.phase === 'uploading'}
+                placeholder="远端目录，如 /root"
+                onChange={(e) =>
+                  setDropUpload((p) => (p ? { ...p, dir: e.target.value } : p))
+                }
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void confirmDropUpload()
+                  else if (e.key === 'Escape') cancelDropUpload()
+                }}
+                className="w-full rounded border border-border bg-background px-2 py-1 text-xs text-foreground outline-none transition-colors focus:border-primary disabled:opacity-60"
+              />
+              {dropUpload.phase === 'failed' && dropUpload.error && (
+                <div className="mt-1 break-all text-destructive">{dropUpload.error}</div>
+              )}
+              <div className="mt-2 flex items-center justify-between gap-2">
+                <span className="truncate text-muted-foreground">
+                  文件夹将作为同名子目录上传
+                </span>
+                <div className="flex shrink-0 gap-2">
+                  <button
+                    type="button"
+                    disabled={dropUpload.phase === 'uploading'}
+                    onClick={cancelDropUpload}
+                    className="rounded border border-border px-2 py-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground disabled:opacity-50"
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    disabled={dropUpload.phase === 'uploading' || !dropUpload.dir.trim()}
+                    onClick={() => void confirmDropUpload()}
+                    className="rounded bg-primary px-2 py-1 text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+                  >
+                    {dropUpload.phase === 'uploading' ? '上传中…' : '上传'}
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
       )}
       {zmodem && (
         <div className="absolute left-1/2 top-3 z-10 w-72 -translate-x-1/2 rounded-md border border-border bg-card px-3 py-2 text-xs text-foreground shadow">
@@ -961,7 +1225,7 @@ export function TerminalView({
               style={{ width: `${zmodem.progress}%` }}
             />
           </div>
-          <div className="mt-1 truncate text-[10px] text-muted-foreground">{zmodem.text}</div>
+          <div className="mt-1 truncate text-xs text-muted-foreground">{zmodem.text}</div>
         </div>
       )}
       {suggestions && (
@@ -969,7 +1233,7 @@ export function TerminalView({
           ref={dropdownRef}
           style={pos ? { top: pos.top, left: pos.left } : undefined}
           className="absolute z-10 max-h-56 w-80 overflow-y-auto rounded-md border border-border bg-popover/95 p-1 text-xs shadow-lg backdrop-blur">
-          <div className="px-2 py-1 text-[10px] text-muted-foreground">
+          <div className="px-2 py-1 text-xs text-muted-foreground">
             命令预测 · → 接受 · Ctrl+↑/↓ 选择 · Esc 关闭
           </div>
           {suggestions.items.map((item, i) => {

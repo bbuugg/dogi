@@ -217,17 +217,17 @@ export function PluginsPage() {
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="truncate text-[15px] font-semibold">{info.name}</span>
-                    <Tag className="m-0 text-[10px] font-normal" variant="outlined">
+                    <Tag className="m-0 text-xs font-normal" variant="outlined">
                       v{info.version}
                     </Tag>
                     <Tag
-                      className="m-0 border-0 text-[10px] font-normal"
+                      className="m-0 border-0 text-xs font-normal"
                       color={info.enabled ? 'success' : 'default'}
                     >
                       {info.enabled ? '已启用' : '已禁用'}
                     </Tag>
                     {info.error && (
-                      <Tag className="m-0 border-0 text-[10px] font-normal" color="error">
+                      <Tag className="m-0 border-0 text-xs font-normal" color="error">
                         加载失败
                       </Tag>
                     )}
@@ -303,7 +303,7 @@ export function PluginsPage() {
                     {info.permissions!.map((perm) => (
                       <Tag
                         key={perm}
-                        className="m-0 border-0 text-[10px] font-normal"
+                        className="m-0 border-0 text-xs font-normal"
                         color="default"
                       >
                         {PERMISSION_LABEL[perm] ?? perm}

@@ -1,19 +1,23 @@
 /**
- * AI Agent（工作区编程/运维助手）服务。
+ * AI Agent（工作区编程/运维助手）服务 —— **内置 Mastra agent 这一条路径**。
  *
  * 核心能力来自同目录下的 agent-core（工具集 / 系统提示词 / 事件适配），
- * 这里只做三件事：
- * 1. 用当前激活的 AI 模型配置把对话跑起来（streamText，复用 ai.ts 的 resolveModel）；
+ * 这里只做四件事：
+ * 1. 用会话选中的 AI 模型配置把对话跑起来（Mastra Agent.stream，模型解析复用 resolve-model）；
  * 2. 绑定工作区：工具全部限定在该目录内读写与执行命令；
  * 3. 确认模式：**会改动东西的工具**（执行命令 / 写入 / 编辑 / 删除）执行前先请示用户
- *    （串行弹卡；默认不限时，中止即释放；闸门在 agent-core/tools.ts 的 guardWrite）。
+ *    （串行弹卡；默认不限时，中止即释放；闸门在 agent-core/tools.ts 的 guardWrite）；
+ * 4. 中止：走 AbortController。
+ *
+ * ⚠️ 原生 AI SDK（`ai` 包的 `streamText`）路径已整体移除：现在只有两种 agent ——
+ * 本文件的 Mastra agent，以及 `acp-agent.ts` 的外部 ACP agent（消息归 agent 自己管）。
+ * 磁盘上 `backend: 'ai-sdk'` 的旧会话由 storage 读取时迁移为 mastra。
  */
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { streamText, stepCountIs, type ToolSet } from 'ai'
+import type { ToolSet } from 'ai'
 import {
   MAX_STEPS,
-  adaptAgentPart,
   buildAgentSystemPrompt,
   buildAgentTools,
   toModelMessages
@@ -26,7 +30,7 @@ import type {
 } from '@shared/types'
 import { resolveModel } from './ai'
 import { askFollowupBroker, buildAskFollowupTool } from './ask-followup'
-import { armConfirmTimeout, modelRunTimeout, modelStreamTimeout } from './timeouts'
+import { armConfirmTimeout, modelRunTimeout } from './timeouts'
 import { skillsForAgent } from './skills'
 import { findGitBash } from '../terminal/shells'
 import { ASK_FOLLOWUP_HINT } from '@shared/ask-followup'
@@ -131,7 +135,6 @@ function adaptMastraPart(part: {
      *
      * 漏掉这一个分支的代价很直观：块落到 default 被丢掉 → 那条工具行永远停在「调用中」，
      * 后面几步都跑完了它还转圈（读取不存在的文件、路径是目录… 这类报错最容易碰到）。
-     * 与 ai-sdk 路径（agent-core/agent.ts）以及终端助手（ai.ts）的适配保持一致。
      */
     case 'tool-error':
       return {
@@ -230,18 +233,21 @@ class AgentService extends EventEmitter {
     }
   }
 
+  /**
+   * 内置 Mastra agent 的一条对话。
+   *
+   * 模型按会话独立：优先用请求里带的 `configId`，回退到设置里的默认模型；
+   * 会话选的配置被删掉时也要回退，否则这个会话会直接报「未配置」。
+   */
   async chat(req: AgentChatRequest): Promise<{ requestId: string }> {
     const requestId = randomUUID()
     const workspace = storage.getAgentWorkspace(req.workspaceId)
     const settings = storage.getAiSettings()
-    // 模型按会话独立：优先用请求里带的 configId，回退到设置里的默认模型。
-    // 会话选的配置被删掉时也要回退，否则这个会话会直接报「未配置」。
     const config =
       (req.configId ? storage.getAiConfig(req.configId) : undefined) ??
       (settings.activeConfigId ? storage.getAiConfig(settings.activeConfigId) : undefined)
 
     const fail = (message: string) => {
-      // 延迟到 invoke 返回 requestId 之后再发事件，避免渲染端因 requestId 未设置而丢弃
       setTimeout(() => {
         this.emitEvent(requestId, { type: 'error', message })
         this.emitEvent(requestId, { type: 'finish', finishReason: 'error' })
@@ -262,145 +268,6 @@ class AgentService extends EventEmitter {
     // 技能每次对话现扫（磁盘即真源，用户随时可以往技能目录里丢东西）：
     // 清单进系统提示词，正文由 read_skill 工具按需读取
     const skills = await skillsForAgent(workspace.path)
-
-    const { tools: mcpTools, errors: mcpErrors } = await mcpManager.buildToolset()
-    if (mcpErrors.length) console.warn('[agent] MCP 工具加载异常：', mcpErrors.join('；'))
-    const tools: ToolSet = {
-      ...buildAgentTools(workspace.path, {
-        permissionMode: settings.permissionMode === 'confirm' ? 'confirm' : 'full',
-        requestConfirm: (r) =>
-          this.requestConfirm(workspace.name, { requestId, ...r }),
-        skills,
-        bashPath: agentBashPath()
-      }),
-      // 浏览器能力：默认用应用自带的（无窗口、画面在面板里）；只有内置 Playwright MCP
-      // 被显式打开时才让位给它（两者同名工具互斥，见 appBrowserTools）
-      ...appBrowserTools(req, workspace.path, mcpTools),
-      // 其余用户在设置里添加的 MCP server 在此统一注入（见 services/ai/mcp.ts）
-      ...mcpTools,
-      // 提问工具不走确认流程：提问本身就是让用户在卡片上做决定
-      ...buildAskFollowupTool(requestId)
-    }
-
-    const model = resolveModel(config)
-    const historyLimit = config.contextMessages ?? 20
-    const modelMessages = toModelMessages(req.history.slice(-historyLimit))
-
-    const result = streamText({
-      model,
-      system:
-        buildAgentSystemPrompt(workspace.path, workspace.name, skills) +
-        (Object.keys(tools).some((k) => k.startsWith('browser_'))
-          ? '\n\n' + BROWSER_PROMPT_SECTION
-          : '') +
-        ASK_FOLLOWUP_HINT,
-      messages: modelMessages,
-      tools,
-      stopWhen: stepCountIs(MAX_STEPS),
-      abortSignal: controller.signal,
-      // 流超时（设置里可改）：默认 5 分钟等不到第一个内容块就判连接死了
-      timeout: modelStreamTimeout(settings.modelTimeoutMs),
-      ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
-      ...(config.maxTokens !== undefined ? { maxOutputTokens: config.maxTokens } : {})
-    })
-
-    void this.consumeStream(requestId, result)
-    return { requestId }
-  }
-
-  private async consumeStream(
-    requestId: string,
-    result: Awaited<ReturnType<typeof streamText>>
-  ): Promise<void> {
-    const startedAt = Date.now()
-    let firstTokenAt = 0
-    try {
-      for await (const part of result.fullStream) {
-        // 记下首字时间，用来算「生成窗口」（首字 → 结束），更贴近真实输出速度
-        if ((part.type === 'text-delta' || part.type === 'reasoning-delta') && !firstTokenAt) {
-          firstTokenAt = Date.now()
-        }
-        const event = adaptAgentPart(part)
-        if (event) this.emitEvent(requestId, event)
-      }
-      // 用量独立采集：拿不到（部分 provider 不回报）也不影响整轮消息
-      try {
-        const u = (await result.usage) as
-          | {
-              promptTokens?: number
-              completionTokens?: number
-              totalTokens?: number
-              reasoningTokens?: number
-              cachedInputTokens?: number
-              // OpenAI responses 风格（apiStyle=responses / openai.responses 提供方）的字段名
-              inputTokens?: number
-              outputTokens?: number
-            }
-          | undefined
-        if (u) {
-          const endAt = Date.now()
-          const durationMs = endAt - startedAt
-          const genWindowMs = firstTokenAt ? endAt - firstTokenAt : durationMs
-          // 同时兼容 chat 风格（promptTokens/completionTokens）与 responses 风格（inputTokens/outputTokens）
-          const inputTokens = u.promptTokens ?? u.inputTokens ?? 0
-          const outputTokens = u.completionTokens ?? u.outputTokens ?? 0
-          const tps = genWindowMs > 0 ? outputTokens / (genWindowMs / 1000) : 0
-          this.emitEvent(requestId, {
-            type: 'usage',
-            usage: {
-              inputTokens,
-              outputTokens,
-              totalTokens: u.totalTokens ?? 0,
-              ...(u.reasoningTokens != null ? { reasoningTokens: u.reasoningTokens } : {}),
-              ...(u.cachedInputTokens != null ? { cachedInputTokens: u.cachedInputTokens } : {}),
-              durationMs,
-              tps: Math.round(tps * 10) / 10
-            }
-          })
-        }
-      } catch {
-        // 用量缺失时静默跳过
-      }
-      this.emitEvent(requestId, { type: 'finish', finishReason: 'done' })
-    } catch (err) {
-      this.emitEvent(requestId, { type: 'error', message: describeError(err) })
-      this.emitEvent(requestId, { type: 'finish', finishReason: 'error' })
-    } finally {
-      this.clearPendingConfirms(requestId)
-      // 挂着的提问也要收尾：不然工具 Promise 不 settle，回合永远卡着
-      askFollowupBroker.cancel(requestId)
-      this.abortControllers.delete(requestId)
-    }
-  }
-
-  /** Mastra 后端实现（实验性）：编排改用 Mastra Agent.stream，工具与模型与 ai-sdk 路径完全一致 */
-  async mastraChat(req: AgentChatRequest): Promise<{ requestId: string }> {
-    const requestId = randomUUID()
-    const workspace = storage.getAgentWorkspace(req.workspaceId)
-    const settings = storage.getAiSettings()
-    const config =
-      (req.configId ? storage.getAiConfig(req.configId) : undefined) ??
-      (settings.activeConfigId ? storage.getAiConfig(settings.activeConfigId) : undefined)
-
-    const fail = (message: string) => {
-      setTimeout(() => {
-        this.emitEvent(requestId, { type: 'error', message })
-        this.emitEvent(requestId, { type: 'finish', finishReason: 'error' })
-      }, 0)
-    }
-    if (!workspace) {
-      fail('工作区不存在，请先选择或新建一个工作区')
-      return { requestId }
-    }
-    if (!config) {
-      fail('尚未配置 AI 模型，请先在设置中添加模型配置')
-      return { requestId }
-    }
-
-    const controller = new AbortController()
-    this.abortControllers.set(requestId, controller)
-
-    const skills = await skillsForAgent(workspace.path)
     const { tools: mcpTools, errors: mcpErrors } = await mcpManager.buildToolset()
     if (mcpErrors.length) console.warn('[agent] MCP 工具加载异常：', mcpErrors.join('；'))
     const tools: ToolSet = {
@@ -410,9 +277,12 @@ class AgentService extends EventEmitter {
         skills,
         bashPath: agentBashPath()
       }),
-      // 同上：自带浏览器工具与内置 MCP 的 browser_* 互斥
+      // 浏览器能力：默认用应用自带的（无窗口、画面在面板里）；只有内置 Playwright MCP
+      // 被显式打开时才让位给它（两者同名工具互斥，见 appBrowserTools）
       ...appBrowserTools(req, workspace.path, mcpTools),
+      // 其余用户在设置里添加的 MCP server 在此统一注入（见 services/ai/mcp.ts）
       ...mcpTools,
+      // 提问工具不走确认流程：提问本身就是让用户在卡片上做决定
       ...buildAskFollowupTool(requestId)
     }
     const hasBrowser = Object.keys(tools).some((k) => k.startsWith('browser_'))

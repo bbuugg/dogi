@@ -33,7 +33,6 @@ export function DataTransferDialog({
   onClose: () => void
 }) {
   const hostCount = useAppStore((s) => s.profiles.length)
-  const noteCount = useAppStore((s) => s.notes.length)
   const apiCount = useAppStore((s) => s.apiRequests.length)
   const exportData = useAppStore((s) => s.exportData)
   const pickImportBundle = useAppStore((s) => s.pickImportBundle)
@@ -48,8 +47,8 @@ export function DataTransferDialog({
   const [busy, setBusy] = useState(false)
 
   const exporting = mode === 'export'
-  const countOf = (kind: TransferKind): number =>
-    kind === 'hosts' ? hostCount : kind === 'notes' ? noteCount : apiCount
+  const countOf = (kind: TransferKind): string =>
+    kind === 'hosts' ? String(hostCount) : kind === 'notes' ? '本地文件' : String(apiCount)
 
   // 每次打开都回到初始勾选，避免上一次的选择残留
   useEffect(() => {

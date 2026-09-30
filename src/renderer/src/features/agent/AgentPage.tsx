@@ -1,28 +1,30 @@
 import { AgentFilesPanel } from '@/features/agent/AgentFilesPanel'
 import { AiMarkdown } from '@/features/agent/AiMarkdown'
-import { GitPanel } from '@/features/agent/GitPanel'
 import { AskFollowupCard } from '@/features/agent/AskFollowupCard'
-import { MessageCopyButton } from '@/features/agent/MessageCopyButton'
-import { MessageOutline } from '@/features/agent/MessageOutline'
-import { MessageDeleteButton } from '@/features/agent/MessageDeleteButton'
-import { MessageEditButton } from '@/features/agent/MessageEditButton'
-import { ReasoningPanel } from '@/features/agent/ReasoningPanel'
-import { TOOL_LABELS, ToolCallRow, toolRunStatus } from '@/features/agent/ToolCallRow'
-import { findTailStart, TurnFold, turnStepSummary } from '@/features/agent/turn-fold'
-import { TokenUsageRow } from '@/features/agent/TokenUsageRow'
-import { TypingDots } from '@/features/agent/TypingDots'
-import { WorkspaceQuickActions } from '@/features/agent/WorkspaceQuickActions'
+import { BrowserPane } from '@/features/agent/BrowserPane'
 import {
   Conversation,
   ConversationContent,
   ConversationScrollButton
 } from '@/features/agent/Conversation'
-import { SidePanel, type SidePanelTab } from '@/features/agent/SidePanel'
-import { configModels, hasUsableConfig, modelNameOnly } from '@/features/agent/model-options'
+import { GitPanel } from '@/features/agent/GitPanel'
 import { McpConfigPopover } from '@/features/agent/McpConfigPopover'
-import { BrowserPane } from '@/features/agent/BrowserPane'
+import { MessageCopyButton } from '@/features/agent/MessageCopyButton'
+import { MessageDeleteButton } from '@/features/agent/MessageDeleteButton'
+import { MessageEditButton } from '@/features/agent/MessageEditButton'
+import { MessageOutline } from '@/features/agent/MessageOutline'
+import { ReasoningPanel } from '@/features/agent/ReasoningPanel'
+import { SidePanel, type SidePanelTab } from '@/features/agent/SidePanel'
+import { TokenUsageRow } from '@/features/agent/TokenUsageRow'
+import { TOOL_LABELS, ToolCallRow, toolRunStatus } from '@/features/agent/ToolCallRow'
+import { TypingDots } from '@/features/agent/TypingDots'
+import { WorkspaceQuickActions } from '@/features/agent/WorkspaceQuickActions'
+import { configModels, hasUsableConfig, modelNameOnly } from '@/features/agent/model-options'
+import { TurnFold, findTailStart, turnStepSummary } from '@/features/agent/turn-fold'
 import { TerminalView } from '@/features/terminal/TerminalView'
-import { useAppStore } from '@/stores/app-store'
+import { useTabEventBus } from '@/shared/lib/use-tab-event-bus'
+import { useInlineConfirm } from '@/shared/components/InlineConfirm'
+import { conversationKind, isDraftConversation, useAppStore } from '@/stores/app-store'
 import { ASK_FOLLOWUP_TOOL } from '@shared/ask-followup'
 import { DEFAULT_BROWSER_VIEWPORT, agentBrowserSessionId } from '@shared/browser'
 import type {
@@ -37,7 +39,7 @@ import type {
   ShellProfile
 } from '@shared/types'
 import type { MenuProps } from 'antd'
-import { Button, Dropdown, Input, Select, Tooltip, message } from 'antd'
+import { Button, Dropdown, Input, Select, Spin, Tooltip, message } from 'antd'
 import { cn } from 'cn'
 import {
   Ban,
@@ -53,7 +55,6 @@ import {
   PanelRightOpen,
   Pencil,
   Send,
-  Settings,
   ShieldAlert,
   ShieldCheck,
   Square,
@@ -71,10 +72,6 @@ import {
   useRef,
   useState
 } from 'react'
-
-/** 模型下拉里 ACP 后端的特殊选项值 */
-const ACP_OPTION = '__acp__'
-const ACP_MANAGE_OPTION = '__acp-manage__'
 
 /**
  * 命令执行权限模式（与终端 AI 助手同一份配置 aiSettings.permissionMode）。
@@ -347,6 +344,8 @@ function MessageBubbleImpl({
       {message.usage && <TokenUsageRow usage={message.usage} />}
       {showDots && <TypingDots />}
       {/* 生成中就露出复制按钮没有意义（内容还在变），一轮结束再显示；
+          「没有正文可复制」的情况由 MessageCopyButton 自己兜（返回 null）——
+          纯思考 + 工具调用的轮次本来就不会有按钮，别在这里再判一次（见 4.3 的折叠规则）；
           invisible 而不是不渲染：保留占位，hover 时不会把消息挤动 */}
       <div className="invisible flex items-center gap-1 group-hover/msg:visible">
         {!streaming && <MessageCopyButton text={rawText} title="复制原文（Markdown）" />}
@@ -413,11 +412,14 @@ interface TerminalTab {
  */
 export function AgentPage({
   conversationId,
-  visible = true
+  visible = true,
+  tabId
 }: {
   conversationId: string | null
   /** 这一页当前是不是显示着（非活动的会话标签被 display:none 藏着）；缺省按显示处理 */
   visible?: boolean
+  /** 当前标签 id（用于注册关闭拦截 guard）；外部 PanelView 传入 */
+  tabId?: string
 }) {
   const workspaces = useAppStore((s) => s.agentWorkspaces)
   // 消息来自本会话（唯一真源），流式/错误等运行时状态另存 agentRuns
@@ -433,9 +435,12 @@ export function AgentPage({
   const active = activeId ? workspaces.find((w) => w.id === activeId) : undefined
   const aiSettings = useAppStore((s) => s.aiSettings)
   const aiConfigs = useAppStore((s) => s.aiConfigs)
-  const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const acpAgents = aiSettings.acpAgents ?? []
+  const agentAcpMessages = useAppStore((s) => s.agentAcpMessages)
+  const acpLoading = useAppStore((s) => s.acpLoading)
+  const loadAcpHistory = useAppStore((s) => s.loadAcpHistory)
   const setAgentConversationModel = useAppStore((s) => s.setAgentConversationModel)
+  const setAcpConversationModel = useAppStore((s) => s.setAcpConversationModel)
   const setAiPermissionMode = useAppStore((s) => s.setAiPermissionMode)
   /** 设置里选的本地终端（'default' 表示平台默认） */
   const preferredShellId = useAppStore((s) => s.preferences.localShell)
@@ -444,29 +449,80 @@ export function AgentPage({
   const permissionMeta =
     AGENT_PERMISSION_MODES.find((m) => m.value === permissionMode) ?? AGENT_PERMISSION_MODES[0]
   const PermissionIcon = permissionMeta.icon
-  const messages = conversation?.messages ?? NO_MESSAGES
+  /**
+   * 会话形态：**内置 Mastra agent 或某个外部 ACP agent**（定下来之后不可互切）。
+   *
+   * 新建的会话是「未定形态」——由**首条消息时选中的模型**决定（见 4.3），所以这里用
+   * 「有效形态」：已定的按已定，未定的按已经选中的模型推断（选中 / 预置了 ACP agent → acp，
+   * 选了内置模型 → mastra，都没选 → undefined）。两者的消息来源不同 ——
+   * mastra 存在会话记录里，ACP 存在本地镜像里（不落盘）。
+   */
+  const kind = conversationKind(conversation)
+  /** 还没定形态（新建的会话，首条消息定型）——此时模型下拉要同时列出两边供选择 */
+  const undecided = Boolean(conversation) && !conversation?.kind
+  /**
+   * 草稿 = 这个工作区的「新建会话页」（还没发出首条消息，侧边栏不列它）。
+   * 发出第一条消息那一刻它才转正：标题取这条消息、形态按选中的模型定（见 isDraftConversation）。
+   */
+  const draft = !!conversation && isDraftConversation(conversation)
+  const isAcp = kind === 'acp'
+  const messages = isAcp
+    ? (conversationId ? agentAcpMessages[conversationId] : undefined) ?? NO_MESSAGES
+    : conversation?.messages ?? NO_MESSAGES
+  /** ACP 会话正在回放历史（`session/load`），消息区显示加载态 */
+  const replaying = isAcp && conversationId ? (acpLoading[conversationId] ?? false) : false
   const streaming = run?.streaming ?? false
   const error = run?.error ?? null
 
-  // ---------- 后端与模型：**按会话独立** ----------
-  // 会话自己在下拉里选过的值优先；没选过才回退到工作区设置 / 设置页的默认模型。
-  // 这样在 A 会话切模型不会波及 B 会话。
-  const ownChoice = conversation?.configId
-  // 非 ACP 模型默认走内置的 Mastra agent（复用同一套模型配置与工具）；
-  // 旧会话若存的是 'ai-sdk' 仍按 ai-sdk 路径执行，不强制迁移。
-  const backend = conversation?.backend ?? active?.backend ?? 'mastra'
-  // ACP 后端无需模型配置（agent 自带模型），只需有可用的预置配置
-  const activeAcp =
-    (backend === 'acp' ? acpAgents.find((a) => a.id === ownChoice) : undefined) ??
-    acpAgents.find((a) => a.id === aiSettings.activeAcpId) ??
-    acpAgents[0]
-  /** 本会话实际使用的模型配置：会话自己的选择优先，回退到设置里的默认模型。
-   *  参与回退的配置必须**有可用模型**（models 被删空的配置跳过，否则下拉会出
-   *  undefined 项、请求也解析不出模型） */
+  // ---------- 关闭拦截 ----------
+  // Agent 正在运行（streaming）时关闭标签会丢失上下文，所以拦截后在**本标签面板内**
+  // 弹确认。streamingRef 存最新值供 guard 闭包读取（guard 注册一次，streaming 变不重注册）。
+  const { confirm, element } = useInlineConfirm()
+  const streamingRef = useRef(streaming)
+  streamingRef.current = streaming
+  useTabEventBus(tabId, () => {
+    if (!streamingRef.current) return true
+    // 「关闭标签前二次确认」关掉：不弹确认，直接放行（中断运行并关闭）
+    if (!useAppStore.getState().preferences.confirmCloseTab) return true
+    return confirm({
+      title: 'Agent 正在运行',
+      content: '关闭标签会中断当前运行，确定关闭吗？',
+      actions: [
+        { label: '取消', value: false },
+        { label: '关闭', kind: 'danger', value: true }
+      ]
+    })
+  })
+
+  // ---------- 会话形态与模型 ----------
+  /**
+   * ACP 会话绑定的 agent 配置（登记表在 AI 设置里，由侧边栏的「导入」弹窗维护）。
+   * 会话记录里的 `acpAgentId` 就是绑定 —— **不可切换**；agent 被移除后这个会话发不出消息，
+   * 需要删除后重新导入（下拉里会给出明确提示）。
+   */
+  const boundAcp = acpAgents.find((a) => a.id === conversation?.acpAgentId)
+  /**
+   * 本会话实际使用的模型配置（仅 mastra）：会话自己的选择优先，回退到设置里的默认模型。
+   * 参与回退的配置必须**有可用模型**（models 被删空的配置跳过，否则下拉会出
+   * undefined 项、请求也解析不出模型）
+   */
   const usable = (id?: string | null): string | undefined =>
-    backend !== 'acp' && hasUsableConfig(aiConfigs, id) ? (id ?? undefined) : undefined
-  const effectiveConfigId = usable(ownChoice) ?? usable(aiSettings.activeConfigId)
-  const hasConfig = backend === 'acp' ? Boolean(activeAcp) : Boolean(effectiveConfigId)
+    !isAcp && hasUsableConfig(aiConfigs, id) ? (id ?? undefined) : undefined
+  const effectiveConfigId = usable(conversation?.configId) ?? usable(aiSettings.activeConfigId)
+  /** 可发消息：ACP 要有绑定的 agent；内置要有可用模型；未定形态时两边有其一即可 */
+  const hasConfig = isAcp ? Boolean(boundAcp) : Boolean(effectiveConfigId) || (undecided && Boolean(boundAcp))
+
+  /**
+   * ACP 会话：**切到可见时**让 agent 回放它的历史（本地不落盘，所以每次打开都拉一次）。
+   *
+   * 只在 `visible` 时拉：非活动的会话标签是常挂载的（`display:none`），不加这个判断会
+   * 一开标签页就把所有 ACP agent 全连一遍。主进程对同一会话的重复请求会去重，
+   * StrictMode 双跑也安全。
+   */
+  useEffect(() => {
+    if (!visible || !conversationId || !isAcp) return
+    void loadAcpHistory(conversationId)
+  }, [visible, conversationId, isAcp, loadAcpHistory])
 
   const pendingConfirm = useAppStore((s) => {
     if (!activeId) return null
@@ -941,22 +997,19 @@ export function AgentPage({
     void openEmbeddedTerminal(key)
   }
 
-  /** 模型下拉选中值：ACP 后端显示预置配置，内置（Mastra）后端显示本会话实际使用的模型配置 */
   /**
    * 模型下拉的选中值编码（解析见 handleModelSelect）：
-   * - `cfg:<配置id>:<模型id>`：内置 Mastra agent，配置下的具体模型
-   * - `<配置id>`：内置 Mastra agent，配置默认模型（兼容旧值）
-   * - `acp:<agentid>:<模型value>`：ACP agent 的具体模型
-   * - `acp:<agentid>`：ACP agent 默认模型
+   * - mastra：`cfg:<配置id>:<模型id>`
+   * - ACP：`acp:<agentId>:<模型id>` —— 带上 agent id：未定形态的会话可能在两个 agent 的
+   *   模型之间挑；已定形态下它就是绑定（不可换）的那个 agent
    */
   const modelSelectValue = (() => {
-    if (backend === 'acp') {
-      if (!activeAcp) return ACP_OPTION
-      // 只有 modelId 仍在 agent 上报的模型列表里才用编码值；否则回退到 agent 默认
-      //（Select 的 value 匹配不到任何选项时会原样显示 value 字符串——看起来就是一串 uuid）
+    if (isAcp) {
       const mid = conversation?.modelId
-      if (mid && activeAcp.models?.includes(mid)) return `acp:${activeAcp.id}:${mid}`
-      return `acp:${activeAcp.id}`
+      // 只有仍在「设置里勾选的模型」列表里才用编码值；否则留空（别显示成一串 uuid）
+      return mid && boundAcp && (boundAcp.models ?? []).includes(mid)
+        ? `acp:${boundAcp.id}:${mid}`
+        : undefined
     }
     if (!effectiveConfigId) return undefined
     const config = aiConfigs.find((c) => c.id === effectiveConfigId)
@@ -970,45 +1023,44 @@ export function AgentPage({
   })()
 
   const handleModelSelect = (value?: string) => {
-    if (!activeId || !conversationId || !value) return
-    if (value === ACP_MANAGE_OPTION) {
-      // 预置配置在设置页统一维护
-      setSettingsOpen(true, 'models')
-      return
-    }
-    if (value === ACP_OPTION) {
-      void setAgentConversationModel(conversationId, {
-        backend: 'acp',
-        configId: undefined,
-        modelId: undefined
-      })
-      return
-    }
+    if (!conversationId || !value) return
     if (value.startsWith('acp:')) {
-      const [, acpId, acpModel] = value.split(':')
-      void setAgentConversationModel(conversationId, {
-        backend: 'acp',
-        configId: acpId,
-        modelId: acpModel
+      // ACP 的模型：已定形态的会话只换模型（走 session/set_config_option，不重建会话）；
+      // 未定的会话顺带把 agent 一起定下来（首条消息时落成 kind: 'acp'）
+      const rest = value.slice(4)
+      const at = rest.indexOf(':')
+      if (at < 0) return
+      void setAcpConversationModel(conversationId, {
+        acpAgentId: rest.slice(0, at),
+        modelId: rest.slice(at + 1)
       })
       return
     }
-    // 内置模型（cfg: 或纯配置 id）一律走 Mastra agent
     if (value.startsWith('cfg:')) {
       const [, cfgId, cfgModel] = value.split(':')
-      void setAgentConversationModel(conversationId, {
-        backend: 'mastra',
-        configId: cfgId,
-        modelId: cfgModel
-      })
-      return
+      void setAgentConversationModel(conversationId, { configId: cfgId, modelId: cfgModel })
     }
-    // 旧格式兜底：纯配置 id
-    void setAgentConversationModel(conversationId, {
-      backend: 'mastra',
-      configId: value,
-      modelId: undefined
-    })
+  }
+
+  const acpIcon = <Bot className="size-3.5" />
+  /**
+   * 某个 ACP agent 的模型选项。
+   *
+   * ⚠️ 来源是 **`AcpAgentConfig.models`（设置 → ACP agent 里拉取并勾选的模型）**，
+   * 不是 agent 现场上报的 —— 现场那一份常常混着用不了的档位。
+   * 一个都没勾时给一条禁用提示，别让分组空着让人以为坏了。
+   */
+  const acpOptionsOf = (a: (typeof acpAgents)[number]) => {
+    const models = a.models ?? []
+    return models.length > 0
+      ? models.map((m) => ({ value: `acp:${a.id}:${m}`, label: m, icon: acpIcon }))
+      : [
+        {
+          value: `acp-hint:${a.id}`,
+          label: '先在「设置 → ACP agent」里拉取并勾选模型',
+          disabled: true
+        }
+      ]
   }
 
   /**
@@ -1016,51 +1068,36 @@ export function AgentPage({
    *
    * ⚠️ antd 6 的 Select（@rc-component/select）在 flattenOptions 里把「组的子项」一律当成
    * 可选 option（取 data.value），不再继续下钻 —— 写两层嵌套分组时，内层分组会变成一个
-   * `value: undefined` 的选项：模型/agent 列表整个不渲染，点它也没有任何反应。
+   * `value: undefined` 的选项：模型列表整个不渲染，点它也没有任何反应。
    * 所以「配置 / 模型 id」的从属关系用组内条目的 label 前缀表达，不再嵌套分组。
+   *
+   * - 形态已定：只列这一类（ACP = 绑定 agent 勾选的模型；mastra = 全部模型配置）；
+   * - 形态未定（新建的会话）：**两边都列** —— 选哪个，这个会话就变成哪一类
+   *   （首条消息定型，见 sendAgentMessage）。
    */
-  const acpIcon = <Bot className="size-3.5" />
-  const modelOptions = [
-    ...(aiConfigs.length > 0
-      ? [
-        {
-          label: 'AI 模型',
-          options: aiConfigs.flatMap((c) =>
-            configModels(c).map((m) => ({ value: `cfg:${c.id}:${m}`, label: `${c.name} · ${m}` }))
-          )
-        }
-      ]
-      : []),
-    {
-      label: 'Agent',
-      options: [
-        ...acpAgents.flatMap((a) => {
-          const fallback = {
-            value: `acp:${a.id}`,
-            label: a.models?.length ? `${a.name}（默认）` : a.name,
-            icon: acpIcon
+  const modelOptions = isAcp
+    ? boundAcp
+      ? [{ label: `Agent · ${boundAcp.name}`, options: acpOptionsOf(boundAcp) }]
+      : []
+    : [
+      ...(aiConfigs.length > 0
+        ? [
+          {
+            label: 'AI 模型',
+            options: aiConfigs.flatMap((c) =>
+              configModels(c).map((m) => ({ value: `cfg:${c.id}:${m}`, label: `${c.name} · ${m}` }))
+            )
           }
-          // agent 默认模型选项必须常驻：会话未选具体模型时选中值是 `acp:<id>`
-          return a.models?.length
-            ? [
-              fallback,
-              ...a.models.map((m) => ({
-                value: `acp:${a.id}:${m}`,
-                label: `${a.name} · ${m}`,
-                icon: acpIcon
-              }))
-            ]
-            : [fallback]
-        }),
-        ...(activeAcp ? [] : [{ value: ACP_OPTION, label: '外部 ACP agent', icon: acpIcon }]),
-        {
-          value: ACP_MANAGE_OPTION,
-          label: acpAgents.length ? '管理 ACP agent…' : '配置 ACP agent…',
-          icon: <Settings className="size-3.5" />
-        }
-      ]
-    }
-  ]
+        ]
+        : []),
+      // 未定形态：顺带列出已登记 agent 的模型（选它 = 把这个会话定成 ACP）；
+      // 没有勾选模型的 agent 只在它是本会话预置的那个时才列（给那条提示）
+      ...(undecided
+        ? acpAgents
+          .filter((a) => (a.models ?? []).length > 0 || a.id === conversation?.acpAgentId)
+          .map((a) => ({ label: `Agent · ${a.name}`, options: acpOptionsOf(a) }))
+        : [])
+    ]
 
   /** 点「编辑」：把这条的内容灌进输入框并进入编辑态（发送时走重发，先删这条及其之后） */
   const startEdit = useCallback((target: AgentChatMessage) => {
@@ -1217,17 +1254,20 @@ export function AgentPage({
   )
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-background rounded-lg overflow-hidden">
+    // relative：关闭确认遮罩（element）以根容器定位，只盖住本标签
+    <div className="relative flex h-full min-h-0 flex-col bg-background rounded-lg overflow-hidden">
       {/* 顶栏：当前工作区 + 操作 */}
       <div className="flex h-14 shrink-0 items-center gap-2 px-3 py-2">
         {active ? (
           <div className="ml-2 flex min-w-0 flex-1 flex-col justify-center">
             {conversation && (
-              <span
-                className="truncate text-base font-bold leading-tight"
-                title={conversation.title}
-              >
-                {conversation.title}
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span
+                  className="truncate text-base font-bold leading-tight"
+                  title={conversation.title}
+                >
+                  {conversation.title}
+                </span>
               </span>
             )}
             {/* 当前工作目录：分屏后同一屏可能并排好几个会话，光看标题分不清各自作用在哪个目录。
@@ -1283,7 +1323,7 @@ export function AgentPage({
                 >
                   <GitBranch className="size-4" />
                   {gitCount > 0 && (
-                    <span className="absolute -right-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] leading-none text-white">
+                    <span className="absolute -right-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-xs leading-none text-white">
                       {gitCount > 99 ? '99+' : gitCount}
                     </span>
                   )}
@@ -1423,14 +1463,45 @@ export function AgentPage({
                   打开工作区面板
                 </Button>
               </div>
+            ) : replaying && messages.length === 0 ? (
+              <div className="flex flex-col h-full items-center justify-center gap-2 text-xs text-muted-foreground">
+                <Spin />
+                <span>正在加载会话历史</span>
+              </div>
+            ) : isAcp && !boundAcp ? (
+              <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
+                <Bot className="size-10 opacity-30" />
+                <div className="text-sm text-muted-foreground">
+                  这个会话绑定的 ACP agent 已被移除。
+                </div>
+                <div className="text-xs text-muted-foreground/60">
+                  删除这个会话后，在左侧用「导入会话」重新接上它。
+                </div>
+              </div>
+            ) : error && messages.length === 0 && !streaming ? (
+              /* 消息流为空时的报错（如 ACP 历史回放失败 / agent 起不来）：必须看得见 ——
+                 Conversation 分支里的错误条在空态下根本不会渲染，不然就是静默失败 */
+              <div className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center">
+                <Bot className="size-10 opacity-30" />
+                <div className="max-w-lg rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  {error}
+                </div>
+              </div>
             ) : messages.length === 0 && !streaming ? (
               <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
                 <Bot className="size-10 opacity-30" />
                 <div className="text-sm text-muted-foreground">
-                  在下方输入你想在「{active.name}」里完成的任务。
+                  {isAcp
+                    ? `这个会话由「${boundAcp?.name ?? 'ACP agent'}」管理，还没有消息。`
+                    : `在下方输入你想在「${active.name}」里完成的任务。`}
                 </div>
                 <div className="text-xs text-muted-foreground/60">
-                  例如：列出项目结构，帮我加一个 /health 接口，然后跑一遍测试
+                  {draft
+                    ? // 草稿：把「发出第一条消息才建会话」这件事说清楚（行为和列表里看到的一致）
+                    '选好模型后发出第一条消息：会话会以这条消息为名出现，类型由所选模型决定'
+                    : isAcp
+                      ? '发第一条消息会在 agent 侧创建会话；之后的历史由 agent 自己保存，本应用不落盘。'
+                      : '例如：列出项目结构，帮我加一个 /health 接口，然后跑一遍测试'}
                 </div>
               </div>
             ) : (
@@ -1451,10 +1522,10 @@ export function AgentPage({
                         streaming={
                           streaming && index === messages.length - 1 && m.role === 'assistant'
                         }
-                        canEdit={!streaming && m.role === 'user'}
+                        canEdit={!streaming && !isAcp && m.role === 'user'}
                         editing={editing?.id === m.id}
                         onEdit={startEdit}
-                        canDelete={!streaming}
+                        canDelete={!streaming && !isAcp}
                         tailCount={messages.length - index}
                         pendingConfirm={pendingConfirm}
                       />
@@ -1524,8 +1595,8 @@ export function AgentPage({
                         ? '改完按 Enter 重新发送（会先删除这条及其之后的全部消息）'
                         : hasConfig
                           ? `在「${active.name}」中描述你的任务…（Enter 发送 · Shift+Enter 换行）`
-                          : backend === 'acp'
-                            ? '请先在设置中配置 ACP agent（AI 配置页）'
+                          : isAcp
+                            ? '这个会话绑定的 ACP agent 已被移除，请删除后重新导入'
                             : '请先在设置中配置 AI 模型'
                     }
                     autoSize={{ minRows: 2, maxRows: 8 }}
@@ -1548,7 +1619,7 @@ export function AgentPage({
                             label: (
                               <span>
                                 {m.label}
-                                <span className="block text-[10px] text-muted-foreground">
+                                <span className="block text-xs text-muted-foreground">
                                   {m.hint}
                                 </span>
                               </span>
@@ -1577,16 +1648,15 @@ export function AgentPage({
                         size="small"
                         variant="borderless"
                         placement="topLeft"
-                        // bare-select：按下（展开）也不许冒边框 —— antd 会给聚焦的 Select
-                        // 补一圈 focus outline，权限按钮没有，这里对齐（见 index.css）
-                        className="bare-select max-w-56 min-w-0"
+                        className="bare-select max-w-44"
                         value={modelSelectValue}
                         onChange={(v) => handleModelSelect(v)}
                         placeholder="选择模型"
                         popupMatchSelectWidth={false}
                         options={modelOptions}
-                        // 选中态只显示模型名（列表里仍是「提供商 · 模型」，方便区分同名模型）
-                        labelRender={(opt) => modelNameOnly(opt.label)}
+                        labelRender={(opt) => (
+                          <span className="block truncate">{modelNameOnly(opt.label)}</span>
+                        )}
                       />
                       {streaming ? (
                         <Button
@@ -1634,6 +1704,9 @@ export function AgentPage({
           />
         )}
       </div>
+
+      {/* 关闭确认浮层（useInlineConfirm） */}
+      {element}
     </div>
   )
 }

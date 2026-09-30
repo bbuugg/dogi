@@ -511,10 +511,9 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const effectiveConfigId = usable(chat?.configId) ?? usable(aiSettings.activeConfigId)
   const hasConfig = Boolean(effectiveConfigId)
 
-  // ---------- 模型下拉：按「模型配置 / 模型 id」两级分组（结构同 Agent 页），另有 ACP 分组 ----------
-  const acpAgents = aiSettings.acpAgents ?? []
-  /** 下拉 value 编码：`cfg:<配置id>:<模型id>`；`acp:__manage__` = 打开设置页的入口项 */
-  const ACP_MANAGE_OPTION = 'acp:__manage__'
+  // ---------- 模型下拉：按「模型配置 / 模型 id」两级分组（结构同 Agent 页） ----------
+  // 终端助手只有内置 Mastra 引擎 —— ACP 会话是 AI Agent 页的形态（每个会话绑定一个外部 agent），
+  // 终端助手既不能挂上去也没有意义，所以这里不再出现 ACP 分组。
   const modelSelectValue = (() => {
     const config = aiConfigs.find((c) => c.id === effectiveConfigId)
     if (!config) return undefined
@@ -543,37 +542,10 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           )
         }
       ]
-      : []),
-    {
-      label: 'Agent（ACP）',
-      options: [
-        // 终端助手的对话管道目前只走内置 AI SDK，ACP 选项置灰展示（去 AI Agent 页使用）
-        ...acpAgents.flatMap((a) => {
-          const suffix = `${a.name}（请在 AI Agent 页使用）`
-          return a.models?.length
-            ? [
-              { value: `acp:${a.id}`, label: suffix, disabled: true },
-              ...a.models.map((m) => ({
-                value: `acp:${a.id}:${m}`,
-                label: `${a.name} · ${m}（请在 AI Agent 页使用）`,
-                disabled: true
-              }))
-            ]
-            : [{ value: `acp:${a.id}`, label: suffix, disabled: true }]
-        }),
-        {
-          value: ACP_MANAGE_OPTION,
-          label: acpAgents.length ? '管理 ACP agent…' : '配置 ACP agent…'
-        }
-      ]
-    }
+      : [])
   ]
   const handleModelSelect = (value?: string): void => {
     if (!sessionId || !value) return
-    if (value === ACP_MANAGE_OPTION) {
-      setSettingsOpen(true, 'models')
-      return
-    }
     if (value.startsWith('cfg:')) {
       const [, cfgId, cfgModel] = value.split(':')
       setAiChatConfig(sessionId, cfgId, cfgModel)
@@ -1013,7 +985,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         <div className="border-b border-amber-500/30 bg-amber-500/10 px-2 py-1.5">
           <div className="flex items-center gap-2">
             <ShieldCheck className="size-3.5 shrink-0 text-amber-500" />
-            <span className="min-w-0 flex-1 truncate text-xs font-medium text-amber-500">
+            <span className="min-w-0 flex-1 truncate text-sm font-medium text-amber-500">
               {TOOL_LABELS[pendingConfirm.toolName] ?? pendingConfirm.toolName}
             </span>
             <Button
@@ -1073,7 +1045,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               label: (
                 <span>
                   {m.label}
-                  <span className="block text-[10px] text-muted-foreground">{m.hint}</span>
+                  <span className="block text-xs text-muted-foreground">{m.hint}</span>
                 </span>
               )
             })),

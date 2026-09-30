@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { streamText, tool, stepCountIs, type ToolSet } from 'ai'
+import { tool, type ToolSet } from 'ai'
 import { z } from 'zod'
 import type {
   AiChatRequest,
@@ -16,7 +16,7 @@ import { askFollowupBroker, buildAskFollowupTool } from './ask-followup'
 import { ASK_FOLLOWUP_HINT } from '@shared/ask-followup'
 import { resolveModel } from './resolve-model'
 import { toModelMessages } from './agent-core'
-import { armConfirmTimeout, modelRunTimeout, modelStreamTimeout } from './timeouts'
+import { armConfirmTimeout, modelRunTimeout } from './timeouts'
 
 // 兼容旧引用路径（agent.ts 从 './ai' 取）
 export { resolveModel }
@@ -385,90 +385,13 @@ class AiAssistant extends EventEmitter {
     return run
   }
 
+  /**
+   * 跑一轮终端助手对话（Mastra Agent.stream）。
+   *
+   * 模型按终端会话独立：优先用请求里带的 configId，回退到设置里的默认模型；
+   * 会话选的配置被删掉时也要回退，否则这个会话会直接报「未配置」。
+   */
   async chat(req: AiChatRequest): Promise<{ requestId: string }> {
-    const { history, targetSessionId = null } = req
-    const requestId = randomUUID()
-    const settings = storage.getAiSettings()
-    // 模型按终端会话独立：优先用请求里带的 configId，回退到设置里的默认模型。
-    // 会话选的配置被删掉时也要回退，否则这个会话会直接报「未配置」。
-    const config =
-      (req.configId ? storage.getAiConfig(req.configId) : undefined) ??
-      (settings.activeConfigId ? storage.getAiConfig(settings.activeConfigId) : undefined)
-
-    if (!config) {
-      // 延迟到 invoke 返回 requestId 之后再发事件，避免渲染端因 requestId 未设置而丢弃
-      setTimeout(() => {
-        this.emitEvent(requestId, {
-          type: 'error',
-          message: '尚未配置 AI 模型，请先在设置中添加模型配置'
-        })
-        this.emitEvent(requestId, { type: 'finish', finishReason: 'error' })
-      }, 0)
-      return { requestId }
-    }
-
-    const controller = new AbortController()
-    this.abortControllers.set(requestId, controller)
-
-    const mcp = await mcpManager.buildToolset()
-    const tools: ToolSet = {
-      ...buildTerminalTools(
-        requestId,
-        targetSessionId,
-        // 终端命令串行队列：绑定本次对话，与其他实例互不影响
-        (fn) => this.queueToolExecution(requestId, fn),
-        // 确认请示走本实例（多实例各自的确认卡独立弹出）
-        (confirmReq) => this.requestConfirm(confirmReq)
-      ),
-      ...mcp.tools,
-      // 提问工具不走确认流程：提问本身就是让用户在卡片上做决定
-      ...buildAskFollowupTool(requestId, targetSessionId)
-    }
-
-    const model = resolveModel(config, req.modelId)
-    const historyLimit = config.contextMessages ?? 20
-    const modelMessages = toModelMessages(history.slice(-historyLimit))
-
-    const mode = settings.permissionMode === 'confirm' ? 'confirm' : 'full'
-    const modeHint =
-      mode === 'confirm'
-        ? '\n当前处于「确认模式」：执行任何终端命令都会先请求用户确认，用户可能拒绝。被拒绝时不要反复重试同一条命令，先询问用户的意见。'
-        : ''
-
-    // 终端绑定提示：本段对话固定作用于绑定的会话
-    const boundSession = targetSessionId ? sessionManager.get(targetSessionId) : undefined
-    const boundPlatformHint = boundSession ? sessionPlatformHint(boundSession.info.platform) : ''
-    const boundHint = boundSession
-      ? `\n本次对话绑定了一个终端会话（${boundSession.info.title}）。除非用户明确要求操作其他会话，终端工具一律作用于该会话，不要切换。${boundPlatformHint ? `\n${boundPlatformHint}` : ''}`
-      : ''
-
-    const systemPrompt = [
-      settings.systemPrompt?.trim() || DEFAULT_SYSTEM_PROMPT,
-      modeHint,
-      boundHint,
-      ASK_FOLLOWUP_HINT,
-      mcp.errors.length ? `\n注意，以下 MCP 服务当前不可用：\n${mcp.errors.join('\n')}` : ''
-    ].join('\n')
-
-    const result = streamText({
-      model,
-      system: systemPrompt,
-      messages: modelMessages,
-      tools,
-      stopWhen: stepCountIs(MAX_STEPS),
-      abortSignal: controller.signal,
-      // 流超时（设置里可改）：默认 5 分钟等不到第一个内容块就判连接死了
-      timeout: modelStreamTimeout(settings.modelTimeoutMs),
-      ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
-      ...(config.maxTokens !== undefined ? { maxOutputTokens: config.maxTokens } : {})
-    })
-
-    void this.consumeStream(requestId, result)
-    return { requestId }
-  }
-
-  /** Mastra 后端实现：编排改用 Mastra Agent.stream，工具 / 模型与 ai-sdk 路径完全一致 */
-  async mastraChat(req: AiChatRequest): Promise<{ requestId: string }> {
     const { history, targetSessionId = null } = req
     const requestId = randomUUID()
     const settings = storage.getAiSettings()
@@ -627,113 +550,6 @@ class AiAssistant extends EventEmitter {
     }
   }
 
-  private async consumeStream(
-    requestId: string,
-    result: Awaited<ReturnType<typeof streamText>>
-  ): Promise<void> {
-    const startedAt = Date.now()
-    let firstTokenAt = 0
-    try {
-      for await (const part of result.fullStream) {
-        // 记下首字时间，用来算「生成窗口」（首字 → 结束），更贴近真实输出速度
-        if ((part.type === 'text-delta' || part.type === 'reasoning-delta') && !firstTokenAt) {
-          firstTokenAt = Date.now()
-        }
-        const event = this.adaptPart(part)
-        if (event) this.emitEvent(requestId, event)
-      }
-      // 用量独立采集：拿不到（部分 provider 不回报）也不影响整轮消息
-      try {
-        const u = (await result.usage) as
-          | {
-              promptTokens?: number
-              completionTokens?: number
-              totalTokens?: number
-              reasoningTokens?: number
-              cachedInputTokens?: number
-              // OpenAI responses 风格（apiStyle=responses / openai.responses 提供方）的字段名
-              inputTokens?: number
-              outputTokens?: number
-            }
-          | undefined
-        if (u) {
-          const endAt = Date.now()
-          const durationMs = endAt - startedAt
-          const genWindowMs = firstTokenAt ? endAt - firstTokenAt : durationMs
-          // 同时兼容 chat 风格（promptTokens/completionTokens）与 responses 风格（inputTokens/outputTokens）
-          const inputTokens = u.promptTokens ?? u.inputTokens ?? 0
-          const outputTokens = u.completionTokens ?? u.outputTokens ?? 0
-          const tps = genWindowMs > 0 ? outputTokens / (genWindowMs / 1000) : 0
-          this.emitEvent(requestId, {
-            type: 'usage',
-            usage: {
-              inputTokens,
-              outputTokens,
-              totalTokens: u.totalTokens ?? 0,
-              ...(u.reasoningTokens != null ? { reasoningTokens: u.reasoningTokens } : {}),
-              ...(u.cachedInputTokens != null ? { cachedInputTokens: u.cachedInputTokens } : {}),
-              durationMs,
-              tps: Math.round(tps * 10) / 10
-            }
-          })
-        }
-      } catch {
-        // 用量缺失时静默跳过
-      }
-      this.emitEvent(requestId, { type: 'finish', finishReason: 'done' })
-    } catch (err) {
-      this.emitEvent(requestId, { type: 'error', message: describeError(err) })
-      this.emitEvent(requestId, { type: 'finish', finishReason: 'error' })
-    } finally {
-      this.clearPendingConfirms(requestId)
-      // 挂着的提问也要收尾：不然工具 Promise 不 settle，回合永远卡着
-      askFollowupBroker.cancel(requestId)
-      this.abortControllers.delete(requestId)
-      // 队列对象由排队中的闭包持有，清理 Map 不影响已中止标志的感知
-      this.toolQueues.delete(requestId)
-    }
-  }
-
-  /** 将 AI SDK 流事件转换为渲染进程事件（兼容字段名差异） */
-  private adaptPart(part: { type: string } & Record<string, unknown>): AiStreamEvent | null {
-    switch (part.type) {
-      case 'text-delta':
-        return { type: 'text-delta', delta: String(part.text ?? '') }
-      // AI SDK 7 的 fullStream 里思考内容是 reasoning-delta（增量在 text 字段），
-      // reasoning-start / reasoning-end 只是起止标记，不带内容
-      case 'reasoning-delta':
-        return { type: 'reasoning-delta', delta: String(part.text ?? '') }
-      case 'tool-call':
-        return {
-          type: 'tool-call',
-          toolCallId: String(part.toolCallId),
-          toolName: String(part.toolName),
-          input: part.input ?? part.args ?? null
-        }
-      case 'tool-result':
-        return {
-          type: 'tool-result',
-          toolCallId: String(part.toolCallId),
-          toolName: String(part.toolName),
-          output: part.output ?? part.result ?? null
-        }
-      case 'tool-error':
-        return {
-          type: 'tool-result',
-          toolCallId: String(part.toolCallId),
-          toolName: String(part.toolName),
-          output: `工具执行失败: ${describeError(part.error)}`,
-          isError: true
-        }
-      case 'error':
-        return { type: 'error', message: describeError(part.error) }
-      case 'abort':
-        return { type: 'finish', finishReason: 'aborted' }
-      default:
-        return null
-    }
-  }
-
   private emitEvent(requestId: string, event: AiStreamEvent): void {
     this.emit('chat-event', requestId, event)
   }
@@ -790,12 +606,11 @@ class AiService extends EventEmitter {
   }
 
   async chat(req: AiChatRequest): Promise<{ requestId: string }> {
-    // 每个终端会话独立实例：对话固定路由到所属会话的助手
+    // 每个终端会话独立实例：对话固定路由到所属会话的助手。
+    // 终端助手只有一种引擎（Mastra，与 AI Agent 页的自带 agent 同款）——
+    // 原生的 AI SDK 路径已随架构调整移除（见文件头说明）。
     const key = req.targetSessionId ?? sessionManager.getActiveId() ?? '__no_session__'
-    const assistant = this.assistantFor(key)
-    // 终端助手内置引擎：默认走 Mastra（与 AI Agent 页一致），'ai-sdk' 仅作兜底
-    if (req.backend === 'ai-sdk') return assistant.chat(req)
-    return assistant.mastraChat(req)
+    return this.assistantFor(key).chat(req)
   }
 
   /** 渲染进程回复确认结果：转发给持有该确认的实例 */

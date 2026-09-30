@@ -1,10 +1,13 @@
-import { app, ipcMain } from 'electron'
+import { app, dialog, ipcMain } from 'electron'
+import { stat } from 'node:fs/promises'
+import { basename } from 'node:path'
 import { executeHttp } from '../services/api/http'
 import { wsService } from '../services/api/ws'
 import { storage } from '../services/storage'
 import type {
   ApiHistoryEntry,
   ApiHttpRequest,
+  ApiPickFileResult,
   ApiRequestEntry,
   WsConnectOptions,
   WsEvent,
@@ -62,6 +65,35 @@ export function registerApiIpc(ctx: IpcContext): void {
   ipcMain.handle('api:abort', (_e, sendId: string) => {
     inflightHttp.get(sendId)?.abort()
     inflightHttp.delete(sendId)
+  })
+  // 为 form-data 的文件字段选一个本地文件。
+  // 渲染端只拿得到「路径 + 文件名 + 大小」：文件内容由 api:send 在主进程侧读
+  //（渲染进程没有 fs，也不该为了发一个文件把它整个搬进内存再走 IPC）。
+  ipcMain.handle('api:pickFile', async (): Promise<ApiPickFileResult> => {
+    // 原生对话框无法被自动化点击（同 sftp:uploadDir 的取法）：探针用环境变量指定文件，
+    // 正常运行不设该变量，照常弹对话框。
+    let filePath = process.env.DOGI_API_PICK_FILE || ''
+    if (!filePath) {
+      const window = ctx.win()
+      const options = { title: '选择要上传的文件', properties: ['openFile' as const] }
+      const result =
+        window && !window.isDestroyed()
+          ? await dialog.showOpenDialog(window, options)
+          : await dialog.showOpenDialog(options)
+      if (result.canceled || !result.filePaths.length) return { canceled: true }
+      filePath = result.filePaths[0]
+    }
+    try {
+      const info = await stat(filePath)
+      if (!info.isFile()) return { canceled: false, error: `所选路径不是文件：${filePath}` }
+      return {
+        canceled: false,
+        file: { path: filePath, name: basename(filePath), size: info.size }
+      }
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e)
+      return { canceled: false, error: `无法读取所选文件：${filePath} —— ${reason}` }
+    }
   })
 
   // ---------- WebSocket 调试（接口请求里的 ws 协议） ----------

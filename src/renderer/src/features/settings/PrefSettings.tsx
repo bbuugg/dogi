@@ -1,15 +1,22 @@
-import { Check, Monitor, Moon, Sun } from 'lucide-react'
-import type { ThemeMode } from '@shared/types'
+import { Check, Monitor, Moon, Save, Sun, Timer, Zap } from 'lucide-react'
+import type { NoteSaveMode, ThemeMode } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import { COLOR_THEMES } from '@/shared/lib/color-themes'
 import { BUILTIN_ACTIVITIES } from '@/app/activities'
-import { ColorPicker, Switch } from 'antd'
+import { ColorPicker, InputNumber, Switch } from 'antd'
 import { cn } from 'cn'
 
 const THEME_OPTIONS: Array<{ value: ThemeMode; label: string; icon: typeof Sun }> = [
   { value: 'system', label: '跟随系统', icon: Monitor },
   { value: 'light', label: '亮色', icon: Sun },
   { value: 'dark', label: '暗色', icon: Moon }
+]
+
+/** 笔记保存时机（与 `NoteSaveMode` 一一对应，顺序即展示顺序） */
+const NOTE_SAVE_MODES: Array<{ value: NoteSaveMode; label: string; icon: typeof Sun }> = [
+  { value: 'manual', label: '手动保存', icon: Save },
+  { value: 'immediate', label: '立即保存', icon: Zap },
+  { value: 'delay', label: '延迟保存', icon: Timer }
 ]
 
 /** 配色色板的统一样式（预设与自定义色块共用） */
@@ -25,6 +32,10 @@ export function PrefSettings() {
   const setMinimizeToTray = useAppStore((s) => s.setMinimizeToTray)
   const confirmCloseTab = useAppStore((s) => s.preferences.confirmCloseTab)
   const setConfirmCloseTab = useAppStore((s) => s.setConfirmCloseTab)
+  const noteSaveMode = useAppStore((s) => s.preferences.noteSaveMode)
+  const noteAutoSaveDelay = useAppStore((s) => s.preferences.noteAutoSaveDelay)
+  const setNoteSaveMode = useAppStore((s) => s.setNoteSaveMode)
+  const setNoteAutoSaveDelay = useAppStore((s) => s.setNoteAutoSaveDelay)
   const notifyOnAgentFinish = useAppStore((s) => s.preferences.notifyOnAgentFinish)
   const setNotifyOnAgentFinish = useAppStore((s) => s.setNotifyOnAgentFinish)
   const hiddenActivities = useAppStore((s) => s.preferences.hiddenActivities)
@@ -64,7 +75,9 @@ export function PrefSettings() {
             关闭标签前二次确认
           </label>
           <p className="mt-1 text-xs leading-4 text-muted-foreground">
-            关闭标签或整个面板组时先弹确认框。在确认框里勾选「以后都不再提示」会自动关掉这个开关，
+            关闭标签、组内批量关闭（其他 / 左侧 / 右侧标签）或整个面板组时，在标签内弹确认框。
+            笔记的「未保存修改」与 Agent 会话的「运行中」确认也受此开关控制：关掉后不再询问，
+            笔记有未保存改动会直接丢弃并关闭。在确认框里勾选「以后都不再提示」会自动关掉这个开关，
             需要时再从这里打开。
           </p>
         </div>
@@ -73,6 +86,52 @@ export function PrefSettings() {
           checked={confirmCloseTab}
           onChange={(v) => void setConfirmCloseTab(v)}
         />
+      </div>
+
+      {/* 笔记保存时机：手动 / 立即 / 延迟，配合「关闭标签二次确认」一起防丢数据 */}
+      <div className="rounded-md">
+        <div className="text-sm font-medium">笔记保存时机</div>
+        <p className="mt-1 mb-2.5 text-xs leading-4 text-muted-foreground">
+          笔记直接读写本地 .md 文件。选「手动保存」时改动只留在编辑器里（状态栏显示「未保存」），
+          点保存按钮或按 Ctrl+S 才写盘；关闭标签前若有未保存改动会先问一下
+          （受「关闭标签前二次确认」开关控制，关掉后直接丢弃并关闭）。
+        </p>
+        <div className="grid grid-cols-3 gap-1" role="radiogroup" aria-label="笔记保存时机">
+          {NOTE_SAVE_MODES.map(({ value, label, icon: Icon }) => {
+            const active = noteSaveMode === value
+            return (
+              <button
+                key={value}
+                role="radio"
+                aria-checked={active}
+                onClick={() => void setNoteSaveMode(value)}
+                className={cn(
+                  'flex flex-col items-center gap-1.5 rounded-md px-2 py-3 text-xs transition-colors',
+                  active
+                    ? 'bg-primary/10 text-foreground'
+                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
+                )}
+              >
+                <Icon className="size-4" />
+                {label}
+              </button>
+            )
+          })}
+        </div>
+        {noteSaveMode === 'delay' && (
+          <div className="mt-2 flex items-center gap-1.5 text-xs text-muted-foreground">
+            停止输入
+            <InputNumber
+              size="small"
+              min={1}
+              max={60}
+              className="w-16"
+              value={noteAutoSaveDelay}
+              onChange={(v) => void setNoteAutoSaveDelay(Number(v) || 2)}
+            />
+            秒后自动保存
+          </div>
+        )}
       </div>
 
       <div className="flex items-start justify-between gap-4 rounded-md">

@@ -134,7 +134,7 @@ export function PluginsPanel() {
                     <div className="truncate text-xs text-muted-foreground/80">
                       {p.description || `v${p.version}`}
                     </div>
-                    <div className="truncate text-[10px] text-muted-foreground/60">
+                    <div className="truncate text-xs text-muted-foreground/60">
                       v{p.version}
                       {!p.enabled && ' · 已禁用'}
                       {p.error && ' · 加载失败'}

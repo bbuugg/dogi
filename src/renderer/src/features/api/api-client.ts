@@ -4,10 +4,40 @@
  * 从原 api-client 插件的 App.tsx 中抽出，供侧边栏列表（ApiPanel）与
  * 请求编辑页（ApiPage）共用：请求头补全、cURL 解析、响应体格式化等。
  */
-import type { ApiHeaderPair } from '@shared/types'
+import type { ApiBodyType, ApiFormField, ApiHeaderPair } from '@shared/types'
 
 /** 支持的 HTTP 方法（下拉选项顺序即展示顺序） */
 export const METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS']
+
+/**
+ * 请求体类型（横向分段选项的顺序）。
+ * `raw` 是缺省形态 —— 历史数据没有 `bodyType` 字段，都按它处理（不是 none）。
+ */
+export const BODY_TYPES: Array<{ value: ApiBodyType; label: string }> = [
+  { value: 'none', label: 'none' },
+  { value: 'raw', label: 'raw' },
+  { value: 'x-www-form-urlencoded', label: 'x-www-form-urlencoded' },
+  { value: 'form-data', label: 'form-data' }
+]
+
+/**
+ * 某种请求体类型对应的标准 Content-Type。
+ * `none` 与 `raw` 都返回 null —— 前者根本不发 body，后者的正文可以是任何东西，
+ * 它们的 Content-Type 完全由用户填的请求头决定（编辑器高亮语言也跟着那份请求头走，见 bodyLanguageOf）。
+ */
+export function contentTypeForBodyType(type: ApiBodyType): string | null {
+  if (type === 'x-www-form-urlencoded') return 'application/x-www-form-urlencoded'
+  if (type === 'form-data') return 'multipart/form-data'
+  return null
+}
+
+/** 是否为「表单类」的 Content-Type（切换请求体类型时用来判断旧值要不要一起换掉） */
+export function isFormContentType(value: string): boolean {
+  const ct = String(value || '')
+    .trim()
+    .toLowerCase()
+  return ct.startsWith('multipart/form-data') || ct.startsWith('application/x-www-form-urlencoded')
+}
 
 /** 常见请求头名称（输入框下拉补全用） */
 export const COMMON_HEADERS = [
@@ -155,6 +185,69 @@ export function normalizeHeaders(raw: unknown): ApiHeaderPair[] {
   return [emptyHeader()]
 }
 
+// ---------- 表单字段（x-www-form-urlencoded / form-data 共用一套行交互） ----------
+
+/** 空白表单字段行（新建请求 / 删空后补一行，让界面始终有可编辑的行） */
+export function emptyFormField(): ApiFormField {
+  return { key: '', value: '', isFile: false }
+}
+
+/** 表单字段行是否为「空槽位」（名称与值都没填） */
+export function isBlankFormField(f: ApiFormField): boolean {
+  return !(f?.key ?? '').trim() && !(f?.value ?? '').trim()
+}
+
+/** 编辑表单字段后的整理规则：与请求头那套完全一致（末行填了就补空槽位、末尾只留一个空行） */
+export function tidyFormRows(list: ApiFormField[]): ApiFormField[] {
+  const next = list.length ? [...list] : [emptyFormField()]
+  if (!isBlankFormField(next[next.length - 1])) next.push(emptyFormField())
+  while (
+    next.length > 1 &&
+    isBlankFormField(next[next.length - 1]) &&
+    isBlankFormField(next[next.length - 2])
+  ) {
+    next.pop()
+  }
+  return next
+}
+
+/** 把历史/导入来的表单字段规整成可编辑的行（兼容缺失 / 脏数据，至少返回一行） */
+export function normalizeFormFields(raw: unknown): ApiFormField[] {
+  if (!Array.isArray(raw)) return [emptyFormField()]
+  const fields = raw
+    .filter((f) => f && typeof f === 'object')
+    .map((f) => ({
+      key: String((f as ApiFormField).key ?? ''),
+      value: String((f as ApiFormField).value ?? ''),
+      // 只有明确 true 才算文件字段：缺省的布尔值不能被当成文件（值会变成不存在的路径）
+      isFile: (f as ApiFormField).isFile === true
+    }))
+  return fields.length ? fields : [emptyFormField()]
+}
+
+/**
+ * 设置（覆盖或新增）Content-Type 请求头 —— 切换请求体类型时用。
+ * 已有行就改它的值（保住用户在表里的位置），没有就在空槽位前插一行。
+ */
+export function setContentType(rows: ApiHeaderPair[], value: string): ApiHeaderPair[] {
+  const idx = rows.findIndex((p) => (p?.key ?? '').trim().toLowerCase() === 'content-type')
+  if (idx >= 0) return tidyHeaderRows(rows.map((p, i) => (i === idx ? { ...p, value } : p)))
+  const kept = rows.filter((p) => !isBlankHeader(p))
+  kept.push({ key: 'Content-Type', value })
+  return tidyHeaderRows(kept)
+}
+
+/**
+ * 从本地绝对路径取文件名（渲染端够不着 node:path）。
+ * Windows 与 POSIX 的分隔符都认，末尾分隔符会被忽略。
+ */
+export function baseNameOf(filePath: string): string {
+  const parts = String(filePath || '')
+    .split(/[\\/]/)
+    .filter(Boolean)
+  return parts.length ? parts[parts.length - 1] : ''
+}
+
 /**
  * 查询参数（Query Params）与 URL 的双向解析。
  *
@@ -234,6 +327,10 @@ export interface ParsedCurl {
   url: string
   headers: ApiHeaderPair[]
   body: string
+  /** `-F` 解析出来的请求体类型（form-data）；其余情况为 undefined（= raw） */
+  bodyType?: ApiBodyType
+  /** `-F` 解析出来的表单字段（含 `@文件` 形式的文件字段） */
+  bodyFields?: ApiFormField[]
 }
 
 /**
@@ -345,8 +442,16 @@ export function parseCurl(cmd: string): ParsedCurl {
 
   let body = ''
   let autoCt: string | null = null
+  /**
+   * 表单字段与请求体类型（`-F` 专用）。
+   * `-F` 在 cURL 里就是 multipart：以前这里把 `name=value` 拼成 `a=b&c=d` 文本再配一个
+   * 没有 boundary 的 `multipart/form-data`，服务端根本解析不了 —— 现在映射成 form-data 字段。
+   */
+  let bodyType: ApiBodyType | undefined
+  let bodyFields: ApiFormField[] | undefined
   if (formParts.length) {
-    body = formParts.join('&')
+    bodyType = 'form-data'
+    bodyFields = formParts.map(parseCurlFormPart)
     if (!pairs.some((p) => p.key.toLowerCase() === 'content-type')) {
       autoCt = 'multipart/form-data'
       pairs.push({ key: 'Content-Type', value: autoCt })
@@ -383,8 +488,30 @@ export function parseCurl(cmd: string): ParsedCurl {
     method: method || (dataParts.length || formParts.length ? 'POST' : 'GET'),
     url,
     headers: pairs,
-    body
+    body,
+    bodyType,
+    bodyFields
   }
+}
+
+/**
+ * 解析一条 `-F` 表单参数（`key=value` / `key=@本地文件路径[;type=...]` / `key=<本地文件路径`）。
+ * `@` 才是「上传文件」：`<` 表示把文件内容当字段值，本应用不读文件内容，退化成文本值
+ *（值就是那个路径，用户可在「类型」里自己改成文件）。
+ */
+function parseCurlFormPart(part: string): ApiFormField {
+  const raw = String(part || '')
+  const eq = raw.indexOf('=')
+  if (eq < 0) return { key: raw.trim(), value: '', isFile: false }
+  const key = raw.slice(0, eq).trim()
+  const rest = raw.slice(eq + 1)
+  if (rest.startsWith('@')) {
+    // `;type=image/png` / `;filename=x.png` 这类参数由 multipart 自己生成，这里丢掉
+    const path = rest.slice(1).split(';')[0]
+    return { key, value: path, isFile: true }
+  }
+  const value = rest.startsWith('<') ? rest.slice(1) : rest
+  return { key, value, isFile: false }
 }
 
 /** 从请求头键值对里取 Content-Type 的值（键名大小写不敏感）；没有则返回空串 */

@@ -1,0 +1,286 @@
+/**
+ * Agent / AI 会话的纯函数。
+ *
+ * 会话的 CRUD / 落盘 / 流式 part 追加等逻辑从 `app-store.ts` 抽出，
+ * 减小主文件体积。这些函数不依赖 `set`/`get`，可被各 slice 复用。
+ */
+import { useAppStore } from './app-store'
+import { isDraftConversation } from './types'
+import type {
+  AgentChatMessage,
+  AgentConversation,
+  AgentStreamEvent,
+  AiMessagePart,
+  AiStreamEvent
+} from '@shared/types'
+
+/** requestId -> sessionId：把流式事件路由到发起对话的那个会话 */
+export const aiRequestSessions = new Map<string, string>()
+
+/** requestId -> conversationId：把 Agent 流式事件路由到发起对话的那个会话 */
+export const agentRequestConversations = new Map<string, string>()
+
+/** 会话默认标题（用户没命名、也没发过消息时显示） */
+export const DEFAULT_CONVERSATION_TITLE = '新会话'
+
+/** 由首条用户消息生成会话标题：取首行、截断到 30 字 */
+export function titleFromMessage(text: string): string {
+  const firstLine = text.split('\n')[0].trim()
+  if (!firstLine) return DEFAULT_CONVERSATION_TITLE
+  return firstLine.length > 30 ? `${firstLine.slice(0, 30)}…` : firstLine
+}
+
+/**
+ * 新建一个「草稿」会话（= 当前工作区的新建会话页；**形态待定**、**不出现在会话列表里**）。
+ *
+ * ⚠️ 这里**刻意不写 `kind`**：会话形态由**首条消息时选中的模型**决定 ——
+ * 选了某个 ACP agent 的模型就是 `acp`，选了内置模型就是 `mastra`
+ * （见 AgentSlice.sendAgentMessage）。`!kind` 同时就是「草稿」的判据
+ * （`isDraftConversation`）：侧边栏不列它，发出首条消息那一刻才转正并落盘；
+ * 在此之前它只活在内存里 —— 一旦落盘，storage 的兜底会把缺省形态当成 `mastra`。
+ */
+export function newConversation(workspaceId: string): AgentConversation {
+  const now = Date.now()
+  return {
+    id: crypto.randomUUID(),
+    workspaceId,
+    title: DEFAULT_CONVERSATION_TITLE,
+    messages: [],
+    createdAt: now,
+    updatedAt: now
+  }
+}
+
+/**
+ * 取某工作区最近更新的会话（没有则 null）。
+ *
+ * ⚠️ **草稿（还没发出首条消息的那些）不能盖过真正的会话**：点「新建会话」后随手切走再切回来，
+ * 应该回到你原来在用的那条会话，而不是那个一个字都没写过的空页。一条真会话都没有时才用草稿兜底
+ * （那时它就是「这个工作区当前的那个新会话页」）。
+ */
+export function latestConversation(
+  conversations: AgentConversation[],
+  workspaceId: string
+): AgentConversation | null {
+  let best: AgentConversation | null = null
+  let draft: AgentConversation | null = null
+  for (const c of conversations) {
+    if (c.workspaceId !== workspaceId) continue
+    if (isDraftConversation(c)) {
+      if (!draft || c.updatedAt > draft.updatedAt) draft = c
+      continue
+    }
+    if (!best || c.updatedAt > best.updatedAt) best = c
+  }
+  return best ?? draft
+}
+
+/**
+ * 选中某工作区要展示的会话：优先最近更新的那个，一个都没有就现建一个空会话 ——
+ * 保证「点开工作区就能直接输入」，不用先手动新建。
+ */
+export function ensureConversation(
+  conversations: AgentConversation[],
+  workspaceId: string
+): { conversations: AgentConversation[]; activeId: string | null } {
+  if (!workspaceId) return { conversations, activeId: null }
+  const latest = latestConversation(conversations, workspaceId)
+  if (latest) return { conversations, activeId: latest.id }
+  const created = newConversation(workspaceId)
+  return { conversations: [...conversations, created], activeId: created.id }
+}
+
+/**
+ * 修改某个会话（浅合并）。
+ *
+ * `bumpUpdatedAt` 控制是否把 updatedAt 推到当前时刻：**默认 true**（发消息、改名、删消息等
+ * 低频用户操作都该让它跳到列表最前）。流式输出每个 token 也会走这里追加 part —— 那种高频路径
+ * 必须传 false，否则 updatedAt 每帧都变，会话列表（按 updatedAt 降序）会被持续重排、闪烁。
+ */
+export function patchConversation(
+  conversations: AgentConversation[],
+  id: string,
+  patch: Partial<AgentConversation>,
+  bumpUpdatedAt = true
+): AgentConversation[] {
+  return conversations.map((c) =>
+    c.id === id ? { ...c, ...patch, updatedAt: bumpUpdatedAt ? Date.now() : c.updatedAt } : c
+  )
+}
+
+/**
+ * 流式期间的**增量落盘**节流表（key = conversationId）。
+ *
+ * 一轮 Agent 对话可能跑几十步、持续很久；此前只在「发消息」与「轮末」落盘，
+ * 中途关掉应用这一轮的全部产出（工具结果、已生成的正文）都会丢 —— 用户实测踩到过。
+ * 这里按固定间隔节流写盘：最多丢最后几秒，又不会每个 token 都序列化整段历史。
+ */
+const AGENT_PERSIST_INTERVAL = 3000
+const agentPersistAt = new Map<string, number>()
+
+/**
+ * 把会话当前内容写盘。
+ *
+ * 只写不读回：调用期间流式输出可能又追加了 part，用主进程的返回值覆盖本地会丢内容。
+ */
+export async function persistConversation(
+  conversations: AgentConversation[],
+  id: string
+): Promise<void> {
+  const conversation = conversations.find((c) => c.id === id)
+  if (!conversation) return
+  /**
+   * ⚠️ **形态还没定的会话一律不落盘**（新建后还没发过消息的那些）。
+   *
+   * `kind` 由首条消息定型（见 4.3），而 storage 对缺省 `kind` 的兜底是 `mastra` ——
+   * 提前落盘（改名、清空、切模型…都会走到这里）会把这条会话**永久锁成内置**：
+   * 之后 `setAcpConversationModel` 会因「形态已定」直接忽略，用户再也选不了 ACP 模型。
+   * 这是唯一的守卫点，别在调用方各写一份。
+   */
+  if (!conversation.kind) return
+  await window.api.agent.saveConversation({
+    id: conversation.id,
+    workspaceId: conversation.workspaceId,
+    // 会话形态固定，落盘时一起带上（ACP 会话的消息由 agent 自己管理，不发 messages）
+    kind: conversation.kind,
+    title: conversation.title,
+    ...(conversation.kind === 'acp' ? {} : { messages: conversation.messages }),
+    configId: conversation.configId,
+    // ⚠️ 必须一起落盘：只存 configId 的话，会话选的具体模型重启后会回退成配置默认模型
+    modelId: conversation.modelId,
+    // ACP 会话的绑定关系（agent 配置 id + agent 侧会话 id），落盘后重启仍能接回同一条会话
+    acpAgentId: conversation.acpAgentId,
+    acpSessionId: conversation.acpSessionId
+  })
+}
+
+export function persistConversationThrottled(id: string): void {
+  const now = Date.now()
+  if (now - (agentPersistAt.get(id) ?? 0) < AGENT_PERSIST_INTERVAL) return
+  agentPersistAt.set(id, now)
+  void persistConversation(useAppStore.getState().agentConversations, id)
+}
+
+/** 通知正文的长度上限（系统通知里放一两行就够，长了会被截断） */
+const NOTICE_SNIPPET_CHARS = 120
+
+/**
+ * Agent 一轮对话结束时发系统通知。
+ *
+ * 这里只负责**凑内容**（会话标题 + 回复开头或报错），「应用在不在前台」「用户有没有
+ * 关掉通知」都由主进程判定（见 services/system/notify.ts / ipc/system.ts）——
+ * 渲染端拿不到窗口的真实可见性（隐藏到托盘时 `document.hasFocus()` 不足以判断）。
+ * 用户主动中止的那一轮不发（人就在跟前）。
+ */
+export function notifyAgentFinished(conversationId: string, finishReason: string): void {
+  if (finishReason === 'aborted') return
+  const state = useAppStore.getState()
+  const conversation = state.agentConversations.find((c) => c.id === conversationId)
+  if (!conversation) return
+  const workspace = state.agentWorkspaces.find((w) => w.id === conversation.workspaceId)
+
+  // ACP 会话的消息在本地镜像里（`messages` 恒为空 —— 那些消息归 agent 自己管）
+  const messages =
+    conversation.kind === 'acp'
+      ? (state.agentAcpMessages[conversationId] ?? [])
+      : conversation.messages
+  const last = messages[messages.length - 1]
+  const reply =
+    last?.role === 'assistant'
+      ? last.parts
+        .map((p) => (p.type === 'text' ? p.text : ''))
+        .join('')
+        .replace(/\s+/g, ' ')
+        .trim()
+      : ''
+  const snippet =
+    reply.length > NOTICE_SNIPPET_CHARS ? `${reply.slice(0, NOTICE_SNIPPET_CHARS)}…` : reply
+  const failed = finishReason === 'error'
+
+  void window.api.app.notify({
+    title: `${failed ? 'Agent 执行出错' : 'Agent 已完成'} · ${conversation.title}`,
+    body: snippet || `${workspace?.name ?? '工作区'} 的会话已结束`
+  })
+}
+
+/** Agent 回复生成中的占位 assistant 消息尾部追加 part */
+export function appendAgentPart(parts: AgentChatMessage['parts'], event: AgentStreamEvent) {
+  const next = [...parts]
+  if (event.type === 'text-delta') {
+    const last = next[next.length - 1]
+    if (last?.type === 'text') {
+      next[next.length - 1] = { type: 'text', text: last.text + event.delta }
+    } else {
+      next.push({ type: 'text', text: event.delta })
+    }
+  } else if (event.type === 'reasoning-delta') {
+    const last = next[next.length - 1]
+    if (last?.type === 'reasoning') {
+      next[next.length - 1] = { type: 'reasoning', text: last.text + event.delta }
+    } else {
+      next.push({ type: 'reasoning', text: event.delta })
+    }
+  } else if (event.type === 'tool-call') {
+    next.push({
+      type: 'tool-call',
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      input: event.input
+    })
+  } else if (event.type === 'tool-result') {
+    next.push({
+      type: 'tool-result',
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      output: event.output,
+      isError: event.isError
+    })
+  } else if (event.type === 'error') {
+    next.push({
+      type: 'text',
+      text: `⚠️ ${event.message}`
+    })
+  }
+  return next
+}
+
+/** AI 回复生成中的占位 assistant 消息尾部追加 part */
+export function appendAssistantPart(
+  parts: AiMessagePart[],
+  event: AiStreamEvent
+): AiMessagePart[] {
+  const next = [...parts]
+  if (event.type === 'text-delta') {
+    const last = next[next.length - 1]
+    if (last?.type === 'text') {
+      next[next.length - 1] = { type: 'text', text: last.text + event.delta }
+    } else {
+      next.push({ type: 'text', text: event.delta })
+    }
+  } else if (event.type === 'reasoning-delta') {
+    const last = next[next.length - 1]
+    if (last?.type === 'reasoning') {
+      next[next.length - 1] = { type: 'reasoning', text: last.text + event.delta }
+    } else {
+      next.push({ type: 'reasoning', text: event.delta })
+    }
+  } else if (event.type === 'tool-call') {
+    next.push({
+      type: 'tool-call',
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      input: event.input
+    })
+  } else if (event.type === 'tool-result') {
+    next.push({
+      type: 'tool-result',
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      output: event.output,
+      isError: event.isError
+    })
+  } else if (event.type === 'error') {
+    next.push({ type: 'text', text: `\n\n⚠️ ${event.message}` })
+  }
+  return next
+}

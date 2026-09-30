@@ -31,6 +31,15 @@ export type TerminalThemeName =
   | 'dracula'
   | 'nord'
 
+/**
+ * 笔记（本地 Markdown 文件）的保存时机。
+ *
+ * - `immediate`：改完立即写盘（不等待）
+ * - `delay`：停止输入若干秒后写盘（秒数见 `Preferences.noteAutoSaveDelay`）
+ * - `manual`：只在你点保存 / Ctrl+S 时写盘，改动留在编辑器里（缺省）
+ */
+export type NoteSaveMode = 'immediate' | 'delay' | 'manual'
+
 export interface Preferences {
   theme: ThemeMode
   /** 界面配色方案（强调色），缺省 neutral */
@@ -72,6 +81,15 @@ export interface Preferences {
    * 在确认框里勾选「以后都不再提示」会自动把它改成 false（可在设置里重新打开）。
    */
   confirmCloseTab: boolean
+  /**
+   * 笔记（本地 Markdown 文件）的保存时机，**缺省 `manual`**。
+   *
+   * 手动模式下改动只留在编辑器里（状态栏显示「未保存」），点保存按钮 / Ctrl+S 才写盘；
+   * 关闭标签前若有未保存改动会弹「不保存 / 保存并关闭 / 取消」。
+   */
+  noteSaveMode: NoteSaveMode
+  /** `noteSaveMode === 'delay'` 时，停止输入多少秒后自动保存（1–60，缺省 2） */
+  noteAutoSaveDelay: number
   /**
    * 活动栏里被隐藏的功能区 id 列表（缺省空数组 = 全部显示）。
    * 设置里关闭某个功能区后它既不出现在活动栏，也不会被激活。
@@ -416,34 +434,6 @@ export interface ScriptEntry {
   updatedAt: number
 }
 
-/** 用户笔记：Vditor 编辑器承载 Markdown 正文 */
-export interface NoteEntry {
-  id: string
-  /** 笔记标题，兼作列表展示与搜索 */
-  title: string
-  /** 笔记正文（Markdown） */
-  content: string
-  /** 历史字段：Vditor 只吃 Markdown，新保存一律为 markdown（保留以兼容旧数据） */
-  language: string
-  /**
-   * 所属分组；undefined = 未分组。
-   * 只由 `notes:arrange`（拖拽重排）改动 —— 普通的保存/新建不要碰它。
-   */
-  groupId?: string
-  createdAt: number
-  updatedAt: number
-}
-
-/** 从本地文件导入笔记的结果（每个文件一篇笔记） */
-export interface NoteImportResult {
-  /** 导入后的完整笔记列表 */
-  notes: NoteEntry[]
-  /** 新笔记 id，按选中文件的顺序 —— 调用方据此打开第一篇 */
-  createdIds: string[]
-  /** 读不出来 / 判定为二进制而跳过的文件名 */
-  skipped: string[]
-}
-
 /** 脚本分组：侧边栏里的分组节点（只承担归类 + 排序，不设颜色） */
 export interface ScriptGroup {
   id: string
@@ -451,7 +441,60 @@ export interface ScriptGroup {
   createdAt: number
 }
 
-/** 笔记分组：侧边栏里的分组节点（只承担归类 + 排序，不设颜色） */
+// ---------------------------------------------------------------------------
+// 笔记（Milkdown 编辑器 + 本地文件）
+// ---------------------------------------------------------------------------
+
+/**
+ * 笔记文件树节点：侧边栏展示本地文件夹里的 Markdown 文件。
+ * 目录节点有 children，文件节点没有。
+ */
+export interface NoteFileItem {
+  /** 相对于已打开文件夹根的路径（根目录下文件 = 文件名；子目录文件 = dir/sub/file.md） */
+  path: string
+  /** 显示名（不含路径前缀） */
+  name: string
+  /** 是否目录 */
+  isDir: boolean
+  /** 子项（仅目录有） */
+  children?: NoteFileItem[]
+}
+
+/** 笔记文件读取结果 */
+export interface NoteFileContent {
+  /** 文件路径（绝对路径） */
+  path: string
+  /** 文件内容（Markdown） */
+  content: string
+  /** 文件修改时间（ms） */
+  mtime: number
+}
+
+/**
+ * 笔记会话：重启后恢复上次打开的文件夹与文件标签。
+ *
+ * 笔记直接对应本地文件，打开状态本身不在磁盘上，所以得单独记一份。
+ * 只记「文件夹 + 文件路径」，内容永远以磁盘为准，不做二次缓存。
+ */
+export interface NoteSession {
+  /** 上次打开的笔记文件夹绝对路径（null = 上次没打开文件夹） */
+  folder: string | null
+  /** 上次打开的笔记文件绝对路径（按标签顺序） */
+  files: string[]
+}
+
+/** 旧版笔记数据（仅用于数据传输兼容，新笔记不再使用 electron-store 存储） */
+export interface NoteEntry {
+  id: string
+  title: string
+  content: string
+  language: string
+  groupId?: string
+  createdAt: number
+  updatedAt: number
+}
+
+/** 旧版笔记分组（仅用于数据传输兼容） */
 export interface NoteGroup {
   id: string
   name: string
@@ -579,6 +622,29 @@ export interface ApiHeaderPair {
 }
 
 /**
+ * 请求体类型（接口调试页「请求体」分段的三选一 + none）：
+ * - `none`：**不携带请求体**，发送时不带 body（Content-Type 也原样不动）；
+ * - `raw`（**缺省**，兼容历史数据）：一段自由文本，高亮语言由 Content-Type 推导；
+ * - `x-www-form-urlencoded`：键值对表单，发送时序列化成 `a=1&b=2`；
+ * - `form-data`：`multipart/form-data`，字段可标成「文件」并选本地文件上传。
+ */
+export type ApiBodyType = 'none' | 'raw' | 'x-www-form-urlencoded' | 'form-data'
+
+/**
+ * 表单字段（`x-www-form-urlencoded` 与 `form-data` 共用同一行结构）。
+ * 两种模式**各存一份列表**：来回切换时不会把另一种模式填的内容冲掉。
+ */
+export interface ApiFormField {
+  key: string
+  value: string
+  /**
+   * **仅 `form-data` 生效**：该字段是文件，`value` 是本地绝对路径，
+   * 主进程发送时读这个文件作为 multipart 的文件部分（文件名取路径末段）。
+   */
+  isFile?: boolean
+}
+
+/**
  * 接口请求分组：侧边栏里的分组节点。
  * 与 SshGroup 不同，这里不设颜色 —— 接口请求的分组只承担「归类 + 排序」。
  */
@@ -611,6 +677,12 @@ export interface ApiRequestEntry {
   url: string
   headers: ApiHeaderPair[]
   body: string
+  /** 请求体类型；undefined 视为 'raw'（兼容历史数据） */
+  bodyType?: ApiBodyType
+  /** `x-www-form-urlencoded` 的键值对（`bodyType` 不是它时只是留着，不参与发送） */
+  bodyUrlencoded?: ApiHeaderPair[]
+  /** `form-data` 的字段（`bodyType` 不是它时只是留着，不参与发送） */
+  bodyFormFields?: ApiFormField[]
   /** 协议类型；undefined 视为 'http'（兼容历史数据） */
   protocol?: ApiProtocol
   /** 仅 WebSocket：子协议（Sec-WebSocket-Protocol），如 ['graphql-ws'] */
@@ -640,6 +712,12 @@ export interface ApiHistoryEntry {
   url: string
   headers: ApiHeaderPair[]
   body: string
+  /** 请求体类型；undefined 视为 'raw'（见 ApiRequestEntry.bodyType） */
+  bodyType?: ApiBodyType
+  /** `x-www-form-urlencoded` 的键值对 */
+  bodyUrlencoded?: ApiHeaderPair[]
+  /** `form-data` 的字段（文件字段存的是当时的本地路径，载入后可能已失效） */
+  bodyFormFields?: ApiFormField[]
   /** 失败时为 0 */
   status: number
   statusText: string
@@ -652,7 +730,14 @@ export interface ApiHttpRequest {
   method: string
   url: string
   headers?: Record<string, string>
+  /** `raw` 模式的正文（bodyType 缺省 / 'raw' 时使用） */
   body?: string
+  /** 请求体类型；缺省视为 'raw' */
+  bodyType?: ApiBodyType
+  /** `x-www-form-urlencoded` 的键值对（bodyType 为它时使用） */
+  urlencoded?: ApiHeaderPair[]
+  /** `form-data` 的字段（bodyType 为它时使用；isFile 字段由主进程读本地文件） */
+  formFields?: ApiFormField[]
   /** 超时（毫秒） */
   timeoutMs?: number
   /** 跳过 TLS 证书校验（自签证书） */
@@ -674,6 +759,23 @@ export interface ApiHttpResponse {
   /** 耗时（毫秒） */
   timeMs: number
   /** 失败时的错误信息 */
+  error?: string
+}
+
+/**
+ * `api:pickFile` 的结果：为 `form-data` 的文件字段选一个本地文件。
+ * 取消时只有 `canceled: true`；所选文件读不到时给 `error`（不抛异常，与 executeHttp 的约定一致）。
+ */
+export interface ApiPickFileResult {
+  canceled: boolean
+  file?: {
+    /** 本地绝对路径（就是要存进 ApiFormField.value 的东西） */
+    path: string
+    /** 文件名（界面展示用；发送时也用它当 multipart 的 filename） */
+    name: string
+    /** 字节数 */
+    size: number
+  }
   error?: string
 }
 
@@ -852,12 +954,14 @@ export interface McpServerConfig {
 export type AiPermissionMode = 'full' | 'confirm'
 
 /**
- * AI Agent 后端：
- * - ai-sdk：内置 AI SDK 驱动（复用模型配置），工具由应用自己提供
- * - acp：连接外部 ACP agent（如 codex-acp），应用作为 ACP 客户端
- * - mastra：内置 Mastra 驱动（复用同一套模型配置与工具），实验性
+ * AI Agent 的两种形态（**一个会话固定是其中一种，创建后不可互切**）：
+ * - mastra：应用自带的 Mastra agent（复用模型配置与内置工具，**消息由本应用管理**）
+ * - acp：本机某个外部 ACP agent（如 codex-acp），**消息与会话都由该 agent 自己管理**，
+ *   本应用只保存「绑定关系」（acpAgentId + acpSessionId）。
+ *
+ * 模型可以切换（mastra 换模型配置 / ACP 走 set_config_option），但 **ACP 绑定不能换**。
  */
-export type AgentBackend = 'ai-sdk' | 'acp' | 'mastra'
+export type AgentBackend = 'mastra' | 'acp'
 
 /** ACP 后端的外部 agent 启动配置（stdio 通信） */
 export interface AcpAgentConfig {
@@ -874,8 +978,10 @@ export interface AcpAgentConfig {
    */
   env?: Record<string, string>
   /**
-   * 从该 agent 拉取（session/new 的 configOptions，category=model）并勾选的模型 id 列表。
-   * 空 = 未选择，使用 agent 自己的当前模型。
+   * 可切换的模型 id 列表 —— **在设置页里从 agent 拉取（`session/new` 的 configOptions）
+   * 或手工填写并勾选**，是 AI Agent 会话模型下拉的**唯一来源**。
+   *
+   * 留空 = 不限制 / 未配置：会话页不列出该 agent 的模型，模型由 agent 自己的当前档位决定。
    */
   models?: string[]
 }
@@ -890,6 +996,45 @@ export interface DetectedAcpAgent {
   args: string[]
   /** 解析到的绝对路径 */
   path: string
+}
+
+/**
+ * ACP agent 侧的一个会话（`session/list` 的返回项）。
+ *
+ * 这是「导入模式」的数据源：应用不管理 ACP 会话内容，只把它的 id 绑到本地会话记录上。
+ */
+export interface AcpSessionInfo {
+  /** agent 侧的会话 id */
+  sessionId: string
+  /** 该会话的工作目录（绝对路径） */
+  cwd: string
+  /** agent 给的标题（可能没有） */
+  title?: string
+  /** 最近活动时间（ISO 8601，可能没有） */
+  updatedAt?: string
+}
+
+/** ACP agent 上报的模型选择项（session/new | session/load 的 configOptions 里 category=model 的那项） */
+export interface AcpModelList {
+  /** 该模型选择项的 configOption id（会话内切换时回传 set_config_option 用） */
+  optionId: string
+  /** agent 当前选中的模型 value */
+  currentValue: string
+  models: Array<{ value: string; name: string }>
+}
+
+/**
+ * ACP 会话的运行时状态（agent 侧会话 id + 可切换的模型列表），
+ * 由主进程在会话就绪（session/new | session/load）后广播给渲染端。
+ */
+export interface AcpConversationState {
+  conversationId: string
+  /** agent 侧的会话 id（新建会话时由 session/new 返回后回填本地会话记录） */
+  acpSessionId: string
+  /** agent 是否支持 session/load（不支持时导入的历史看不到，只能看实时输出） */
+  canLoad: boolean
+  /** agent 上报的模型选择项；null = 该 agent 不上报模型（模型由 agent 自己决定） */
+  models: AcpModelList | null
 }
 
 export interface AiSettings {
@@ -907,10 +1052,11 @@ export interface AiSettings {
    * 不设 = 用 @shared/ai-timeouts 的缺省值（5 分钟）；设置页可改。
    */
   modelTimeoutMs?: number
-  /** 预定义的 ACP agent 配置（设置页维护，工作区在 AI Agent 模型下拉处选择） */
+  /**
+   * 已登记的 ACP agent 配置 —— **在 AI Agent 侧边栏的「导入」弹窗里维护**（检测 / 手动添加），
+   * 不再有独立的设置页。ACP 会话创建时绑定其中之一，之后不可切换。
+   */
   acpAgents?: AcpAgentConfig[]
-  /** 当前 ACP 后端使用的配置 id（缺省取 acpAgents[0]） */
-  activeAcpId?: string
 }
 
 /** 主进程向渲染进程发起的命令执行确认请求 */
@@ -1025,12 +1171,6 @@ export interface AiChatRequest {
   configId?: string
   /** 配置下的具体模型 id（配置挂了多个模型时按会话选择）；缺省用配置的 `model` */
   modelId?: string
-  /**
-   * 本次对话使用的内置引擎后端：缺省回退到 Mastra（与 AI Agent 页一致）。
-   * 仅作兜底用：`'ai-sdk'` 走原生 AI SDK 路径，其余（含未设置）走 Mastra。
-   * 终端助手当前没有 ACP 选项（ACP 在 AI Agent 页使用），故此处只区分内置引擎。
-   */
-  backend?: AgentBackend
 }
 
 export type AiMessagePart =
@@ -1076,8 +1216,6 @@ export interface AgentWorkspace {
   name: string
   /** 绝对路径 */
   path: string
-  /** 该工作区使用的 Agent 后端（每会话独立，在模型下拉处切换）；缺省 ai-sdk */
-  backend?: AgentBackend
   createdAt: number
   updatedAt: number
 }
@@ -1108,29 +1246,42 @@ export interface AgentFsFile {
 }
 
 /**
- * Agent 会话：一个工作区下可以有多个独立会话。
+ * Agent 会话：一个工作区下可以有多个独立会话，**每个会话固定一种形态**。
  *
- * 消息随会话一起持久化 —— 会话列表的意义就是能随时切回去接着聊，
- * 而 ACP 后端的 agent 上下文按会话隔离（见 services/ai/acp-agent.ts）。
+ * - `kind: 'mastra'`：应用自带的 Mastra agent，`messages` 随会话落盘（能随时切回来接着聊）；
+ * - `kind: 'acp'`：绑定的外部 ACP agent（`acpAgentId`）**不可切换**，
+ *   `acpSessionId` 是 agent 侧的会话 id（导入时绑定 / 新建后回填）。
+ *   **消息由 agent 自己管理** —— 本地不保存任何消息，打开会话时用 `session/load` 让 agent 回放。
  */
 export interface AgentConversation {
   id: string
   /** 所属工作区 id */
   workspaceId: string
-  /** 标题（默认由首条用户消息截断生成，可重命名） */
-  title: string
-  /** 该会话的完整消息历史 */
-  messages: AgentChatMessage[]
   /**
-   * 该会话使用的后端与选中项 —— **按会话独立**，互不影响。
-   * - 未设置 `backend` 时回退到工作区的 `backend`；
-   * - `configId` 的含义由 `backend` 决定：`ai-sdk` 下是 `AiModelConfig.id`，
-   *   `acp` 下是 `AcpAgentConfig.id`；未设置时回退到设置里的默认模型 / 默认 ACP 预置。
+   * 会话形态：内置 Mastra agent 或某个固定的外部 ACP agent（**定下来之后不可互切**）。
+   *
+   * 缺省表示**还没定**：新建的会话先不指定形态，由**首条消息时选中的模型**决定
+   * （选了 ACP agent 的模型 → `acp`，选了内置模型 → `mastra`），发消息那一刻落盘，
+   * 见 AgentSlice.sendAgentMessage。侧边栏的类型标识在未定时不显示。
    */
-  backend?: AgentBackend
+  kind?: AgentBackend
+  /** 标题（默认由首条用户消息截断生成，可重命名；导入的 ACP 会话取 agent 给的标题） */
+  title: string
+  /** 该会话的完整消息历史；**只有 `kind: 'mastra'` 才有内容**，ACP 会话恒为空数组 */
+  messages: AgentChatMessage[]
+  /** 仅 `kind: 'mastra'`：使用的模型配置 id（`AiModelConfig.id`）；缺省回退到设置里的默认模型 */
   configId?: string
-  /** 具体模型 id：`ai-sdk` 下是配置里的模型 id；`acp` 下是 agent 上报的模型 value。缺省用配置/agent 默认 */
+  /**
+   * 具体模型 id：
+   * - `mastra` 下是配置里的模型 id（缺省用配置的默认模型）；
+   * - `acp` 下是 agent 上报的模型 value（缺省用 agent 的当前模型）。
+   * 两种形态都**可以切换**（ACP 走 `session/set_config_option`）。
+   */
   modelId?: string
+  /** 仅 `kind: 'acp'`：绑定的 ACP agent 配置 id（`AcpAgentConfig.id`），**不可切换** */
+  acpAgentId?: string
+  /** 仅 `kind: 'acp'`：agent 侧的会话 id（`session/new` 或导入时绑定），**不可切换** */
+  acpSessionId?: string
   createdAt: number
   updatedAt: number
 }
@@ -1155,23 +1306,30 @@ export type AgentMessagePart =
 /** 发起 Agent 对话的请求体：绑定一个工作区（工具全部作用于该目录）+ 一个会话 */
 export interface AgentChatRequest {
   workspaceId: string
-  /** 会话 id：ACP 后端据此复用 / 新建独立的 agent session（不同会话不共享上下文） */
+  /** 会话 id：ACP 后端据此定位 / 新建独立的 agent session（不同会话不共享上下文） */
   conversationId: string
+  /** 会话形态；缺省回退到会话记录（缺记录时按 mastra） */
+  kind?: AgentBackend
+  /** 本轮要发给模型的历史。**mastra 用**；ACP 只取最后一条用户文本，其余由 agent 自己维护 */
   history: AgentChatMessage[]
-  /** 本次对话使用的后端；缺省回退到会话记录 / 工作区设置 */
-  backend?: AgentBackend
-  /**
-   * 本次对话选中的 id —— 含义由 `backend` 决定：
-   * `ai-sdk` 下是 `AiModelConfig.id`，`acp` 下是 `AcpAgentConfig.id`。
-   * 缺省回退到设置里的默认模型 / 默认 ACP 预置。
-   */
+  /** 仅 `mastra`：模型配置 id；缺省回退到设置里的默认模型 */
   configId?: string
-  /** 具体模型 id：`ai-sdk` 下是配置里的模型 id；`acp` 下是 agent 上报的模型 value */
+  /** 具体模型 id：`mastra` 是配置里的模型；`acp` 是 agent 上报的模型 value */
   modelId?: string
+  /** 仅 `acp`：绑定的 ACP agent 配置 id */
+  acpAgentId?: string
+  /** 仅 `acp`：agent 侧的会话 id；为空表示「这个会话还没在 agent 侧建过」，由主进程 session/new 补上 */
+  acpSessionId?: string
 }
 
 /** Agent 流事件（形状与 AiStreamEvent 一致；reasoning-delta 为思考内容增量） */
 export type AgentStreamEvent =
+  /**
+   * ACP 会话的历史回放：打开一个导入的 ACP 会话时，`session/load` 让 agent 把整段历史
+   * 回放给客户端，主进程把它拼成消息列表**整段下发**（本地不落盘）。
+   * `mastra` 路径不会发这个事件。
+   */
+  | { type: 'history'; messages: AgentChatMessage[] }
   | { type: 'text-delta'; delta: string }
   | { type: 'reasoning-delta'; delta: string }
   | { type: 'tool-call'; toolCallId: string; toolName: string; input: unknown }

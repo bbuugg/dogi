@@ -1,1514 +1,136 @@
+/**
+ * 全局 zustand store —— 渲染端唯一状态真源。
+ *
+ * 类型、常量、纯函数已抽到 `types.ts`（按功能域分声明）和 `pane-helpers.ts` / `agent-helpers.ts`。
+ * 这里只保留 `create<AppStore>()` 的实现体与 IPC 事件监听。消费方仍从这里 import 一切。
+ */
 import { HOSTS_ACTIVITY_ID } from '@/app/activity-ids'
 import { HOSTS_SCRIPTS_SECTION_ID } from '@/app/section-ids'
 import { parseCurl } from '@/features/api/api-client'
+import { scriptToTerminalInput } from '@/features/scripts/script'
+import { clampTerminalFontSize } from '@/features/terminal/terminal-font'
+import { applyColorTheme } from '@/shared/lib/theme'
+import { requestTabClose, setTabCloseExecutor } from '@/shared/lib/tab-event-bus'
+import { DEFAULT_SHORTCUTS, findShortcutByEvent } from '@shared/shortcuts'
+import { create } from 'zustand'
+
+// ---- 从拆分文件 re-export 全部公开符号（消费方仍只 import `@/stores/app-store`） ----
+export {
+  type PanelTabType,
+  type SettingsTab,
+  type EditorSaveState,
+  type SiblingTabsCloseMode,
+  type PanelTab,
+  type PanelGroup,
+  type AiChatState,
+  type AgentRunState,
+  type TransferItem,
+  type UiState,
+  type AppStore,
+  SETTINGS_TABS,
+  normalizeSettingsTab,
+  editorSaveKey,
+  HOST_LOG_LIMIT,
+  NEW_API_REQUEST_ID,
+  NEW_WS_REQUEST_ID,
+  API_HISTORY_LIMIT,
+  terminalTabId,
+  apiTabId,
+  agentTabId,
+  agentTab,
+  apiTabTitle,
+  groupTerminalSessionId,
+  conversationKind,
+  isDraftConversation,
+  emptyAiChat,
+  emptyAgentRun,
+  withPluginList,
+  DEFAULT_PREFERENCES
+} from './types'
+
+// ---- 导入实现所需的类型与纯函数 ----
+// ⚠️ 顶部的 `export { … } from './types'` **不会**把符号带进本地作用域，
+// 实现体里用到的值（常量 / 纯函数）必须在这里真正 import 一次。
 import {
-  firstGroupId,
+  agentTab,
+  apiTabId,
+  apiTabTitle,
+  emptyAgentRun,
+  emptyAiChat,
+  isDraftConversation,
+  normalizeSettingsTab,
+  terminalTabId,
+  withPluginList,
+  API_HISTORY_LIMIT,
+  DEFAULT_PREFERENCES,
+  HOST_LOG_LIMIT,
+  NEW_API_REQUEST_ID,
+  NEW_WS_REQUEST_ID,
+  type AppStore,
+  type PanelGroup,
+  type TransferItem
+} from './types'
+import {
   genPaneId,
   insertSibling,
   makeLeaf,
   removeLeaf,
-  updateSizes,
-  type PaneNode,
-  type SplitDirectionInput
+  updateSizes
 } from '@/app/layout/pane-layout'
-import { scriptToTerminalInput } from '@/features/scripts/script'
-import { clampTerminalFontSize } from '@/features/terminal/terminal-font'
-import { applyColorTheme } from '@/shared/lib/theme'
-import type { PluginViewInstance } from '@/features/plugins/host'
-import type { PluginInfo } from '@shared/plugin'
-import { DEFAULT_SHORTCUTS, findShortcutByEvent } from '@shared/shortcuts'
 import type {
+  AgentBackend,
   AgentChatMessage,
-  AgentConfirmRequest,
   AgentConversation,
   AgentStreamEvent,
-  AgentWorkspace,
-  AgentBackend,
   AiChatMessage,
-  AiConfirmRequest,
-  AiMessagePart,
-  AiModelConfig,
-  AiPermissionMode,
-  AiSettings,
-  AiStreamEvent,
-  AskFollowupAnswer,
-  AskFollowupRequest,
-  ApiGroup,
-  ApiHistoryEntry,
-  ApiProtocol,
-  ApiRequestEntry,
-  AppShortcutAction,
-  ColorThemeName,
-  HostLogEntry,
-  MonitorUnsupportedReason,
-  NoteEntry,
-  NoteGroup,
-  NoteImportResult,
+  NoteFileItem,
   Preferences,
-  ScriptEntry,
-  ScriptGroup,
-  ServerMetrics,
-  SessionInfo,
-  ShellDetectResult,
-  ShortcutConfig,
-  SkillInfo,
-  SkillRootInfo,
-  SkillSettings,
-  SshConnectProgress,
-  SshGroup,
-  SshKnownHost,
-  SshProfile,
-  SshTunnel,
-  SshTunnelRuntime,
-  TransferExportResult,
-  TransferImportResult,
-  TransferKind,
-  TransferPickResult,
-  SftpTransferProgress,
-  TerminalThemeName,
-  ThemeMode
+  SessionInfo
 } from '@shared/types'
-import type { WorkspaceConfig, WorkspaceConfigSnapshot } from '@shared/workspace-config'
-import { create } from 'zustand'
-
-/** PanelView 标签类型（终端会话也是其中一种，不再有独立的「终端」固定标签） */
-export type PanelTabType =
-  | 'terminal'
-  | 'script'
-  | 'note'
-  | 'api'
-  | 'plugins'
-  | 'plugin'
-  | 'sftp'
-  | 'rdp'
-  | 'tunnels'
-  | 'logs'
-  | 'agent'
-
-/** 设置弹窗左侧分组（与 `features/settings/SettingsModal` 的菜单一一对应） */
-export type SettingsTab =
-  | 'prefs'
-  | 'shortcuts'
-  | 'terminal'
-  | 'models'
-  | 'acp'
-  | 'mcp'
-  | 'skills'
-  | 'timeouts'
-  | 'prompt'
-
-/** 全部合法分组（顺序即菜单顺序） */
-export const SETTINGS_TABS: readonly SettingsTab[] = [
-  'prefs',
-  'shortcuts',
-  'terminal',
-  'models',
-  'acp',
-  'mcp',
-  'skills',
-  'timeouts',
-  'prompt'
-]
-
-/** 归一化外部传入的分组（非法值或未传都回落到「偏好」） */
-export function normalizeSettingsTab(tab?: string): SettingsTab {
-  if (tab && (SETTINGS_TABS as readonly string[]).includes(tab)) return tab as SettingsTab
-  return 'prefs'
-}
-
-/** 编辑页（脚本 / 笔记）的保存状态，由页面自己投影到底部状态栏 */
-export type EditorSaveState = 'saving' | 'dirty' | 'saved'
-
-/**
- * 状态栏保存状态的键。
- *
- * 脚本 id / 笔记 id / 接口请求 id 来自三张不同的表、理论上可能撞车，所以带上类型前缀区分。
- * `api` 与 `ws` 其实同属 apiRequests 一张表（id 不会撞），分开只是为了状态栏的提示语
- * 能分别显示「接口请求」和「WebSocket」。
- */
-export const editorSaveKey = (kind: 'script' | 'note' | 'api' | 'ws', id: string): string =>
-  `${kind}:${id}`
-
-/** 渲染端主机日志条数上限（与主进程内存环形缓冲一致，超出丢最旧的） */
-const HOST_LOG_LIMIT = 1000
-
-/**
- * 等待二次确认的关闭操作。
- *
- * 用户开了「关闭标签前二次确认」（`Preferences.confirmCloseTab`）时，
- * 关闭入口不直接关，而是挂到这里，由 `TabCloseConfirm` 弹框后再真正执行。
- */
-export type PendingTabClose =
-  | { kind: 'tab'; tabId: string; label: string }
-  | { kind: 'group'; groupId: string; count: number }
-
-/**
- * PanelView 中打开的标签页。
- *
- * 标签 id 由身份推导（terminal-<sessionId> / script-<id> / note-<id> / api-<id> /
- * plugins / plugin-<viewId>），这样「是否已打开」只需比对 id，无需遍历业务字段。
- */
-export interface PanelTab {
-  id: string
-  type: PanelTabType
-  title: string
-  closable: boolean
-  /** 所属面板组（分屏树的一个叶子） */
-  groupId: string
-  /** terminal：对应的终端会话 id */
-  sessionId?: string
-  /** agent：对应的 Agent 会话 id */
-  agentConversationId?: string
-  scriptId?: string
-  noteId?: string
-  /** 接口请求：保存的请求 id */
-  apiRequestId?: string
-  /**
-   * 接口请求的协议类型（决定这个标签渲染 ApiPage 还是 WsPage）。
-   * 打开标签时从请求上抄一份 —— 协议创建后不可改，所以不会与请求本身漂移；
-   * 草稿标签则是新建时指定的协议（见 `openNewApiDraft`）。
-   */
-  apiProtocol?: ApiProtocol
-  /** 接口请求（未保存草稿）的目标分组：保存落盘时写入该分组 */
-  apiGroupId?: string
-  /** sftp：对应的 SSH 主机配置 id（凭据在主进程按它解密） */
-  sftpProfileId?: string
-  /** rdp：对应的主机配置 id（kind = 'rdp'：地址 / 端口 / 凭据都取自它） */
-  rdpProfileId?: string
-  pluginViewId?: string
-}
-
-/**
- * 面板组（分屏树的一个叶子）：一组平级标签页，同一时刻只显示激活的那个。
- * 分屏、拖拽排序、跨组移动都作用在组与标签上（VS Code 编辑器组语义）。
- */
-export interface PanelGroup {
-  id: string
-  tabIds: string[]
-  activeTabId: string | null
-}
-
-/** 终端标签 id：由会话 id 推导，重连换会话 id 时同步换标签 id */
-export function terminalTabId(sessionId: string): string {
-  return `terminal-${sessionId}`
-}
-
-/** 接口请求标签 id：由请求 id 推导 */
-export function apiTabId(requestId: string): string {
-  return `api-${requestId}`
-}
-
-/** Agent 会话标签 id：由会话 id 推导 */
-export function agentTabId(conversationId: string): string {
-  return `agent-${conversationId}`
-}
-
-/**
- * Agent 会话标签的载荷。
- *
- * `title` 只是个初值 —— 渲染时 `PanelTabItem` 会优先取会话当前的 title
- * （与终端标签取 `session.title` 同一套路），所以会话重命名 / 首条消息自动定标题
- * 都不需要再同步标签，不会漂移。
- */
-function agentTab(conversation: Pick<AgentConversation, 'id' | 'title'>): Omit<PanelTab, 'groupId'> {
-  return {
-    id: agentTabId(conversation.id),
-    type: 'agent',
-    title: conversation.title,
-    closable: true,
-    agentConversationId: conversation.id
-  }
-}
-
-/** 未保存的「新建请求」草稿标签使用的请求 id（不是一个真实存储条目） */
-export const NEW_API_REQUEST_ID = '__new__'
-
-/**
- * 未保存的「新建 WebSocket」草稿标签的请求 id。
- *
- * 与 HTTP 草稿**分开**：两者共用同一个草稿 id 的话，已经打开 HTTP 草稿时
- * 再点「新建 WebSocket」只会聚焦到那个 HTTP 草稿上，协议切换不过来。
- */
-export const NEW_WS_REQUEST_ID = '__new_ws__'
-
-/** 请求历史最多保留的条数 */
-export const API_HISTORY_LIMIT = 50
-
-/**
- * 接口请求的展示名：优先用用户起的名字，否则退回「协议 + 路径」，
- * 都没有时给个占位（新建但还没填地址的请求）。
- */
-export function apiTabTitle(
-  req: Pick<ApiRequestEntry, 'name' | 'method' | 'url'> & { protocol?: ApiProtocol }
-): string {
-  const name = req.name.trim()
-  if (name) return name
-  const isWs = req.protocol === 'ws'
-  const url = req.url.trim()
-  if (!url) return isWs ? '新建 WebSocket' : '新建请求'
-  // WebSocket 没有 HTTP 方法，用 WS 前缀代替
-  const prefix = isWs ? 'WS' : req.method
-  try {
-    const u = new URL(url)
-    // 根路径且无查询串时用主机名，避免出现「GET /」这种没信息量的标题
-    const path = u.pathname === '/' && !u.search ? u.host : `${u.pathname}${u.search}`
-    return `${prefix} ${path}`
-  } catch {
-    // 地址还不完整（如只输入了 example.com）时按原文展示
-    return `${prefix} ${url}`
-  }
-}
-
-/** 打开一个已保存的主机会话：主进程按主机类型（ssh / local）决定启动方式 */
-function openSession(profileId: string, cols = 80, rows = 24): Promise<SessionInfo> {
-  return window.api.terminal.createFromProfile(profileId, cols, rows)
-}
+import {
+  reconnectingIds,
+  openSession,
+  withoutTab,
+  resolveFocus,
+  applyTabClose,
+  attachSessionTab,
+  focusTabPatch,
+  closePlainTab,
+  siblingTabIds,
+  closeTabsPatch,
+  closeMissingPluginTabs,
+  closeMissingAgentTabs,
+  addOrFocusTab
+} from './pane-helpers'
+import {
+  aiRequestSessions,
+  agentRequestConversations,
+  DEFAULT_CONVERSATION_TITLE,
+  titleFromMessage,
+  newConversation,
+  ensureConversation,
+  patchConversation,
+  persistConversation,
+  persistConversationThrottled,
+  notifyAgentFinished,
+  appendAgentPart,
+  appendAssistantPart
+} from './agent-helpers'
 
 /** 终端字号持久化写入的防抖句柄（Ctrl+滚轮会触发连续调整） */
 let fontSizeSaveTimer: number | undefined
 
-/**
- * 插件列表变化（禁用 / 卸载 / 重载 / 刷新）后，若插件管理页选中的插件已不在列表中，
- * 清空选中，避免右侧详情停留在已卸载插件的残留数据上。
- */
-function withPluginList(ui: UiState, list: PluginInfo[]): UiState {
-  if (!ui.activePluginId || list.some((p) => p.id === ui.activePluginId)) return ui
-  return { ...ui, activePluginId: null }
-}
-
-/** 重连中的旧会话 ID：其 onClosed 事件不应从布局摘掉面板（会被新会话原地替换） */
-const reconnectingIds = new Set<string>()
-
-/** 单个终端会话独立的 AI 对话状态 */
-export interface AiChatState {
-  messages: AiChatMessage[]
-  streaming: boolean
-  /** 进行中的对话请求 id（用于事件路由与中止） */
-  requestId: string | null
-  error: string | null
-  /**
-   * 该终端会话使用的模型配置 id —— **按会话独立**，互不影响。
-   * 未设置时回退到设置里的默认模型 `aiSettings.activeConfigId`。
-   */
-  configId?: string
-  /** 配置下的具体模型 id（配置挂了多个模型时按会话选择）；缺省用配置的默认模型 */
-  modelId?: string
-}
-
-function emptyAiChat(): AiChatState {
-  return { messages: [], streaming: false, requestId: null, error: null }
-}
-
-/** requestId -> sessionId：把流式事件路由到发起对话的那个会话 */
-const aiRequestSessions = new Map<string, string>()
-
-/**
- * 单个会话的运行时状态。
- *
- * 消息本身存在 `agentConversations` 里（唯一真源，也是落盘的那份），
- * 这里只放「这一轮跑到哪了」—— 两者分开，避免同一份消息维护两遍。
- */
-export interface AgentRunState {
-  streaming: boolean
-  /** 进行中的对话请求 id（用于事件路由与中止） */
-  requestId: string | null
-  error: string | null
-}
-
-function emptyAgentRun(): AgentRunState {
-  return { streaming: false, requestId: null, error: null }
-}
-
-/** requestId -> conversationId：把 Agent 流式事件路由到发起对话的那个会话 */
-const agentRequestConversations = new Map<string, string>()
-
-/** 会话默认标题（用户没命名、也没发过消息时显示） */
-const DEFAULT_CONVERSATION_TITLE = '新会话'
-
-/** 由首条用户消息生成会话标题：取首行、截断到 30 字 */
-function titleFromMessage(text: string): string {
-  const firstLine = text.split('\n')[0].trim()
-  if (!firstLine) return DEFAULT_CONVERSATION_TITLE
-  return firstLine.length > 30 ? `${firstLine.slice(0, 30)}…` : firstLine
-}
-
-/** 新建一个内存态会话（落盘时机见 persistConversation） */
-function newConversation(workspaceId: string): AgentConversation {
-  const now = Date.now()
-  return {
-    id: crypto.randomUUID(),
-    workspaceId,
-    title: DEFAULT_CONVERSATION_TITLE,
-    messages: [],
-    createdAt: now,
-    updatedAt: now
-  }
-}
-
-/** 取某工作区最近更新的会话（没有则 null） */
-function latestConversation(
-  conversations: AgentConversation[],
-  workspaceId: string
-): AgentConversation | null {
-  let best: AgentConversation | null = null
-  for (const c of conversations) {
-    if (c.workspaceId !== workspaceId) continue
-    if (!best || c.updatedAt > best.updatedAt) best = c
-  }
-  return best
-}
-
-/**
- * 选中某工作区要展示的会话：优先最近更新的那个，一个都没有就现建一个空会话 ——
- * 保证「点开工作区就能直接输入」，不用先手动新建。
- */
-function ensureConversation(
-  conversations: AgentConversation[],
-  workspaceId: string
-): { conversations: AgentConversation[]; activeId: string | null } {
-  if (!workspaceId) return { conversations, activeId: null }
-  const latest = latestConversation(conversations, workspaceId)
-  if (latest) return { conversations, activeId: latest.id }
-  const created = newConversation(workspaceId)
-  return { conversations: [...conversations, created], activeId: created.id }
-}
-
-/**
- * 修改某个会话（浅合并）。
- *
- * `bumpUpdatedAt` 控制是否把 updatedAt 推到当前时刻：**默认 true**（发消息、改名、删消息等
- * 低频用户操作都该让它跳到列表最前）。流式输出每个 token 也会走这里追加 part —— 那种高频路径
- * 必须传 false，否则 updatedAt 每帧都变，会话列表（按 updatedAt 降序）会被持续重排、闪烁。
- */
-function patchConversation(
-  conversations: AgentConversation[],
-  id: string,
-  patch: Partial<AgentConversation>,
-  bumpUpdatedAt = true
-): AgentConversation[] {
-  return conversations.map((c) =>
-    c.id === id ? { ...c, ...patch, updatedAt: bumpUpdatedAt ? Date.now() : c.updatedAt } : c
-  )
-}
-
-/**
- * 把会话当前内容写盘。
- *
- * 只写不读回：调用期间流式输出可能又追加了 part，用主进程的返回值覆盖本地会丢内容。
- */
-/**
- * 流式期间的**增量落盘**节流表（key = conversationId）。
- *
- * 一轮 Agent 对话可能跑几十步、持续很久；此前只在「发消息」与「轮末」落盘，
- * 中途关掉应用这一轮的全部产出（工具结果、已生成的正文）都会丢 —— 用户实测踩到过。
- * 这里按固定间隔节流写盘：最多丢最后几秒，又不会每个 token 都序列化整段历史。
- */
-const AGENT_PERSIST_INTERVAL = 3000
-const agentPersistAt = new Map<string, number>()
-
-function persistConversationThrottled(id: string): void {
-  const now = Date.now()
-  if (now - (agentPersistAt.get(id) ?? 0) < AGENT_PERSIST_INTERVAL) return
-  agentPersistAt.set(id, now)
-  void persistConversation(useAppStore.getState().agentConversations, id)
-}
-
-async function persistConversation(
-  conversations: AgentConversation[],
-  id: string
-): Promise<void> {
-  const conversation = conversations.find((c) => c.id === id)
-  if (!conversation) return
-  await window.api.agent.saveConversation({
-    id: conversation.id,
-    workspaceId: conversation.workspaceId,
-    title: conversation.title,
-    messages: conversation.messages,
-    backend: conversation.backend,
-    configId: conversation.configId,
-    // ⚠️ 必须一起落盘：只存 configId 的话，会话选的具体模型重启后会回退成配置默认模型
-    modelId: conversation.modelId
-  })
-}
-
-/** 通知正文的长度上限（系统通知里放一两行就够，长了会被截断） */
-const NOTICE_SNIPPET_CHARS = 120
-
-/**
- * Agent 一轮对话结束时发系统通知。
- *
- * 这里只负责**凑内容**（会话标题 + 回复开头或报错），「应用在不在前台」「用户有没有
- * 关掉通知」都由主进程判定（见 services/system/notify.ts / ipc/system.ts）——
- * 渲染端拿不到窗口的真实可见性（隐藏到托盘时 `document.hasFocus()` 不足以判断）。
- * 用户主动中止的那一轮不发（人就在跟前）。
- */
-function notifyAgentFinished(conversationId: string, finishReason: string): void {
-  if (finishReason === 'aborted') return
-  const state = useAppStore.getState()
-  const conversation = state.agentConversations.find((c) => c.id === conversationId)
-  if (!conversation) return
-  const workspace = state.agentWorkspaces.find((w) => w.id === conversation.workspaceId)
-
-  const last = conversation.messages[conversation.messages.length - 1]
-  const reply =
-    last?.role === 'assistant'
-      ? last.parts
-          .map((p) => (p.type === 'text' ? p.text : ''))
-          .join('')
-          .replace(/\s+/g, ' ')
-          .trim()
-      : ''
-  const snippet =
-    reply.length > NOTICE_SNIPPET_CHARS ? `${reply.slice(0, NOTICE_SNIPPET_CHARS)}…` : reply
-  const failed = finishReason === 'error'
-
-  void window.api.app.notify({
-    title: `${failed ? 'Agent 执行出错' : 'Agent 已完成'} · ${conversation.title}`,
-    body: snippet || `${workspace?.name ?? '工作区'} 的会话已结束`
-  })
-}
-
-/** Agent 回复生成中的占位 assistant 消息尾部追加 part */
-function appendAgentPart(parts: AgentChatMessage['parts'], event: AgentStreamEvent) {
-  const next = [...parts]
-  if (event.type === 'text-delta') {
-    const last = next[next.length - 1]
-    if (last?.type === 'text') {
-      next[next.length - 1] = { type: 'text', text: last.text + event.delta }
-    } else {
-      next.push({ type: 'text', text: event.delta })
-    }
-  } else if (event.type === 'reasoning-delta') {
-    const last = next[next.length - 1]
-    if (last?.type === 'reasoning') {
-      next[next.length - 1] = { type: 'reasoning', text: last.text + event.delta }
-    } else {
-      next.push({ type: 'reasoning', text: event.delta })
-    }
-  } else if (event.type === 'tool-call') {
-    next.push({
-      type: 'tool-call',
-      toolCallId: event.toolCallId,
-      toolName: event.toolName,
-      input: event.input
-    })
-  } else if (event.type === 'tool-result') {
-    next.push({
-      type: 'tool-result',
-      toolCallId: event.toolCallId,
-      toolName: event.toolName,
-      output: event.output,
-      isError: event.isError
-    })
-  } else if (event.type === 'error') {
-    next.push({
-      type: 'text',
-      text: `⚠️ ${event.message}`
-    })
-  }
-  return next
-}
-
-/** AI 回复生成中的占位 assistant 消息尾部追加 part */
-function appendAssistantPart(
-  parts: AiMessagePart[],
-  event: AiStreamEvent
-): AiMessagePart[] {
-  const next = [...parts]
-  if (event.type === 'text-delta') {
-    const last = next[next.length - 1]
-    if (last?.type === 'text') {
-      next[next.length - 1] = { type: 'text', text: last.text + event.delta }
-    } else {
-      next.push({ type: 'text', text: event.delta })
-    }
-  } else if (event.type === 'reasoning-delta') {
-    const last = next[next.length - 1]
-    if (last?.type === 'reasoning') {
-      next[next.length - 1] = { type: 'reasoning', text: last.text + event.delta }
-    } else {
-      next.push({ type: 'reasoning', text: event.delta })
-    }
-  } else if (event.type === 'tool-call') {
-    next.push({
-      type: 'tool-call',
-      toolCallId: event.toolCallId,
-      toolName: event.toolName,
-      input: event.input
-    })
-  } else if (event.type === 'tool-result') {
-    next.push({
-      type: 'tool-result',
-      toolCallId: event.toolCallId,
-      toolName: event.toolName,
-      output: event.output,
-      isError: event.isError
-    })
-  } else if (event.type === 'error') {
-    next.push({ type: 'text', text: `\n\n⚠️ ${event.message}` })
-  }
-  return next
-}
-
-/** 从所在组摘掉一个标签；若组因此变空则返回被移除的组 ID（连同其标签一起清理） */
-function withoutTab(
-  groups: Record<string, PanelGroup>,
-  tabs: PanelTab[],
-  tabId: string
-): { groups: Record<string, PanelGroup>; tabs: PanelTab[]; removedGroupId: string | null } {
-  const tab = tabs.find((t) => t.id === tabId)
-  if (!tab) return { groups, tabs, removedGroupId: null }
-  const nextTabs = tabs.filter((t) => t.id !== tabId)
-  const g = groups[tab.groupId]
-  if (!g) return { groups, tabs: nextTabs, removedGroupId: null }
-  const tabIds = g.tabIds.filter((x) => x !== tabId)
-  const next: Record<string, PanelGroup> = { ...groups }
-  let removedGroupId: string | null = null
-  if (tabIds.length === 0) {
-    delete next[tab.groupId]
-    removedGroupId = tab.groupId
-  } else {
-    next[tab.groupId] = {
-      ...g,
-      tabIds,
-      activeTabId: g.activeTabId === tabId ? (tabIds[tabIds.length - 1] ?? null) : g.activeTabId
-    }
-  }
-  return { groups: next, tabs: nextTabs, removedGroupId }
-}
-
-/**
- * 重算焦点：优先保留原焦点组，组已消失则回退到布局里的第一个组。
- * activeSessionId 只在激活标签是终端时改变（切到脚本/笔记标签不该让「当前终端」丢失）。
- */
-function resolveFocus(
-  layout: PaneNode | null,
-  groups: Record<string, PanelGroup>,
-  tabs: PanelTab[],
-  preferGroupId: string | null,
-  prevSessionId: string | null
-): { activeGroupId: string | null; activeSessionId: string | null } {
-  const activeGroupId =
-    preferGroupId && groups[preferGroupId]
-      ? preferGroupId
-      : (firstGroupId(layout) ?? Object.keys(groups)[0] ?? null)
-  const g = activeGroupId ? groups[activeGroupId] : undefined
-  const tab = g?.activeTabId ? tabs.find((t) => t.id === g.activeTabId) : undefined
-  return {
-    activeGroupId,
-    activeSessionId: tab?.type === 'terminal' ? (tab.sessionId ?? prevSessionId) : prevSessionId
-  }
-}
-
-/** 关闭会话后统一维护：更新组、从布局摘掉空组、折叠单子节点、重选焦点 */
-function applyTabClose(
-  s: Pick<
-    AppStore,
-    | 'sessions'
-    | 'layout'
-    | 'groups'
-    | 'activeGroupId'
-    | 'activeSessionId'
-    | 'exitedSessions'
-    | 'monitors'
-    | 'monitorUnsupported'
-    | 'aiChats'
-    | 'connectStages'
-    | 'ui'
-  >,
-  id: string
-): Partial<AppStore> {
-  const sessions = s.sessions.filter((x) => x.id !== id)
-  const tab = s.ui.panelTabs.find((t) => t.type === 'terminal' && t.sessionId === id)
-  const { groups, tabs, removedGroupId } = tab
-    ? withoutTab(s.groups, s.ui.panelTabs, tab.id)
-    : { groups: s.groups, tabs: s.ui.panelTabs, removedGroupId: null }
-  const layout = removedGroupId ? removeLeaf(s.layout, removedGroupId) : s.layout
-  // 关掉的若是当前会话，焦点回落到原组（或布局里的第一个组）
-  const focus = resolveFocus(
-    layout,
-    groups,
-    tabs,
-    s.activeGroupId,
-    s.activeSessionId === id ? null : s.activeSessionId
-  )
-  const exited = new Set(s.exitedSessions)
-  exited.delete(id)
-  const monitors = { ...s.monitors }
-  delete monitors[id]
-  // 「不支持监控」标记随会话关闭一并清理
-  const monitorUnsupported = { ...s.monitorUnsupported }
-  delete monitorUnsupported[id]
-  // 会话关闭，其独立的 AI 对话与 AI 面板开关随之清理
-  const aiChats = { ...s.aiChats }
-  delete aiChats[id]
-  const aiOpenSessions = { ...s.ui.aiOpenSessions }
-  delete aiOpenSessions[id]
-  const aiMinimizedSessions = { ...s.ui.aiMinimizedSessions }
-  delete aiMinimizedSessions[id]
-  // 连接进度也随之清理
-  const connectStages = { ...s.connectStages }
-  delete connectStages[id]
-  return {
-    sessions,
-    groups,
-    layout,
-    activeGroupId: focus.activeGroupId,
-    activeSessionId: focus.activeSessionId,
-    exitedSessions: exited,
-    monitors,
-    monitorUnsupported,
-    aiChats,
-    connectStages,
-    ui: { ...s.ui, panelTabs: tabs, aiOpenSessions, aiMinimizedSessions }
-  }
-}
-
-/**
- * 新会话作为终端标签加入当前激活组（没有可用组时新建组并重置布局），并聚焦它。
- * 打开连接、新建本地终端都走这里，保证「打开 = 在 PanelView 里多一个标签」。
- */
-function attachSessionTab(s: AppStore, info: SessionInfo): Partial<AppStore> {
-  const tabs = [...s.ui.panelTabs]
-  const groups = { ...s.groups }
-  const base = {
-    id: terminalTabId(info.id),
-    type: 'terminal' as const,
-    title: info.title || '终端',
-    closable: true,
-    sessionId: info.id
-  }
-  let activeGroupId =
-    (s.activeGroupId && groups[s.activeGroupId] ? s.activeGroupId : null) ??
-    firstGroupId(s.layout)
-  if (!activeGroupId || !groups[activeGroupId]) {
-    const gid = genPaneId()
-    groups[gid] = { id: gid, tabIds: [base.id], activeTabId: base.id }
-    tabs.push({ ...base, groupId: gid })
-    return {
-      sessions: [...s.sessions, info],
-      groups,
-      layout: makeLeaf(gid),
-      activeGroupId: gid,
-      activeSessionId: info.id,
-      ui: { ...s.ui, panelTabs: tabs }
-    }
-  }
-  const g = groups[activeGroupId]
-  groups[activeGroupId] = { ...g, tabIds: [...g.tabIds, base.id], activeTabId: base.id }
-  tabs.push({ ...base, groupId: activeGroupId })
-  return {
-    sessions: [...s.sessions, info],
-    groups,
-    activeGroupId,
-    activeSessionId: info.id,
-    ui: { ...s.ui, panelTabs: tabs }
-  }
-}
-
-/** 聚焦一个已存在的标签（切换其所在组的激活标签 + 聚焦该组） */
-function focusTabPatch(s: AppStore, tab: PanelTab): Partial<AppStore> {
-  const g = s.groups[tab.groupId]
-  return {
-    activeGroupId: tab.groupId,
-    activeSessionId: tab.type === 'terminal' ? (tab.sessionId ?? s.activeSessionId) : s.activeSessionId,
-    groups:
-      g && g.activeTabId !== tab.id
-        ? { ...s.groups, [tab.groupId]: { ...g, activeTabId: tab.id } }
-        : s.groups
-  }
-}
-
-/** 关闭一个「非终端」标签（脚本/笔记/插件管理/插件视图）：摘掉标签与空组，并重算焦点 */
-function closePlainTab(s: AppStore, tabId: string): Partial<AppStore> {
-  const { groups, tabs, removedGroupId } = withoutTab(s.groups, s.ui.panelTabs, tabId)
-  const layout = removedGroupId ? removeLeaf(s.layout, removedGroupId) : s.layout
-  const focus = resolveFocus(layout, groups, tabs, s.activeGroupId, s.activeSessionId)
-  return {
-    groups,
-    layout,
-    activeGroupId: focus.activeGroupId,
-    activeSessionId: focus.activeSessionId,
-    ui: { ...s.ui, panelTabs: tabs }
-  }
-}
-
-/**
- * 插件视图消失（卸载 / 禁用 / 重载）后，把指向它的插件标签一并关掉。
- *
- * 插件不再往活动栏挂条目，所以「插件没了」只剩标签这一处残留需要收拾：
- * 留着只会停在「插件视图未加载」上。与脚本 / 笔记的删除同理，标签生命周期
- * 跟着对象走。
- */
-function closeMissingPluginTabs(
-  s: AppStore,
-  views: PluginViewInstance[]
-): Partial<AppStore> {
-  const alive = new Set(views.map((v) => v.viewId))
-  const stale = new Set(
-    s.ui.panelTabs
-      .filter((t) => t.type === 'plugin' && (!t.pluginViewId || !alive.has(t.pluginViewId)))
-      .map((t) => t.id)
-  )
-  if (stale.size === 0) return {}
-  const tabs = s.ui.panelTabs.filter((t) => !stale.has(t.id))
-  const groups: Record<string, PanelGroup> = {}
-  let layout = s.layout
-  for (const [id, g] of Object.entries(s.groups)) {
-    const tabIds = g.tabIds.filter((x) => !stale.has(x))
-    if (tabIds.length === 0) {
-      layout = removeLeaf(layout, id)
-      continue
-    }
-    groups[id] = {
-      ...g,
-      tabIds,
-      activeTabId:
-        g.activeTabId && stale.has(g.activeTabId)
-          ? (tabIds[tabIds.length - 1] ?? null)
-          : g.activeTabId
-    }
-  }
-  const focus = resolveFocus(layout, groups, tabs, s.activeGroupId, s.activeSessionId)
-  return {
-    groups,
-    layout,
-    activeGroupId: focus.activeGroupId,
-    activeSessionId: focus.activeSessionId,
-    ui: { ...s.ui, panelTabs: tabs }
-  }
-}
-
-/**
- * 会话不存在了（删除会话 / 删除工作区）→ 把它对应的 Agent 标签一并关掉。
- *
- * 与脚本 / 笔记 / 插件视图同理：标签生命周期跟着对象走，留着只会停在「会话不存在」上。
- * 工作区被删时它的会话是级联删掉的，所以这里按「还活着的会话 id 集合」判定，一次覆盖两种删除。
- */
-function closeMissingAgentTabs(s: AppStore, aliveIds: Set<string>): Partial<AppStore> {
-  const stale = new Set(
-    s.ui.panelTabs
-      .filter(
-        (t) => t.type === 'agent' && (!t.agentConversationId || !aliveIds.has(t.agentConversationId))
-      )
-      .map((t) => t.id)
-  )
-  if (stale.size === 0) return {}
-  const tabs = s.ui.panelTabs.filter((t) => !stale.has(t.id))
-  const groups: Record<string, PanelGroup> = {}
-  let layout = s.layout
-  for (const [id, g] of Object.entries(s.groups)) {
-    const tabIds = g.tabIds.filter((x) => !stale.has(x))
-    if (tabIds.length === 0) {
-      layout = removeLeaf(layout, id)
-      continue
-    }
-    groups[id] = {
-      ...g,
-      tabIds,
-      activeTabId:
-        g.activeTabId && stale.has(g.activeTabId)
-          ? (tabIds[tabIds.length - 1] ?? null)
-          : g.activeTabId
-    }
-  }
-  const focus = resolveFocus(layout, groups, tabs, s.activeGroupId, s.activeSessionId)
-  return {
-    groups,
-    layout,
-    activeGroupId: focus.activeGroupId,
-    activeSessionId: focus.activeSessionId,
-    ui: { ...s.ui, panelTabs: tabs }
-  }
-}
-
-/** 打开标签：已打开则聚焦，否则加入当前激活组（脚本/笔记/插件都走这里） */
-function addOrFocusTab(s: AppStore, tab: Omit<PanelTab, 'groupId'>): Partial<AppStore> {
-  const existing = s.ui.panelTabs.find((t) => t.id === tab.id)
-  if (existing) return focusTabPatch(s, existing)
-
-  let activeGroupId =
-    (s.activeGroupId && s.groups[s.activeGroupId] ? s.activeGroupId : null) ??
-    firstGroupId(s.layout)
-  if (!activeGroupId || !s.groups[activeGroupId]) {
-    const gid = genPaneId()
-    return {
-      groups: { ...s.groups, [gid]: { id: gid, tabIds: [tab.id], activeTabId: tab.id } },
-      layout: makeLeaf(gid),
-      activeGroupId: gid,
-      ui: { ...s.ui, panelTabs: [...s.ui.panelTabs, { ...tab, groupId: gid }] }
-    }
-  }
-  const g = s.groups[activeGroupId]
-  return {
-    groups: { ...s.groups, [activeGroupId]: { ...g, tabIds: [...g.tabIds, tab.id], activeTabId: tab.id } },
-    activeGroupId,
-    ui: { ...s.ui, panelTabs: [...s.ui.panelTabs, { ...tab, groupId: activeGroupId }] }
-  }
-}
-
-/**
- * 某个面板组里「激活标签对应的终端会话 id」（激活的不是终端时为 undefined）。
- *
- * 「终端页面」= 终端标签 = 一个会话，这是 AI 助手的归属单位。状态栏开关、
- * 面板渲染、快捷键都以此为准，省得每处各写一遍「取激活标签再判类型」。
- */
-export function groupTerminalSessionId(
-  s: { groups: Record<string, PanelGroup>; ui: { panelTabs: PanelTab[] } },
-  groupId: string | null | undefined
-): string | undefined {
-  const tabId = groupId ? s.groups[groupId]?.activeTabId : null
-  const tab = tabId ? s.ui.panelTabs.find((t) => t.id === tabId) : undefined
-  return tab?.type === 'terminal' ? tab.sessionId : undefined
-}
-
-interface UiState {
-  /**
-   * 各终端页面是否打开其内置 AI 助手（key 为会话 id，终端标签 = 一个终端页面）。
-   *
-   * AI 助手**属于终端页面**而不是面板组：同一个组里切标签就换实例，
-   * 每个终端页面各自记住自己的开关，互不影响（对话状态见 `aiChats`，同样按会话隔离）。
-   */
-  aiOpenSessions: Record<string, boolean>
-  /**
-   * 各终端页面的 AI 浮窗是否最小化（key 为会话 id）：
-   * 最小化后收起消息列表与输入栏，只留一行状态条展示最新对话内容。
-   */
-  aiMinimizedSessions: Record<string, boolean>
-  settingsOpen: boolean
-  /** 编辑中的 SSH 配置（null=新建，undefined=关闭）；groupId 为新建时预设的分组 */
-  sshDialog: { open: boolean; editing?: SshProfile | null; groupId?: string }
-  /** 运行脚本对话框：scriptId 为预设脚本（可空，在对话框内选择） */
-  runScriptDialog: { open: boolean; scriptId?: string }
-  /** 设置弹窗当前选中的分组（打开时由入口参数写入，见 setSettingsOpen） */
-  settingsTab: SettingsTab
-  /** 是否打开命令面板（Ctrl+Shift+P：脚本、终端、主机、设置等命令入口） */
-  commandPaletteOpen: boolean
-  /**
-   * 当前激活的功能区 id（活动栏选中的 tab，导航的唯一真源）：
-   * 主区域显示什么、侧边栏显示哪个面板都由它派生（见 src/renderer/src/activities.tsx）。
-   * id 失效（插件被卸载等）时回退到第一个内置功能区。
-   */
-  activeActivity: string
-  /**
-   * 活动栏功能区的显示顺序（存功能区 id 列表）。
-   * null = 用户没拖过，按 BUILTIN_ACTIVITIES 的默认顺序；
-   * 列表里缺失的 id（新增功能区）排在已排序 id 之后、保持默认相对顺序（见 orderActivities）。
-   */
-  activityOrder: string[] | null
-  /** 各功能区的侧边栏是否折叠（key 为功能区 id；侧边栏属于功能区，互不影响） */
-  collapsedActivities: Record<string, boolean>
-  /**
-   * 侧边栏内各「可折叠纵向分区」是否收起（key 为分区 id，见 section-ids.ts）。
-   *
-   * 与 collapsedActivities 同一思路：状态放 store 而不是组件里，
-   * 这样分区所在的组件重挂载（切换功能区等）后折叠态仍然保持；
-   * 通用容器见 components/StackedSections.tsx。
-   */
-  collapsedSections: Record<string, boolean>
-  /**
-   * 侧边栏内各「可拖拽分区」的高度（px，key 为分区 id，见 section-ids.ts）。
-   *
-   * 有值 = 用户拖过，该分区高度固定为它（不再参与剩余空间分配）；
-   * 无值 = 按 SectionShell 的 flex 权重自动分配（默认状态）。
-   * 声明了 `resizableAbove` 的分区才可能被写入。
-   */
-  sectionHeights: Record<string, number>
-  /** 插件管理功能：当前正在查看的插件 id（null = 未选中） */
-  activePluginId: string | null
-  /** PanelView 中打开的标签页（扁平列表，按 groupId 归属到面板组） */
-  panelTabs: PanelTab[]
-  /** 侧边栏宽度（px） */
-  sidebarWidth: number
-  /** AI 助手浮窗宽度（px） */
-  aiPanelWidth: number
-  /**
-   * AI 助手浮窗展开时的高度（px，含底部输入横条）。
-   *
-   * 展开态高度固定为它，不随消息多少变化（空对话 / 长回复都一样高），
-   * 用户可拖动卡片自由边调整；实际渲染时再按容器剩余空间钳制。
-   */
-  aiPanelHeight: number
-  /** AI 助手浮窗位置（相对面板组内容区：x=左边距、y=下边距；null=默认底部居中） */
-  aiFloatingPos: { x: number; y: number } | null
-  /**
-   * 各编辑页的保存状态（key 见 `editorSaveKey`），显示在底部状态栏（见 EditorSaveStatus）。
-   *
-   * 脚本页 / 笔记页自己维护草稿与自动保存，「保存中/未保存/已保存」只是把它投影到状态栏；
-   * 按实体隔离，多个脚本或笔记标签同时打开时互不干扰（每个页面只写自己那一格）。
-   */
-  editorSaveStatus: Record<string, EditorSaveState>
-  /**
-   * 等待二次确认的关闭操作（null = 没有待确认的关闭）。
-   * 只在 `Preferences.confirmCloseTab` 开启时才会被写入，弹框见 TabCloseConfirm。
-   */
-  pendingTabClose: PendingTabClose | null
-  /**
-   * 设置页是否正在录制快捷键。
-   *
-   * 录制时全局的 keydown 分发必须让路，否则按下的组合会**既被录进去、又把动作执行一遍**
-   * （两边都监听 window 的捕获阶段，注册更早的分发会先跑）。所以录制期间用一个标志位挂起分发。
-   */
-  shortcutRecording: boolean
-  /**
-   * AI Agent 内嵌终端的「切换请求」计数器（每命中一次开关快捷键 +1）。
-   *
-   * 终端会话是 AgentPage 的页面内状态（要绑定打开时的那个工作区目录），不适合挪进 store，
-   * 所以用自增计数器当一次性信号：store 只广播「请切换一次」，由挂载着的 AgentPage 消费。
-   * 用计数而不是布尔：连按多次不会被合并成一次。
-   */
-  agentTerminalToggle: number
-}
-
-/** 传输任务条目：主进程进度 + 渲染端按「字节差 / 时间差」计算的实时速度（字节/秒） */
-export interface TransferItem extends SftpTransferProgress {
-  /** 当前速度（字节/秒）；0 表示尚未采样或已结束 */
-  speed: number
-  /** 上次速度采样的时间与字节数（内部状态，用于差值计算） */
-  lastAt?: number
-  lastBytes?: number
-}
-
-interface AppStore {
-  // ---------- 终端 ----------
-  sessions: SessionInfo[]
-  activeSessionId: string | null
-  exitedSessions: Set<string>
-  /**主机中的会话阶段（key 为 sessionId；连接就绪/失败/关闭后移除） */
-  connectStages: Record<string, SshConnectProgress>
-  // ---------- SFTP 传输任务 ----------
-  /** 进行中 / 已结束的 SFTP 传输任务（transferId → 进度）；全局，供状态栏任务面板展示。
-   *  结束的不会自动移除，直到用户逐条移除或「清除已完成」（用户要求：完成后留在托盘里） */
-  transfers: Record<string, TransferItem>
-  /** 状态栏右下角传输任务面板是否展开 */
-  transferTrayOpen: boolean
-  /** 分屏布局树：每个叶子承载一个面板组；null 表示还没有任何标签页 */
-  layout: PaneNode | null
-  /** 所有面板组，key 为组 ID */
-  groups: Record<string, PanelGroup>
-  /** 当前聚焦的组 ID（决定新建标签落在哪个组，以及监控/AI 的上下文） */
-  activeGroupId: string | null
-
-  // ---------- SSH ----------
-  profiles: SshProfile[]
-  /**主机分组（侧边栏归类用） */
-  sshGroups: SshGroup[]
-  /** 主机指纹记录（TOFU：首连静默记录，指纹变化硬失败） */
-  knownHosts: SshKnownHost[]
-  /** SSH 隧道配置（本地转发 / SOCKS5 动态代理） */
-  tunnels: SshTunnel[]
-  /** 隧道运行态（key 为隧道 id；由 tunnels:status 全量推送刷新） */
-  tunnelRuntime: Record<string, SshTunnelRuntime>
-  /** 「新建隧道」预选主机（右键「隧道…」传入；面板消费后清空） */
-  tunnelSeed: string | null
-
-  // ---------- 主机日志 ----------
-  /** SSH / 隧道 / SFTP 等主机事件（从旧到新，界面倒序展示；上限 HOST_LOG_LIMIT） */
-  hostLogs: HostLogEntry[]
-
-  // ---------- 用户脚本 ----------
-  scripts: ScriptEntry[]
-  /** 脚本分组（侧边栏里的分组节点，数组顺序即显示顺序） */
-  scriptGroups: ScriptGroup[]
-
-  // ---------- 笔记 ----------
-  notes: NoteEntry[]
-  /** 笔记分组（侧边栏里的分组节点，数组顺序即显示顺序） */
-  noteGroups: NoteGroup[]
-
-  // ---------- 接口请求 ----------
-  /** 保存的接口请求（侧边栏列表；一个请求对应 PanelView 里的一个标签） */
-  apiRequests: ApiRequestEntry[]
-  /** 接口请求分组（侧边栏里的分组节点，数组顺序即显示顺序） */
-  apiGroups: ApiGroup[]
-  /** 请求历史（发送后自动记录，按时间倒序） */
-  apiHistory: ApiHistoryEntry[]
-  /**
-   * 「新建请求」草稿的种子：侧边栏历史记录「载入」时先存一份条目内容再打开草稿标签，
-   * 草稿页感知到种子后消费掉（consumeApiDraftSeed），只对 HTTP 草稿生效一次。
-   */
-  apiDraftSeed: Partial<ApiRequestEntry> | null
-
-  // ---------- 偏好 ----------
-  preferences: Preferences
-  /**
-   * 应用内快捷键配置（动作 -> accelerator）。
-   *
-   * 由**渲染端**在 window 上监听 keydown 自行匹配分发（见 bootstrap 里的 shortcutWired），
-   * 不用 Electron 的 globalShortcut —— 那是系统级的，会占用全局组合键、和别的程序抢。
-   */
-  shortcuts: ShortcutConfig[]
-  /** 本地可用 shell 检测结果（null = 尚未加载） */
-  shells: ShellDetectResult | null
-
-  // ---------- AI ----------
-  aiConfigs: AiModelConfig[]
-  aiSettings: AiSettings
-  /** 每个终端会话独立的 AI 对话（key 为 sessionId，互不影响） */
-  aiChats: Record<string, AiChatState>
-  /** 确认模式下等待用户处理的命令执行请求（key 为确认 id；各会话实例独立弹卡） */
-  pendingConfirms: Record<string, AiConfirmRequest>
-
-  // ---------- AI Agent（工作区编程助手） ----------
-  agentWorkspaces: AgentWorkspace[]
-  /** 当前选中的工作区 id */
-  activeAgentWorkspaceId: string | null
-  /**
-   * 全部会话（含消息历史）。一个工作区下可以有多个会话，`workspaceId` 决定归属。
-   *
-   * 这是消息的唯一真源，也是落盘的那份；新建的空会话先只存在于内存，
-   * 等真的发出第一条消息（或改标题）才写盘，避免留下一堆空记录。
-   */
-  agentConversations: AgentConversation[]
-  /** 当前选中的会话 id（主区域 AgentPage 展示它） */
-  activeAgentConversationId: string | null
-  /** 各会话的运行时状态（key 为 conversationId） */
-  agentRuns: Record<string, AgentRunState>
-  /** Agent 确认模式下等待用户处理的命令执行请求（key 为确认 id） */
-  agentPendingConfirms: Record<string, AgentConfirmRequest>
-  /**
-   * `ask_followup_question` 待回答的提问表单（**key 是 toolCallId**，不是提问 id）——
-   * 渲染端就是按 toolCallId 在对话流里找到对应那条工具调用、把卡片插在那儿的。
-   */
-  followupRequests: Record<string, AskFollowupRequest>
-  /**
-   * 各工作区目录里的配置（key 为 workspaceId，含 `.dogi/workspace.json` 的落盘位置）。
-   *
-   * 这份配置跟着项目目录走、不进 electron-store，所以按工作区**懒加载**并缓存在这里；
-   * 没有 key = 还没读过（不是「没有配置」）。
-   */
-  workspaceConfigs: Record<string, WorkspaceConfigSnapshot>
-
-  // ---------- 技能（Agent Skills：目录 + SKILL.md） ----------
-  /** 磁盘上扫描到的技能（含未启用的，由 skillSettings.disabled 决定用不用） */
-  skills: SkillInfo[]
-  /** 各个技能根目录的扫描情况（设置页展示「扫了哪些地方」） */
-  skillRoots: SkillRootInfo[]
-  /** 技能的用户选择（启停 / 额外根目录）；null = 尚未加载 */
-  skillSettings: SkillSettings | null
-
-  // ---------- UI ----------
-  ui: UiState
-
-  // ---------- 插件（运行时加载外部插件） ----------
-  /** 已加载插件的视图实例（侧边栏入口 + 主区域渲染组件） */
-  plugins: PluginViewInstance[]
-  /** 插件管理页列表（含启用状态/加载错误），与 plugins 分开以支撑管理操作 */
-  pluginList: PluginInfo[]
-  /** 插件通过宿主注册的命令面板命令 */
-  pluginCommands: Record<string, { pluginId: string; title: string; run: () => void }>
-
-  // ---------- 服务器监控 ----------
-  /** 各会话最新指标，key 为 sessionId；无该 key 表示取不到数据（不显示指标） */
-  monitors: Record<string, ServerMetrics>
-  /**
-   * 被判定为「不支持监控」的会话（非 Linux 主机 / 采集持续无效），key 为 sessionId，
-   * 值为判定原因（windows / other / unavailable）。有新鲜指标推送时自动清除。
-   */
-  monitorUnsupported: Record<string, MonitorUnsupportedReason>
-
-  bootstrap: () => Promise<void>
-  /** 新建本地终端标签（不传 shellId 时用偏好设置的默认本地终端），落在当前激活组 */
-  createLocalSession: (shellId?: string) => Promise<void>
-  /**
-   * 连接一个已保存的主机：ssh / local 作为终端会话标签打开，rdp 打开远程桌面标签。
-   * 终端会话返回新会话信息；rdp 主机没有终端会话，返回 null
-   */
-  connectHost: (profile: SshProfile) => Promise<SessionInfo | null>
-  /** 连接指定主机并在其上执行脚本：连接就绪后把脚本写入该会话，返回是否执行成功 */
-  runScriptOnHost: (profile: SshProfile, script: ScriptEntry) => Promise<boolean>
-  closeSession: (id: string) => Promise<void>
-  /** 会话结束后重连：按原类型/SSH 配置新建一个会话并替换旧的 */
-  reconnectSession: (id: string) => Promise<void>
-  setActiveSession: (id: string) => void
-  /** 聚焦某个面板组 */
-  setActiveGroup: (groupId: string) => void
-  /**
-   * 向当前激活组的上/下/左/右拆分出新组：把该组的激活标签拎过去。
-   * 组内不足两个标签时不做任何事（拆了还是同一个组，且绝不新建终端）。
-   */
-  splitActivePane: (direction: SplitDirectionInput) => Promise<void>
-  /** 把标签移到目标组（可指定插入位置）；源组若因此变空则从布局中移除 */
-  moveTabToGroup: (tabId: string, targetGroupId: string, index?: number) => void
-  /** 把标签拖到某组的边缘：在该方向新建组并放入该标签 */
-  splitTabToGroup: (tabId: string, targetGroupId: string, direction: SplitDirectionInput) => void
-  /** 组内重排：把 tabId 移到组内 toIndex（相对重排前）位置 */
-  reorderTabs: (groupId: string, tabId: string, toIndex: number) => void
-  /** 关闭整个组（含其全部标签；终端会话会被结束） */
-  closeGroup: (groupId: string) => Promise<void>
-  /** 拖拽分隔条时更新某分隔节点的权重 */
-  resizeSplit: (splitId: string, sizes: number[]) => void
-  refreshProfiles: () => Promise<void>
-  /** 刷新主机指纹记录（重置 / 连接记录后调用） */
-  refreshKnownHosts: () => Promise<void>
-  /** 重置指定 host:port 的主机指纹记录（下次连接重新 TOFU） */
-  resetHostKey: (host: string, port: number) => Promise<void>
-  /** 新建（不传 id）或重命名（传 id）SSH 分组；color 为 undefined 保留原色，null 清除 */
-  saveSshGroup: (input: { id?: string; name: string; color?: string | null }) => Promise<void>
-  /** 设置连接的强调色（null 清除，回到继承所属分组） */
-  setSshProfileColor: (id: string, color: string | null) => Promise<void>
-  /** 删除分组；deleteProfiles=true 时连同组内连接一起删除，否则组内连接回到「未分组」 */
-  deleteSshGroup: (id: string, deleteProfiles?: boolean) => Promise<void>
-  /** 拖拽排序 / 换组后的整体重排：数组顺序即显示顺序 */
-  arrangeSsh: (payload: {
-    groupIds: string[]
-    profiles: Array<{ id: string; groupId?: string }>
-  }) => Promise<void>
-
-  /** 开/关某个终端页面（会话）的 AI 助手浮窗 */
-  setSessionAiOpen: (sessionId: string, open: boolean) => void
-  /** 最小化/展开 AI 浮窗的消息列表区 */
-  setAiMinimized: (sessionId: string, minimized: boolean) => void
-  /** 移动 AI 浮窗（null = 恢复默认底部居中） */
-  setAiFloatingPos: (pos: { x: number; y: number } | null) => void
-  setSettingsOpen: (open: boolean, tab?: UiState['settingsTab']) => void
-  setCommandPaletteOpen: (open: boolean) => void
-  /** 设置页开始/结束录制快捷键（录制期间挂起应用内快捷键分发） */
-  setShortcutRecording: (recording: boolean) => void
-  /** 请求开关一次 AI Agent 内嵌终端（快捷键触发；由 AgentPage 消费 ui.agentTerminalToggle） */
-  toggleAgentTerminal: () => void
-  /** 执行一个快捷键动作（应用内快捷键命中后调用） */
-  runShortcutAction: (action: AppShortcutAction) => void
-  /** 切换功能区（活动栏 tab）：主区域与侧边栏都由它派生，不再单独存 view */
-  selectActivity: (id: string) => void
-  /** 重排活动栏功能区（拖拽图标后写入完整 id 顺序） */
-  setActivityOrder: (order: string[]) => void
-  /** 运行时加载插件（扫描 userData/plugins，收集视图注入 store） */
-  loadPlugins: () => Promise<void>
-  /** 刷新插件管理页列表（manifest + 启用状态 + 错误） */
-  refreshPluginList: () => Promise<void>
-  /** 启用/禁用插件并刷新视图与列表 */
-  togglePluginEnabled: (id: string, enabled: boolean) => Promise<void>
-  /** 卸载插件并刷新视图与列表 */
-  uninstallPlugin: (id: string) => Promise<void>
-  /** 从文件/目录安装插件并刷新视图与列表 */
-  installPlugin: (sourcePath: string) => Promise<void>
-  /** 重新加载插件（不传 id 表示全部）并刷新视图与列表，无需重启应用 */
-  reloadPlugins: (id?: string) => Promise<void>
-  /** 插件注册的命令面板命令 */
-  registerPluginCommand: (
-    pluginId: string,
-    cmd: { id: string; title: string; run: () => void }
-  ) => void
-  setSidebarWidth: (width: number) => void
-  /** 折叠/展开「当前功能区」自己的侧边栏（侧边栏属于功能区，互不影响） */
-  setSidebarCollapsed: (collapsed: boolean) => void
-  /** 折叠/展开侧边栏内的某个纵向分区（分区 id 见 section-ids.ts） */
-  setSectionCollapsed: (id: string, collapsed: boolean) => void
-  /** 设置可拖拽分区的高度（px，由分区间拖拽条写入，见 StackedSections 的 SectionResizer） */
-  setSectionHeight: (id: string, height: number) => void
-  /**
-   * 定位到「脚本」分区：切回主机功能区并展开侧边栏与脚本分区。
-   *
-   * 脚本不再是独立功能区（只服务于主机，见 section-ids.ts），
-   * 凡是原先「跳到脚本功能区」的入口（状态栏菜单、命令面板）都改走这里。
-   */
-  openScriptsSection: () => void
-  setAiPanelWidth: (width: number) => void
-  /** 设置 AI 助手浮窗展开高度（px，含输入横条） */
-  setAiPanelHeight: (height: number) => void
-  refreshScripts: () => Promise<void>
-  /** 删除脚本，并关掉它的标签页 */
-  deleteScript: (id: string) => Promise<void>
-  /** 刷新脚本分组到 store */
-  refreshScriptGroups: () => Promise<void>
-  /** 新建（不传 id）或重命名（传 id）脚本分组 */
-  saveScriptGroup: (input: { id?: string; name: string }) => Promise<void>
-  /** 删除分组；deleteScripts=true 时连同组内脚本一起删除 */
-  deleteScriptGroup: (id: string, deleteScripts?: boolean) => Promise<void>
-  /** 拖拽排序 / 换组后的整体重排：数组顺序即显示顺序 */
-  arrangeScripts: (payload: {
-    groupIds: string[]
-    scripts: Array<{ id: string; groupId?: string }>
-  }) => Promise<void>
-  /** 刷新接口请求列表到 store */
-  refreshApiRequests: () => Promise<void>
-  /** 刷新接口请求分组到 store */
-  refreshApiGroups: () => Promise<void>
-  /** 新建（不传 id）或重命名（传 id）接口请求分组 */
-  saveApiGroup: (input: { id?: string; name: string }) => Promise<void>
-  /** 删除分组；deleteRequests=true 时连同组内请求一起删除，否则组内请求回到「未分组」 */
-  deleteApiGroup: (id: string, deleteRequests?: boolean) => Promise<void>
-  /** 拖拽排序 / 换组后的整体重排：数组顺序即显示顺序 */
-  arrangeApi: (payload: {
-    groupIds: string[]
-    requests: Array<{ id: string; groupId?: string }>
-  }) => Promise<void>
-  /**
-   * 新建一条请求并返回其 id（不自动打开标签，由调用方决定）。
-   * `seed` 用于预填内容（导入 cURL 走这条路），缺省就是一条空请求。
-   */
-  createApiRequest: (seed?: Partial<ApiRequestEntry>) => Promise<string>
-  /**
-   * 解析 cURL 命令并保存为一条新请求，返回新请求 id。
-   * 解析失败会抛错（由调用方提示），成功时也不自动打开标签。
-   */
-  importCurlRequest: (curlText: string) => Promise<string>
-  /** 刷新请求历史到 store */
-  refreshApiHistory: () => Promise<void>
-  /** 保存接口请求（upsert）：已有请求原地更新 */
-  saveApiRequest: (entry: ApiRequestEntry) => Promise<void>
-  /** 删除接口请求，并关掉它的标签页 */
-  deleteApiRequest: (id: string) => Promise<void>
-  /** 记录一条请求历史（截断到 API_HISTORY_LIMIT 条并落盘） */
-  recordApiHistory: (entry: ApiHistoryEntry) => Promise<void>
-  /** 清空请求历史 */
-  clearApiHistory: () => Promise<void>
-  // ---------- 数据导入 / 导出（左下角菜单） ----------
-  /**
-   * 导出：弹保存对话框 → 主进程把选中的类型各写成一个 JSON 后打包成 zip。
-   * 返回主进程的结果（含保存路径与各类型条目数），取消时不提示。
-   */
-  exportData: (kinds: TransferKind[]) => Promise<TransferExportResult>
-  /** 导入第一步：选 zip 并解析，返回可导入项摘要（bundleId 指向主进程里暂存的内容） */
-  pickImportBundle: () => Promise<TransferPickResult>
-  /** 导入第二步：把勾选的类型写回库，成功后刷新对应的列表（分组可能一起进来） */
-  applyImport: (bundleId: string, kinds: TransferKind[]) => Promise<TransferImportResult>
-  /** 放弃这次导入（丢掉主进程里暂存的解析结果） */
-  cancelImport: (bundleId: string) => Promise<void>
-  /** 刷新笔记列表到 store */
-  refreshNotes: () => Promise<void>
-  /** 新建一篇空笔记并返回其 id（默认语言 markdown）；groupId 用于「在某分组内新建」 */
-  createNote: (groupId?: string) => Promise<string>
-  /** 保存笔记（upsert）：已有笔记原地更新 */
-  saveNote: (note: NoteEntry) => Promise<void>
-  /** 删除笔记，并关掉它的标签页 */
-  deleteNote: (id: string) => Promise<void>
-  /** 从本地选择文件导入为笔记（每个文件一篇），返回新建的 id 供调用方打开第一篇 */
-  importNotes: () => Promise<NoteImportResult>
-  /** 刷新笔记分组到 store */
-  refreshNoteGroups: () => Promise<void>
-  /** 新建（不传 id）或重命名（传 id）笔记分组 */
-  saveNoteGroup: (input: { id?: string; name: string }) => Promise<void>
-  /** 删除分组；deleteNotes=true 时连同组内笔记一起删除 */
-  deleteNoteGroup: (id: string, deleteNotes?: boolean) => Promise<void>
-  /** 拖拽排序 / 换组后的整体重排：数组顺序即显示顺序 */
-  arrangeNotes: (payload: {
-    groupIds: string[]
-    notes: Array<{ id: string; groupId?: string }>
-  }) => Promise<void>
-
-  /** 选择要查看的插件（null 表示取消选择） */
-  selectPlugin: (id: string | null) => void
-  /** 在 PanelView 中打开脚本标签（已存在则激活） */
-  openScriptTab: (scriptId: string) => void
-  /** 在 PanelView 中打开笔记标签（已存在则激活） */
-  openNoteTab: (noteId: string) => void
-  /** 在 PanelView 中打开接口请求标签（已存在则激活） */
-  openApiTab: (requestId: string) => void
-  /**
-   * 打开一个「未保存的新请求」草稿标签（不落盘，保存时才写进列表）。
-   * `protocol` 决定草稿是 HTTP 还是 WebSocket（两者用不同的草稿标签 id）。
-   */
-  openNewApiDraft: (groupId?: string, protocol?: ApiProtocol) => void
-  /** 从历史记录载入：把条目内容存为草稿种子，再打开（或聚焦）「新建请求」草稿标签 */
-  loadApiHistoryDraft: (entry: ApiHistoryEntry) => void
-  /** 草稿页取走种子（取走即清空，避免之后打开草稿又带上旧内容） */
-  consumeApiDraftSeed: () => void
-  /** 打开主机的 SFTP 文件管理标签（已打开则聚焦） */
-  openSftpTab: (profileId: string) => void
-  /** 打开主机的远程桌面（RDP）标签（已打开则聚焦；标签内弹凭据对话框再连接） */
-  openRdpTab: (profileId: string) => void
-  /** 打开「隧道」管理标签（已打开则聚焦；传 profileId 时预选该主机新建隧道） */
-  openTunnelsTab: (profileId?: string) => void
-  /** 隧道面板取走预选主机（取走即清空，避免之后打开又带上旧预选） */
-  consumeTunnelSeed: () => void
-  /** 拉取隧道配置与运行态（启动 / 增删后调用） */
-  refreshTunnels: () => Promise<void>
-  /** 新建（id 为空）或更新隧道；运行中被编辑的隧道由主进程自动重启 */
-  saveTunnel: (input: SshTunnel) => Promise<void>
-  /** 删除隧道（运行中先停止） */
-  removeTunnel: (id: string) => Promise<void>
-  startTunnel: (id: string) => Promise<void>
-  stopTunnel: (id: string) => Promise<void>
-  /** 打开「主机日志」标签（全局单例，已打开则聚焦；打开时顺手拉一次全量） */
-  openLogsTab: () => void
-  /** 重新拉取主机日志全量（跨重启保留的旧记录一并进来） */
-  refreshHostLogs: () => Promise<void>
-  /** 清空主机日志（内存 + 落盘文件） */
-  clearHostLogs: () => Promise<void>
-  /** 在 PanelView 中打开插件管理标签（已存在则激活） */
-  openPluginsTab: () => void
-  /** 在 PanelView 中打开插件视图标签（已存在则激活） */
-  openPluginTab: (viewId: string) => void
-  /** 激活 PanelView 中的指定标签 */
-  activatePanelTab: (id: string) => void
-  /** 关闭 PanelView 中的指定标签 */
-  closePanelTab: (id: string) => void
-  /**
-   * 请求关闭标签：**用户入口一律走这个**，别直接调 `closePanelTab`。
-   * 开了「关闭标签前二次确认」时先挂起等弹框，否则立即关闭。
-   * （`closePanelTab` 保留为「无条件关闭」，供保存草稿后关标签之类的程序化场景使用。）
-   */
-  requestClosePanelTab: (id: string) => void
-  /** 请求关闭整个面板组：同 `requestClosePanelTab`，也走二次确认 */
-  requestCloseGroup: (groupId: string) => void
-  /** 取消待确认的关闭（弹框点「取消」） */
-  cancelPendingTabClose: () => void
-  /** 确认待确认的关闭；dontAskAgain=true 时顺手把「二次确认」设置关掉 */
-  confirmPendingTabClose: (dontAskAgain: boolean) => Promise<void>
-  /** 更新 PanelView 标签标题 */
-  updatePanelTabTitle: (id: string, title: string) => void
-  /** 上报某个编辑页（脚本 / 笔记）的保存状态（由状态栏的 EditorSaveStatus 读取，key 见 `editorSaveKey`） */
-  setEditorSaveStatus: (key: string, state: EditorSaveState) => void
-  /** 打开/关闭 SSH 配置弹窗（editing=null 为新建；groupId 预设新建时的分组） */
-  setSshDialog: (open: boolean, editing?: SshProfile | null, groupId?: string) => void
-  /** 打开/关闭「运行脚本」对话框（可预设要运行的脚本） */
-  setRunScriptDialog: (open: boolean, scriptId?: string) => void
-  refreshAiConfigs: () => Promise<void>
-  /** 重新拉取 AI 设置（删除/新建配置后同步 activeConfigId，避免渲染端悬空） */
-  refreshAiSettings: () => Promise<void>
-  setActiveAiConfig: (id: string) => Promise<void>
-  /**
-   * 设置**某个终端会话**的 AI 助手使用的模型（只影响这一个会话）。
-   * 与 `setActiveAiConfig`（设置页的默认模型）区分开：这里改的是单个会话的覆盖值。
-   * `modelId` 是配置下的具体模型 id（配置挂了多个模型时用）。
-   */
-  setAiChatConfig: (sid: string, configId: string, modelId?: string) => void
-  saveAiSettings: (patch: Partial<AiSettings>) => Promise<void>
-  setAiPermissionMode: (mode: AiPermissionMode) => Promise<void>
-  resolveAiConfirm: (id: string, approved: boolean) => Promise<void>
-  setTheme: (mode: ThemeMode) => Promise<void>
-  /** 设置界面配色方案（强调色，立即生效并持久化）；custom 时传入自定义色值 */
-  setColorTheme: (name: ColorThemeName, customColor?: string) => Promise<void>
-  setTerminalTheme: (name: TerminalThemeName) => Promise<void>
-  setCopyOnSelect: (enabled: boolean) => Promise<void>
-  setRightClickPaste: (enabled: boolean) => Promise<void>
-  setCommandPrediction: (enabled: boolean) => Promise<void>
-  /** 关闭窗口时是否最小化到系统托盘（持久化到偏好设置） */
-  setMinimizeToTray: (enabled: boolean) => Promise<void>
-  /** 关闭标签页前是否二次确认（持久化到偏好设置；确认框里勾「以后都不再提示」会把它关掉） */
-  setConfirmCloseTab: (enabled: boolean) => Promise<void>
-  /** Agent 会话完成、应用不在前台时是否发系统通知（持久化到偏好设置） */
-  setNotifyOnAgentFinish: (enabled: boolean) => Promise<void>
-  /** 设置活动栏被隐藏的功能区 id 列表（持久化到偏好设置） */
-  setHiddenActivities: (ids: string[]) => Promise<void>
-  /** 写入 / 更新一笔 SFTP 传输进度（来自 sftp:progress 广播；结束的保留在托盘，不自动移除） */
-  upsertTransfer: (progress: SftpTransferProgress) => void
-  /** 从任务面板移除一笔传输（用户手动关闭） */
-  removeTransfer: (transferId: string) => void
-  /** 清空所有已结束（成功/失败/取消）的传输 */
-  clearFinishedTransfers: () => void
-  /** 展开 / 收起状态栏右下角的传输任务面板 */
-  setTransferTrayOpen: (open: boolean) => void
-  toggleTransferTray: () => void
-  /** 设置本地终端默认 shell（持久化到偏好设置） */
-  setLocalShell: (shellId: string) => Promise<void>
-  setTerminalFontSize: (size: number) => Promise<void>
-  /** 设置服务器指标采集间隔（毫秒）：立即生效并持久化 */
-  /**
-   * 保存快捷键配置（持久化到主进程）。
-   * 应用内快捷键是「每次按键现读 store 匹配」，所以落盘后无需任何重注册，立刻生效。
-   */
-  saveShortcuts: (shortcuts: ShortcutConfig[]) => Promise<void>
-  setMonitorInterval: (ms: number) => Promise<void>
-  sendAiMessage: (text: string, targetSessionId?: string | null) => Promise<void>
-  abortAi: (sessionId: string) => Promise<void>
-  clearAiMessages: (sessionId: string) => void
-  /** 删除某条消息及其之后的全部消息（用于「从这里重新开始」）；流式期间由 UI 侧禁用 */
-  deleteAiMessagesFrom: (sessionId: string, messageId: string) => void
-  /**
-   * 编辑并重发某条用户消息：**先删掉它及其之后的全部消息**，再用新文本重发。
-   * 顺序不能反 —— `sendAiMessage` 读的是 store 里的历史，反了模型会看到「编辑前 + 编辑后」两条。
-   */
-  resendAiMessage: (sessionId: string, messageId: string, text: string) => Promise<void>
-  handleAiEvent: (requestId: string, event: AiStreamEvent) => void
-  /** 重新拉取 Agent 工作区列表 */
-  loadAgentWorkspaces: () => Promise<void>
-  /** 保存工作区（同名路径视为更新）；返回最新列表 */
-  saveAgentWorkspace: (input: {
-    id?: string
-    name: string
-    path: string
-    backend?: AgentBackend
-  }) => Promise<void>
-  deleteAgentWorkspace: (id: string) => Promise<void>
-  /**
-   * 读取工作区目录里的配置（`<工作区>/.dogi/workspace.json`，快捷功能等）。
-   * 已缓存时直接返回；`force` 用于外部改动后的手动重读。
-   */
-  loadWorkspaceConfig: (workspaceId: string, force?: boolean) => Promise<void>
-  /** 保存工作区目录配置（写盘成功后同步本地缓存） */
-  saveWorkspaceConfig: (workspaceId: string, config: WorkspaceConfig) => Promise<void>
-  /**
-   * 重新扫描技能（设置页打开 / 改完设置后调用）。
-   * 工作区级技能取**当前选中的工作区**；技能内容在磁盘上，所以每次都是实扫。
-   */
-  loadSkills: () => Promise<void>
-  /** 保存技能设置（启停 / 额外根目录）并重新扫描 */
-  saveSkillSettings: (patch: Partial<SkillSettings>) => Promise<void>
-  /** 切换工作区的 Agent 后端（内置 AI SDK / 外部 ACP agent），每会话独立 */
-  setAgentWorkspaceBackend: (id: string, backend: AgentBackend) => Promise<void>
-  /**
-   * 设置**某个会话**使用的后端 / 模型（立即落盘）。
-   * 只写这一个会话 —— 切换 A 会话的模型不该影响 B 会话。
-   * 不动 `updatedAt`：这是配置变更，不该让会话在列表里跳到最前。
-   */
-  setAgentConversationModel: (
-    id: string,
-    patch: { backend?: AgentBackend; configId?: string; modelId?: string }
-  ) => Promise<void>
-  /** 选中工作区：自动定位到它最近更新的会话（一个都没有则新建一个空会话） */
-  selectAgentWorkspace: (id: string) => void
-  /** 新建会话（默认建在当前工作区下）并选中；仅内存，发出首条消息后才落盘 */
-  createAgentConversation: (workspaceId?: string) => void
-  /** 选中会话：同时把它的标签带到 PanelView 前台 */
-  selectAgentConversation: (id: string) => void
-  /** 重命名会话（立即落盘） */
-  renameAgentConversation: (id: string, title: string) => Promise<void>
-  /** 删除会话；删的是当前会话时自动切到同工作区的下一个 */
-  deleteAgentConversation: (id: string) => Promise<void>
-  /** 清空指定会话的消息（保留会话本身） */
-  clearAgentMessages: (conversationId: string) => void
-  /** 删除某条消息及其之后的全部消息（用于「从这里重新开始」）；流式期间由 UI 侧禁用 */
-  deleteAgentMessagesFrom: (messageId: string, conversationId: string) => Promise<void>
-  /** 编辑后重发：删掉这条及其之后的全部消息，再用新文本重新发起这一轮 */
-  resendAgentMessage: (messageId: string, text: string, conversationId: string) => Promise<void>
-  /**
-   * 在指定会话发起 Agent 对话。
-   *
-   * `conversationId` **必传**：会话视图可能同时挂着多个（每个标签一份），
-   * 靠 store 的「当前选中」指针兜底会打到别的会话上。工作区由会话自身推导。
-   */
-  sendAgentMessage: (text: string, conversationId: string) => Promise<void>
-  /** 中止指定会话的对话（必传，理由同 `sendAgentMessage`） */
-  abortAgent: (conversationId: string) => Promise<void>
-  handleAgentEvent: (requestId: string, event: AgentStreamEvent) => void
-  /** 回复 Agent 命令执行确认：approved=true 执行，false 取消 */
-  resolveAgentConfirm: (id: string, approved: boolean) => Promise<void>
-  /**
-   * 提交 `ask_followup_question` 的回答。`toolCallId` 定位卡片（也是 followupRequests 的 key），
-   * `answer` 传 null 表示跳过 —— 工具会拿到「未作答」并自行继续。
-   */
-  resolveFollowup: (toolCallId: string, answer: AskFollowupAnswer | null) => Promise<void>
-}
+// 所有类型、常量、纯函数已抽到 types.ts / pane-helpers.ts / agent-helpers.ts，
+// 此处通过顶部 export { ... } from './types' re-export。
+// 下面直接进入 create<AppStore>() 实现体。
 
 let listenersBound = false
 
-/** 偏好设置默认值：任何存档里缺失的字段都用这里的初值兜底（避免旧存档缺新字段导致 undefined） */
-const DEFAULT_PREFERENCES: Preferences = {
-  theme: 'system',
-  colorTheme: 'neutral',
-  customColor: '#3b82f6',
-  terminalTheme: 'auto',
-  copyOnSelect: true,
-  rightClickPaste: true,
-  commandPrediction: true,
-  terminalFontSize: 13,
-  localShell: 'default',
-  minimizeToTray: true,
-  monitorInterval: 2000,
-  confirmCloseTab: true,
-  notifyOnAgentFinish: true,
-  hiddenActivities: [],
-  browserChannel: 'auto'
-}
-
 export const useAppStore = create<AppStore>()((set, get) => {
-/** 应用内快捷键的 keydown 监听器仅注册一次，避免 HMR / 重复 bootstrap 叠加 */
-let shortcutWired = false
-/** 退出前落盘请求的监听器同样只注册一次 */
-let flushWired = false
+  /** 应用内快捷键的 keydown 监听器仅注册一次，避免 HMR / 重复 bootstrap 叠加 */
+  let shortcutWired = false
+  /** 退出前落盘请求的监听器同样只注册一次 */
+  let flushWired = false
   if (!listenersBound && typeof window !== 'undefined' && window.api) {
     listenersBound = true
     // 会话输出退出等事件 -> 更新状态（数据本身由 TerminalView 自行订阅）
@@ -1579,6 +201,42 @@ let flushWired = false
       if (conversationId) agentRequestConversations.set(requestId, conversationId)
       get().handleAgentEvent(requestId, event)
     })
+    /**
+     * ACP 会话就绪（`session/new` 或 `session/load` 完成）后的状态推送：
+     * agent 侧会话 id + 可切换的模型列表。
+     *
+     * **新建的 ACP 会话靠它回填 `acpSessionId`**（那条记录本来没有 id，是 agent 建的），
+     * 回填后立刻落盘 —— 否则重启后这条会话就变成「没有绑定」的孤儿记录。
+     */
+    window.api.agent.acp.onState((state) => {
+      const before = get().agentConversations.find((c) => c.id === state.conversationId)
+      // 会话记录里的绑定与推送不一致 = 这次是「新建会话」的 id 回填，需要落盘
+      const needsPersist = !!before && before.acpSessionId !== state.acpSessionId
+      // 原来就有 id、现在换了一个 = agent 不支持 session/load 时的降级重绑，得让用户知道
+      const rebound = !!before?.acpSessionId && before.acpSessionId !== state.acpSessionId
+      set((s) => ({
+        acpStates: { ...s.acpStates, [state.conversationId]: state },
+        ...(needsPersist
+          ? {
+              agentConversations: patchConversation(
+                s.agentConversations,
+                state.conversationId,
+                { acpSessionId: state.acpSessionId },
+                // 绑定关系的变更不算「有活动」，不让会话跳到列表最前
+                false
+              )
+            }
+          : {})
+      }))
+      if (needsPersist) void persistConversation(get().agentConversations, state.conversationId)
+      if (rebound) {
+        void import('antd').then(({ message }) =>
+          message.warning(
+            '该 ACP agent 不支持加载已有会话（session/load），已在 agent 侧新建了一个会话，原历史无法显示'
+          )
+        )
+      }
+    })
     window.api.agent.onConfirmRequest((req) => {
       set((s) => ({ agentPendingConfirms: { ...s.agentPendingConfirms, [req.id]: req } }))
     })
@@ -1641,8 +299,8 @@ let flushWired = false
 
     scripts: [],
     scriptGroups: [],
-    notes: [],
-    noteGroups: [],
+    noteFolder: null,
+    noteFileTree: [],
     apiRequests: [],
     apiGroups: [],
     apiHistory: [],
@@ -1664,6 +322,10 @@ let flushWired = false
     agentConversations: [],
     activeAgentConversationId: null,
     agentRuns: {},
+    // ACP 会话的本地镜像 / 运行时状态 / 加载态：都只活在内存里（消息归 agent 自己管）
+    agentAcpMessages: {},
+    acpStates: {},
+    acpLoading: {},
     agentPendingConfirms: {},
     followupRequests: {},
     workspaceConfigs: {},
@@ -1696,7 +358,6 @@ let flushWired = false
       aiPanelHeight: 440,
       aiFloatingPos: null,
       editorSaveStatus: {},
-      pendingTabClose: null,
       shortcutRecording: false,
       agentTerminalToggle: 0
     },
@@ -1705,7 +366,7 @@ let flushWired = false
     monitorUnsupported: {},
 
     bootstrap: async () => {
-      const [profiles, sshGroups, knownHosts, tunnelInit, configs, settings, preferences, shells, scripts, scriptGroups, notes, noteGroups, apiRequests, apiGroups, apiHistory, shortcuts, agentWorkspaces, agentConversations, hostLogs] = await Promise.all([
+      const [profiles, sshGroups, knownHosts, tunnelInit, configs, settings, preferences, shells, scripts, scriptGroups, apiRequests, apiGroups, apiHistory, shortcuts, agentWorkspaces, agentConversations, hostLogs] = await Promise.all([
         window.api.ssh.list(),
         window.api.ssh.listGroups(),
         window.api.ssh.knownHostsList(),
@@ -1716,8 +377,6 @@ let flushWired = false
         window.api.terminal.listShells(),
         window.api.scripts.list(),
         window.api.scripts.listGroups(),
-        window.api.notes.list(),
-        window.api.notes.listGroups(),
         window.api.apiClient.list(),
         window.api.apiClient.listGroups(),
         window.api.apiClient.listHistory(),
@@ -1747,8 +406,6 @@ let flushWired = false
         shells,
         scripts,
         scriptGroups,
-        notes,
-        noteGroups,
         apiRequests,
         apiGroups,
         apiHistory,
@@ -1769,7 +426,7 @@ let flushWired = false
           void Promise.all(
             streaming.map((cid) => persistConversation(get().agentConversations, cid))
           )
-            .catch(() => {})
+            .catch(() => { })
             .finally(() => void window.api.app.flushDone())
         })
       }
@@ -1810,6 +467,34 @@ let flushWired = false
           },
           true
         )
+      }
+
+      // ---------- 恢复上次的笔记会话（文件夹 + 打开的文件标签） ----------
+      // 文件内容永远以磁盘为准，这里只还原「打开状态」；已经被删掉的文件不再恢复，
+      // 否则一启动就会开出一堆「文件不存在」的标签。
+      const noteSession = await window.api.notes.getSession()
+      if (noteSession.folder) {
+        const items = await window.api.notes.refreshFolder(noteSession.folder)
+        set({ noteFolder: noteSession.folder, noteFileTree: items })
+        // scanDir 给的 path 只是相对父目录的一段，得拼成完整相对路径才好比对
+        const flatten = (list: NoteFileItem[], parent = ''): string[] =>
+          list.flatMap((item) => {
+            const full = parent ? `${parent}/${item.path}` : item.path
+            return item.isDir ? flatten(item.children ?? [], full) : [full]
+          })
+        const alive = new Set(flatten(items))
+        const sep = noteSession.folder.includes('\\') ? '\\' : '/'
+        const prefix = noteSession.folder.replace(/[\\/]+$/, '') + sep
+        for (const abs of noteSession.files) {
+          if (!abs.startsWith(prefix)) continue
+          const rel = abs.slice(prefix.length).split(sep).join('/')
+          if (alive.has(rel)) get().openNoteTab(abs, abs.split(/[\\/]/).pop() ?? abs)
+        }
+      } else {
+        // 没打开文件夹（直接打开的单个文件）时拿不到文件树校验存在性，原样恢复
+        for (const abs of noteSession.files) {
+          get().openNoteTab(abs, abs.split(/[\\/]/).pop() ?? abs)
+        }
       }
     },
 
@@ -1895,8 +580,8 @@ let flushWired = false
         const tab = s.ui.panelTabs.find((t) => t.type === 'terminal' && t.sessionId === id)
         const tabs = tab
           ? s.ui.panelTabs.map((t) =>
-              t.id === tab.id ? { ...t, id: nextTabId, sessionId: info.id } : t
-            )
+            t.id === tab.id ? { ...t, id: nextTabId, sessionId: info.id } : t
+          )
           : s.ui.panelTabs
         let groups = s.groups
         if (tab) {
@@ -2357,68 +1042,56 @@ let flushWired = false
       set({ scriptGroups: groups, scripts })
     },
 
-    refreshNotes: async () => {
-      set({ notes: await window.api.notes.list() })
+    openNoteFolder: async () => {
+      const result = await window.api.notes.openFolder()
+      if (!result) return false
+      set({ noteFolder: result.root, noteFileTree: result.items })
+      return true
     },
 
-    createNote: async (groupId) => {
-      const prevIds = new Set(get().notes.map((n) => n.id))
-      const list = await window.api.notes.save({
-        id: '',
-        title: '未命名笔记',
-        content: '',
-        language: 'markdown',
-        groupId,
-        createdAt: 0,
-        updatedAt: 0
-      })
-      const created = list.find((n) => !prevIds.has(n.id))
-      set({ notes: list })
-      return created?.id ?? ''
+    openNoteFile: async () => {
+      return window.api.notes.openFile()
     },
 
-    saveNote: async (note) => {
-      set({ notes: await window.api.notes.save(note) })
+    readNoteFile: async (filePath) => {
+      const root = get().noteFolder
+      if (!root) throw new Error('未打开笔记文件夹')
+      return window.api.notes.readFile(root, filePath)
     },
 
-    deleteNote: async (id) => {
-      const notes = await window.api.notes.remove(id)
-      // 该笔记若正在标签页里打开，一并关掉
-      set((s) => ({ notes, ...closePlainTab(s, `note-${id}`) }))
+    saveNoteFile: async (filePath, content) => {
+      return window.api.notes.saveFile(filePath, content)
     },
 
-    importNotes: async () => {
-      const result = await window.api.notes.importFiles()
-      set({ notes: result.notes })
+    createNoteFile: async (dirPath) => {
+      const root = get().noteFolder ?? ''
+      const result = await window.api.notes.newFile(root, dirPath ?? '')
+      // 刷新文件树
+      if (root) {
+        set({ noteFileTree: await window.api.notes.refreshFolder(root) })
+      }
       return result
     },
 
-    refreshNoteGroups: async () => {
-      set({ noteGroups: await window.api.notes.listGroups() })
+    refreshNoteFolder: async () => {
+      const root = get().noteFolder
+      if (!root) return
+      set({ noteFileTree: await window.api.notes.refreshFolder(root) })
     },
 
-    saveNoteGroup: async (input) => {
-      set({ noteGroups: await window.api.notes.saveGroup(input) })
+    renameNoteFile: async (oldPath, newName) => {
+      const root = get().noteFolder
+      if (!root) throw new Error('未打开笔记文件夹')
+      const newPath = await window.api.notes.renameFile(root, oldPath, newName)
+      set({ noteFileTree: await window.api.notes.refreshFolder(root) })
+      return newPath
     },
 
-    deleteNoteGroup: async (id, deleteNotes) => {
-      // 组内笔记可能被删除或回到「未分组」，两份数据一起刷新
-      const { groups, notes } = await window.api.notes.removeGroup(id, deleteNotes)
-      const alive = new Set(notes.map((n) => n.id))
-      set((s) => {
-        let patch: Partial<AppStore> = { noteGroups: groups, notes }
-        // 被删掉的笔记若正在标签页里打开，一并关掉（与单条删除一致）
-        for (const tab of s.ui.panelTabs) {
-          if (tab.type !== 'note' || !tab.noteId || alive.has(tab.noteId)) continue
-          patch = { ...patch, ...closePlainTab({ ...s, ...patch } as AppStore, tab.id) }
-        }
-        return patch
-      })
-    },
-
-    arrangeNotes: async (payload) => {
-      const { groups, notes } = await window.api.notes.arrange(payload)
-      set({ noteGroups: groups, notes })
+    deleteNoteFile: async (filePath) => {
+      const root = get().noteFolder
+      if (!root) throw new Error('未打开笔记文件夹')
+      await window.api.notes.deleteFile(root, filePath)
+      set({ noteFileTree: await window.api.notes.refreshFolder(root) })
     },
 
     selectPlugin: (id) => {
@@ -2482,7 +1155,10 @@ let flushWired = false
         method: parsed.method,
         url: parsed.url,
         headers: parsed.headers.length ? parsed.headers : [{ key: '', value: '' }],
-        body: parsed.body
+        body: parsed.body,
+        // `-F` 解析出来的是 form-data 字段（见 parseCurl）；其余情况保持缺省的 raw
+        bodyType: parsed.bodyType,
+        bodyFormFields: parsed.bodyFields
       })
     },
 
@@ -2527,9 +1203,6 @@ let flushWired = false
             window.api.ssh.listGroups().then((sshGroups) => set({ sshGroups }))
           )
         }
-        if (kinds.includes('notes')) {
-          jobs.push(get().refreshNotes(), get().refreshNoteGroups())
-        }
         if (kinds.includes('api')) {
           jobs.push(get().refreshApiRequests(), get().refreshApiGroups())
         }
@@ -2553,15 +1226,16 @@ let flushWired = false
       })
     },
 
-    openNoteTab: (noteId) => {
+    openNoteTab: (filePath, title) => {
       set((s) => {
-        const note = s.notes.find((n) => n.id === noteId)
+        // 标签 id 用文件路径的 hash 来保证唯一性（同一文件只开一个标签）
+        const tabId = `note-${btoa(unescape(encodeURIComponent(filePath))).replace(/[/+=]/g, '_')}`
         return addOrFocusTab(s, {
-          id: `note-${noteId}`,
+          id: tabId,
           type: 'note',
-          title: note?.title ?? '未命名笔记',
+          title: title ?? filePath.split(/[\\/]/).pop() ?? '未命名笔记',
           closable: true,
-          noteId
+          noteFilePath: filePath
         })
       })
     },
@@ -2607,7 +1281,11 @@ let flushWired = false
           method: entry.method || 'GET',
           url: entry.url,
           headers: entry.headers,
-          body: entry.body
+          body: entry.body,
+          // 请求体形态一起带过去：只载入正文、把 form-data 载成 raw 会让人以为「历史记错了」
+          bodyType: entry.bodyType,
+          bodyUrlencoded: entry.bodyUrlencoded,
+          bodyFormFields: entry.bodyFormFields
         }
       })
       get().openNewApiDraft()
@@ -2726,47 +1404,41 @@ let flushWired = false
       set((st) => closePlainTab(st, id))
     },
 
-    requestClosePanelTab: (id) => {
-      const s = get()
-      const tab = s.ui.panelTabs.find((t) => t.id === id)
-      if (!tab) return
-      // 没开二次确认就直接关，保持原来的手感
-      if (!s.preferences.confirmCloseTab) {
-        get().closePanelTab(id)
-        return
-      }
-      set((st) => ({
-        ui: { ...st.ui, pendingTabClose: { kind: 'tab', tabId: id, label: tab.title } }
-      }))
+    requestClosePanelTab: async (id) => {
+      // 确认框画在标签面板内部：先带到前台，再推 close-request 给页面确认
+      await requestTabCloseVisible(id)
     },
 
-    requestCloseGroup: (groupId) => {
-      const s = get()
-      const group = s.groups[groupId]
+    requestCloseGroup: async (groupId) => {
+      const group = get().groups[groupId]
       if (!group) return
-      if (!s.preferences.confirmCloseTab) {
-        void get().closeGroup(groupId)
-        return
+      // 快照后逐个推（关闭会实时改组）；任一标签取消即中止剩余
+      for (const tid of [...group.tabIds]) {
+        if (!(await requestTabCloseVisible(tid))) return
       }
-      set((st) => ({
-        ui: {
-          ...st.ui,
-          pendingTabClose: { kind: 'group', groupId, count: group.tabIds.length }
-        }
-      }))
     },
 
-    cancelPendingTabClose: () =>
-      set((st) => (st.ui.pendingTabClose ? { ui: { ...st.ui, pendingTabClose: null } } : {})),
+    requestCloseSiblingTabs: async (tabId, mode) => {
+      const ids = siblingTabIds(get(), tabId, mode)
+      // 该方向没有可关的标签（首/末标签的左侧/右侧）→ 什么也不做
+      if (ids.length === 0) return
+      // 逐个推 close-request 确认，任一取消即中止剩余
+      for (const tid of ids) {
+        if (!(await requestTabCloseVisible(tid))) return
+      }
+    },
 
-    confirmPendingTabClose: async (dontAskAgain) => {
-      const pending = get().ui.pendingTabClose
-      if (!pending) return
-      // 先收起弹框再执行关闭：关闭会改 groups / panelTabs，别让弹框停在半途的状态上
-      set((st) => ({ ui: { ...st.ui, pendingTabClose: null } }))
-      if (dontAskAgain) await get().setConfirmCloseTab(false)
-      if (pending.kind === 'tab') get().closePanelTab(pending.tabId)
-      else await get().closeGroup(pending.groupId)
+    closeSiblingTabs: async (tabId, mode) => {
+      const ids = siblingTabIds(get(), tabId, mode)
+      if (ids.length === 0) return
+      const closing = new Set(ids)
+      // 其中的终端会话一并结束（与 closeGroup 一致：非终端标签只关标签）
+      const sessionIds = get()
+        .ui.panelTabs.filter((t) => closing.has(t.id))
+        .map((t) => t.sessionId)
+        .filter((x): x is string => Boolean(x))
+      await Promise.all(sessionIds.map((id) => window.api.terminal.kill(id)))
+      set((s) => closeTabsPatch(s, closing))
     },
 
     updatePanelTabTitle: (id, title) => {
@@ -2885,6 +1557,20 @@ let flushWired = false
     setConfirmCloseTab: async (enabled) => {
       set((s) => ({ preferences: { ...s.preferences, confirmCloseTab: enabled } }))
       const preferences = await window.api.prefs.save({ confirmCloseTab: enabled })
+      set({ preferences })
+    },
+
+    setNoteSaveMode: async (mode) => {
+      set((s) => ({ preferences: { ...s.preferences, noteSaveMode: mode } }))
+      const preferences = await window.api.prefs.save({ noteSaveMode: mode })
+      set({ preferences })
+    },
+
+    setNoteAutoSaveDelay: async (seconds) => {
+      // 夹到 1–60 秒：0 会让「延迟保存」退化成每敲一下写一次盘，太大则形同没保存
+      const noteAutoSaveDelay = Math.min(60, Math.max(1, Math.round(seconds) || 2))
+      set((s) => ({ preferences: { ...s.preferences, noteAutoSaveDelay } }))
+      const preferences = await window.api.prefs.save({ noteAutoSaveDelay })
       set({ preferences })
     },
 
@@ -3245,24 +1931,50 @@ let flushWired = false
       })
     },
 
-    setAgentWorkspaceBackend: async (id, backend) => {
-      const ws = get().agentWorkspaces.find((w) => w.id === id)
-      if (!ws) return
-      const workspaces = await window.api.agent.saveWorkspace({
-        id,
-        name: ws.name,
-        path: ws.path,
-        backend
-      })
-      set({ agentWorkspaces: workspaces })
+    setAgentConversationModel: async (id, patch) => {
+      const conversation = get().agentConversations.find((c) => c.id === id)
+      // ACP 会话的模型走 setAcpConversationModel（要下发到 agent），这里只管 mastra
+      if (!conversation || conversation.kind === 'acp') return
+      // 选了内置模型 = 这个会话就按内置（mastra）走：顺手清掉未定形态时可能预置的 ACP agent
+      const next = { ...patch, acpAgentId: undefined }
+      // 不动 updatedAt：这是配置变更，不该让会话在列表里跳到最前
+      set((s) => ({ agentConversations: patchConversation(s.agentConversations, id, next, false) }))
+      // 未定形态的会话不落盘（persistConversation 里统一拦掉，见那里的 ⚠️）
+      await persistConversation(get().agentConversations, id)
     },
 
-    setAgentConversationModel: async (id, patch) => {
-      if (!get().agentConversations.some((c) => c.id === id)) return
+    /**
+     * 会话模型下拉里选中「某个 ACP agent 的模型」。
+     *
+     * - 形态未定（新建会话）：这就是**定型**动作 —— 记下 `acpAgentId` + `modelId`，
+     *   首条消息时按它落成 `kind: 'acp'`（先不落盘，与 setAgentConversationModel 同理）；
+     * - 形态已是 acp：只换 `modelId` 并立即下发 `session/set_config_option`（不重建会话）；
+     * - 形态已是 mastra：忽略（**形态不可互切**）。
+     */
+    setAcpConversationModel: async (id, { acpAgentId, modelId }) => {
+      const conversation = get().agentConversations.find((c) => c.id === id)
+      if (!conversation || conversation.kind === 'mastra') return
+      // 已绑定的会话不许换 agent（换 agent 等于换会话，没意义）
+      const agentId = acpAgentId ?? conversation.acpAgentId
+      if (!agentId) return
+      if (conversation.kind === 'acp' && agentId !== conversation.acpAgentId) return
       set((s) => ({
-        agentConversations: s.agentConversations.map((c) => (c.id === id ? { ...c, ...patch } : c))
+        agentConversations: patchConversation(
+          s.agentConversations,
+          id,
+          { acpAgentId: agentId, modelId, configId: undefined },
+          false
+        )
       }))
+      // 未定形态的会话不落盘（persistConversation 里统一拦掉）
       await persistConversation(get().agentConversations, id)
+      // 立即下发到 agent；会话还没连上（没发过消息）时由下一轮提问前的 applyModel 兜底
+      try {
+        await window.api.agent.acp.setModel({ conversationId: id, modelId })
+      } catch (err) {
+        const { message } = await import('antd')
+        message.warning(`切换模型失败：${err instanceof Error ? err.message : String(err)}`)
+      }
     },
 
     deleteAgentWorkspace: async (id) => {
@@ -3357,15 +2069,96 @@ let flushWired = false
       set((s) => {
         const wid = workspaceId ?? s.activeAgentWorkspaceId
         if (!wid) return {}
-        const created = newConversation(wid)
-        // 新会话排在前面，符合「最近在用」的直觉
+        /**
+         * 「新建会话」= 打开**这个工作区的新建会话页**（草稿，侧边栏不列它，见 isDraftConversation）。
+         *
+         * 该工作区已经有草稿就**复用它**：连点两次「新建会话」应当还是同一个空页，
+         * 而不是攒出两条看不见的空会话（它们永远不会出现在列表里，只能算内存垃圾）。
+         */
+        const existing = s.agentConversations.find(
+          (c) => c.workspaceId === wid && isDraftConversation(c)
+        )
+        const target = existing ?? newConversation(wid)
         return {
           activeAgentWorkspaceId: wid,
-          agentConversations: [created, ...s.agentConversations],
-          activeAgentConversationId: created.id,
-          ...addOrFocusTab(s, agentTab(created))
+          // 新会话排在前面，符合「最近在用」的直觉（复用草稿时位置不动）
+          agentConversations: existing ? s.agentConversations : [target, ...s.agentConversations],
+          activeAgentConversationId: target.id,
+          ...addOrFocusTab(s, agentTab(target))
         }
       }),
+
+    importAcpConversations: async ({ workspaceId, acpAgentId, sessions }) => {
+      if (sessions.length === 0) return
+      const now = Date.now()
+      // 已导入过的（同 agent + 同 agent 侧会话 id）不重复建，避免一份会话出现两条记录
+      const existing = new Set(
+        get()
+          .agentConversations.filter(
+            (c) => c.workspaceId === workspaceId && c.acpAgentId === acpAgentId
+          )
+          .map((c) => c.acpSessionId)
+      )
+      const created: AgentConversation[] = sessions
+        .filter((s) => !existing.has(s.sessionId))
+        .map((s, i) => ({
+          id: crypto.randomUUID(),
+          workspaceId,
+          kind: 'acp' as const,
+          // 标题优先用 agent 给的（没有就留给用户自己改）
+          title: s.title?.trim() || DEFAULT_CONVERSATION_TITLE,
+          messages: [],
+          acpAgentId,
+          acpSessionId: s.sessionId,
+          createdAt: now + i,
+          updatedAt: now + i
+        }))
+      if (created.length === 0) return
+      const last = created[created.length - 1]
+      set((s) => ({
+        activeAgentWorkspaceId: workspaceId,
+        agentConversations: [...created, ...s.agentConversations],
+        activeAgentConversationId: last.id,
+        ...addOrFocusTab(s, agentTab(last))
+      }))
+      for (const c of created) await persistConversation(get().agentConversations, c.id)
+    },
+
+    /**
+     * 打开 ACP 会话时回放它的历史（`session/load`）。
+     *
+     * 幂等且按会话去重：主进程对同一会话只跑一次回放（会话标签反复挂载 / StrictMode 双跑
+     * 都安全），这里只负责把加载态摆出来、把请求发出去。回放结果作为一条 `history` 事件
+     * 整段替换本地镜像（见 handleAgentEvent）。
+     */
+    loadAcpHistory: async (conversationId) => {
+      const conversation = get().agentConversations.find((c) => c.id === conversationId)
+      if (!conversation || conversation.kind !== 'acp') return
+      // 已经有回放在跑：不重复发
+      if (get().acpLoading[conversationId]) return
+      // 还没在 agent 侧建过会话（新建后还没发过消息）：没有历史可回放
+      if (!conversation.acpSessionId) return
+      if ((get().agentRuns[conversationId] ?? emptyAgentRun()).streaming) return
+      set((s) => ({ acpLoading: { ...s.acpLoading, [conversationId]: true } }))
+      try {
+        const { requestId } = await window.api.agent.acp.load({
+          workspaceId: conversation.workspaceId,
+          conversationId,
+          acpAgentId: conversation.acpAgentId,
+          acpSessionId: conversation.acpSessionId,
+          modelId: conversation.modelId
+        })
+        agentRequestConversations.set(requestId, conversationId)
+      } catch (err) {
+        // 加载失败：清掉加载态并提示（会话本身还能继续用，只是看不到历史）
+        set((s) => {
+          const { [conversationId]: _drop, ...acpLoading } = s.acpLoading
+          return { acpLoading }
+        })
+        const { message } = await import('antd')
+        message.error(`加载会话历史失败：${err instanceof Error ? err.message : String(err)}`)
+      }
+    },
 
     selectAgentConversation: (id) =>
       set((s) => {
@@ -3385,13 +2178,35 @@ let flushWired = false
       await persistConversation(get().agentConversations, id)
     },
 
-    deleteAgentConversation: async (id) => {
+    deleteAgentConversation: async (id, options = {}) => {
       // 正在流式输出就先中止，否则主进程那个会话的 agent 进程会变成孤儿
       if ((get().agentRuns[id] ?? emptyAgentRun()).requestId) await get().abortAgent(id)
+      const target = get().agentConversations.find((c) => c.id === id)
+      // ACP 会话：默认只删本地绑定（agent 侧会话保留，下次还能导入回来）；
+      // 用户显式勾了「同时删除」才连 agent 侧一起删 —— 失败只提示，本地记录照删。
+      if (options.deleteRemoteSession && target?.kind === 'acp' && target.acpAgentId && target.acpSessionId) {
+        try {
+          await window.api.agent.acp.deleteSession({
+            acpAgentId: target.acpAgentId,
+            sessionId: target.acpSessionId
+          })
+        } catch (err) {
+          const { message } = await import('antd')
+          message.warning(
+            `已删除本地会话，但 ACP agent 侧的会话未删除：${
+              err instanceof Error ? err.message : String(err)
+            }`
+          )
+        }
+      }
       await window.api.agent.deleteConversation(id)
       set((s) => {
         const conversations = s.agentConversations.filter((c) => c.id !== id)
         const { [id]: _removed, ...runs } = s.agentRuns
+        // ACP 的本地消息镜像 / 运行态 / 加载态一并清掉
+        const { [id]: _removedAcp, ...agentAcpMessages } = s.agentAcpMessages
+        const { [id]: _removedState, ...acpStates } = s.acpStates
+        const { [id]: _removedLoading, ...acpLoading } = s.acpLoading
         // 删的正是当前会话时，切到同工作区剩下的最近一个，没有就现建
         const ensured =
           s.activeAgentConversationId === id
@@ -3400,6 +2215,9 @@ let flushWired = false
         return {
           agentConversations: ensured.conversations,
           agentRuns: runs,
+          agentAcpMessages,
+          acpStates,
+          acpLoading,
           activeAgentConversationId: ensured.activeId,
           // 会话没了，它的标签也跟着关
           ...closeMissingAgentTabs(s, new Set(ensured.conversations.map((c) => c.id)))
@@ -3432,30 +2250,53 @@ let flushWired = false
         parts: [],
         createdAt: now + 1
       }
-      const history = [...conversation.messages, userMsg]
+      /**
+       * **首条消息定型**：会话形态在创建时是「未定」的，由这里选中的模型决定 ——
+       * 选了某个 ACP agent 的模型（未定形态下会先写进 `acpAgentId`）就是 `acp`，
+       * 否则按内置的 mastra 走（没选模型时回退到设置里的默认模型配置）。
+       * 定型后立刻连 `kind` 一起落盘，之后不可再切（见 4.3）。
+       */
+      const kind: AgentBackend = conversation.kind ?? (conversation.acpAgentId ? 'acp' : 'mastra')
+      // 本轮带过去的「已有消息」：ACP 会话的上下文由 agent 自己维护，本地镜像仅供展示；
+      // mastra 则要把完整历史（含刚加的用户消息）交给模型。
+      const isAcp = kind === 'acp'
+      const existing = isAcp ? (get().agentAcpMessages[cid] ?? []) : conversation.messages
+      const history = [...existing, userMsg]
       // 首条消息顺手定标题，省得用户手动命名（之后可在会话列表里改）
-      const title =
-        conversation.messages.length === 0 ? titleFromMessage(trimmed) : conversation.title
+      const title = existing.length === 0 ? titleFromMessage(trimmed) : conversation.title
 
-      set((s) => ({
-        agentConversations: patchConversation(s.agentConversations, cid, {
-          messages: [...history, assistantMsg],
-          title
-        }),
-        agentRuns: { ...s.agentRuns, [cid]: { streaming: true, requestId: null, error: null } }
-      }))
-      // 用户消息与标题立刻落盘：这一轮即便失败 / 应用被关，输入也不会丢
+      set((s) =>
+        isAcp
+          ? {
+            // ACP：消息只进本地镜像（**不落盘**，那部分归 agent 自己管）
+            agentAcpMessages: { ...s.agentAcpMessages, [cid]: [...history, assistantMsg] },
+            agentConversations: patchConversation(s.agentConversations, cid, { title, kind }),
+            agentRuns: { ...s.agentRuns, [cid]: { streaming: true, requestId: null, error: null } }
+          }
+          : {
+            agentConversations: patchConversation(s.agentConversations, cid, {
+              messages: [...history, assistantMsg],
+              title,
+              kind
+            }),
+            agentRuns: { ...s.agentRuns, [cid]: { streaming: true, requestId: null, error: null } }
+          }
+      )
+      // 会话元信息（标题 / 更新时刻；mastra 还含用户消息）立刻落盘：
+      // 这一轮即便失败 / 应用被关，输入也不会丢
       void persistConversation(get().agentConversations, cid)
 
       try {
         const { requestId } = await window.api.agent.chat({
           workspaceId: wid,
           conversationId: cid,
+          // 会话形态（上面刚定型）；模型配置 / 具体模型 / ACP 绑定都按会话带过去（未选则主进程回退）
+          kind,
           history,
-          // 后端、模型配置与具体模型 id 都按会话带过去（未选则主进程回退到默认）
-          backend: conversation.backend,
           configId: conversation.configId,
-          modelId: conversation.modelId
+          modelId: conversation.modelId,
+          acpAgentId: conversation.acpAgentId,
+          acpSessionId: conversation.acpSessionId
         })
         agentRequestConversations.set(requestId, cid)
         set((s) => ({
@@ -3504,6 +2345,16 @@ let flushWired = false
       if (!cid) return
       const requestId = (get().agentRuns[cid] ?? emptyAgentRun()).requestId
       if (requestId) agentRequestConversations.delete(requestId)
+      const conversation = get().agentConversations.find((c) => c.id === cid)
+      // ACP 会话的「消息」只是本地镜像：清掉它并不影响 agent 侧的上下文，
+      // 重新打开会话（session/load）历史还会回来 —— 所以这里只清镜像。
+      if (conversation?.kind === 'acp') {
+        set((s) => ({
+          agentAcpMessages: { ...s.agentAcpMessages, [cid]: [] },
+          agentRuns: { ...s.agentRuns, [cid]: emptyAgentRun() }
+        }))
+        return
+      }
       set((s) => ({
         agentConversations: patchConversation(s.agentConversations, cid, { messages: [] }),
         agentRuns: { ...s.agentRuns, [cid]: emptyAgentRun() }
@@ -3511,12 +2362,17 @@ let flushWired = false
       void persistConversation(get().agentConversations, cid)
     },
 
-    /** 删除某条消息及其之后的全部消息（「从这里重新开始」） */
+    /**
+     * 删除某条消息及其之后的全部消息（「从这里重新开始」）。
+     *
+     * **只对 mastra 会话生效**：ACP 会话的历史归 agent 管，本地删掉只会让画面与 agent 侧
+     * 的上下文不一致（重新打开会话又会回放回来），所以 UI 侧也禁用了这个入口。
+     */
     deleteAgentMessagesFrom: async (messageId, conversationId) => {
       const cid = conversationId
       if (!cid) return
       const conversation = get().agentConversations.find((c) => c.id === cid)
-      if (!conversation) return
+      if (!conversation || conversation.kind === 'acp') return
       const index = conversation.messages.findIndex((m) => m.id === messageId)
       if (index < 0) return
       set((s) => ({
@@ -3532,12 +2388,13 @@ let flushWired = false
       await persistConversation(get().agentConversations, cid)
     },
 
+    /** 编辑后重发：只对 mastra 会话生效（理由同 deleteAgentMessagesFrom） */
     resendAgentMessage: async (messageId, text, conversationId) => {
       const trimmed = text.trim()
       const cid = conversationId
       if (!cid || !trimmed) return
       const conversation = get().agentConversations.find((c) => c.id === cid)
-      if (!conversation) return
+      if (!conversation || conversation.kind === 'acp') return
       if ((get().agentRuns[cid] ?? emptyAgentRun()).streaming) return
       const index = conversation.messages.findIndex((m) => m.id === messageId)
       if (index < 0) return
@@ -3559,8 +2416,13 @@ let flushWired = false
       // 路由到发起该对话的会话（不依赖当前选中）
       const cid = agentRequestConversations.get(requestId)
       if (!cid) return
+      /**
+       * ACP 会话的消息落在**本地镜像**（`agentAcpMessages`，不落盘）；
+       * mastra 会话落在自己的 `messages` 上。两者只有存放位置不同，渲染完全一致。
+       */
+      const isAcp = get().agentConversations.find((c) => c.id === cid)?.kind === 'acp'
 
-      /** 把事件追加到会话最后一条 assistant 消息上 */
+      /** 把事件追加到最后一条 assistant 消息上 */
       const appendToLast = (
         messages: AgentChatMessage[],
         ev: AgentStreamEvent
@@ -3573,24 +2435,63 @@ let flushWired = false
         return next
       }
 
-      if (event.type === 'usage') {
+      /** 就地更新「这个会话的消息列表」（按形态落到镜像或会话上） */
+      const updateMessages = (
+        transform: (messages: AgentChatMessage[]) => AgentChatMessage[]
+      ): void => {
         set((s) => {
+          if (isAcp) {
+            const current = s.agentAcpMessages[cid] ?? []
+            return { agentAcpMessages: { ...s.agentAcpMessages, [cid]: transform(current) } }
+          }
           const conversation = s.agentConversations.find((c) => c.id === cid)
           if (!conversation) return {}
-          const messages = [...conversation.messages]
-          const last = messages[messages.length - 1]
-          if (last?.role === 'assistant') {
-            messages[messages.length - 1] = { ...last, usage: event.usage }
-          }
           return {
-            agentConversations: patchConversation(s.agentConversations, cid, { messages }, false)
+            agentConversations: patchConversation(
+              s.agentConversations,
+              cid,
+              { messages: transform(conversation.messages) },
+              // 流式 token（text/reasoning/tool-call/tool-result）高频追加：不 bump updatedAt，
+              // 否则会话列表（按 updatedAt 降序）会被持续重排、闪烁
+              false
+            )
           }
+        })
+      }
+
+      /** 清掉该会话的「历史回放中」标记（回放结束 / 失败时） */
+      const clearLoading = (): void => {
+        if (!isAcp) return
+        set((s) => {
+          if (!(cid in s.acpLoading)) return {}
+          const { [cid]: _drop, ...acpLoading } = s.acpLoading
+          return { acpLoading }
+        })
+      }
+
+      // ACP 的历史回放（打开会话时由 session/load 产出）：整段替换本地镜像
+      if (event.type === 'history') {
+        set((s) => ({ agentAcpMessages: { ...s.agentAcpMessages, [cid]: event.messages } }))
+        return
+      }
+
+      if (event.type === 'usage') {
+        updateMessages((messages) => {
+          const next = [...messages]
+          const last = next[next.length - 1]
+          if (last?.role === 'assistant') {
+            next[next.length - 1] = { ...last, usage: event.usage }
+          }
+          return next
         })
         return
       }
 
       if (event.type === 'finish') {
         agentRequestConversations.delete(requestId)
+        // 这次是「打开会话时回放历史」还是「真的跑了一轮」？回放不该发系统通知
+        const wasReplay = isAcp && !!get().acpLoading[cid]
+        clearLoading()
         set((s) => ({
           agentRuns: {
             ...s.agentRuns,
@@ -3598,9 +2499,10 @@ let flushWired = false
           }
         }))
         // 应用不在前台时发系统通知（是否真弹由主进程按窗口状态 + 偏好决定）
-        notifyAgentFinished(cid, event.finishReason)
-        // 整轮结束才落盘：中途每个 part 都写盘会让长回复反复序列化同一段历史
-        void persistConversation(get().agentConversations, cid)
+        if (!wasReplay) notifyAgentFinished(cid, event.finishReason)
+        // 整轮结束才落盘：中途每个 part 都写盘会让长回复反复序列化同一段历史。
+        // ACP 会话没有消息要落盘（标题 / updatedAt 也只在发消息时写）。
+        if (!isAcp) void persistConversation(get().agentConversations, cid)
         // 兜底：该对话已结束但仍有其挂起确认时按取消处理，避免主进程工具悬挂
         for (const c of Object.values(get().agentPendingConfirms)) {
           if (c.requestId === requestId) void get().resolveAgentConfirm(c.id, false)
@@ -3611,13 +2513,24 @@ let flushWired = false
       if (event.type === 'error') {
         // 报错即视为本轮对话结束：立刻复位 streaming，不依赖后续 finish 事件
         agentRequestConversations.delete(requestId)
-        set((s) => {
-          const conversation = s.agentConversations.find((c) => c.id === cid)
-          if (!conversation) return {}
-          return {
-            agentConversations: patchConversation(s.agentConversations, cid, {
-              messages: appendToLast(conversation.messages, event)
-            }),
+        clearLoading()
+        if (isAcp) {
+          // ACP：错误（含「agent 不支持 session/load」这类回放失败）走会话页顶部的错误条 ——
+          // 历史还没回放出来时镜像可能是空的，塞进消息流会看不见
+          set((s) => ({
+            agentRuns: {
+              ...s.agentRuns,
+              [cid]: {
+                ...(s.agentRuns[cid] ?? emptyAgentRun()),
+                streaming: false,
+                requestId: null,
+                error: event.message
+              }
+            }
+          }))
+        } else {
+          updateMessages((messages) => appendToLast(messages, event))
+          set((s) => ({
             agentRuns: {
               ...s.agentRuns,
               [cid]: {
@@ -3627,31 +2540,19 @@ let flushWired = false
                 error: null
               }
             }
-          }
-        })
-        void persistConversation(get().agentConversations, cid)
+          }))
+          void persistConversation(get().agentConversations, cid)
+        }
         for (const c of Object.values(get().agentPendingConfirms)) {
           if (c.requestId === requestId) void get().resolveAgentConfirm(c.id, false)
         }
         return
       }
 
-      set((s) => {
-        const conversation = s.agentConversations.find((c) => c.id === cid)
-        if (!conversation) return {}
-        return {
-          agentConversations: patchConversation(
-            s.agentConversations,
-            cid,
-            { messages: appendToLast(conversation.messages, event) },
-            // 流式 token（text/reasoning/tool-call/tool-result）高频追加：不 bump updatedAt，
-            // 否则会话列表（按 updatedAt 降序）会被持续重排、闪烁
-            false
-          )
-        }
-      })
+      updateMessages((messages) => appendToLast(messages, event))
       // 流式期间增量落盘：中途关掉应用也不至于丢掉这一轮已有的产出
-      persistConversationThrottled(cid)
+      // （ACP 会话没有消息要落盘，跳过）
+      if (!isAcp) persistConversationThrottled(cid)
     },
 
     resolveAgentConfirm: async (id, approved) => {
@@ -3680,7 +2581,56 @@ let flushWired = false
   }
 })
 
+// ---- 标签关闭回执：「真正执行关闭」由本 store 提供（见 shared/lib/tab-event-bus.ts） ----
+setTabCloseExecutor((id) => useAppStore.getState().closePanelTab(id))
+
+/**
+ * 把标签带到前台再推关闭请求。
+ *
+ * 确认框画在标签面板内部（InlineConfirm），背景标签处于 `hidden` 面板里，
+ * 不先激活的话确认框渲染出来也不可见、也无法点击 —— 先 setActiveGroup +
+ * activatePanelTab，等 React 摘掉 hidden 再推 close-request。
+ */
+async function requestTabCloseVisible(id: string): Promise<boolean> {
+  const s = useAppStore.getState()
+  const tab = s.ui.panelTabs.find((t) => t.id === id)
+  if (!tab) return true
+  const group = s.groups[tab.groupId]
+  if (group && group.activeTabId !== id) {
+    s.setActiveGroup(tab.groupId)
+    s.activatePanelTab(id)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  return requestTabClose(id)
+}
+
+/**
+ * 笔记会话落盘：打开的文件夹或笔记标签一变，就把当前状态写回主进程，
+ * 下次启动据此恢复（恢复逻辑见 bootstrap 的「恢复上次的笔记会话」）。
+ *
+ * 用订阅 + 节流统一处理，而不是在 openNoteTab / 关标签等每处挂钩子：
+ * 标签能从很多路径变化（新建 / 打开 / 关闭 / 关闭其他 / 关闭整组），
+ * 逐个去挂，漏一个就再也存不对了。
+ */
+if (typeof window !== 'undefined' && window.api?.notes?.saveSession) {
+  let noteSessionTimer: ReturnType<typeof setTimeout> | null = null
+  let lastNoteSession = ''
+  useAppStore.subscribe((s) => {
+    const files = s.ui.panelTabs
+      .filter((t) => t.type === 'note' && t.noteFilePath)
+      .map((t) => t.noteFilePath as string)
+    const key = JSON.stringify({ folder: s.noteFolder, files })
+    if (key === lastNoteSession) return
+    lastNoteSession = key
+    if (noteSessionTimer) clearTimeout(noteSessionTimer)
+    noteSessionTimer = setTimeout(() => {
+      noteSessionTimer = null
+      void window.api.notes.saveSession({ folder: s.noteFolder, files })
+    }, 400)
+  })
+}
+
 // CDP 调试暴露（模块初始化完成后赋值，避免 TDZ）
 if (typeof window !== 'undefined') {
-  ;(window as unknown as Record<string, unknown>).__store = useAppStore
+  ; (window as unknown as Record<string, unknown>).__store = useAppStore
 }

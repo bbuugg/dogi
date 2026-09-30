@@ -712,7 +712,7 @@ function HistoryList({
     <div className="space-y-2">
       {groups.map((g) => (
         <div key={g.label}>
-          <div className="px-2 pb-0.5 pt-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+          <div className="px-2 pb-0.5 pt-1 text-xs font-medium uppercase tracking-wide text-muted-foreground/70">
             {g.label}
           </div>
           <div className="space-y-0.5">
@@ -725,7 +725,7 @@ function HistoryList({
               >
                 <span
                   className={cn(
-                    'shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold',
+                    'shrink-0 rounded px-1.5 py-0.5 font-mono text-xs font-semibold',
                     methodBadgeClass(entry.method)
                   )}
                 >
@@ -852,7 +852,7 @@ function RequestRow({
           <div className="flex min-w-0 flex-1 items-center gap-1.5">
             <span
               className={cn(
-                'shrink-0 font-mono text-[10px] font-semibold leading-none',
+                'shrink-0 font-mono text-xs font-semibold leading-none',
                 protoClass(request)
               )}
             >

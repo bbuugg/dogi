@@ -46,7 +46,7 @@ function Bar({ pct }: { pct: number }) {
 function Stat({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex flex-col gap-1">
-      <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+      <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
         {label}
       </span>
       <div className="text-sm font-medium tabular-nums">{children}</div>
@@ -148,7 +148,7 @@ function MetricsDetail({
         </Stat>
 
         <Stat label="负载">
-          <div className="text-[10px] font-normal text-muted-foreground">1m / 5m / 15m</div>
+          <div className="text-xs font-normal text-muted-foreground">1m / 5m / 15m</div>
           <div className="text-[13px]">
             {metrics.load1.toFixed(2)} / {metrics.load5.toFixed(2)} / {metrics.load15.toFixed(2)}
           </div>

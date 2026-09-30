@@ -7,28 +7,37 @@ import {
   type PointerEvent as ReactPointerEvent
 } from 'react'
 import { ChevronDown, ChevronUp, Globe, Send, Trash2, X } from 'lucide-react'
-import { AutoComplete, Button, Input, Modal, Select, Tag, message } from 'antd'
+import { AutoComplete, Button, Input, Modal, Segmented, Select, Tag, message } from 'antd'
 import { apiTabId, apiTabTitle, editorSaveKey, NEW_API_REQUEST_ID, useAppStore } from '@/stores/app-store'
 import MonacoEditor from '@/shared/components/MonacoEditor'
+import { BodyFieldsTable } from '@/features/api/BodyFieldsTable'
 import { TabButtons } from '@/features/api/TabButtons'
 import {
+  BODY_TYPES,
   COMMON_HEADERS,
   METHODS,
+  baseNameOf,
   bodyLanguageOf,
+  contentTypeForBodyType,
   contentTypeOf,
+  emptyFormField,
   emptyHeader,
   formatBody,
   formatBytes,
   headerValueSuggestions,
   isBlankHeader,
+  isFormContentType,
+  normalizeFormFields,
   normalizeHeaders,
   pairsToHeaders,
   parseQueryParams,
   serializeParams,
+  setContentType,
+  tidyFormRows,
   tidyHeaderRows,
   withQuery
 } from '@/features/api/api-client'
-import type { ApiHeaderPair, ApiHttpResponse } from '@shared/types'
+import type { ApiBodyType, ApiFormField, ApiHeaderPair, ApiHttpResponse } from '@shared/types'
 
 /** 响应面板高度占比的默认值与上下限（拖动分隔条时按此范围夹取） */
 const RES_RATIO_DEFAULT = 0.45
@@ -52,6 +61,12 @@ const REQ_TABS = [
 ] as const
 
 /**
+ * 请求体类型在界面上是横向分段（antd Segmented ≈ 横向 radio，与主机类型 / 隧道类型同款）。
+ * 没有描述文案：每种形态的规则写在各自的表单内容里（见 4.19）。
+ */
+const BODY_TYPE_OPTIONS = BODY_TYPES.map((b) => ({ label: b.label, value: b.value }))
+
+/**
  * 接口请求编辑页（主区域）：一个标签 = 一个已保存的请求。
  *
  * 与原 api-client 插件的区别：请求的「多标签」由 PanelView 承担，
@@ -60,7 +75,7 @@ const REQ_TABS = [
  *
  * 草稿**不自动保存**：改完按 Ctrl/Cmd+S 才落盘（保存成功给 message 提示）。
  */
-export function ApiPage({ requestId }: { requestId: string }) {
+export function ApiPage({ requestId, tabId }: { requestId: string; tabId?: string }) {
   const apiRequests = useAppStore((s) => s.apiRequests)
   const saveApiRequest = useAppStore((s) => s.saveApiRequest)
   const createApiRequest = useAppStore((s) => s.createApiRequest)
@@ -88,6 +103,20 @@ export function ApiPage({ requestId }: { requestId: string }) {
    */
   const [params, setParams] = useState<ApiHeaderPair[]>([emptyHeader()])
   const [body, setBody] = useState('')
+  /**
+   * 请求体类型（`raw` / `x-www-form-urlencoded` / `form-data`）。
+   * 三种形态**各存各的内容**（raw 用 body、另两种各一张表），来回切不丢东西。
+   */
+  const [bodyType, setBodyType] = useState<ApiBodyType>('raw')
+  /** `x-www-form-urlencoded` 的键值对（末行恒为空槽位） */
+  const [urlencoded, setUrlencoded] = useState<ApiHeaderPair[]>([emptyHeader()])
+  /** `form-data` 的字段（`isFile` 的行值存本地绝对路径） */
+  const [formFields, setFormFields] = useState<ApiFormField[]>([emptyFormField()])
+  /**
+   * 已选文件的展示文案（路径 → 「文件名 (12.3 KB)」）。
+   * 只是展示用的缓存：落盘的是路径，重启后从路径末段退化显示（大小不再知道）。
+   */
+  const [fileLabels, setFileLabels] = useState<Record<string, string>>({})
   /**
    * 请求体编辑器（Monaco）的高亮语言。
    * 不做持久化：它由 Content-Type 推导（见 bodyLanguageOf），
@@ -179,6 +208,9 @@ export function ApiPage({ requestId }: { requestId: string }) {
         url: url.trim(),
         headers,
         body,
+        bodyType,
+        bodyUrlencoded: urlencoded,
+        bodyFormFields: formFields,
         groupId: current?.groupId,
         createdAt: 0,
         updatedAt: 0
@@ -206,6 +238,9 @@ export function ApiPage({ requestId }: { requestId: string }) {
         url: url.trim(),
         headers,
         body,
+        bodyType,
+        bodyUrlencoded: urlencoded,
+        bodyFormFields: formFields,
         groupId: gid
       })
       // 草稿标签 → 真实标签：关掉草稿，避免残留一个空白标签
@@ -237,6 +272,17 @@ export function ApiPage({ requestId }: { requestId: string }) {
     // 查询参数表从 URL 的查询串解析出来（不另存，URL 才是事实来源）
     setParams(tidyHeaderRows(parseQueryParams(req?.url ?? '')))
     setBody(req?.body ?? '')
+    // 请求体形态：历史数据没有 bodyType → raw；两张表单各自规整（末行恒为空槽位）
+    setBodyType(req?.bodyType ?? 'raw')
+    setUrlencoded(
+      req?.bodyUrlencoded?.length ? tidyHeaderRows(normalizeHeaders(req.bodyUrlencoded)) : [emptyHeader()]
+    )
+    setFormFields(
+      req?.bodyFormFields?.length
+        ? tidyFormRows(normalizeFormFields(req.bodyFormFields))
+        : [emptyFormField()]
+    )
+    setFileLabels({})
     // 编辑器语言跟着这个请求的 Content-Type 走（没有 Content-Type 时给 json）
     setBodyLanguage(bodyLanguageOf(contentTypeOf(req?.headers ?? [])))
     // 响应与错误属于「上一次请求的结果」，换请求时清空避免张冠李戴
@@ -263,6 +309,18 @@ export function ApiPage({ requestId }: { requestId: string }) {
     setParams(tidyHeaderRows(parseQueryParams(apiDraftSeed.url || '')))
     setHeaders(seedHeaders)
     setBody(apiDraftSeed.body || '')
+    setBodyType(apiDraftSeed.bodyType ?? 'raw')
+    setUrlencoded(
+      apiDraftSeed.bodyUrlencoded?.length
+        ? tidyHeaderRows(normalizeHeaders(apiDraftSeed.bodyUrlencoded))
+        : [emptyHeader()]
+    )
+    setFormFields(
+      apiDraftSeed.bodyFormFields?.length
+        ? tidyFormRows(normalizeFormFields(apiDraftSeed.bodyFormFields))
+        : [emptyFormField()]
+    )
+    setFileLabels({})
     setBodyLanguage(bodyLanguageOf(contentTypeOf(seedHeaders)))
     setReqTab('headers')
     markDirty()
@@ -320,6 +378,74 @@ export function ApiPage({ requestId }: { requestId: string }) {
     markDirty()
   }
 
+  // ---------- 表单字段（x-www-form-urlencoded / form-data 各一张表，交互与请求头一致） ----------
+  const updateUrlencoded = (idx: number, field: keyof ApiHeaderPair, value: string): void => {
+    setUrlencoded((prev) =>
+      tidyHeaderRows(prev.map((p, i) => (i === idx ? { ...p, [field]: value } : p)))
+    )
+    markDirty()
+  }
+  const removeUrlencoded = (idx: number): void => {
+    setUrlencoded((prev) => tidyHeaderRows(prev.filter((_, i) => i !== idx)))
+    markDirty()
+  }
+  const updateFormField = (idx: number, patch: Partial<ApiFormField>): void => {
+    setFormFields((prev) => tidyFormRows(prev.map((f, i) => (i === idx ? { ...f, ...patch } : f))))
+    markDirty()
+  }
+  const removeFormField = (idx: number): void => {
+    setFormFields((prev) => tidyFormRows(prev.filter((_, i) => i !== idx)))
+    markDirty()
+  }
+
+  /**
+   * 为某个 form-data 字段选本地文件：对话框与 stat 都在主进程（渲染端拿不到 fs），
+   * 回包给「路径 + 文件名 + 大小」—— 路径写进字段值（发送时主进程按它读文件），
+   * 文件名+大小进展示缓存（落盘的只有路径，重启后退化成路径末段）。
+   */
+  const pickFormFile = async (idx: number): Promise<void> => {
+    try {
+      const res = await window.api.apiClient.pickFile()
+      if (res.canceled) return
+      if (res.error || !res.file) {
+        message.error(res.error || '选择文件失败')
+        return
+      }
+      const file = res.file
+      setFileLabels((prev) => ({ ...prev, [file.path]: `${file.name} (${formatBytes(file.size)})` }))
+      updateFormField(idx, { value: file.path, isFile: true })
+    } catch (e) {
+      message.error(`选择文件失败：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  /**
+   * 切换请求体类型：顺手把请求头里的 Content-Type 一起换掉，别让它跟正文对不上。
+   * - `none`（不携带请求体）：连 Content-Type 也不动 —— 没有正文就没有「对不上」的问题，
+   *   用户自己填的头原样保留；
+   * - 换成表单类：当前没填、或填的还是另一类表单 → 换成这一类的标准值；
+   *   用户自己写的（比如带 charset 的 urlencoded）不动；
+   * - 换回 raw：当前还是表单类 → 换成 application/json（表单类的 Content-Type 配自由文本
+   *   必然对不上，编辑器也没法高亮）。
+   */
+  const changeBodyType = (next: ApiBodyType): void => {
+    setBodyType(next)
+    if (next === 'none') {
+      markDirty()
+      return
+    }
+    const canonical = contentTypeForBodyType(next)
+    const current = contentTypeOf(headers)
+    if (canonical && (!current.trim() || isFormContentType(current))) {
+      setHeaders((prev) => setContentType(prev, canonical))
+      setBodyLanguage(bodyLanguageOf(canonical))
+    } else if (!canonical && isFormContentType(current)) {
+      setHeaders((prev) => setContentType(prev, 'application/json'))
+      setBodyLanguage('json')
+    }
+    markDirty()
+  }
+
   /**
    * 地址框输入：直接把新 URL 落盘到草稿，同时把查询串解析进参数表
    * （这是「URL → 表格」这一向的同步；「表格 → URL」由下面的 effect 负责）。
@@ -346,13 +472,18 @@ export function ApiPage({ requestId }: { requestId: string }) {
     cancelledRef.current = false
     let res: ApiHttpResponse | null = null
     try {
-      // 不传 timeoutMs：永不超时，慢接口由用户手动点「取消」中断
+      // 不传 timeoutMs：永不超时，慢接口由用户手动点「取消」中断。
+      // 三种请求体形态把各自的数据都带上（主进程按 bodyType 取用那一种）——
+      // 只带 raw 的话，切到表单模式后发的还是旧正文。
       res = await window.api.apiClient.send(
         {
           method,
           url: trimmed,
           headers: pairsToHeaders(headers),
-          body: method !== 'GET' && method !== 'HEAD' ? body : undefined
+          bodyType,
+          body: method !== 'GET' && method !== 'HEAD' ? body : undefined,
+          urlencoded,
+          formFields
         },
         sendId
       )
@@ -383,6 +514,9 @@ export function ApiPage({ requestId }: { requestId: string }) {
           url: trimmed,
           headers,
           body,
+          bodyType,
+          bodyUrlencoded: urlencoded,
+          bodyFormFields: formFields,
           status: res?.status ?? 0,
           statusText: res?.statusText ?? '',
           timeMs: res?.timeMs ?? 0,
@@ -678,30 +812,72 @@ export function ApiPage({ requestId }: { requestId: string }) {
 
           {reqTab === 'body' && (
             <div className="flex h-full min-h-0 flex-col px-3 pb-3">
-              <div className="min-h-0 flex-1 overflow-hidden">
-                <MonacoEditor
-                  value={body}
-                  onChange={(v) => {
-                    setBody(v)
-                    markDirty()
-                  }}
-                  language={bodyLanguage}
-                  onLanguageChange={setBodyLanguage}
-                  showLanguageSelector
-                  showLineNumbersToggle
-                  showWordWrapToggle
-                  showCopyButton
-                  // Monaco 没有 placeholder，GET/HEAD 的提醒改挂在工具栏上 ——
-                  // 不额外占一行高度（请求构造区本来就容易被响应面板压扁）
-                  toolbar={
-                    method === 'GET' || method === 'HEAD' ? (
-                      <span className="shrink-0 text-xs text-amber-600 dark:text-amber-400">
-                        {method} 请求不携带请求体，这里的内容发送时会被忽略
-                      </span>
-                    ) : undefined
-                  }
+              {/*
+                请求体形态：横向分段（≈ 横向 radio），不带描述文案。
+                GET/HEAD 的提醒挂在这一排（而不是 Monaco 的工具栏）—— 三种形态都要提示，
+                且请求构造区本来就容易被响应面板压扁，不额外占一行高度。
+              */}
+              <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 pb-2">
+                <Segmented
+                  options={BODY_TYPE_OPTIONS}
+                  value={bodyType}
+                  onChange={changeBodyType}
                 />
+                {bodyType !== 'none' && (method === 'GET' || method === 'HEAD') && (
+                  <span className="shrink-0 text-xs text-amber-600 dark:text-amber-400">
+                    {method} 请求不携带请求体，这里的内容发送时会被忽略
+                  </span>
+                )}
               </div>
+
+              {bodyType === 'none' ? (
+                <div className="min-h-0 flex-1 overflow-auto pt-1 text-xs text-muted-foreground">
+                  不携带请求体：发送时不带 body（请求头里的 Content-Type 原样保留）。
+                </div>
+              ) : bodyType === 'raw' ? (
+                <div className="min-h-0 flex-1 overflow-hidden">
+                  <MonacoEditor
+                    value={body}
+                    onChange={(v) => {
+                      setBody(v)
+                      markDirty()
+                    }}
+                    language={bodyLanguage}
+                    onLanguageChange={setBodyLanguage}
+                    showLanguageSelector
+                    showLineNumbersToggle
+                    showWordWrapToggle
+                    showCopyButton
+                  />
+                </div>
+              ) : (
+                // 两张表单与「请求头」同款：末行恒为空槽位（见 tidyFormRows / tidyHeaderRows）
+                <div className="min-h-0 flex-1 overflow-auto">
+                  {bodyType === 'x-www-form-urlencoded' ? (
+                    <BodyFieldsTable
+                      fields={urlencoded}
+                      fileMode={false}
+                      onPatch={(i, patch) => {
+                        // 表单行的 patch 只可能是 key / value（fileMode=false 时没有类型列）
+                        if (patch.key !== undefined) updateUrlencoded(i, 'key', patch.key)
+                        if (patch.value !== undefined) updateUrlencoded(i, 'value', patch.value)
+                      }}
+                      onRemove={removeUrlencoded}
+                      onPickFile={() => {}}
+                      fileLabel={(p) => p}
+                    />
+                  ) : (
+                    <BodyFieldsTable
+                      fields={formFields}
+                      fileMode
+                      onPatch={updateFormField}
+                      onRemove={removeFormField}
+                      onPickFile={(i) => void pickFormFile(i)}
+                      fileLabel={(p) => fileLabels[p] ?? baseNameOf(p)}
+                    />
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>

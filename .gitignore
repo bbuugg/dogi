@@ -1,6 +1,8 @@
 **/node_modules
 out
 .vscode
+.trae
+.zcode
 build/config.gypi
 release
 .merkle-snapshot.json

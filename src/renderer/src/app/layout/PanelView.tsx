@@ -9,7 +9,9 @@ import {
 import {
   ArrowDown,
   ArrowLeft,
+  ArrowLeftToLine,
   ArrowRight,
+  ArrowRightToLine,
   ArrowUp,
   Bot,
   Boxes,
@@ -23,12 +25,13 @@ import {
   Plus,
   Puzzle,
   ScrollText,
+  Split,
   TerminalSquare,
   X
 } from 'lucide-react'
 import { cn } from 'cn'
 import type { SessionInfo } from '@shared/types'
-import { groupTerminalSessionId, useAppStore, type PanelTab } from '@/stores/app-store'
+import { groupTerminalSessionId, useAppStore, type PanelTab, type PanelTabType } from '@/stores/app-store'
 import { TerminalView } from '@/features/terminal/TerminalView'
 import { AiPanel } from '@/features/agent/AiPanel'
 import { AgentPage } from '@/features/agent/AgentPage'
@@ -45,6 +48,8 @@ import { Dropdown } from 'antd'
 import { useDrag, useDrop } from 'react-dnd'
 import type { PaneNode, SplitDirection, SplitDirectionInput } from '@/app/layout/pane-layout'
 import { resolveSshColor } from '@/features/hosts/ssh-color'
+import { getTabBus, releaseTabBus } from '@/shared/lib/tab-event-bus'
+import { useInlineConfirm } from '@/shared/components/InlineConfirm'
 import { tintText } from '@/shared/lib/color'
 
 /** react-dnd 拖拽标签的 item 类型与载荷（带来源组，drop 端据此判断跨组移动） */
@@ -453,9 +458,10 @@ function PanelGroupView({ groupId }: { groupId: string }) {
             const isActive = group.activeTabId === tid
             return (
               // 内容宿主必须是 flex 列：面板根的 flex-1 才有定义高度可言 ——
-              // 否则列表页（日志 / 隧道 / 插件）会长到内容高度，内部 overflow-auto 永远不触发滚动
-              <div key={tid} className={isActive ? 'flex h-full flex-col' : 'hidden'}>
-                <TabContent tab={tab} active={active && isActive} />
+              // 否则列表页（日志 / 隧道 / 插件）会长到内容高度，内部 overflow-auto 永远不触发滚动。
+              // relative：标签内确认框（InlineConfirm）的遮罩以它定位，只盖住本标签
+              <div key={tid} className={isActive ? 'relative flex h-full flex-col' : 'hidden'}>
+                <TabContentGuard tab={tab} active={active && isActive} />
               </div>
             )
           })}
@@ -556,6 +562,7 @@ function PanelTabItem({
   const splitTabToGroup = useAppStore((s) => s.splitTabToGroup)
   const requestClosePanelTab = useAppStore((s) => s.requestClosePanelTab)
   const requestCloseGroup = useAppStore((s) => s.requestCloseGroup)
+  const requestCloseSiblingTabs = useAppStore((s) => s.requestCloseSiblingTabs)
   const reorderTabs = useAppStore((s) => s.reorderTabs)
   const moveTabToGroup = useAppStore((s) => s.moveTabToGroup)
   const innerRef = useRef<HTMLDivElement | null>(null)
@@ -618,33 +625,20 @@ function PanelTabItem({
       }}
       menu={{
         items: [
-          { key: 'title', label, disabled: true },
-          { type: 'divider' },
           // 拆分只搬动标签本身（把它拎到该方向的新组）。组内只有这一个标签时没有可拆的
           // 东西，置灰 —— 不再「顺手新建一个终端」来凑分屏，标签功能不牵连其它功能。
+          // 四个方向收进二级菜单，一级只留一项：菜单不被四行同质的方向项撑长。
           {
-            key: 'split-up',
-            icon: <ArrowUp className="size-3.5" />,
-            label: '向上拆分',
-            disabled: tabCount === 1
-          },
-          {
-            key: 'split-down',
-            icon: <ArrowDown className="size-3.5" />,
-            label: '向下拆分',
-            disabled: tabCount === 1
-          },
-          {
-            key: 'split-left',
-            icon: <ArrowLeft className="size-3.5" />,
-            label: '向左拆分',
-            disabled: tabCount === 1
-          },
-          {
-            key: 'split-right',
-            icon: <ArrowRight className="size-3.5" />,
-            label: '向右拆分',
-            disabled: tabCount === 1
+            key: 'split',
+            icon: <Split className="size-3.5" />,
+            label: '拆分',
+            disabled: tabCount === 1,
+            children: [
+              { key: 'split-up', icon: <ArrowUp className="size-3.5" />, label: '向上拆分' },
+              { key: 'split-down', icon: <ArrowDown className="size-3.5" />, label: '向下拆分' },
+              { key: 'split-left', icon: <ArrowLeft className="size-3.5" />, label: '向左拆分' },
+              { key: 'split-right', icon: <ArrowRight className="size-3.5" />, label: '向右拆分' }
+            ]
           },
           { type: 'divider' },
           {
@@ -653,11 +647,41 @@ function PanelTabItem({
             label: '关闭标签',
             danger: true
           },
+          // 其余关闭方式收进「关闭」二级菜单（与「拆分」同款收法），一级只留最常用的关闭标签。
+          // 组内批量关闭：都只作用于本组（跨组的标签不碰），且都保留当前这个标签，
+          // 所以各范围「无可关项」时置灰 —— 组内只剩自己 / 自己是首（末）个标签。
           {
-            key: 'close-group',
+            key: 'close-more',
             icon: <X className="size-3.5" />,
-            label: '关闭整个组',
-            danger: true
+            label: '关闭',
+            children: [
+              {
+                key: 'close-others',
+                label: '关闭其他标签',
+                danger: true,
+                disabled: tabCount === 1
+              },
+              {
+                key: 'close-left',
+                icon: <ArrowLeftToLine className="size-3.5" />,
+                label: '关闭左侧标签',
+                danger: true,
+                disabled: index === 0
+              },
+              {
+                key: 'close-right',
+                icon: <ArrowRightToLine className="size-3.5" />,
+                label: '关闭右侧标签',
+                danger: true,
+                disabled: index === tabCount - 1
+              },
+              { type: 'divider' },
+              {
+                key: 'close-group',
+                label: '关闭整个组',
+                danger: true
+              }
+            ]
           }
         ],
         onClick: ({ key }) => {
@@ -666,6 +690,12 @@ function PanelTabItem({
             splitTabToGroup(tab.id, groupId, key.slice('split-'.length) as SplitDirectionInput)
           } else if (key === 'close-tab') {
             requestClosePanelTab(tab.id)
+          } else if (key === 'close-others') {
+            requestCloseSiblingTabs(tab.id, 'others')
+          } else if (key === 'close-left') {
+            requestCloseSiblingTabs(tab.id, 'left')
+          } else if (key === 'close-right') {
+            requestCloseSiblingTabs(tab.id, 'right')
           } else if (key === 'close-group') {
             requestCloseGroup(groupId)
           }
@@ -732,33 +762,102 @@ function PanelTabItem({
   )
 }
 
+/** 有自带关闭确认的页面（经 useTabEventBus 注册 close-request handler）：防手滑不再叠加，避免双重弹窗 */
+const PAGE_MANAGED_CLOSE_TYPES: ReadonlySet<PanelTabType> = new Set(['note', 'agent'])
+
+/**
+ * 包装 TabContent 的关闭确认层：标签关闭总线的**所有者**（mount 创建、unmount 释放，
+ * 见 `shared/lib/tab-event-bus.ts`），并给没有自带确认的页面注册防手滑通用确认
+ * （受 confirmCloseTab 偏好控制）。
+ *
+ * Dirty 确认（未保存改动）/ 运行中确认由各页面自己经 useTabEventBus 注册
+ * close-request handler 负责 —— 只有页面自己最清楚自己的保存状态。两类 handler
+ * 在同一条总线上依次执行、任一 false 即阻止；确认框一律画在标签面板内部
+ * （InlineConfirm），不再用 portal 到 body 的全局 Modal.confirm。
+ */
+function TabContentGuard({ tab, active }: { tab: PanelTab; active: boolean }) {
+  const { confirm, element } = useInlineConfirm()
+  /** 通用确认里「以后都不再提示」勾选（uncontrolled，点「关闭」时读一次） */
+  const dontAskRef = useRef(false)
+  const pageManagedClose = PAGE_MANAGED_CLOSE_TYPES.has(tab.type)
+
+  // 总线所有者：标签内容挂载期间持有总线；unmount 释放（未决的确认会由
+  // useInlineConfirm 的卸载结算按取消收尾，批量关闭路径不会悬挂）
+  useEffect(() => {
+    getTabBus(tab.id)
+    return () => releaseTabBus(tab.id)
+  }, [tab.id])
+
+  useEffect(() => {
+    if (pageManagedClose) return
+    const off = getTabBus(tab.id).on('close-request', () => {
+      const s = useAppStore.getState()
+      // 防手滑确认（受偏好控制）
+      if (!s.preferences.confirmCloseTab) return true
+      dontAskRef.current = false
+      return confirm({
+        title: '关闭标签',
+        content: `确定关闭标签「${tab.title}」？`,
+        extra: (
+          <label className="mt-3 flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+            <input type="checkbox" onChange={(e) => (dontAskRef.current = e.target.checked)} />
+            以后都不再提示
+          </label>
+        ),
+        actions: [
+          { label: '取消', value: false },
+          {
+            label: '关闭',
+            kind: 'danger',
+            value: true,
+            run: async () => {
+              if (dontAskRef.current) await useAppStore.getState().setConfirmCloseTab(false)
+              return true
+            }
+          }
+        ]
+      })
+    })
+    return off
+  }, [tab.id, tab.title, pageManagedClose, confirm])
+
+  return (
+    <>
+      <TabContent tab={tab} active={active} />
+      {element}
+    </>
+  )
+}
+
 /** 单个标签的内容 */
 function TabContent({ tab, active }: { tab: PanelTab; active: boolean }) {
   switch (tab.type) {
     case 'terminal': {
       if (!tab.sessionId) return null
-      return <TerminalTab sessionId={tab.sessionId} active={active} />
+      return <TerminalTab tabId={tab.id} sessionId={tab.sessionId} active={active} />
     }
     case 'script':
-      return tab.scriptId ? <ScriptsPage scriptId={tab.scriptId} /> : null
+      return tab.scriptId ? <ScriptsPage tabId={tab.id} scriptId={tab.scriptId} /> : null
     case 'note':
-      return tab.noteId ? <NotesPage noteId={tab.noteId} /> : null
+      // active 传进去：标签保活（切走只是 hidden），笔记页要靠它「每次切回来都
+      // 重新探一次文件是否还在」，否则被外部删掉的文件会一直安静地留着。
+      return tab.noteFilePath ? <NotesPage tabId={tab.id} filePath={tab.noteFilePath} active={active} /> : null
     case 'api':
       if (!tab.apiRequestId) return null
       // 同一张表两种协议：ws 走 WebSocket 调试页，其余走 HTTP 请求页
       return tab.apiProtocol === 'ws' ? (
-        <WsPage requestId={tab.apiRequestId} />
+        <WsPage tabId={tab.id} requestId={tab.apiRequestId} />
       ) : (
-        <ApiPage requestId={tab.apiRequestId} />
+        <ApiPage tabId={tab.id} requestId={tab.apiRequestId} />
       )
     case 'plugins':
       return <PluginsPage />
     case 'plugin':
       return tab.pluginViewId ? <PluginTabContent tab={tab} /> : null
     case 'sftp':
-      return tab.sftpProfileId ? <SftpPage profileId={tab.sftpProfileId} /> : null
+      return tab.sftpProfileId ? <SftpPage tabId={tab.id} profileId={tab.sftpProfileId} /> : null
     case 'rdp':
-      return tab.rdpProfileId ? <RdpPage profileId={tab.rdpProfileId} /> : null
+      return tab.rdpProfileId ? <RdpPage tabId={tab.id} profileId={tab.rdpProfileId} /> : null
     case 'tunnels':
       return <TunnelsPanel />
     case 'logs':
@@ -767,7 +866,7 @@ function TabContent({ tab, active }: { tab: PanelTab; active: boolean }) {
       // 会话视图完全由 conversationId 驱动，所以一个标签一份实例、互不串台。
       // `visible` 给会话页用来「切过来的那一帧先把内容区宽度量准」（见 AgentPage 的 contentWidth）
       return tab.agentConversationId ? (
-        <AgentPage conversationId={tab.agentConversationId} visible={active} />
+        <AgentPage tabId={tab.id} conversationId={tab.agentConversationId} visible={active} />
       ) : null
     default:
       return null
@@ -775,10 +874,10 @@ function TabContent({ tab, active }: { tab: PanelTab; active: boolean }) {
 }
 
 /** 终端标签内容 */
-function TerminalTab({ sessionId, active }: { sessionId: string; active: boolean }) {
+function TerminalTab({ tabId, sessionId, active }: { tabId: string; sessionId: string; active: boolean }) {
   const session = useAppStore((s) => s.sessions.find((x: SessionInfo) => x.id === sessionId))
   if (!session) return null
-  return <TerminalView session={session} isActive={active} />
+  return <TerminalView tabId={tabId} session={session} isActive={active} />
 }
 
 /** 插件标签内容：渲染插件在 activate 时注册的视图组件 */

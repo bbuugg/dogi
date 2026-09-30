@@ -39,6 +39,7 @@ export default defineConfig({
           )
             return 'vendor-antd'
           if (i.includes('monaco')) return 'monaco'
+          if (i.includes('/@milkdown/') || i.includes('/@milkdown-') || i.includes('/prosemirror/')) return 'vendor-milkdown'
           if (i.includes('/@xterm/')) return 'xterm'
           if (
             i.includes('/node_modules/ai/') ||

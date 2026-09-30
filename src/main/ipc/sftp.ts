@@ -1,4 +1,5 @@
 import { app, dialog, ipcMain } from 'electron'
+import { promises as fs } from 'node:fs'
 import { isTransferCancelled, sftpService, type SftpProgressPayload } from '../services/sftp/sftp'
 import type { SftpTransferResult } from '@shared/types'
 import type { IpcContext } from './shared'
@@ -121,6 +122,37 @@ export function registerSftpIpc(ctx: IpcContext): void {
       } catch (e) {
         if (isTransferCancelled(e)) return { ok: false, canceled: true }
         return { ok: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  // 按本地路径上传（不弹系统对话框）：路径由渲染端从「拖入终端」的数据里取（webUtils.getPathForFile）。
+  // 目录递归上传为 remoteDir/<本地目录名>（目录内每个文件一笔独立传输，见 sftpService.uploadDir），
+  // 文件直接落到 remoteDir。聚合语义与 sftp:upload 一致：取消不算错误。
+  ipcMain.handle(
+    'sftp:uploadPaths',
+    async (_e, connId: string, remoteDir: string, paths: string[]): Promise<SftpTransferResult> => {
+      const settled = await Promise.allSettled(
+        paths.map(async (localPath) => {
+          const st = await fs.stat(localPath)
+          return st.isDirectory()
+            ? sftpService.uploadDir(connId, localPath, remoteDir)
+            : sftpService.uploadFrom(connId, localPath, remoteDir)
+        })
+      )
+      const done = settled.filter((s) => s.status === 'fulfilled').length
+      const rejected = settled.filter(
+        (s): s is PromiseRejectedResult => s.status === 'rejected'
+      )
+      if (rejected.length === 0) return { ok: true, count: done }
+      if (rejected.some((s) => isTransferCancelled(s.reason))) {
+        return { ok: false, canceled: true, count: done }
+      }
+      const reason = rejected[0].reason
+      return {
+        ok: false,
+        error: reason instanceof Error ? reason.message : String(reason),
+        count: done
       }
     }
   )

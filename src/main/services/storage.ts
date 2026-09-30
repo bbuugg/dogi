@@ -14,6 +14,7 @@ import type {
   McpServerConfig,
   NoteEntry,
   NoteGroup,
+  NoteSession,
   Preferences,
   ScriptEntry,
   ScriptGroup,
@@ -40,6 +41,8 @@ interface StoreSchema {
   notes: NoteEntry[]
   scriptGroups: ScriptGroup[]
   noteGroups: NoteGroup[]
+  /** 上次打开的笔记文件夹与文件（重启后恢复；缺省视为没打开过） */
+  noteSession?: NoteSession
   apiRequests: ApiRequestEntry[]
   apiGroups: ApiGroup[]
   apiHistory: ApiHistoryEntry[]
@@ -69,6 +72,9 @@ const DEFAULT_PREFERENCES: Preferences = {
   minimizeToTray: true,
   monitorInterval: 2000,
   confirmCloseTab: true,
+  // 笔记默认「手动保存」：改动先留在编辑器里，由用户点保存 / Ctrl+S 落盘
+  noteSaveMode: 'manual',
+  noteAutoSaveDelay: 2,
   notifyOnAgentFinish: true,
   hiddenActivities: [],
   browserChannel: 'auto',
@@ -81,6 +87,62 @@ const DEFAULT_PREFERENCES: Preferences = {
 
 /** 密钥类字段加密前缀（safeStorage 密文 base64） */
 const ENC_PREFIX = 'enc:'
+
+/** 会话默认标题（渲染端也有一份同值常量） */
+const DEFAULT_CONVERSATION_TITLE = '新会话'
+
+/**
+ * 旧存档里的会话形态（0.0.6 及以前）。
+ *
+ * 当时的模型是「工作区 / 会话各有一个 `backend`，`configId` 的含义由它决定」，
+ * 且 `ai-sdk` 是第三种后端 —— 现在只有 `kind: 'mastra' | 'acp'` 两种，需要读时迁移。
+ */
+type LegacyConversation = Partial<AgentConversation> & {
+  id: string
+  workspaceId: string
+  backend?: 'ai-sdk' | 'acp' | 'mastra'
+  /** 旧字段：`ai-sdk` 下是 AiModelConfig.id，`acp` 下是 AcpAgentConfig.id */
+  configId?: string
+}
+
+/**
+ * 把存档里的会话规整成当前形态（**读取时迁移，不写回**，下次保存自然落成新形态）。
+ *
+ * - `backend`（含已移除的 `'ai-sdk'`）→ `kind`：`'acp'` 仍是 acp，其余一律按 mastra；
+ * - 旧 ACP 会话的 `configId` 存的是 `AcpAgentConfig.id` → 迁到 `acpAgentId`；
+ * - 旧 ACP 会话没有 `acpSessionId`（当时每次都是 `session/new`），保持 undefined，
+ *   首轮对话时由主进程补建并把新 id 回填；
+ * - 旧 ACP 会话确实在本地存过消息，但新架构下 ACP 会话的消息由 agent 自己管理
+ *   （打开时 `session/load` 回放），这里直接丢掉本地副本，避免显示一份不再更新的僵尸历史。
+ */
+function normalizeConversation(raw: LegacyConversation): AgentConversation {
+  const kind: AgentBackend =
+    raw.kind === 'acp' || (!raw.kind && raw.backend === 'acp') ? 'acp' : 'mastra'
+  const base = {
+    id: raw.id,
+    workspaceId: raw.workspaceId,
+    title: raw.title ?? DEFAULT_CONVERSATION_TITLE,
+    createdAt: raw.createdAt ?? Date.now(),
+    updatedAt: raw.updatedAt ?? Date.now()
+  }
+  if (kind === 'acp') {
+    return {
+      ...base,
+      kind: 'acp',
+      messages: [],
+      modelId: raw.modelId,
+      acpAgentId: raw.acpAgentId ?? raw.configId,
+      acpSessionId: raw.acpSessionId
+    }
+  }
+  return {
+    ...base,
+    kind: 'mastra',
+    messages: raw.messages ?? [],
+    configId: raw.configId,
+    modelId: raw.modelId
+  }
+}
 
 class StorageService {
   private store = new Store<StoreSchema>({
@@ -541,6 +603,21 @@ class StorageService {
   }
 
   // ---------- 笔记 ----------
+  /**
+   * 上次打开的笔记文件夹与文件（重启后恢复）。
+   * 字段是后加的，老存档里没有 → 缺省返回空会话。
+   */
+  getNoteSession(): NoteSession {
+    return this.store.get('noteSession') ?? { folder: null, files: [] }
+  }
+
+  /** 保存笔记会话：只覆盖传入的部分（folder 或 files） */
+  saveNoteSession(patch: { folder?: string | null; files?: string[] }): NoteSession {
+    const next: NoteSession = { ...this.getNoteSession(), ...patch }
+    this.store.set('noteSession', next)
+    return next
+  }
+
   listNotes (): NoteEntry[] {
     return this.store.get('notes')
   }
@@ -890,6 +967,8 @@ class StorageService {
       agentBackend?: string
     }
     const { autoApprove, acpAgent: legacyAcp, agentBackend: _legacyBackend, ...rest } = stored
+    // 旧字段 `activeAcpId`（默认 ACP 预置）已随架构调整移除（ACP 绑定在会话创建时确定）
+    delete (rest as { activeAcpId?: string }).activeAcpId
     const permissionMode: AiPermissionMode =
       rest.permissionMode ?? (autoApprove === false ? 'confirm' : 'full')
     const settings: AiSettings = { ...DEFAULT_AI_SETTINGS, ...rest, permissionMode }
@@ -903,12 +982,7 @@ class StorageService {
           args: legacyAcp.args ?? []
         }
       ]
-      settings.activeAcpId = settings.acpAgents[0].id
       this.store.set('aiSettings', settings)
-    }
-    // 校正悬空的 activeAcpId（指向已删除的配置）：回退到剩余第一个
-    if (settings.activeAcpId && !settings.acpAgents?.some((a) => a.id === settings.activeAcpId)) {
-      settings.activeAcpId = settings.acpAgents?.[0]?.id
     }
     // 校正悬空的 activeConfigId（指向已删除的配置）：回退到剩余第一个，
     // 否则面板下拉框匹配不到 option、既显示空白又切不动
@@ -957,7 +1031,6 @@ class StorageService {
     id?: string
     name: string
     path: string
-    backend?: AgentBackend
   }): AgentWorkspace[] {
     const workspaces = this.store.get('agentWorkspaces')
     const now = Date.now()
@@ -970,7 +1043,6 @@ class StorageService {
             ? {
                 ...w,
                 name: input.name.trim() || w.name,
-                backend: input.backend ?? w.backend,
                 updatedAt: now
               }
             : w
@@ -981,7 +1053,6 @@ class StorageService {
             id: crypto.randomUUID(),
             name: input.name.trim(),
             path: input.path,
-            backend: input.backend,
             createdAt: now,
             updatedAt: now
           }
@@ -1002,8 +1073,11 @@ class StorageService {
   }
 
   // ---------- Agent 会话 ----------
+  /** 全部会话（读取时把旧存档迁移成当前形态，见 normalizeConversation） */
   listAgentConversations(): AgentConversation[] {
-    return this.store.get('agentConversations')
+    return this.store
+      .get('agentConversations')
+      .map((c) => normalizeConversation(c as LegacyConversation))
   }
 
   /**
@@ -1015,30 +1089,50 @@ class StorageService {
   saveAgentConversation(input: {
     id?: string
     workspaceId: string
+    /** 会话形态；不传沿用旧值（新会话按 mastra） */
+    kind?: AgentBackend
     title?: string
+    /** 仅 mastra 有意义：ACP 会话的消息由 agent 自己管理，这里一律写空 */
     messages?: AgentChatMessage[]
-    backend?: AgentBackend
+    /** 仅 mastra */
     configId?: string
-    /** 具体模型 id：`ai-sdk` 下是配置里的模型，`acp` 下是 agent 上报的模型 value */
+    /** 具体模型 id：`mastra` 是配置里的模型，`acp` 是 agent 上报的模型 value */
     modelId?: string
+    /** 仅 acp：绑定的 ACP agent 配置 id */
+    acpAgentId?: string
+    /** 仅 acp：agent 侧的会话 id */
+    acpSessionId?: string
   }): AgentConversation {
-    const conversations = this.store.get('agentConversations')
+    // 先迁移一遍：旧记录没有 kind，靠 normalize 补出来，后续的 prev 取值才是新语义
+    const conversations = this.store
+      .get('agentConversations')
+      .map((c) => normalizeConversation(c as LegacyConversation))
     const now = Date.now()
     const prev = input.id ? conversations.find((c) => c.id === input.id) : undefined
+    const kind: AgentBackend = input.kind ?? prev?.kind ?? 'mastra'
+    const isAcp = kind === 'acp'
+    // 各字段一律用 `'x' in input` 判断而不是 `??`：渲染端落盘时**每次都显式带上**这些字段，
+    // 其中 `undefined` 表示「这个字段要清掉（没选 / 走默认）」—— 必须能覆盖旧值，
+    // 否则把会话从某个模型切回默认就永远切不回来（见 AGENTS.md 4.3）。
     const conversation: AgentConversation = {
       id: input.id || crypto.randomUUID(),
       workspaceId: input.workspaceId,
-      title: input.title ?? prev?.title ?? '新会话',
-      messages: input.messages ?? prev?.messages ?? [],
-      // 后端 / 模型按会话存。这里用 `in` 判断而不是 `??`：
-      // 渲染端落盘时每次都显式带上这两个字段，其中 `undefined` 表示「这个会话没选、走默认」——
-      // 必须能覆盖掉旧值，否则从 ACP / 某个模型切回默认就永远切不回来了。
-      backend: 'backend' in input ? input.backend : prev?.backend,
-      configId: 'configId' in input ? input.configId : prev?.configId,
-      // ⚠️ modelId 与上面两个字段同款处理（`in` 而不是 `??`）：它也是「按会话选中的具体模型」。
-      // 之前**整条链路都漏了它**（store → preload → ipc → storage），会话里换的模型永远不落盘，
-      // 重启后回退到配置默认模型（用户报告「每个会话设置的模型重启后恢复成默认」）。
+      kind,
+      title: input.title ?? prev?.title ?? DEFAULT_CONVERSATION_TITLE,
+      // ACP 会话的消息归 agent 管：本地不保存任何消息
+      messages: isAcp ? [] : (input.messages ?? prev?.messages ?? []),
+      configId: isAcp ? undefined : 'configId' in input ? input.configId : prev?.configId,
       modelId: 'modelId' in input ? input.modelId : prev?.modelId,
+      acpAgentId: isAcp
+        ? 'acpAgentId' in input
+          ? input.acpAgentId
+          : prev?.acpAgentId
+        : undefined,
+      acpSessionId: isAcp
+        ? 'acpSessionId' in input
+          ? input.acpSessionId
+          : prev?.acpSessionId
+        : undefined,
       createdAt: prev?.createdAt ?? now,
       updatedAt: now
     }

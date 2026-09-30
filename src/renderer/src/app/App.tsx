@@ -12,7 +12,6 @@ import { SettingsModal } from '@/features/settings/SettingsModal'
 import { CommandPalette } from '@/app/layout/CommandPalette'
 import { RunScriptDialog } from '@/features/scripts/RunScriptDialog'
 import { PanelView } from '@/app/layout/PanelView'
-import { TabCloseConfirm } from '@/app/layout/TabCloseConfirm'
 import { StatusBar } from '@/app/layout/StatusBar'
 import { ResizeHandle } from '@/shared/components/ResizeHandle'
 import { AntdProvider } from '@/shared/components/AntdProvider'
@@ -42,7 +41,7 @@ export default function App() {
     const activeTabId = gid ? s.groups[gid]?.activeTabId : null
     const tab = activeTabId ? s.ui.panelTabs.find((t) => t.id === activeTabId) : undefined
     if (tab?.type === 'script' && tab.scriptId) return editorSaveKey('script', tab.scriptId)
-    if (tab?.type === 'note' && tab.noteId) return editorSaveKey('note', tab.noteId)
+    if (tab?.type === 'note' && tab.noteFilePath) return editorSaveKey('note', tab.noteFilePath)
     // WebSocket 与 HTTP 请求共用一张表，但状态栏提示语不同，所以键前缀分开（见 editorSaveKey）
     if (tab?.type === 'api' && tab.apiRequestId)
       return editorSaveKey(tab.apiProtocol === 'ws' ? 'ws' : 'api', tab.apiRequestId)
@@ -110,7 +109,6 @@ export default function App() {
         <SettingsModal />
         <CommandPalette />
         <RunScriptDialog />
-        <TabCloseConfirm />
         </div>
       </DndProvider>
     </AntdProvider>

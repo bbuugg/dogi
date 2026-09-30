@@ -1,7 +1,5 @@
 import { ipcMain } from 'electron'
 import { aiService } from '../services/ai/ai'
-import { acpAgentService } from '../services/ai/acp-agent'
-import { detectInstalledAcpAgents } from '../services/ai/acp-detect'
 import { sessionManager } from '../services/terminal/sessions'
 import { storage } from '../services/storage'
 import type { AiChatRequest, AiModelConfig, AiSettings, AiStreamEvent } from '@shared/types'
@@ -22,7 +20,6 @@ export function registerAiIpc(ctx: IpcContext): void {
   ipcMain.handle('ai:settings:save', (_e, settings: Partial<AiSettings>) =>
     storage.saveAiSettings(settings)
   )
-  ipcMain.handle('ai:detectAcpAgents', () => detectInstalledAcpAgents())
   // 拉取 OpenAI 兼容接口的模型列表（GET {baseURL}/models），供设置页「拉取远程模型」使用。
   // configId：编辑已有配置时表单里的 apiKey 是空的（脱敏不回显），按它取存储的解密 key，
   // 否则「保存后编辑再拉取」就会变成无鉴权请求而失败。
@@ -47,14 +44,6 @@ export function registerAiIpc(ctx: IpcContext): void {
       return [...new Set(ids)]
     }
   )
-  // 向 ACP agent 询问可用模型：临时建连（initialize + session/new），读 configOptions 后即断开
-  ipcMain.handle('ai:acpListModels', async (_e, agentId: string) => {
-    const settings = storage.getAiSettings()
-    const cfg = settings.acpAgents?.find((a) => a.id === agentId)
-    if (!cfg?.command) throw new Error('ACP agent 配置不存在')
-    return acpAgentService.listModels(cfg)
-  })
-
   // ---------- 对话流与中止 ----------
   ipcMain.handle('ai:chat', async (_e, req: AiChatRequest) => aiService.chat(req))
   ipcMain.handle('ai:abort', (_e, requestId: string) => aiService.abort(requestId))

@@ -6,21 +6,39 @@ import { ASK_FOLLOWUP_TOOL } from '@shared/ask-followup'
 /**
  * 已完成的轮次折叠（参考 fishwork 的 TurnStepGroup）。
  *
- * 思路：一轮 assistant 消息**已完成**（不是正在流式的末条）时，把「末尾连续正文之前」的
+ * 思路：一轮 assistant 消息**已完成**（不是正在流式的末条）时，把「最终回答之前」的
  * 全部过程（思考 / 工具调用 / 提问卡 / 中途正文）收进**一个**可展开分组，默认只露一行摘要
- * （如「思考 ×1 · 工具调用 ×3」），点击展开 / 收起；末尾连续的正文（最终回答）始终可见。
+ * （如「思考 ×1 · 工具调用 ×3」），点击展开 / 收起；最终回答（末尾那段正文）始终可见。
+ * ⚠️「末尾不是正文」的回落规则见 `findTailStart` —— **正文绝不能被折进折叠条**。
  *
  * 这与 reasoning / tool 各自的 CollapsibleRow 是两层：每个工具仍是一条可点的横条，而它们整体
  * 再被这一层「过程折叠条」收住，让长轮次的对话流不至于被一堆工具横条淹没。
  */
 
-/** 末尾连续正文块的起点：它之前的一切收进折叠组 */
+/**
+ * 折叠组的终点（= 可见尾巴的起点）：它之前的一切收进折叠组。
+ *
+ * 首选「**末尾连续正文**的起点」—— 那是最终回答，必须整段可见。
+ *
+ * ⚠️ 但**末尾不是正文时不能把正文一起折进去**（用户报告）：ACP 导入的历史里
+ * 「正文说完 → 后面还跟着几步工具调用」很常见（甚至因为工具结果的归属问题被排到正文之后），
+ * 只按「末尾连续正文」算，`tailStart` 会等于 `units.length` —— **整条消息（含正文）全被折进
+ * 折叠条**，界面上看不到任何输出，却能点到复制按钮（复制出一条你看不见的正文）。
+ * 所以退一步：拿**最后一个正文块**当答案的锚点，它之后的工具行留在可见区。
+ * 整条消息一个正文块都没有（纯思考 + 工具调用）时折叠全部 —— 那是正常形态，不是 bug。
+ */
 export function findTailStart(units: { kind: string }[]): number {
   let tailStart = units.length
   while (tailStart > 0 && units[tailStart - 1].kind === 'text') {
     tailStart--
   }
-  return tailStart
+  // 末尾本来就是正文：末尾连续正文全部可见（原行为）
+  if (tailStart < units.length) return tailStart
+  // 末尾不是正文：回到最后一个正文块，把它（及它之后的工具行）留在外面
+  for (let i = units.length - 1; i >= 0; i--) {
+    if (units[i].kind === 'text') return i
+  }
+  return units.length
 }
 
 /** 折叠条摘要：思考 ×N · 工具调用 ×N · 提问 ×N */

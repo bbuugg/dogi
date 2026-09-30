@@ -1,8 +1,11 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import { applyColorTheme } from '../shared/theme'
 import type { ColorThemeName } from '../shared/types'
 import type {
+  AcpConversationState,
+  AcpModelList,
+  AcpSessionInfo,
   AgentBackend,
   AgentChatMessage,
   AgentChatRequest,
@@ -23,6 +26,7 @@ import type {
   ApiHistoryEntry,
   ApiHttpRequest,
   ApiHttpResponse,
+  ApiPickFileResult,
   ApiRequestEntry,
   AppInfo,
   BrowserFrame,
@@ -42,7 +46,9 @@ import type {
   MoshClientStatus,
   NoteEntry,
   NoteGroup,
-  NoteImportResult,
+  NoteFileItem,
+  NoteFileContent,
+  NoteSession,
   OpenResult,
   Preferences,
   RdpBridgeInfo,
@@ -274,6 +280,16 @@ const api = {
     /** 弹选择目录对话框后递归上传整个本地目录（目录内每个文件一笔独立传输） */
     uploadDir: (connId: string, remoteDir: string): Promise<SftpTransferResult> =>
       ipcRenderer.invoke('sftp:uploadDir', connId, remoteDir),
+    /**
+     * 按本地路径上传（不弹对话框）：目录递归上传为 remoteDir/<目录名>，文件落到 remoteDir。
+     * 用于「拖文件/文件夹到终端」——路径由渲染端用 app.getPathForFile 从拖拽数据里取
+     */
+    uploadPaths: (
+      connId: string,
+      remoteDir: string,
+      paths: string[]
+    ): Promise<SftpTransferResult> =>
+      ipcRenderer.invoke('sftp:uploadPaths', connId, remoteDir, paths),
     /** 弹选择目录对话框后递归下载整个远端目录（目录内每个文件一笔独立传输） */
     downloadDir: (connId: string, remoteDir: string, defaultName: string): Promise<SftpTransferResult> =>
       ipcRenderer.invoke('sftp:downloadDir', connId, remoteDir, defaultName),
@@ -322,17 +338,9 @@ const api = {
     getSettings: (): Promise<AiSettings> => ipcRenderer.invoke('ai:settings:get'),
     saveSettings: (settings: Partial<AiSettings>): Promise<AiSettings> =>
       ipcRenderer.invoke('ai:settings:save', settings),
-    /** 检测本机 PATH 中已安装的 ACP agent */
-    detectAcpAgents: (): Promise<DetectedAcpAgent[]> =>
-      ipcRenderer.invoke('ai:detectAcpAgents'),
     /** 拉取 OpenAI 兼容接口的模型列表（GET {baseURL}/models）；编辑已有配置时传 configId 以复用存储的 key */
     listRemoteModels: (input: { baseURL: string; apiKey?: string; configId?: string }): Promise<string[]> =>
       ipcRenderer.invoke('ai:listRemoteModels', input),
-    /** 向 ACP agent 询问可用模型（临时建连读 configOptions）；agent 未上报时返回 null */
-    acpListModels: (
-      agentId: string
-    ): Promise<{ optionId: string; currentValue: string; models: Array<{ value: string; name: string }> } | null> =>
-      ipcRenderer.invoke('ai:acpListModels', agentId),
     chat: (req: AiChatRequest): Promise<{ requestId: string }> =>
       ipcRenderer.invoke('ai:chat', req),
     abort: (requestId: string): Promise<void> =>
@@ -356,28 +364,64 @@ const api = {
       id?: string
       name: string
       path: string
-      backend?: AgentBackend
     }): Promise<AgentWorkspace[]> => ipcRenderer.invoke('agent:workspaces:save', input),
     deleteWorkspace: (id: string): Promise<AgentWorkspace[]> =>
       ipcRenderer.invoke('agent:workspaces:delete', id),
-    /** 全部会话（含消息历史），渲染端按 workspaceId 归到各工作区下 */
+    /** 全部会话（含 mastra 会话的消息历史），渲染端按 workspaceId 归到各工作区下 */
     listConversations: (): Promise<AgentConversation[]> =>
       ipcRenderer.invoke('agent:conversations:list'),
     /** 新建（不传 id）或更新会话，返回保存后的那一个（不回传全量列表） */
     saveConversation: (input: {
       id?: string
       workspaceId: string
+      /** 会话形态：mastra（自带 agent，消息本地存）/ acp（外部 agent，消息归它自己管） */
+      kind?: AgentBackend
       title?: string
+      /** 仅 mastra 有意义；ACP 会话的消息由 agent 管理，本地一律不保存 */
       messages?: AgentChatMessage[]
-      backend?: AgentBackend
       configId?: string
       modelId?: string
+      acpAgentId?: string
+      acpSessionId?: string
     }): Promise<AgentConversation> => ipcRenderer.invoke('agent:conversations:save', input),
     deleteConversation: (id: string): Promise<void> =>
       ipcRenderer.invoke('agent:conversations:delete', id),
     chat: (req: AgentChatRequest): Promise<{ requestId: string }> =>
       ipcRenderer.invoke('agent:chat', req),
     abort: (requestId: string): Promise<void> => ipcRenderer.invoke('agent:abort', requestId),
+    /**
+     * ACP（外部 agent）：会话由 agent 自己管理，本应用只做「发现 → 导入 → 绑定」。
+     * 检测 / 会话列表 / 删除都走临时连接，用完即杀。
+     */
+    acp: {
+      /** 扫描本机 PATH 里已安装的已知 ACP agent */
+      detect: (): Promise<DetectedAcpAgent[]> => ipcRenderer.invoke('agent:acp:detect'),
+      /** 拉取某个 agent 侧的会话列表（`session/list`）；cwd 用于按工作区目录过滤 */
+      listSessions: (payload: { acpAgentId: string; cwd?: string }): Promise<AcpSessionInfo[]> =>
+        ipcRenderer.invoke('agent:acp:listSessions', payload),
+      /** 向 agent 询问可用模型（临时建连读 configOptions）；agent 不上报时返回 null */
+      listModels: (acpAgentId: string): Promise<AcpModelList | null> =>
+        ipcRenderer.invoke('agent:acp:listModels', acpAgentId),
+      /** 让 agent 删掉它那边的会话（`session/delete`）；删除会话时可选 */
+      deleteSession: (payload: { acpAgentId: string; sessionId: string }): Promise<void> =>
+        ipcRenderer.invoke('agent:acp:deleteSession', payload),
+      /** 打开 ACP 会话：让 agent 用 `session/load` 回放历史（本地不落盘） */
+      load: (payload: {
+        workspaceId: string
+        conversationId: string
+        acpAgentId?: string
+        acpSessionId?: string
+        modelId?: string
+      }): Promise<{ requestId: string }> => ipcRenderer.invoke('agent:acp:load', payload),
+      /** 切换某个 ACP 会话的模型（`session/set_config_option`，不重建会话） */
+      setModel: (payload: { conversationId: string; modelId?: string }): Promise<void> =>
+        ipcRenderer.invoke('agent:acp:setModel', payload),
+      /**
+       * 会话就绪（新建 / 载入）后的状态推送：agent 侧会话 id + 可切换的模型列表。
+       * 新建的 ACP 会话靠它把 `session/new` 返回的 id 落盘。
+       */
+      onState: (cb: (state: AcpConversationState) => void) => subscribe('agent:acp-state', cb)
+    },
     /**
      * 流事件。`conversationId` 由主进程补上：事件可能早于 `chat()` 的返回值到达，
      * 渲染端不能只靠自己那张 requestId → 会话 的表（见 ipc/agent.ts）。
@@ -490,8 +534,35 @@ const api = {
       deleteNotes?: boolean
     ): Promise<{ groups: NoteGroup[]; notes: NoteEntry[] }> =>
       ipcRenderer.invoke('notes:groups:delete', id, deleteNotes),
-    /** 从本地选择文件导入为笔记（每个文件一篇），返回最新列表与新建 id */
-    importFiles: (): Promise<NoteImportResult> => ipcRenderer.invoke('notes:import')
+    /** 打开本地文件夹：返回文件夹根路径与 Markdown 文件树 */
+    openFolder: (): Promise<{ root: string; items: NoteFileItem[] } | null> =>
+      ipcRenderer.invoke('notes:openFolder'),
+    /** 打开单个本地 Markdown 文件 */
+    openFile: (): Promise<NoteFileContent | null> =>
+      ipcRenderer.invoke('notes:openFile'),
+    /** 上次打开的笔记文件夹与文件（启动时恢复用） */
+    getSession: (): Promise<NoteSession> => ipcRenderer.invoke('notes:session:get'),
+    /** 保存笔记会话（只传变化的部分：folder 或 files） */
+    saveSession: (patch: { folder?: string | null; files?: string[] }): Promise<NoteSession> =>
+      ipcRenderer.invoke('notes:session:save', patch),
+    /** 读取文件夹内指定文件（filePath 为相对路径） */
+    readFile: (root: string, filePath: string): Promise<NoteFileContent> =>
+      ipcRenderer.invoke('notes:readFile', root, filePath),
+    /** 保存内容到文件（filePath 为绝对路径） */
+    saveFile: (filePath: string, content: string): Promise<{ mtime: number }> =>
+      ipcRenderer.invoke('notes:saveFile', filePath, content),
+    /** 新建笔记文件（root 为空时弹保存框） */
+    newFile: (root: string, dirPath: string): Promise<NoteFileContent> =>
+      ipcRenderer.invoke('notes:newFile', root, dirPath),
+    /** 刷新已打开的文件夹，返回更新后的文件树 */
+    refreshFolder: (root: string): Promise<NoteFileItem[]> =>
+      ipcRenderer.invoke('notes:refreshFolder', root),
+    /** 重命名文件（在已打开的文件夹内） */
+    renameFile: (root: string, oldPath: string, newName: string): Promise<string> =>
+      ipcRenderer.invoke('notes:renameFile', root, oldPath, newName),
+    /** 删除文件（从已打开的文件夹中移除） */
+    deleteFile: (root: string, filePath: string): Promise<void> =>
+      ipcRenderer.invoke('notes:deleteFile', root, filePath)
   },
   /**
    * 浏览器会话控制（Agent 的浏览器工具与内嵌面板共用）。画面走 screencast 帧流
@@ -554,7 +625,12 @@ const api = {
     /** sendId 由渲染端生成（一次请求一个），配合 abort 手动取消进行中的请求 */
     send: (req: ApiHttpRequest, sendId?: string): Promise<ApiHttpResponse> =>
       ipcRenderer.invoke('api:send', req, sendId),
-    abort: (sendId: string): Promise<void> => ipcRenderer.invoke('api:abort', sendId)
+    abort: (sendId: string): Promise<void> => ipcRenderer.invoke('api:abort', sendId),
+    /**
+     * 为 form-data 的文件字段选本地文件（弹系统对话框，主进程顺手 stat 出名字与大小）。
+     * 只是选路径：文件内容由 send 在主进程侧读。
+     */
+    pickFile: (): Promise<ApiPickFileResult> => ipcRenderer.invoke('api:pickFile')
   },
   /**
    * WebSocket 调试（接口请求里的 ws 协议）。
@@ -601,6 +677,12 @@ const api = {
     info: (): Promise<AppInfo> => ipcRenderer.invoke('app:info'),
     /** 用系统默认程序打开外部链接（主进程会按安全协议过滤，避免弹窗） */
     openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url),
+    /**
+     * 取拖入文件的本地绝对路径。Electron 32 起 `File.path` 已移除，
+     * 必须在 preload 里用 `webUtils.getPathForFile` 包一层（官方推荐做法）；
+     * 非真实文件（如程序构造的 File）返回空串，调用方需过滤。
+     */
+    getPathForFile: (file: File): string => webUtils.getPathForFile(file),
     /**
      * 发一条系统通知。**是否真的弹由主进程判定**：应用在前台时不打扰，
      * 通知开关也读偏好；返回是否弹出。

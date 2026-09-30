@@ -289,14 +289,14 @@ export function ModelSettings() {
           >
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5">
-                <span className="truncate text-xs font-medium">{config.name}</span>
+                <span className="truncate text-sm font-medium">{config.name}</span>
                 {config.id === activeConfigId && (
                   <Tag color="default" className="m-0 h-4 border-0 bg-secondary px-1.5 text-[9px] leading-4">
                     默认
                   </Tag>
                 )}
               </div>
-              <div className="truncate text-[10px] text-muted-foreground">
+              <div className="truncate text-xs text-muted-foreground">
                 {KIND_LABELS[config.kind]}
                 {hasApiStyleChoice(config.kind)
                   ? ` · ${API_STYLE_LABELS[config.apiStyle ?? API_STYLE_DEFAULT[config.kind] ?? 'responses'].split('（')[0]}`
@@ -320,7 +320,7 @@ export function ModelSettings() {
                       okButtonProps={{ danger: true }}
                       onConfirm={() => void removeModel(config, m)}
                     >
-                      <Tag className="m-0 cursor-pointer font-mono text-[10px]">
+                      <Tag className="m-0 cursor-pointer font-mono text-xs">
                         {m}
                         <X className="ml-0.5 inline-block size-2.5 align-middle" />
                       </Tag>
@@ -451,11 +451,11 @@ export function ModelSettings() {
                   patch({ models: v, ...(autoName ? { name: v[0] } : {}) })
                 }}
               />
-              <p className="text-[10px] text-muted-foreground">
+              <p className="text-xs text-muted-foreground">
                 可添加多个模型：输入后回车，或拉取后从列表勾选；第一个为该配置的默认模型。
               </p>
               {!hasApiStyleChoice(editing.kind) && (
-                <p className="text-[10px] text-muted-foreground">
+                <p className="text-xs text-muted-foreground">
                   从远程拉取仅支持 OpenAI 兼容接口（/v1/models），其余服务商请手动输入模型 ID。
                 </p>
               )}
@@ -476,7 +476,7 @@ export function ModelSettings() {
                     { value: 'responses', label: API_STYLE_LABELS['responses'] }
                   ]}
                 />
-                <p className="text-[10px] text-muted-foreground">
+                <p className="text-xs text-muted-foreground">
                   第三方兼容接口（Ollama / vLLM / 中转网关）若调用 /responses 报 404，请选 Chat Completions。
                 </p>
               </div>
@@ -559,7 +559,7 @@ export function ModelSettings() {
               </div>
             )}
             {picker.selected.length > 0 && (
-              <p className="text-[10px] text-muted-foreground">
+              <p className="text-xs text-muted-foreground">
                 已选 {picker.selected.length} 个，确认后将追加到「{picker.config.name}」（已存在的不会重复）。
               </p>
             )}

@@ -261,7 +261,7 @@ type RdpPhase = 'loading' | 'prompt' | 'idle' | 'connecting' | 'connected' | 'en
  * 预填配置值，密码必填，可勾选保存回配置 —— 主进程 safeStorage 加密落盘）。
  * 连接失败 / 会话结束的遮罩上可沿用当前凭据「重新连接」或「修改凭据」重来。
  */
-export function RdpPage({ profileId }: { profileId: string }) {
+export function RdpPage({ profileId, tabId }: { profileId: string; tabId?: string }) {
   const profile = useAppStore((s) => s.profiles.find((p) => p.id === profileId))
   const refreshProfiles = useAppStore((s) => s.refreshProfiles)
   const host = profile?.host ?? ''

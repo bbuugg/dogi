@@ -81,7 +81,7 @@ export function McpConfigPopover() {
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0">
                 <div className="text-xs font-medium">浏览器工具</div>
-                <div className="text-[10px] leading-4 text-muted-foreground">
+                <div className="text-xs leading-4 text-muted-foreground">
                   关闭后 AI 拿不到任何浏览器工具（面板仍可手动使用）
                 </div>
               </div>
@@ -103,7 +103,7 @@ export function McpConfigPopover() {
                     { label: '系统浏览器', value: 'system' }
                   ]}
                 />
-                <div className="mt-1.5 text-[10px] leading-4 text-muted-foreground">
+                <div className="mt-1.5 text-xs leading-4 text-muted-foreground">
                   {browserToolMode === 'in-app'
                     ? '无窗口运行，画面镜像到右侧「浏览器」标签（不弹本机窗口）'
                     : '由内置 Playwright MCP 驱动，会拉起本机的 Edge / Chrome 窗口'}
@@ -126,7 +126,7 @@ export function McpConfigPopover() {
               >
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5">
-                    <span className="truncate text-xs font-medium">{server.name}</span>
+                    <span className="truncate text-sm font-medium">{server.name}</span>
                     {server.enabled ? (
                       <Tag color="default" className="m-0 h-4 border-0 bg-secondary px-1.5 text-[9px] leading-4">
                         启用
@@ -142,7 +142,7 @@ export function McpConfigPopover() {
                       </Tag>
                     ) : null}
                   </div>
-                  <div className="truncate font-mono text-[10px] text-muted-foreground">
+                  <div className="truncate font-mono text-xs text-muted-foreground">
                     {server.command} {(server.args ?? []).join(' ')}
                   </div>
                 </div>

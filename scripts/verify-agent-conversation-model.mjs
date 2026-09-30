@@ -1,15 +1,20 @@
 /**
- * Agent 会话「模型选择」的持久化验证（真启动两次应用，同一个 userData 目录）。
+ * Agent 会话「形态 / 模型选择」的持久化验证（真启动两次应用，同一个 userData 目录）。
  *
- * 用户报告：每个会话设置的模型，重启应用后恢复成默认。根因是 **modelId 在整条落盘链路上
- * 都缺**（store 的 persistConversation → preload → ipc → storage.saveAgentConversation），
- * 会话里换的模型永远写不进磁盘；重启后只剩 configId，于是回退成「配置的默认模型」。
+ * 起因一（AGENTS 4.3）：每个会话设置的模型，重启应用后恢复成默认 —— 根因是 **modelId 在
+ * 整条落盘链路上都缺**（store 的 persistConversation → preload → ipc → storage），
+ * 会话里换的模型永远写不进磁盘。
  *
- * 覆盖四条（第 2 条是 AGENTS 4.3 特别强调的覆盖语义，最容易回归）：
- *   1. 保存时带 modelId → 读得回来；
+ * 起因二（本轮架构调整）：会话形态从「工作区 / 会话各一个 backend」改成
+ * **每个会话固定 `kind: 'mastra' | 'acp'`**，ACP 会话多出绑定关系（acpAgentId + acpSessionId），
+ * 且**消息由 agent 自己管理、本地一律不存**。这些都是「只写不读回」的落盘语义，最容易回归。
+ *
+ * 覆盖：
+ *   1. 保存时带 modelId → 读得回来（mastra）；
  *   2. 不带 modelId 再存一次（改标题、每轮结束落盘）→ **必须保留旧值**（`in` 语义，不是清空）；
  *   3. 显式传 `modelId: undefined` → 才允许清空；
- *   4. 重启后仍在（真的落盘了，不是只活在内存里）。
+ *   4. ACP 会话：kind / acpAgentId / acpSessionId 落盘，**messages 一律为空**（哪怕传了消息）；
+ *   5. 重启后以上各项仍在（真的落盘了，不是只活在内存里）。
  *
  * 跑：node scripts/verify-agent-conversation-model.mjs（需先 npm run build 出产物）
  */
@@ -72,16 +77,17 @@ try {
   cdp = await connect({ port: CDP_PORT })
   await waitReady(cdp)
 
+  // --- mastra 会话：形态 + 模型配置 + 具体模型 ---
   const saved = await cdp.eval(`window.api.agent.saveConversation({
     workspaceId: 'w-probe',
     title: '探针会话',
     messages: [],
-    backend: 'acp',
-    configId: 'acp-1',
+    kind: 'mastra',
+    configId: 'cfg-1',
     modelId: 'airouter/deepseek-flash'
   })`)
-  check('新建会话返回的 modelId 正确', saved?.modelId === 'airouter/deepseek-flash')
-  check('新建会话返回的 configId / backend 正确', saved?.configId === 'acp-1' && saved?.backend === 'acp')
+  check('新建会话返回的 kind / modelId 正确', saved?.kind === 'mastra' && saved?.modelId === 'airouter/deepseek-flash')
+  check('新建会话返回的 configId 正确', saved?.configId === 'cfg-1')
 
   check(
     'listConversations 能读回 modelId',
@@ -113,10 +119,37 @@ try {
   await cdp.eval(`window.api.agent.saveConversation({
     id: ${JSON.stringify(saved.id)},
     workspaceId: 'w-probe',
-    backend: 'acp',
-    configId: 'acp-2',
+    kind: 'mastra',
+    configId: 'cfg-2',
     modelId: 'm-after-restart'
   })`)
+
+  // --- ACP 会话：绑定关系落盘、消息不由本应用管理 ---
+  const acp = await cdp.eval(`window.api.agent.saveConversation({
+    workspaceId: 'w-probe',
+    title: '导入的 ACP 会话',
+    kind: 'acp',
+    acpAgentId: 'agent-1',
+    acpSessionId: 'sess-abc',
+    messages: [{ id: 'x', role: 'user', parts: [{ type: 'text', text: '不该被存下来' }], createdAt: 1 }]
+  })`)
+  check('ACP 会话 kind / acpAgentId 正确', acp?.kind === 'acp' && acp?.acpAgentId === 'agent-1')
+  check('ACP 会话 acpSessionId 正确', acp?.acpSessionId === 'sess-abc')
+  check('ACP 会话的消息不由本应用保存（messages 恒为空）', Array.isArray(acp?.messages) && acp.messages.length === 0)
+
+  // 再存一次（不带 kind / 绑定）：形态与绑定都必须保留
+  await cdp.eval(`window.api.agent.saveConversation({
+    id: ${JSON.stringify(acp.id)},
+    workspaceId: 'w-probe',
+    title: '标题改了',
+    messages: []
+  })`)
+  const acpAfter = await byId(cdp, acp.id)
+  check(
+    'ACP 会话不带 kind 保存时仍是 acp，绑定也保留',
+    acpAfter?.kind === 'acp' && acpAfter?.acpAgentId === 'agent-1' && acpAfter?.acpSessionId === 'sess-abc'
+  )
+
   cdp.close()
   cdp = null
   process.kill(child.pid)
@@ -132,9 +165,14 @@ try {
   check('重启后能按 id 找回会话', !!reopened)
   check('重启后 modelId 仍在（真的落盘了）', reopened?.modelId === 'm-after-restart')
   check(
-    '重启后 backend / configId 也在',
-    reopened?.backend === 'acp' && reopened?.configId === 'acp-2'
+    '重启后 kind / configId 也在',
+    reopened?.kind === 'mastra' && reopened?.configId === 'cfg-2'
   )
+
+  const reopenedAcp = await byId(cdp, acp.id)
+  check('重启后 ACP 会话仍在且仍是 acp', reopenedAcp?.kind === 'acp')
+  check('重启后 ACP 绑定仍在', reopenedAcp?.acpSessionId === 'sess-abc' && reopenedAcp?.acpAgentId === 'agent-1')
+  check('重启后 ACP 会话依然没有本地消息', (reopenedAcp?.messages ?? []).length === 0)
 
   console.log('\nALL PASS')
 } catch (err) {

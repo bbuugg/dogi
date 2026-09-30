@@ -986,7 +986,7 @@ export function activate(api) {
               },
                 h(Icon, { className: 'w-3.5 h-3.5 shrink-0 text-muted-foreground' }),
                 h('span', { className: 'flex-1 truncate font-mono' }, k.key),
-                h(Tag, { color: 'orange', className: 'm-0 text-[10px] leading-4 shrink-0' }, '二进制名'))
+                h(Tag, { color: 'orange', className: 'm-0 text-xs leading-4 shrink-0' }, '二进制名'))
             }
             return h('div', {
               key: k.key,

@@ -370,7 +370,7 @@ const MonacoEditor: FC<MonacoEditorProps> = ({
           {readOnly && (
             <Tag
               color="green"
-              className="m-0 gap-1 border-0 bg-emerald-500/15 text-[10px] font-medium text-emerald-600 dark:text-emerald-400"
+              className="m-0 gap-1 border-0 bg-emerald-500/15 text-xs font-medium text-emerald-600 dark:text-emerald-400"
             >
               <Lock className="size-2.5" />
               只读

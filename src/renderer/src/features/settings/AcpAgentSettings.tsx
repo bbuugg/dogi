@@ -1,8 +1,8 @@
-import { useState } from 'react'
-import { CloudDownload, Pencil, Plus, ScanSearch, Star, Trash2, X } from 'lucide-react'
-import type { AcpAgentConfig, DetectedAcpAgent } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
+import type { AcpAgentConfig, DetectedAcpAgent } from '@shared/types'
 import { Button, Input, Modal, Popconfirm, Select, Tag, message } from 'antd'
+import { CloudDownload, Pencil, Plus, ScanSearch, Trash2, X } from 'lucide-react'
+import { useState } from 'react'
 
 interface FormState {
   id: string
@@ -27,12 +27,17 @@ function toForm(config: AcpAgentConfig | null): FormState {
   }
 }
 
-/** 设置页：预定义 ACP agent 配置（列表 / 新建 / 编辑 / 删除 / 检测本地已安装） */
+/**
+ * 设置页：ACP agent 配置（列表 / 新建 / 编辑 / 删除 / 检测本地已安装 / 拉取并勾选模型）。
+ *
+ * 这里是 **ACP agent 的模型来源**：会话页的模型下拉只列各 agent 在这里勾选的模型
+ * （见 4.18）。检测与「导入会话」在 AI Agent 侧边栏的导入弹窗里也有一份入口，
+ * 两边写的是同一张 `aiSettings.acpAgents`。
+ */
 export function AcpAgentSettings() {
   const aiSettings = useAppStore((s) => s.aiSettings)
   const saveAiSettings = useAppStore((s) => s.saveAiSettings)
   const acpAgents = aiSettings.acpAgents ?? []
-  const activeAcpId = aiSettings.activeAcpId
 
   const [editing, setEditing] = useState<FormState | null>(null)
   const [saving, setSaving] = useState(false)
@@ -59,7 +64,7 @@ export function AcpAgentSettings() {
   ) => {
     setFetchingModels(config.id)
     try {
-      const result = await window.api.ai.acpListModels(config.id)
+      const result = await window.api.agent.acp.listModels(config.id)
       if (!result || result.models.length === 0) {
         message.info('该 agent 未上报可用模型（需支持 ACP configOptions 协议）')
         return
@@ -144,15 +149,14 @@ export function AcpAgentSettings() {
     setError(null)
   }
 
-  /** 保存预设列表，必要时修正 activeAcpId 悬空 */
-  const commit = async (next: AcpAgentConfig[], preferId?: string) => {
-    const activeValid =
-      preferId && next.some((a) => a.id === preferId)
-        ? preferId
-        : next.some((a) => a.id === activeAcpId)
-          ? activeAcpId
-          : next[0]?.id
-    await saveAiSettings({ acpAgents: next, activeAcpId: activeValid })
+  /**
+   * 保存配置列表。
+   *
+   * 注意**没有**「默认 ACP agent」这回事（旧字段 activeAcpId 已移除）：ACP 会话在创建 /
+   * 导入时就把 agent 绑死了，之后不可切换，所以这里只管登记表本身。
+   */
+  const commit = async (next: AcpAgentConfig[]) => {
+    await saveAiSettings({ acpAgents: next })
   }
 
   const handleSave = async () => {
@@ -173,8 +177,8 @@ export function AcpAgentSettings() {
         env:
           Object.keys(editing.env).length > 0
             ? Object.fromEntries(
-                Object.entries(editing.env).filter(([k]) => k.trim().length > 0)
-              )
+              Object.entries(editing.env).filter(([k]) => k.trim().length > 0)
+            )
             : undefined,
         // 自定义模型 + 从 agent 拉取的模型都在这里；留空则使用 agent 自己的当前模型
         models: editing.models.map((m) => m.trim()).filter(Boolean)
@@ -183,7 +187,7 @@ export function AcpAgentSettings() {
       const next = exists
         ? acpAgents.map((a) => (a.id === config.id ? config : a))
         : [...acpAgents, config]
-      await commit(next, config.id)
+      await commit(next)
       setEditing(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -203,13 +207,13 @@ export function AcpAgentSettings() {
       command: item.command,
       args: item.args
     }
-    await commit([...acpAgents, config], config.id)
+    await commit([...acpAgents, config])
   }
 
   const runDetect = async () => {
     setDetecting(true)
     try {
-      setDetected(await window.api.ai.detectAcpAgents())
+      setDetected(await window.api.agent.acp.detect())
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       setDetected([])
@@ -223,7 +227,7 @@ export function AcpAgentSettings() {
     <div className="space-y-2">
       <div className="flex items-center justify-between">
         <p className="text-xs text-muted-foreground">
-          预定义外部 ACP agent 启动配置
+          外部 ACP agent 启动配置；勾选的模型会出现在 AI Agent 的模型下拉里
         </p>
         <div className="flex shrink-0 items-center gap-1">
           <Button
@@ -306,16 +310,6 @@ export function AcpAgentSettings() {
             title="向该 agent 询问可用模型"
             onClick={() => void handleFetchModels(config)}
           />
-          {config.id !== activeAcpId && (
-            <Button
-              icon={<Star className="size-3.5" />}
-              size="small"
-              type="text"
-              className="w-7 p-0"
-              title="设为当前使用"
-              onClick={() => void saveAiSettings({ activeAcpId: config.id })}
-            />
-          )}
           <Button
             icon={<Pencil className="size-3.5" />}
             size="small"
@@ -544,10 +538,9 @@ export function AcpAgentSettings() {
                   type="text"
                   className="w-14 shrink-0 p-0"
                   disabled={acpAgents.some((a) => a.command === item.command)}
+                  icon={acpAgents.some((a) => a.command === item.command) || <Plus className='size-4' />}
                   onClick={() => void addDetected(item)}
-                >
-                  {acpAgents.some((a) => a.command === item.command) ? '已添加' : '添加'}
-                </Button>
+                />
               </div>
             ))}
           </div>

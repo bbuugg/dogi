@@ -2,9 +2,11 @@ import { useEffect, useState } from 'react'
 import { AlertTriangle, RotateCcw } from 'lucide-react'
 import type { AppShortcutAction } from '@shared/types'
 import {
+  EDITOR_SHORTCUT_GROUPS,
   SHORTCUT_ACTIONS,
   acceleratorFromEvent,
   findShortcutConflicts,
+  formatEditorShortcut,
   formatShortcutForPlatform,
   isUsableAccelerator,
   shortcutLabel
@@ -193,6 +195,37 @@ export function ShortcutSettings() {
         >
           恢复默认
         </Button>
+      </div>
+
+      {/* 笔记编辑器快捷键：由编辑器自己的 keymap 处理（键位对齐 Typora），改不了也不该在这里改 */}
+      <div className="space-y-2 border-t border-border/60 pt-4">
+        <div className="text-[13px] font-medium">笔记编辑器快捷键</div>
+        <p className="text-xs leading-4 text-muted-foreground">
+          编辑器（Milkdown）内置的排版快捷键，键位与 Typora 一致，只在光标位于笔记正文里时生效，
+          <span className="font-medium">不在这里配置</span>。Mac 上 Ctrl 对应 ⌘。
+        </p>
+        {EDITOR_SHORTCUT_GROUPS.map((group) => (
+          <div key={group.name} className="space-y-1">
+            <div className="text-xs font-medium text-muted-foreground">{group.name}</div>
+            <div className="divide-y divide-border/60 rounded-md border border-border/60">
+              {group.items.map((item) => (
+                <div key={item.label} className="flex items-center justify-between gap-4 px-3 py-2">
+                  <span className="min-w-0 text-[13px]">{item.label}</span>
+                  <span className="shrink-0 rounded border border-border/60 bg-secondary px-2 py-0.5 font-mono text-[12px]">
+                    {formatEditorShortcut(item, platform)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+        <p className="text-xs leading-4 text-muted-foreground">
+          另外：直接输入 <code className="rounded bg-secondary px-1"># ␣</code>、
+          <code className="rounded bg-secondary px-1">- ␣</code>、
+          <code className="rounded bg-secondary px-1">1. ␣</code>、
+          <code className="rounded bg-secondary px-1">&gt; ␣</code> 会即时变成标题 / 列表 / 引用；
+          在空段落里输入 <code className="rounded bg-secondary px-1">/</code> 唤起块类型菜单。
+        </p>
       </div>
     </div>
   )

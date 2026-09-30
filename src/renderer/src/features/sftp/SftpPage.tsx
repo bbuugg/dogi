@@ -44,7 +44,7 @@ function formatTime(ts: number): string {
  * 下载（文件 / 整个文件夹）/ 复制 / 移动（跨目录）/ 重命名 / 删除（目录递归）。
  * 所有传输进度汇聚到全局 store（见 TransferTray），在状态栏右下角统一展示。
  */
-export function SftpPage({ profileId }: { profileId: string }) {
+export function SftpPage({ profileId, tabId }: { profileId: string; tabId?: string }) {
   const profile = useAppStore((s) => s.profiles.find((p) => p.id === profileId))
 
   /** 连接 id：一个标签一个连接，页面卸载时关闭 */

@@ -106,7 +106,7 @@ interface WsLogEntry {
  * - 草稿同样**不自动保存**：改完按 Ctrl/Cmd+S 才落盘。
  *   消息日志只存在内存里（关标签即丢），它不是配置，不需要落盘。
  */
-export function WsPage({ requestId }: { requestId: string }) {
+export function WsPage({ requestId, tabId }: { requestId: string; tabId?: string }) {
   const apiRequests = useAppStore((s) => s.apiRequests)
   const saveApiRequest = useAppStore((s) => s.saveApiRequest)
   const createApiRequest = useAppStore((s) => s.createApiRequest)
@@ -987,14 +987,14 @@ function LogRow({ entry }: { entry: WsLogEntry }) {
         isSystem && entry.level === 'error' && 'bg-destructive/5'
       )}
     >
-      <span className="w-[68px] shrink-0 font-mono text-[10px] leading-4 text-muted-foreground/70">
+      <span className="w-[68px] shrink-0 font-mono text-xs leading-4 text-muted-foreground/70">
         {clockOf(entry.at)}
       </span>
       {isSystem ? (
         <>
           <span
             className={cn(
-              'w-12 shrink-0 text-[10px] leading-4',
+              'w-12 shrink-0 text-xs leading-4',
               entry.level === 'error' ? 'text-destructive' : 'text-muted-foreground'
             )}
           >
@@ -1014,7 +1014,7 @@ function LogRow({ entry }: { entry: WsLogEntry }) {
         <>
           <span
             className={cn(
-              'flex w-12 shrink-0 items-center gap-1 text-[10px] leading-4',
+              'flex w-12 shrink-0 items-center gap-1 text-xs leading-4',
               entry.dir === 'sent' ? 'text-blue-500' : 'text-emerald-500'
             )}
           >
@@ -1025,10 +1025,10 @@ function LogRow({ entry }: { entry: WsLogEntry }) {
             )}
             {entry.dir === 'sent' ? '发送' : '接收'}
           </span>
-          <span className="w-14 shrink-0 text-[10px] leading-4 text-muted-foreground/70">
+          <span className="w-14 shrink-0 text-xs leading-4 text-muted-foreground/70">
             {entry.encoding === 'base64' ? 'binary' : 'text'}
           </span>
-          <span className="w-14 shrink-0 text-right font-mono text-[10px] leading-4 text-muted-foreground/70">
+          <span className="w-14 shrink-0 text-right font-mono text-xs leading-4 text-muted-foreground/70">
             {formatBytes(entry.bytes)}
           </span>
           {/* 长帧不截断，容器内滚动：调试时经常要看完整的 payload */}

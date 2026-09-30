@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron'
 import { agentService } from '../services/ai/agent'
 import { acpAgentService } from '../services/ai/acp-agent'
+import { detectInstalledAcpAgents } from '../services/ai/acp-detect'
 import {
   listWorkspaceDir,
   readWorkspaceFile,
@@ -30,14 +31,21 @@ function requireWorkspace(id: string) {
   return ws
 }
 
+/** 取某个已登记的 ACP agent 配置；不存在就抛错（渲染端提示「重新导入」） */
+function requireAcpAgent(id?: string) {
+  const cfg = id ? storage.getAiSettings().acpAgents?.find((a) => a.id === id) : undefined
+  if (!cfg?.command) throw new Error('该 ACP agent 配置不存在，请重新检测 / 添加')
+  return cfg
+}
+
 /**
- * 工作区 Agent IPC：工作区 CRUD、对话流、确认卡。
+ * 工作区 Agent IPC：工作区 CRUD、对话流、确认卡、ACP 会话导入。
  *
- * 同一个 `agent:*` 通道下按后端分派（backend 字段，按会话独立）：
- * - 非 ACP 模型默认走内置 Mastra agent（agentService.mastraChat，复用同一套模型配置与工具）；
- * - 旧会话若存的是 `ai-sdk` 仍走原生 AI SDK 路径（agentService.chat）作为兜底；
- * - `acp` 走外部 ACP agent（acpAgentService）。
- * 确认卡所有后端共用同一通道 —— 渲染端不必关心是哪一个在要权限。
+ * `agent:chat` 按**会话形态**（`kind`，按会话独立）分派到两条完全不同的路径：
+ * - `mastra`：内置 Mastra agent（agentService），消息随会话落盘；
+ * - `acp`：外部 ACP agent（acpAgentService），**消息由 agent 自己管理**，
+ *   本地只存绑定关系（acpAgentId + acpSessionId）。
+ * 确认卡两条路径共用同一通道 —— 渲染端不必关心是哪一个在要权限。
  */
 export function registerAgentIpc(ctx: IpcContext): void {
   /**
@@ -93,11 +101,13 @@ export function registerAgentIpc(ctx: IpcContext): void {
       input: {
         id?: string
         workspaceId: string
+        kind?: AgentBackend
         title?: string
         messages?: AgentChatMessage[]
-        backend?: AgentBackend
         configId?: string
         modelId?: string
+        acpAgentId?: string
+        acpSessionId?: string
       }
     ) => storage.saveAgentConversation(input)
   )
@@ -106,6 +116,51 @@ export function registerAgentIpc(ctx: IpcContext): void {
     // 会话没了，它的浏览器 profile（登录态等）跟着删 —— 见 session.ts 的 purge 说明
     await browserSessions.purge(agentBrowserSessionId(id))
   })
+
+  // ---------- ACP：检测 / 会话发现 / 历史回放 / 模型切换 ----------
+  /** 扫描本机 PATH 里已安装的已知 ACP agent（导入弹窗的「检测」用） */
+  ipcMain.handle('agent:acp:detect', () => detectInstalledAcpAgents())
+  /** 拉取某个 agent 侧的会话列表（`session/list`）：导入弹窗的数据源 */
+  ipcMain.handle(
+    'agent:acp:listSessions',
+    (_e, payload: { acpAgentId: string; cwd?: string }) =>
+      acpAgentService.listSessions(requireAcpAgent(payload.acpAgentId), payload.cwd)
+  )
+  /** 向 agent 询问可用模型（临时建连读 configOptions）：设置页勾选模型用 */
+  ipcMain.handle('agent:acp:listModels', (_e, acpAgentId: string) =>
+    acpAgentService.listModels(requireAcpAgent(acpAgentId))
+  )
+  /** 让 agent 删掉它那边的会话（`session/delete`）：删除会话弹窗里的可选项 */
+  ipcMain.handle(
+    'agent:acp:deleteSession',
+    (_e, payload: { acpAgentId: string; sessionId: string }) =>
+      acpAgentService.deleteSession(requireAcpAgent(payload.acpAgentId), payload.sessionId)
+  )
+  /** 打开一个 ACP 会话：让 agent 用 `session/load` 回放历史（本地不落盘） */
+  ipcMain.handle(
+    'agent:acp:load',
+    async (
+      _e,
+      payload: {
+        workspaceId: string
+        conversationId: string
+        acpAgentId?: string
+        acpSessionId?: string
+        modelId?: string
+      }
+    ) => {
+      const result = await acpAgentService.load(payload)
+      // 与 chat 同一套归属登记：历史/错误事件可能早于 invoke 回包到达
+      chatConversations.set(result.requestId, payload.conversationId)
+      return result
+    }
+  )
+  /** 切换某个 ACP 会话的模型（`session/set_config_option`，不重建会话） */
+  ipcMain.handle(
+    'agent:acp:setModel',
+    (_e, payload: { conversationId: string; modelId?: string }) =>
+      acpAgentService.setModel(payload.conversationId, payload.modelId)
+  )
 
   // ---------- 工作区文件（右侧文件树的懒加载列表 + 编辑器读写） ----------
   ipcMain.handle('agent:fs:list', (_e, payload: { workspaceId: string; dir?: string }) =>
@@ -132,22 +187,12 @@ export function registerAgentIpc(ctx: IpcContext): void {
   )
 
   ipcMain.handle('agent:chat', async (_e, req: AgentChatRequest) => {
-    // 后端**按会话**独立：优先取请求里带的（渲染端是会话记录的唯一真源），
-    // 其次回退到会话记录 / 工作区设置 —— 切一个会话的后端不该影响其它会话
+    // 会话形态**按会话固定**：优先取请求里带的（渲染端是会话记录的唯一真源），
+    // 其次回退到磁盘上的会话记录 —— 老会话记录缺 kind 时按 mastra 处理。
     const conv = storage.listAgentConversations().find((c) => c.id === req.conversationId)
-    const ws = storage.getAgentWorkspace(req.workspaceId)
-    // 后端**按会话**独立：优先取请求里带的（渲染端是会话记录的唯一真源），
-    // 其次回退到会话记录 / 工作区设置 —— 切一个会话的后端不该影响其它会话。
-    // 非 ACP 默认走内置 Mastra agent；旧会话存的 'ai-sdk' 仍走原路径，不强制迁移。
-    const backend = req.backend ?? conv?.backend ?? ws?.backend ?? 'mastra'
-    let result: { requestId: string }
-    if (backend === 'acp') {
-      result = await acpAgentService.chat(req)
-    } else if (backend === 'ai-sdk') {
-      result = await agentService.chat(req)
-    } else {
-      result = await agentService.mastraChat(req)
-    }
+    const kind: AgentBackend = req.kind ?? conv?.kind ?? 'mastra'
+    const result =
+      kind === 'acp' ? await acpAgentService.chat(req) : await agentService.chat(req)
     // 事件归属：**必须在这里登记**，因为「未配置模型」这种失败分支是用 setTimeout(0)
     // 发事件的，会比 invoke 的回包更早到达渲染端 —— 渲染端那时还不知道 requestId 属于谁，
     // 事件就被丢掉了（表现为转圈不结束、通知不弹）。这里同步微任务一定早于那个定时器。
@@ -160,6 +205,10 @@ export function registerAgentIpc(ctx: IpcContext): void {
   })
   agentService.on('chat-event', broadcastAgentEvent)
   acpAgentService.on('chat-event', broadcastAgentEvent)
+
+  // ACP 会话就绪后把绑定关系（agent 侧会话 id + 可切换的模型列表）推给渲染端：
+  // 「新建的会话」要靠它把 session/new 返回的 id 落盘。
+  acpAgentService.on('acp-state', (state) => ctx.broadcast('agent:acp-state', state))
 
   agentService.setConfirmSink({
     request: (req) => ctx.broadcast('agent:confirm', req),

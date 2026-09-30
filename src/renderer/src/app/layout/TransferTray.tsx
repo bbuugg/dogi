@@ -102,7 +102,7 @@ export function TransferTray() {
                     <span className="truncate text-xs text-foreground" title={t.name}>
                       {t.name}
                     </span>
-                    <span className="shrink-0 text-[10px] text-muted-foreground">{label}</span>
+                    <span className="shrink-0 text-xs text-muted-foreground">{label}</span>
                   </div>
                   {t.error ? (
                     <span className="mt-0.5 block truncate text-xs text-destructive">

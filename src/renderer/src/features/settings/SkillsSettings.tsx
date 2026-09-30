@@ -23,7 +23,7 @@ const SOURCE_LABELS: Record<SkillSource, string> = {
 
 function SourceTag({ source }: { source: SkillSource }) {
   return (
-    <span className="shrink-0 rounded border border-border/70 px-1 py-0.5 text-[10px] leading-3 text-muted-foreground">
+    <span className="shrink-0 rounded border border-border/70 px-1 py-0.5 text-xs leading-3 text-muted-foreground">
       {SOURCE_LABELS[source]}
     </span>
   )
@@ -64,7 +64,7 @@ function SkillRow({
         <div className="mt-0.5 line-clamp-2 text-xs leading-4 text-muted-foreground">
           {skill.description}
         </div>
-        <div className="mt-0.5 truncate text-[10px] text-muted-foreground/60" title={skill.file}>
+        <div className="mt-0.5 truncate text-xs text-muted-foreground/60" title={skill.file}>
           {skill.file}
         </div>
       </div>
@@ -230,7 +230,7 @@ export function SkillsSettings() {
             )}
           </div>
         ))}
-        <p className="pt-0.5 text-[10px] leading-4 text-muted-foreground/70">
+        <p className="pt-0.5 text-xs leading-4 text-muted-foreground/70">
           工作区级技能来自当前工作区
           {activeWorkspaceName ? `「${activeWorkspaceName}」` : '（当前没有选中工作区，只看全局技能）'}
           的 .dogi/skills 目录。

@@ -89,6 +89,10 @@ function apiOut(r: ApiRequestEntry): ApiRequestEntry {
     url: r.url,
     headers: r.headers ?? [],
     body: r.body ?? '',
+    // 请求体形态与两张表单一起带走：只导正文等于把 form-data 请求导成空 raw
+    bodyType: r.bodyType,
+    bodyUrlencoded: r.bodyUrlencoded,
+    bodyFormFields: r.bodyFormFields,
     protocol: r.protocol ?? 'http',
     subprotocols: r.subprotocols,
     // 不校验是「显式 false」，缺省才代表正常校验 —— 原样带过去，别写死 true

@@ -476,7 +476,7 @@ export function CommandPalette() {
             onKeyDown={onKeyDown}
           />
           {mode !== 'root' && (
-            <span className="shrink-0 text-[10px] text-muted-foreground">{MODE_LABEL[mode]}</span>
+            <span className="shrink-0 text-xs text-muted-foreground">{MODE_LABEL[mode]}</span>
           )}
         </div>
 
@@ -496,7 +496,7 @@ export function CommandPalette() {
               return (
                 <div key={item.id}>
                   {showGroup && (
-                    <div className="px-3 pt-2 pb-1 text-[10px] font-medium text-muted-foreground">
+                    <div className="px-3 pt-2 pb-1 text-xs font-medium text-muted-foreground">
                       {item.group}
                     </div>
                   )}
@@ -520,7 +520,7 @@ export function CommandPalette() {
                       )}
                     </div>
                     {item.hint && (
-                      <span className="shrink-0 text-[10px] text-muted-foreground">{item.hint}</span>
+                      <span className="shrink-0 text-xs text-muted-foreground">{item.hint}</span>
                     )}
                   </button>
                 </div>

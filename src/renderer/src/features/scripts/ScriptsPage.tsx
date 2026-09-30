@@ -13,7 +13,7 @@ const AUTOSAVE_DELAY = 800
  * 通过 scriptId prop 指定要编辑的脚本；正文/标题/描述改动后防抖自动保存，
  * 也可手动 Ctrl+S（或点保存按钮）立即落盘，侧边栏列表随之刷新。
  */
-export function ScriptsPage({ scriptId }: { scriptId: string }) {
+export function ScriptsPage({ scriptId, tabId }: { scriptId: string; tabId?: string }) {
   const scripts = useAppStore((s) => s.scripts)
   const refreshScripts = useAppStore((s) => s.refreshScripts)
   const setRunScriptDialog = useAppStore((s) => s.setRunScriptDialog)

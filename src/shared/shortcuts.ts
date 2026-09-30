@@ -22,8 +22,9 @@ export const SHORTCUT_ACTIONS: ShortcutActionMeta[] = [
   {
     action: 'toggle-agent-terminal',
     label: '开关 AI Agent 终端',
-    // 终端类应用里 Ctrl/Cmd+Shift+` 已经成了「开关内嵌终端」的事实标准（VS Code 同款）
-    defaultAccelerator: 'CommandOrControl+Shift+`'
+    // 用 Ctrl/Cmd+`（单反引号）：Ctrl/Cmd+Shift+` 在笔记编辑器里被 Typora 风格的行内代码
+    // 占用了（应用内快捷键在捕获阶段监听 window，会抢在编辑器前面吃掉按键，两者不能同键）。
+    defaultAccelerator: 'CommandOrControl+`'
   },
 ]
 
@@ -211,6 +212,109 @@ export function isUsableAccelerator(accelerator: string): boolean {
   if (/^F([0-9]{1,2})$/.test(key)) return true
   return parts.includes('mod') || parts.includes('alt')
 }
+
+// ---------- 笔记编辑器（Milkdown / Crepe）内的快捷键 ----------
+// 这一组键由编辑器自己的 keymap 处理、只在正文聚焦时生效，**不属于**上面那套可配置的
+// 应用内快捷键（拿应用层的改键机制去接管会把编辑器搞乱）。本清单是唯一数据源：
+// 「?」帮助浮层与设置页都从这里渲染；`key` 同时被 `features/notes/MilkdownEditor.tsx`
+// 映射到具体命令。
+
+/** 「?」浮层与设置页共用的一条编辑器快捷键 */
+export interface EditorShortcut {
+  /** 分组标题 */
+  group: string
+  label: string
+  /** Milkdown/prosemirror 键名（`Mod-` = Mac ⌘、其它平台 Ctrl）；给了它就用于注册与展示 */
+  key?: string
+  /** 编辑器内置键的说明文本（不走键名注册），支持 {mod} / {alt} / {shift} 占位符 */
+  keys?: string
+}
+
+/** prosemirror 键名里的修饰键 → accelerator 里的写法 */
+const EDITOR_KEY_MODIFIERS: Record<string, string> = {
+  mod: 'CommandOrControl',
+  cmd: 'CommandOrControl',
+  command: 'CommandOrControl',
+  meta: 'CommandOrControl',
+  ctrl: 'Ctrl',
+  control: 'Ctrl',
+  alt: 'Alt',
+  option: 'Alt',
+  shift: 'Shift'
+}
+
+/**
+ * 把 prosemirror 键名（``Mod-Shift-` ``）转成 Electron accelerator（``CommandOrControl+Shift+` ``），
+ * 再由 `formatShortcutForPlatform` 按平台渲染。**仅用于展示**，不要拿它去注册按键。
+ *
+ * 切分方式与 prosemirror-keymap 的 `normalizeKeyName` 一致：末尾那段是主键，前面的都是修饰键
+ * （注意 `Mod--` 这种主键本身是连字符的情况，靠 `(?!$)` 保住最后一段）。
+ */
+export function editorKeyToAccelerator(key: string): string {
+  const parts = key.split(/-(?!$)/)
+  const main = parts[parts.length - 1] ?? ''
+  const mods: string[] = []
+  for (const raw of parts.slice(0, -1)) {
+    const mod = EDITOR_KEY_MODIFIERS[raw.toLowerCase()]
+    if (mod && !mods.includes(mod)) mods.push(mod)
+  }
+  // 展示时单字母主键统一大写，读起来才像按键；注册用的键名仍写小写字母
+  const name = /^[a-z]$/i.test(main) ? main.toUpperCase() : main
+  return [...mods, name].join('+')
+}
+
+/** 把一条编辑器快捷键渲染成当前平台可读的按键文本（Mac 用 ⌘⌥⇧，其它平台用 Ctrl/Alt/Shift） */
+export function formatEditorShortcut(item: EditorShortcut, platform: string): string {
+  if (item.key) return formatShortcutForPlatform(editorKeyToAccelerator(item.key), platform)
+  const isMac = platform === 'darwin'
+  return (item.keys ?? '')
+    .replace(/\{mod\}/g, isMac ? '⌘' : 'Ctrl')
+    .replace(/\{alt\}/g, isMac ? '⌥' : 'Alt')
+    .replace(/\{shift\}/g, isMac ? '⇧' : 'Shift')
+}
+
+/**
+ * 笔记编辑器快捷键清单（键位对齐 Typora 官方快捷键表）。
+ *
+ * 只列 Typora 官方**有**的键位；`key` 那几条约等于 Milkdown 默认之外的补充绑定，
+ * 具体命令在 `MilkdownEditor.tsx` 的 `TYPORA_KEYMAP` 里一一对应。
+ */
+export const EDITOR_SHORTCUTS: EditorShortcut[] = [
+  { group: '行内格式', label: '加粗', key: 'Mod-b' },
+  { group: '行内格式', label: '斜体', key: 'Mod-i' },
+  { group: '行内格式', label: '删除线', key: 'Alt-Shift-5' },
+  // 行内代码是 non-inclusive mark：必须先选中文字再按，光按键不打字（与 VS Code 一致）
+  { group: '行内格式', label: '行内代码（先选中文字）', key: 'Mod-Shift-`' },
+  { group: '行内格式', label: '超链接', key: 'Mod-k' },
+
+  { group: '段落与块', label: '标题 1–6', keys: '{mod}+1 … {mod}+6' },
+  { group: '段落与块', label: '变回正文', key: 'Mod-0' },
+  { group: '段落与块', label: '提升标题级别', key: 'Mod-=' },
+  { group: '段落与块', label: '降低标题级别', key: 'Mod--' },
+  { group: '段落与块', label: '引用', key: 'Mod-Shift-q' },
+  { group: '段落与块', label: '代码块', key: 'Mod-Shift-k' },
+
+  { group: '列表与表格', label: '无序列表', key: 'Mod-Shift-]' },
+  { group: '列表与表格', label: '有序列表', key: 'Mod-Shift-[' },
+  { group: '列表与表格', label: '表格', key: 'Mod-t' },
+  { group: '列表与表格', label: '图片', key: 'Mod-Shift-i' },
+  { group: '列表与表格', label: '数学块', key: 'Mod-Shift-m' },
+
+  { group: '其它', label: '列表缩进', keys: 'Tab' },
+  { group: '其它', label: '减少列表缩进', keys: '{shift}+Tab' },
+  { group: '其它', label: '软换行（行内换行）', keys: '{shift}+Enter' },
+  { group: '其它', label: '撤销', key: 'Mod-z' },
+  { group: '其它', label: '重做', key: 'Mod-y' }
+]
+
+/** 按 `group` 切好的清单（保持上面的先后顺序），供设置页与「?」浮层按分组渲染 */
+export const EDITOR_SHORTCUT_GROUPS: Array<{ name: string; items: EditorShortcut[] }> =
+  EDITOR_SHORTCUTS.reduce<Array<{ name: string; items: EditorShortcut[] }>>((groups, item) => {
+    const last = groups[groups.length - 1]
+    if (last?.name === item.group) last.items.push(item)
+    else groups.push({ name: item.group, items: [item] })
+    return groups
+  }, [])
 
 /**
  * 找出某个按键事件命中的快捷键配置（未命中返回 null）。

@@ -1,14 +1,18 @@
-import { useAppStore } from '@/stores/app-store'
+import { isDraftConversation, useAppStore } from '@/stores/app-store'
+import { AcpImportDialog } from '@/features/agent/AcpImportDialog'
 import type { AgentConversation, AgentWorkspace } from '@shared/types'
-import { Button, Input, Modal, message } from 'antd'
+import { Button, Checkbox, Dropdown, Input, Modal, message } from 'antd'
+import type { MenuProps } from 'antd'
 import { cn } from 'cn'
 import {
   ChevronRight,
   CirclePause,
   Folder,
   FolderPlus,
+  Import,
   Loader2,
   MessageSquarePlus,
+  MoreHorizontal,
   Pencil,
   Plus,
   Trash2
@@ -63,6 +67,10 @@ export function AgentPanel() {
   /** 待重命名的会话（id 为空表示不处于重命名中） */
   const [convRename, setConvRename] = useState<{ id: string; title: string } | null>(null)
   const [pendingConvDelete, setPendingConvDelete] = useState<AgentConversation | null>(null)
+  /** 删除 ACP 会话时是否连 agent 侧的会话一起删（默认不删，避免误删用户数据） */
+  const [deleteRemoteSession, setDeleteRemoteSession] = useState(false)
+  /** 正在为哪个工作区导入会话（null = 弹窗关闭） */
+  const [importTarget, setImportTarget] = useState<AgentWorkspace | null>(null)
   const [picking, setPicking] = useState(false)
 
   /**
@@ -79,10 +87,17 @@ export function AgentPanel() {
     setExpanded((prev) => (prev.includes(activeWorkspaceId) ? prev : [...prev, activeWorkspaceId]))
   }, [activeWorkspaceId])
 
-  /** 按工作区归类会话，组内按最近更新排序（最近在用的在最上面） */
+  /**
+   * 按工作区归类会话，组内按最近更新排序（最近在用的在最上面）。
+   *
+   * ⚠️ **草稿（还没发出首条消息的会话）不进列表**：点「新建会话」只是打开这个工作区的
+   * 新建会话页，列表里不该立刻冒出一条空会话 —— 它发出首条消息那一刻才转正
+   * （见 `isDraftConversation`）。
+   */
   const byWorkspace = useMemo(() => {
     const map = new Map<string, AgentConversation[]>()
     for (const c of conversations) {
+      if (isDraftConversation(c)) continue
       const list = map.get(c.workspaceId) ?? []
       list.push(c)
       map.set(c.workspaceId, list)
@@ -172,9 +187,13 @@ export function AgentPanel() {
   const confirmConvDelete = async () => {
     const target = pendingConvDelete
     if (!target) return
+    // 只有 ACP 会话（且确实绑定了 agent 侧会话）才谈得上「连它一起删」
+    const remote =
+      deleteRemoteSession && target.kind === 'acp' && !!target.acpAgentId && !!target.acpSessionId
     setPendingConvDelete(null)
+    setDeleteRemoteSession(false)
     try {
-      await deleteAgentConversation(target.id)
+      await deleteAgentConversation(target.id, { deleteRemoteSession: remote })
     } catch (err) {
       message.error(`删除失败：${err instanceof Error ? err.message : String(err)}`)
     }
@@ -183,6 +202,37 @@ export function AgentPanel() {
   /** 行尾小按钮统一样式：平时隐形，hover 所在行才浮现；没有 hover 的窄屏（<768px）常显 */
   const rowAction =
     'rounded p-0.5 opacity-0 transition-opacity hover:bg-foreground/10 group-hover:opacity-100 max-md:opacity-100'
+
+  /**
+   * 工作区行的操作菜单。
+   *
+   * 原先 4 个按钮平铺在行尾（导入 / 新建会话 / 重命名 / 删除），行一窄就把工作区名挤没了；
+   * 现在收进一个「更多」下拉，行尾只留一个图标。
+   */
+  const workspaceMenuItems = (w: AgentWorkspace): MenuProps['items'] => [
+    { key: 'new', label: '新建会话', icon: <MessageSquarePlus className="size-3.5" /> },
+    { key: 'import', label: '导入会话', icon: <Import className="size-3.5" /> },
+    { type: 'divider' },
+    { key: 'rename', label: '重命名工作区', icon: <Pencil className="size-3.5" /> },
+    {
+      key: 'delete',
+      label: '删除工作区',
+      icon: <Trash2 className="size-3.5" />,
+      danger: true
+    }
+  ]
+
+  const handleWorkspaceMenu = (w: AgentWorkspace, isExpanded: boolean): MenuProps['onClick'] =>
+    ({ key, domEvent }) => {
+      // 菜单挂在会切换展开状态的行上：不拦住冒泡的话，点「重命名」会顺手把列表收起
+      domEvent.stopPropagation()
+      if (key === 'import') setImportTarget(w)
+      else if (key === 'new') {
+        createAgentConversation(w.id)
+        if (!isExpanded) toggleExpand(w.id)
+      } else if (key === 'rename') setEdit({ id: w.id, name: w.name, path: w.path })
+      else if (key === 'delete') setPendingDelete(w)
+    }
 
   return (
     <div className="flex h-full flex-col">
@@ -265,40 +315,24 @@ export function AgentPanel() {
                     </button>
                     {/* 弹性空隙：吃掉「名称 + 箭头」到行尾按钮之间的余量，名称再长也止步于按钮左侧 */}
                     <span className="flex-1" aria-hidden="true" />
-                    <button
-                      type="button"
-                      title="新建会话"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        createAgentConversation(w.id)
-                        if (!isExpanded) toggleExpand(w.id)
+                    {/* 行尾操作全部收进「更多」下拉（导入 / 新建会话 / 重命名 / 删除） */}
+                    <Dropdown
+                      trigger={['click']}
+                      placement="bottomRight"
+                      menu={{
+                        items: workspaceMenuItems(w),
+                        onClick: handleWorkspaceMenu(w, isExpanded)
                       }}
-                      className={rowAction}
                     >
-                      <MessageSquarePlus className="size-3.5" />
-                    </button>
-                    <button
-                      type="button"
-                      title="重命名工作区"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setEdit({ id: w.id, name: w.name, path: w.path })
-                      }}
-                      className={rowAction}
-                    >
-                      <Pencil className="size-3.5" />
-                    </button>
-                    <button
-                      type="button"
-                      title="删除工作区"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setPendingDelete(w)
-                      }}
-                      className={cn(rowAction, 'hover:bg-destructive/10 hover:text-destructive')}
-                    >
-                      <Trash2 className="size-3.5" />
-                    </button>
+                      <button
+                        type="button"
+                        title="更多操作"
+                        onClick={(e) => e.stopPropagation()}
+                        className={rowAction}
+                      >
+                        <MoreHorizontal className="size-3.5" />
+                      </button>
+                    </Dropdown>
                   </div>
 
                   {/* 会话列表：嵌在工作区下方，**只用缩进表示从属**（与 fishwork 侧栏一致，不画竖线/分隔符） */}
@@ -306,7 +340,7 @@ export function AgentPanel() {
                     <div className="mt-0.5 flex flex-col gap-0.5">
                       {list.length === 0 && (
                         <div className="py-1.5 pl-7 text-xs text-muted-foreground/60">
-                          还没有会话，点右侧的「新建会话」图标开始
+                          还没有会话：选好模型、发出第一条消息后，它会出现在这里
                         </div>
                       )}
                       {list.map((c) => {
@@ -318,6 +352,9 @@ export function AgentPanel() {
                         return (
                           <div
                             key={c.id}
+                            /* data-conversation-id：探针用来数「列表里到底有几条会话」
+                               （草稿不进列表，光看 store 里的条数是看不出来的） */
+                            data-conversation-id={c.id}
                             onClick={() => {
                               selectAgentWorkspace(w.id)
                               selectAgentConversation(c.id)
@@ -462,7 +499,10 @@ export function AgentPanel() {
       {/* 删除会话确认 */}
       <Modal
         open={pendingConvDelete !== null}
-        onCancel={() => setPendingConvDelete(null)}
+        onCancel={() => {
+          setPendingConvDelete(null)
+          setDeleteRemoteSession(false)
+        }}
         title="删除会话？"
         okText="删除"
         cancelText="取消"
@@ -473,9 +513,30 @@ export function AgentPanel() {
         destroyOnHidden
       >
         <p className="text-sm text-muted-foreground">
-          「{pendingConvDelete?.title}」的对话记录将被删除，该操作不可撤销。
+          {pendingConvDelete?.kind === 'acp'
+            ? `将从应用里移除「${pendingConvDelete.title}」这条会话记录；它的消息由 ACP agent 自己保存，不受影响。`
+            : `「${pendingConvDelete?.title}」的对话记录将被删除，该操作不可撤销。`}
         </p>
+        {/* ACP 会话：可选把 agent 侧的会话也删掉（默认不删 —— 删了就拉不回来了） */}
+        {pendingConvDelete?.kind === 'acp' && pendingConvDelete.acpSessionId && (
+          <Checkbox
+            className="mt-3"
+            checked={deleteRemoteSession}
+            onChange={(e) => setDeleteRemoteSession(e.target.checked)}
+          >
+            <span className="text-xs">同时删除 ACP agent 侧的会话（不可撤销）</span>
+          </Checkbox>
+        )}
       </Modal>
+
+      {/* 导入会话：按工作区打开，选中 agent 后可拉取已有会话或新建会话 */}
+      {importTarget && (
+        <AcpImportDialog
+          workspace={importTarget}
+          open
+          onClose={() => setImportTarget(null)}
+        />
+      )}
 
       {/* 删除工作区确认 */}
       <Modal
