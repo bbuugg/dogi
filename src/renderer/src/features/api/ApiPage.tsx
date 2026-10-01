@@ -823,11 +823,6 @@ export function ApiPage({ requestId, tabId }: { requestId: string; tabId?: strin
                   value={bodyType}
                   onChange={changeBodyType}
                 />
-                {bodyType !== 'none' && (method === 'GET' || method === 'HEAD') && (
-                  <span className="shrink-0 text-xs text-amber-600 dark:text-amber-400">
-                    {method} 请求不携带请求体，这里的内容发送时会被忽略
-                  </span>
-                )}
               </div>
 
               {bodyType === 'none' ? (

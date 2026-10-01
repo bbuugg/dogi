@@ -10,7 +10,39 @@
  */
 import { readFile } from 'node:fs/promises'
 import { basename, extname } from 'node:path'
+import { STATUS_CODES } from 'node:http'
 import type { ApiBodyType, ApiFormField, ApiHeaderPair } from '@shared/types'
+
+/** undici 的最小类型（仅用到的部分），避免硬依赖其类型声明 */
+type UndiciModule = {
+  Agent: new (o: Record<string, unknown>) => unknown
+  ProxyAgent: new (p: string) => unknown
+  request: (
+    url: string,
+    init: Record<string, unknown>
+  ) => Promise<{
+    statusCode: number
+    headers: { forEach: (cb: (v: string, k: string) => void) => void }
+    body: AsyncIterable<Buffer | string>
+  }>
+}
+
+/** 按请求选项构造 undici 的 dispatcher（代理 / 跳过 TLS 校验 / 关闭底层超时） */
+function buildUndiciDispatcher(
+  undici: UndiciModule,
+  req: HttpRequestInput
+): { dispatcher?: unknown } {
+  if (req.proxy) return { dispatcher: new undici.ProxyAgent(req.proxy) }
+  const opts: Record<string, unknown> = {}
+  if (req.rejectUnauthorized === false) opts.connect = { rejectUnauthorized: false }
+  // 未指定超时：关掉 undici 自带的 300s 上限（否则长请求静默被掐断）
+  if (!req.timeoutMs || req.timeoutMs <= 0) {
+    opts.headersTimeout = 0
+    opts.bodyTimeout = 0
+  }
+  if (Object.keys(opts).length) return { dispatcher: new undici.Agent(opts) }
+  return {}
+}
 
 /** 请求入参（PluginHttpRequest / ApiHttpRequest 的结构超集） */
 export interface HttpRequestInput {
@@ -199,65 +231,75 @@ export async function executeHttp(req: HttpRequestInput, signal?: AbortSignal): 
     if (signal.aborted) ctrl.abort()
     else signal.addEventListener('abort', onExternalAbort, { once: true })
   }
-  // 请求体形态：GET / HEAD 不带 body（与历史行为一致）。
-  // 请求头**必须复制一份**：form-data 要删掉调用方写的 Content-Type，
-  // 不能就地改调用方的对象（历史记录 / 重发都还指着它）。
-  const method = String(req.method || '').toUpperCase()
+  const method = String(req.method || 'GET').toUpperCase()
   const reqHeaders: Record<string, string> = { ...(req.headers ?? {}) }
-  const init: RequestInit = {
-    method: req.method,
-    headers: reqHeaders,
-    signal: ctrl.signal
-  }
-  // 代理 / 自签证书 / 关闭底层默认超时：尝试使用 undici 构造 dispatcher
-  //（非必需依赖，缺失时降级为普通 fetch）。
-  // 注意：Node 全局 fetch 底层是 undici，默认自带 headersTimeout / bodyTimeout
-  // 各 300 秒 —— 长请求会被它静默掐断（"Headers Timeout Error"），与调用方设的
-  // 超时无关。所以未指定 timeoutMs 时必须显式把这两个上限关掉，才谈得上「永不超时」。
+  const done = (
+    ok: boolean,
+    status: number,
+    statusText: string,
+    headers: Record<string, string>,
+    body: string
+  ): HttpResult => ({
+    ok,
+    status,
+    statusText,
+    headers,
+    body,
+    timeMs: Math.round(performance.now() - start)
+  })
+  const fail = (msg: string): HttpResult => ({
+    ok: false,
+    status: 0,
+    statusText: '',
+    headers: {},
+    body: '',
+    timeMs: Math.round(performance.now() - start),
+    error: msg
+  })
+
   try {
-    const undici = (await import('undici').catch(() => null)) as
-      | { Agent: new (o: unknown) => unknown; ProxyAgent: new (p: string) => unknown }
-      | null
-    if (undici) {
-      if (req.proxy) {
-        ;(init as { dispatcher?: unknown }).dispatcher = new undici.ProxyAgent(req.proxy)
-      } else {
-        const opts: Record<string, unknown> = {}
-        if (req.rejectUnauthorized === false) {
-          opts.connect = { rejectUnauthorized: false }
-        }
-        if (!req.timeoutMs || req.timeoutMs <= 0) {
-          // 0 = 关闭超时（undici 文档约定）
-          opts.headersTimeout = 0
-          opts.bodyTimeout = 0
-        }
-        // 只有确有自定义需求时才替换 dispatcher，否则走默认（行为与原生 fetch 一致）
-        if (Object.keys(opts).length) {
-          ;(init as { dispatcher?: unknown }).dispatcher = new undici.Agent(opts)
-        }
+    const undici = (await import('undici').catch(() => null)) as UndiciModule | null
+    const prepared = await prepareBody(req)
+    // 准备失败（文件没选 / 读不到）也走「status=0 + error」这一条路径
+    if (prepared.error) return fail(prepared.error)
+    if (prepared.contentType === null) dropHeader(reqHeaders, 'content-type')
+    else if (prepared.contentType) reqHeaders['Content-Type'] = prepared.contentType
+    const hasBody = prepared.body !== undefined
+
+    // GET / HEAD 现在也允许携带请求体：Node 全局 fetch 的 Request 构造会拒绝
+    // GET/HEAD 带 body（抛 “Request with GET/HEAD method cannot have body”），
+    // 所以这一支改用 undici.request（更底层，不强制该限制）把 body 发出去。
+    if ((method === 'GET' || method === 'HEAD') && hasBody && undici) {
+      const { dispatcher } = buildUndiciDispatcher(undici, req)
+      const ures = await undici.request(targetUrl, {
+        method: req.method,
+        headers: reqHeaders,
+        body: prepared.body as never,
+        signal: ctrl.signal,
+        dispatcher
+      } as Record<string, unknown>)
+      const headers: Record<string, string> = {}
+      ures.headers.forEach((v, k) => {
+        headers[k] = v
+      })
+      let bodyText = ''
+      for await (const chunk of ures.body) {
+        bodyText += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8')
       }
+      const status = ures.statusCode
+      return done(status >= 200 && status < 300, status, STATUS_CODES[status] ?? '', headers, bodyText)
     }
-  } catch {
-    // 忽略：无 undici 时走默认 dispatcher
-  }
-  try {
-    if (method !== 'GET' && method !== 'HEAD') {
-      const prepared = await prepareBody(req)
-      // 准备失败（文件没选 / 读不到）也走「status=0 + error」这一条路径
-      if (prepared.error) {
-        return {
-          ok: false,
-          status: 0,
-          statusText: '',
-          headers: {},
-          body: '',
-          timeMs: Math.round(performance.now() - start),
-          error: prepared.error
-        }
-      }
-      if (prepared.contentType === null) dropHeader(reqHeaders, 'content-type')
-      else if (prepared.contentType) reqHeaders['Content-Type'] = prepared.contentType
-      init.body = prepared.body
+
+    // 其余情况（含 GET/HEAD 不带 body）仍走原生 fetch，行为不变
+    const init: RequestInit = {
+      method: req.method,
+      headers: reqHeaders,
+      signal: ctrl.signal
+    }
+    if (hasBody) (init as { body?: unknown }).body = prepared.body
+    if (undici) {
+      const { dispatcher } = buildUndiciDispatcher(undici, req)
+      ;(init as { dispatcher?: unknown }).dispatcher = dispatcher
     }
     const res = await fetch(targetUrl, init)
     const body = await res.text()
@@ -265,24 +307,9 @@ export async function executeHttp(req: HttpRequestInput, signal?: AbortSignal): 
     res.headers.forEach((v, k) => {
       headers[k] = v
     })
-    return {
-      ok: res.ok,
-      status: res.status,
-      statusText: res.statusText,
-      headers,
-      body,
-      timeMs: Math.round(performance.now() - start)
-    }
+    return done(res.ok, res.status, res.statusText, headers, body)
   } catch (e) {
-    return {
-      ok: false,
-      status: 0,
-      statusText: '',
-      headers: {},
-      body: '',
-      timeMs: Math.round(performance.now() - start),
-      error: e instanceof Error ? e.message : String(e)
-    }
+    return fail(e instanceof Error ? e.message : String(e))
   } finally {
     if (timer) clearTimeout(timer)
     if (signal) signal.removeEventListener('abort', onExternalAbort)

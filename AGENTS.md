@@ -724,7 +724,10 @@ ACP 是「别人的 agent 在别人的进程里管自己的会话」。本应用
   选文件走 `api:pickFile`（主进程弹对话框 + stat 出名字与大小）—— **渲染端只拿路径**，
   不把文件内容搬进内存再走 IPC。文件没选 / 读不到 → `status=0 + error` 且**根本不发包**。
   ⚠️ 原生对话框无法自动化：探针用 `DOGI_API_PICK_FILE` 旁路（同 sftp:uploadDir 的约定），正常运行不设。
-- **GET / HEAD 不带请求体**（四种形态一致）：这是老行为，别顺手「修」成带 body。
+- **GET / HEAD 允许携带请求体**：四种形态都可带。Node 全局 `fetch` 的 Request 构造会拒绝
+  GET/HEAD 带 body（抛 “Request with GET/HEAD method cannot have body”），所以这条支路由
+  `undici.request`（更底层，不强制该限制）发出，逻辑在 `src/main/services/api/http.ts` 的 `executeHttp`。
+  ⚠️ 别为了「统一」把它塞回 `fetch`——那样 GET/HEAD 带 body 又会整条失败（status=0 + 该报错）。
 - cURL 导入：`-F`（含 `@文件`）映射成 form-data 字段；不再拼成 `a=b&c=d` 文本配一个没有 boundary 的
   multipart 头（那样服务端根本解析不了）。`-d` 仍是 raw 文本。
 - 加字段/加形态时**整条链路一起对齐**（落盘、历史、草稿种子、transfer 的 `apiOut` 白名单），
