@@ -1,38 +1,45 @@
-import { useState } from 'react'
+import ExpandButton from '@/components/ExpandButton'
+import { useAppStore } from '@/stores/app-store'
+import type { NoteFileItem } from '@shared/types'
+import { Button, Dropdown, Input, Modal, Tree, message, type MenuProps, type TreeDataNode } from 'antd'
+import { cn } from 'cn'
 import {
-  ChevronDown,
-  ChevronRight,
   ExternalLink,
   FilePlus,
   FileText,
-  Folder,
+  FolderMinus,
   FolderOpen,
   RefreshCw,
   Trash2
 } from 'lucide-react'
-import { Button, Dropdown, Input, Modal, Tree, message, type MenuProps, type TreeDataNode } from 'antd'
-import { useAppStore } from '@/stores/app-store'
-import { cn } from 'cn'
-import type { NoteFileItem } from '@shared/types'
-
-/** 侧边栏里「所打开的文件夹」自己那个根节点在 Tree 里的 key */
-const ROOT_KEY = '__note-root__'
+import { useEffect, useState } from 'react'
 
 /**
- * 笔记侧边栏：打开本地文件夹后，以**该文件夹为根节点**展示其中的 Markdown 文件树。
+ * 笔记侧边栏：可同时打开多个本地目录，每个目录一个根节点、一棵 Markdown 文件树。
  *
- * 顶层只显示文件夹本身（可展开/折叠），展开后才是里面的目录与文件 ——
- * 不把文件夹内容直接铺在侧边栏顶层，避免「看不出这些文件属于哪个目录」。
- *
- * - 顶部工具栏：打开文件夹 / 打开文件 / 新建笔记 / 刷新
- * - 文件树：点击文件打开编辑标签，目录可展开/折叠
- * - 右键菜单：新建 / 在文件管理器中打开 / 重命名 / 删除
+ * - 顶部工具栏：打开文件夹（可多选）/ 刷新全部
+ * - 目录根节点右键：在此新建笔记 / 在文件管理器中打开 / 刷新 / 移除该目录（只移出侧边栏，不删文件）
+ * - 文件与子目录：点击文件打开编辑标签；右键 新建 / 打开文件位置 / 重命名 / 删除
+ * - 同一目录只出现一次（Windows / macOS 不区分大小写），父子目录可以同时打开
  */
+
+/** 相对路径（用 `/` 分隔）→ 绝对路径。传给系统 / 主进程时必须还原成宿主平台的分隔符 */
+function absPath(root: string, rel: string): string {
+  if (!rel) return root
+  const sep = root.includes('\\') ? '\\' : '/'
+  return `${root}${sep}${rel.split('/').join(sep)}`
+}
+
+/** 根节点显示名：路径最后一段 */
+function rootName(root: string): string {
+  return root.split(/[\\/]/).filter(Boolean).pop() || root
+}
+
 export function NotesPanel() {
-  const noteFolder = useAppStore((s) => s.noteFolder)
-  const noteFileTree = useAppStore((s) => s.noteFileTree)
+  const noteRoots = useAppStore((s) => s.noteRoots)
+  const noteTrees = useAppStore((s) => s.noteTrees)
   const openNoteFolder = useAppStore((s) => s.openNoteFolder)
-  const openNoteFile = useAppStore((s) => s.openNoteFile)
+  const removeNoteRoot = useAppStore((s) => s.removeNoteRoot)
   const readNoteFile = useAppStore((s) => s.readNoteFile)
   const createNoteFile = useAppStore((s) => s.createNoteFile)
   const refreshNoteFolder = useAppStore((s) => s.refreshNoteFolder)
@@ -41,43 +48,29 @@ export function NotesPanel() {
   const openNoteTab = useAppStore((s) => s.openNoteTab)
 
   const [search, setSearch] = useState('')
-  /** 展开的节点 key（完整相对路径；根节点用 ROOT_KEY） */
-  const [expandedKeys, setExpandedKeys] = useState<string[]>([ROOT_KEY])
+  /** 展开的节点 key（目录的绝对路径） */
+  const [expandedKeys, setExpandedKeys] = useState<string[]>([])
   /** 待确认删除的文件 */
-  const [pendingDelete, setPendingDelete] = useState<{ path: string; name: string } | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<{ root: string; path: string; name: string } | null>(null)
   /** 重命名对话框 */
-  const [renameTarget, setRenameTarget] = useState<{ path: string; name: string } | null>(null)
+  const [renameTarget, setRenameTarget] = useState<{ root: string; path: string; name: string } | null>(null)
   const [renameValue, setRenameValue] = useState('')
 
-  /** 路径分隔符跟随已打开的文件夹（Windows 是 `\`，其它平台 `/`） */
-  const sep = noteFolder && noteFolder.includes('\\') ? '\\' : '/'
-
-  /**
-   * 相对路径（用 `/` 分隔）→ 绝对路径。
-   * 传给系统「打开文件位置」时必须还原成宿主平台的分隔符。
-   */
-  const absPath = (rel: string): string => {
-    if (!noteFolder) return ''
-    if (!rel) return noteFolder
-    return `${noteFolder}${sep}${rel.split('/').join(sep)}`
-  }
-
-  /** 在系统文件管理器中定位：目录直接打开，文件在其所在目录中被选中 */
-  const revealInExplorer = (rel: string): void => {
-    void (async () => {
-      const r = await window.api.shell.revealPath(absPath(rel))
-      if (!r.ok) message.error(r.error ?? '打开文件位置失败')
-    })()
-  }
+  // 新打开的目录默认展开（启动恢复的也是刚「出现」的目录，一并展开）
+  useEffect(() => {
+    setExpandedKeys((prev) => {
+      const missing = noteRoots.filter((r) => !prev.includes(r))
+      return missing.length > 0 ? [...prev, ...missing] : prev
+    })
+  }, [noteRoots])
 
   /** 递归搜索过滤：返回命中文件名的节点（目录如果子项有命中也保留） */
-  const filterTree = (items: NoteFileItem[], q: string): NoteFileItem[] => {
-    if (!q) return items
-    const lower = q.toLowerCase()
+  const filterTree = (items: NoteFileItem[], query: string): NoteFileItem[] => {
+    const lower = query.toLowerCase()
     return items
       .map((item) => {
         if (item.isDir) {
-          const children = item.children ? filterTree(item.children, q) : []
+          const children = item.children ? filterTree(item.children, query) : []
           if (children.length > 0) return { ...item, children }
           return null
         }
@@ -87,10 +80,16 @@ export function NotesPanel() {
   }
 
   const q = search.trim().toLowerCase()
-  const viewTree = q ? filterTree(noteFileTree, q) : noteFileTree
+  const viewRoots = noteRoots.map((root) => {
+    const items = noteTrees[root] ?? []
+    return { root, items: q ? filterTree(items, q) : items }
+  })
+  const totalItems = viewRoots.reduce((n, r) => n + r.items.length, 0)
 
-  /** 搜索时自动展开所有目录（含根节点） */
-  const effectiveExpanded = q ? [ROOT_KEY, ...collectDirKeys(viewTree, '')] : expandedKeys
+  /** 搜索时自动展开所有目录（含各根节点） */
+  const effectiveExpanded = q
+    ? [...noteRoots, ...viewRoots.flatMap(({ root, items }) => collectDirKeys(items, root, ''))]
+    : expandedKeys
 
   /** 展开/折叠目录 */
   const toggleExpand = (key: string) => {
@@ -99,119 +98,125 @@ export function NotesPanel() {
     )
   }
 
+  /** 在系统文件管理器中定位：目录直接打开，文件在其所在目录中被选中 */
+  const revealInExplorer = (root: string, rel: string): void => {
+    void (async () => {
+      const r = await window.api.shell.revealPath(absPath(root, rel))
+      if (!r.ok) message.error(r.error ?? '打开文件位置失败')
+    })()
+  }
+
   /**
-   * 把 NoteFileItem[] 转成 antd Tree 需要的 TreeDataNode[]。
+   * 把某棵树转成 antd Tree 的 TreeDataNode[]。
    *
    * ⚠️ `item.path` 只是相对**父目录**的一段（主进程 scanDir 是按层给的），
-   * 拼上 parentPath 才是相对笔记根目录的完整路径。读写 / 重命名 / 删除
-   * 全都要用完整路径 —— 少拼这一层，子目录里的文件就会报「读不到」
-   * （拿到的路径缺了子目录那一段）。
+   * 拼上 parentRel 才是相对所属目录根的完整路径；Tree 的 key 用绝对路径 ——
+   * 多个目录的树合成一棵后，只有绝对路径能保证不撞 key。
    */
-  const toTreeData = (items: NoteFileItem[], parentPath: string): TreeDataNode[] => {
+  const toTreeData = (items: NoteFileItem[], root: string, parentRel: string): TreeDataNode[] => {
     return items.map((item) => {
-      const fullPath = parentPath ? `${parentPath}/${item.path}` : item.path
+      const rel = parentRel ? `${parentRel}/${item.path}` : item.path
+      const key = absPath(root, rel)
       if (item.isDir) {
         return {
-          key: fullPath,
+          key,
           selectable: false,
           title: (
             <DirRow
               name={item.name}
-              expanded={effectiveExpanded.includes(fullPath)}
-              onToggle={() => toggleExpand(fullPath)}
-              onNew={() => void handleCreate(fullPath)}
-              onReveal={() => revealInExplorer(fullPath)}
+              path={key}
+              expanded={effectiveExpanded.includes(key)}
+              onToggle={() => toggleExpand(key)}
+              onNew={() => void handleCreate(root, rel)}
+              onReveal={() => revealInExplorer(root, rel)}
               onRename={() => {
-                setRenameTarget({ path: fullPath, name: item.name })
+                setRenameTarget({ root, path: rel, name: item.name })
                 setRenameValue(item.name)
               }}
-              onDelete={() => setPendingDelete({ path: fullPath, name: item.name })}
+              onDelete={() => setPendingDelete({ root, path: rel, name: item.name })}
             />
           ),
-          children: item.children ? toTreeData(item.children, fullPath) : []
+          children: item.children ? toTreeData(item.children, root, rel) : []
         }
       }
       return {
-        key: fullPath,
+        key,
         selectable: false,
         isLeaf: true,
         title: (
           <FileRow
             item={item}
-            onOpen={() => void handleOpenFile(fullPath)}
-            onReveal={() => revealInExplorer(fullPath)}
+            onOpen={() => void handleOpenFile(root, rel)}
+            onReveal={() => revealInExplorer(root, rel)}
             onRename={() => {
-              setRenameTarget({ path: fullPath, name: item.name })
+              setRenameTarget({ root, path: rel, name: item.name })
               setRenameValue(item.name)
             }}
-            onDelete={() => setPendingDelete({ path: fullPath, name: item.name })}
+            onDelete={() => setPendingDelete({ root, path: rel, name: item.name })}
           />
         )
       }
     })
   }
 
-  const folderName = noteFolder ? noteFolder.split(/[\\/]/).filter(Boolean).pop() || noteFolder : ''
+  /** 顶层：每个已打开的目录一个根节点（父子目录同时打开时各自成根，互不折叠） */
+  const treeData: TreeDataNode[] = viewRoots.map(({ root, items }) => ({
+    key: root,
+    selectable: false,
+    title: (
+      <DirRow
+        name={rootName(root)}
+        path={root}
+        expanded={effectiveExpanded.includes(root)}
+        onToggle={() => toggleExpand(root)}
+        onNew={() => void handleCreate(root, '')}
+        onReveal={() => revealInExplorer(root, '')}
+        onRefresh={() => void refreshNoteFolder(root)}
+        onRemove={() => handleRemoveRoot(root)}
+      />
+    ),
+    children: toTreeData(items, root, '')
+  }))
 
-  /** 顶层树：只有一个「笔记文件夹」根节点，其余内容挂在它下面 */
-  const treeData: TreeDataNode[] = noteFolder
-    ? [
-        {
-          key: ROOT_KEY,
-          selectable: false,
-          title: (
-            <DirRow
-              name={folderName}
-              expanded={effectiveExpanded.includes(ROOT_KEY)}
-              onToggle={() => toggleExpand(ROOT_KEY)}
-              onNew={() => void handleCreate('')}
-              onReveal={() => revealInExplorer('')}
-            />
-          ),
-          children: toTreeData(viewTree, '')
-        }
-      ]
-    : []
-
-  /** 打开文件：读取内容后开标签（relPath 是相对笔记文件夹的完整路径） */
-  const handleOpenFile = async (relPath: string) => {
+  /** 打开文件：读取内容后开标签（relPath 是相对所属目录的完整路径） */
+  const handleOpenFile = async (root: string, relPath: string) => {
     try {
-      const result = await readNoteFile(relPath)
+      const result = await readNoteFile(root, relPath)
       openNoteTab(result.path, result.path.split(/[\\/]/).pop() ?? relPath)
     } catch (e) {
       message.error(`打开文件失败：${e instanceof Error ? e.message : String(e)}`)
     }
   }
 
-  /** 打开文件夹 */
+  /** 打开目录（可多选） */
   const handleOpenFolder = async () => {
     try {
-      await openNoteFolder()
+      const result = await openNoteFolder()
+      if (!result) return
+      if (result.skipped > 0) {
+        message.info(
+          result.added > 0
+            ? `已添加 ${result.added} 个目录，${result.skipped} 个已在侧边栏中`
+            : '所选目录已在侧边栏中'
+        )
+      }
     } catch (e) {
       message.error(`打开文件夹失败：${e instanceof Error ? e.message : String(e)}`)
     }
   }
 
-  /** 打开单个文件（不在文件夹模式下） */
-  const handleOpenFileDirect = async () => {
-    try {
-      const result = await openNoteFile()
-      if (result) {
-        openNoteTab(result.path, result.path.split(/[\\/]/).pop() ?? result.path)
-      }
-    } catch (e) {
-      message.error(`打开文件失败：${e instanceof Error ? e.message : String(e)}`)
-    }
+  /** 从侧边栏移除目录（磁盘文件不动） */
+  const handleRemoveRoot = (root: string) => {
+    removeNoteRoot(root)
   }
 
-  /** 新建笔记文件（dirPath 是相对笔记文件夹的完整目录路径，空串 = 根目录） */
-  const handleCreate = async (dirPath: string) => {
+  /** 新建笔记文件（dirPath 是相对所属目录的完整目录路径，空串 = 根目录） */
+  const handleCreate = async (root: string, dirPath: string) => {
     try {
-      const result = await createNoteFile(dirPath)
+      const result = await createNoteFile(root, dirPath)
       openNoteTab(result.path, result.path.split(/[\\/]/).pop() ?? result.path)
       message.success('已新建笔记')
     } catch (e) {
-      if (e instanceof Error && e.message === '用户取消') return
       message.error(`新建失败：${e instanceof Error ? e.message : String(e)}`)
     }
   }
@@ -222,7 +227,7 @@ export function NotesPanel() {
     const target = pendingDelete
     setPendingDelete(null)
     try {
-      await deleteNoteFile(target.path)
+      await deleteNoteFile(target.root, target.path)
       message.success('已删除该文件')
     } catch (e) {
       message.error(`删除失败：${e instanceof Error ? e.message : String(e)}`)
@@ -238,7 +243,7 @@ export function NotesPanel() {
       return
     }
     try {
-      await renameNoteFile(renameTarget.path, name)
+      await renameNoteFile(renameTarget.root, renameTarget.path, name)
       setRenameTarget(null)
       message.success('已重命名')
     } catch (e) {
@@ -246,15 +251,11 @@ export function NotesPanel() {
     }
   }
 
-  const isEmpty = noteFileTree.length === 0
-
   return (
     <div className="flex h-full flex-col">
       {/* 工具栏 */}
       <div className="mb-1 flex items-center justify-between gap-1 px-3 py-1">
-        <span className="text-sm font-medium text-muted-foreground truncate">
-          {noteFolder ? folderName : '笔记'}
-        </span>
+        <span className="text-sm font-medium text-muted-foreground truncate">笔记</span>
         <div className="flex items-center gap-1">
           <Button
             type="text"
@@ -264,38 +265,20 @@ export function NotesPanel() {
             icon={<FolderOpen className="size-3.5" />}
             onClick={() => void handleOpenFolder()}
           />
-          <Button
-            type="text"
-            size="small"
-            className="px-0.5 text-muted-foreground"
-            title="打开文件"
-            icon={<FileText className="size-3.5" />}
-            onClick={() => void handleOpenFileDirect()}
-          />
-          {noteFolder && (
-            <>
-              <Button
-                type="text"
-                size="small"
-                className="px-0.5 text-muted-foreground"
-                title="新建笔记"
-                icon={<FilePlus className="size-3.5" />}
-                onClick={() => void handleCreate('')}
-              />
-              <Button
-                type="text"
-                size="small"
-                className="px-0.5 text-muted-foreground"
-                title="刷新"
-                icon={<RefreshCw className="size-3.5" />}
-                onClick={() => void refreshNoteFolder()}
-              />
-            </>
+          {noteRoots.length > 0 && (
+            <Button
+              type="text"
+              size="small"
+              className="px-0.5 text-muted-foreground"
+              title="刷新全部目录"
+              icon={<RefreshCw className="size-3.5" />}
+              onClick={() => void refreshNoteFolder()}
+            />
           )}
         </div>
       </div>
 
-      {noteFolder && (
+      {noteRoots.length > 0 && (
         <div className="px-3">
           <Input
             size='small'
@@ -308,32 +291,35 @@ export function NotesPanel() {
       )}
 
       <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
-        {!noteFolder ? (
+        {noteRoots.length === 0 ? (
           <div className="mx-2 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
-            点击上方「打开文件夹」选择笔记目录，
+            点击上方「打开文件夹」选择笔记目录，可添加多个，
             <br />
-            或「打开文件」直接编辑单个 Markdown 文件。
+            重启后自动恢复。
           </div>
-        ) : isEmpty ? (
-          <div className="mx-2 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
-            该文件夹下没有 Markdown 文件。
-            <br />
-            点击「新建笔记」创建第一个。
-          </div>
-        ) : q && viewTree.length === 0 ? (
+        ) : q && totalItems === 0 ? (
           <div className="mx-2 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
             没有匹配「{search}」的文件。
           </div>
         ) : (
-          <Tree
-            className="side-tree notes-tree"
-            treeData={treeData}
-            selectable={false}
-            blockNode
-            showLine={false}
-            expandedKeys={effectiveExpanded}
-            onExpand={(keys) => setExpandedKeys(keys.map(String))}
-          />
+          <>
+            <Tree
+              className="side-tree notes-tree"
+              treeData={treeData}
+              selectable={false}
+              blockNode
+              showLine={false}
+              expandedKeys={effectiveExpanded}
+              onExpand={(keys) => setExpandedKeys(keys.map(String))}
+            />
+            {noteRoots.length === 1 && (noteTrees[noteRoots[0]] ?? []).length === 0 && !q && (
+              <div className="mx-2 mt-2 rounded-md border border-dashed border-border px-3 py-4 text-center text-xs text-muted-foreground">
+                该目录下没有 Markdown 文件。
+                <br />
+                右键目录名可「在此新建笔记」。
+              </div>
+            )}
+          </>
         )}
       </div>
 
@@ -380,52 +366,63 @@ export function NotesPanel() {
   )
 }
 
-/** 收集树中所有目录的 key（搜索时自动展开） */
-function collectDirKeys(items: NoteFileItem[], parentPath: string): string[] {
+/** 收集一棵树里所有目录的 key（搜索时自动展开） */
+function collectDirKeys(items: NoteFileItem[], root: string, parentRel: string): string[] {
   const keys: string[] = []
   for (const item of items) {
     if (item.isDir) {
-      const fullPath = parentPath ? `${parentPath}/${item.path}` : item.path
-      keys.push(fullPath)
-      if (item.children) keys.push(...collectDirKeys(item.children, fullPath))
+      const rel = parentRel ? `${parentRel}/${item.path}` : item.path
+      keys.push(absPath(root, rel))
+      if (item.children) keys.push(...collectDirKeys(item.children, root, rel))
     }
   }
   return keys
 }
 
 /**
- * 目录行：展开/折叠箭头 + 文件夹图标 + 名称 + 右键菜单。
+ * 目录行：展开/折叠箭头 + 名称 + 右键菜单。
  * 点击箭头或名称行都能切换展开/折叠。
  *
- * `onRename` / `onDelete` 不给时（根节点「笔记文件夹」）菜单里就不出现这两项 ——
- * 重命名 / 删除笔记根目录不是这个面板该干的事。
+ * 根节点（已打开的目录）传 `onRefresh` / `onRemove` 而不传 `onRename` / `onDelete` ——
+ * 重命名 / 删除「用户机器上的目录」不是这个面板该干的事；普通子目录相反。
  */
 function DirRow({
   name,
+  path,
   expanded,
   onToggle,
   onNew,
   onReveal,
+  onRefresh,
   onRename,
-  onDelete
+  onDelete,
+  onRemove
 }: {
   name: string
+  /** 完整路径，悬停提示用 */
+  path?: string
   expanded: boolean
   onToggle: () => void
   onNew: () => void
   onReveal: () => void
+  onRefresh?: () => void
   onRename?: () => void
   onDelete?: () => void
+  onRemove?: () => void
 }) {
   const items: MenuProps['items'] = [
     { key: 'new', icon: <FilePlus className="size-3.5" />, label: '在此新建笔记' },
     { key: 'reveal', icon: <ExternalLink className="size-3.5" />, label: '在文件管理器中打开' },
+    ...(onRefresh ? [{ key: 'refresh', icon: <RefreshCw className="size-3.5" />, label: '刷新' }] : []),
+    ...((onRename && onDelete) || onRemove ? [{ type: 'divider' as const }] : []),
     ...(onRename && onDelete
       ? [
-          { type: 'divider' as const },
-          { key: 'rename', icon: <FileText className="size-3.5" />, label: '重命名' },
-          { key: 'delete', icon: <Trash2 className="size-3.5" />, label: '删除', danger: true }
-        ]
+        { key: 'rename', icon: <FileText className="size-3.5" />, label: '重命名' },
+        { key: 'delete', icon: <Trash2 className="size-3.5" />, label: '删除', danger: true }
+      ]
+      : []),
+    ...(onRemove
+      ? [{ key: 'remove', icon: <FolderMinus className="size-3.5" />, label: '移除该目录（文件保留）', danger: true }]
       : [])
   ]
   return (
@@ -436,29 +433,21 @@ function DirRow({
         onClick: ({ key }) => {
           if (key === 'new') onNew()
           else if (key === 'reveal') onReveal()
+          else if (key === 'refresh') onRefresh?.()
           else if (key === 'rename') onRename?.()
           else if (key === 'delete') onDelete?.()
+          else if (key === 'remove') onRemove?.()
         }
       }}
     >
       <div
-        className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 py-0.5"
-        onClick={(e) => {
-          e.stopPropagation()
-          onToggle()
-        }}
-      >
-        {expanded ? (
-          <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-        ) : (
-          <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+        className={cn(
+          'row-own-bg relative flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-md px-1 py-1 transition-colors text-muted-foreground hover:bg-foreground/5 hover:text-foreground'
         )}
-        {expanded ? (
-          <FolderOpen className="size-3.5 shrink-0 text-muted-foreground" />
-        ) : (
-          <Folder className="size-3.5 shrink-0 text-muted-foreground" />
-        )}
-        <span className="truncate text-[13px] font-medium">{name}</span>
+        onClick={onToggle}
+        title={path}>
+        <ExpandButton expanded={expanded} onToggle={onToggle} color={null} />
+        <span className="min-w-0 truncate text-sm font-medium">{name}</span>
       </div>
     </Dropdown>
   )
@@ -507,7 +496,6 @@ function FileRow({
         }}
       >
         <div className="flex min-w-0 flex-1 items-center gap-2">
-          <FileText className="size-3.5 shrink-0 opacity-70" />
           <span className="min-w-0 flex-1 truncate text-[13px] font-medium leading-none">
             {item.name}
           </span>

@@ -571,7 +571,6 @@ function ScriptRow({
         }}
       >
         <div className="flex min-w-0 flex-1 items-center gap-2">
-          <FileCode2 className="size-3.5 shrink-0 opacity-70" />
           <div className="min-w-0 flex-1 truncate text-[13px] font-medium leading-none">
             {script.name}
           </div>

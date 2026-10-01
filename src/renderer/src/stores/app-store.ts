@@ -12,6 +12,7 @@ import { clampTerminalFontSize } from '@/features/terminal/terminal-font'
 import { applyColorTheme } from '@/shared/lib/theme'
 import { requestTabClose, setTabCloseExecutor } from '@/shared/lib/tab-event-bus'
 import { DEFAULT_SHORTCUTS, findShortcutByEvent } from '@shared/shortcuts'
+import { isUnderNoteRoot, sameNoteRoot } from '@shared/note-folders'
 import { create } from 'zustand'
 
 // ---- 从拆分文件 re-export 全部公开符号（消费方仍只 import `@/stores/app-store`） ----
@@ -299,8 +300,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     scripts: [],
     scriptGroups: [],
-    noteFolder: null,
-    noteFileTree: [],
+    noteRoots: [],
+    noteTrees: {},
     apiRequests: [],
     apiGroups: [],
     apiHistory: [],
@@ -469,31 +470,37 @@ export const useAppStore = create<AppStore>()((set, get) => {
         )
       }
 
-      // ---------- 恢复上次的笔记会话（文件夹 + 打开的文件标签） ----------
+      // ---------- 恢复上次的笔记会话（打开的目录 + 文件标签） ----------
       // 文件内容永远以磁盘为准，这里只还原「打开状态」；已经被删掉的文件不再恢复，
       // 否则一启动就会开出一堆「文件不存在」的标签。
       const noteSession = await window.api.notes.getSession()
-      if (noteSession.folder) {
-        const items = await window.api.notes.refreshFolder(noteSession.folder)
-        set({ noteFolder: noteSession.folder, noteFileTree: items })
+      const folders = (noteSession.folders ?? []).filter(Boolean)
+      if (folders.length > 0) {
+        const trees: Record<string, NoteFileItem[]> = {}
+        for (const folder of folders) {
+          trees[folder] = await window.api.notes.refreshFolder(folder)
+        }
+        set({ noteRoots: folders, noteTrees: trees })
         // scanDir 给的 path 只是相对父目录的一段，得拼成完整相对路径才好比对
         const flatten = (list: NoteFileItem[], parent = ''): string[] =>
           list.flatMap((item) => {
             const full = parent ? `${parent}/${item.path}` : item.path
             return item.isDir ? flatten(item.children ?? [], full) : [full]
           })
-        const alive = new Set(flatten(items))
-        const sep = noteSession.folder.includes('\\') ? '\\' : '/'
-        const prefix = noteSession.folder.replace(/[\\/]+$/, '') + sep
+        const aliveByRoot = folders.map((folder) => ({ folder, alive: new Set(flatten(trees[folder])) }))
         for (const abs of noteSession.files) {
-          if (!abs.startsWith(prefix)) continue
+          // 归属取「最长的根」：父子目录同时打开时，同一个文件会出现在两棵树里，
+          // 更深的那个才是它的所属目录
+          let owner: { folder: string; alive: Set<string> } | null = null
+          for (const entry of aliveByRoot) {
+            if (!isUnderNoteRoot(abs, entry.folder)) continue
+            if (!owner || entry.folder.length > owner.folder.length) owner = entry
+          }
+          if (!owner) continue
+          const sep = owner.folder.includes('\\') ? '\\' : '/'
+          const prefix = owner.folder.replace(/[\\/]+$/, '') + sep
           const rel = abs.slice(prefix.length).split(sep).join('/')
-          if (alive.has(rel)) get().openNoteTab(abs, abs.split(/[\\/]/).pop() ?? abs)
-        }
-      } else {
-        // 没打开文件夹（直接打开的单个文件）时拿不到文件树校验存在性，原样恢复
-        for (const abs of noteSession.files) {
-          get().openNoteTab(abs, abs.split(/[\\/]/).pop() ?? abs)
+          if (owner.alive.has(rel)) get().openNoteTab(abs, abs.split(/[\\/]/).pop() ?? abs)
         }
       }
     },
@@ -551,80 +558,81 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const old = get().sessions.find((x) => x.id === id)
       if (!old) return
       reconnectingIds.add(id)
-      // 按原会话重建：绑定了主机的（ssh 或 local 主机）沿用它，纯本地会话新建默认 shell
-      let info: SessionInfo
-      if (old.profileId) {
-        if (!get().profiles.some((p) => p.id === old.profileId)) {
-          // 主机配置已删除：退化为普通本地终端
-          info = await window.api.terminal.createLocal(80, 24)
-        } else {
-          try {
+      try {
+        // 按原会话重建：绑定了主机的（ssh 或 local 主机）沿用它，纯本地会话新建默认 shell
+        let info: SessionInfo
+        if (old.profileId) {
+          if (!get().profiles.some((p) => p.id === old.profileId)) {
+            // 主机配置已删除：退化为普通本地终端
+            info = await window.api.terminal.createLocal(80, 24)
+          } else {
+            // 配置还在但连接前置条件不满足（如 Mosh 缺本地 mosh-client）会抛错：
+            // 提示后保持原样。不能退化为本地终端 —— 那会「重连」出一个不相干的 shell
             info = await openSession(old.profileId)
-          } catch (e) {
-            // 配置还在但连接前置条件不满足（如 Mosh 缺本地 mosh-client）：提示后保持原样。
-            // 不能退化为本地终端 —— 那会「重连」出一个不相干的 shell
-            reconnectingIds.delete(id)
-            const { message } = await import('antd')
-            message.error(`重连失败：${e instanceof Error ? e.message : String(e)}`)
-            return
           }
+        } else {
+          info = await window.api.terminal.createLocal(80, 24)
         }
-      } else {
-        info = await window.api.terminal.createLocal(80, 24)
-      }
-      // 关闭已退出的旧会话（onClosed 已被 reconnectingIds 屏蔽，不会摘掉组）
-      await window.api.terminal.kill(id)
-      set((s) => {
-        // 找到承载该会话的标签，原地替换会话 ID（保留组与标签位置）
-        const nextTabId = terminalTabId(info.id)
-        const tab = s.ui.panelTabs.find((t) => t.type === 'terminal' && t.sessionId === id)
-        const tabs = tab
-          ? s.ui.panelTabs.map((t) =>
-            t.id === tab.id ? { ...t, id: nextTabId, sessionId: info.id } : t
-          )
-          : s.ui.panelTabs
-        let groups = s.groups
-        if (tab) {
-          const g = s.groups[tab.groupId]
-          if (g) {
-            groups = {
-              ...s.groups,
-              [tab.groupId]: {
-                ...g,
-                tabIds: g.tabIds.map((x) => (x === tab.id ? nextTabId : x)),
-                activeTabId: g.activeTabId === tab.id ? nextTabId : g.activeTabId
+        // 关闭已退出的旧会话（onClosed 已被 reconnectingIds 屏蔽，不会摘掉组）
+        await window.api.terminal.kill(id)
+        set((s) => {
+          // 找到承载该会话的标签，原地替换会话 ID（保留组与标签位置）
+          const nextTabId = terminalTabId(info.id)
+          const tab = s.ui.panelTabs.find((t) => t.type === 'terminal' && t.sessionId === id)
+          const tabs = tab
+            ? s.ui.panelTabs.map((t) =>
+              t.id === tab.id ? { ...t, id: nextTabId, sessionId: info.id } : t
+            )
+            : s.ui.panelTabs
+          let groups = s.groups
+          if (tab) {
+            const g = s.groups[tab.groupId]
+            if (g) {
+              groups = {
+                ...s.groups,
+                [tab.groupId]: {
+                  ...g,
+                  tabIds: g.tabIds.map((x) => (x === tab.id ? nextTabId : x)),
+                  activeTabId: g.activeTabId === tab.id ? nextTabId : g.activeTabId
+                }
               }
             }
           }
-        }
-        const sessions = s.sessions.filter((x) => x.id !== id).concat(info)
-        const exited = new Set(s.exitedSessions)
-        exited.delete(id)
-        // 旧会话的指标随之作废（新会话的指标由主进程重新采集）
-        const monitors = { ...s.monitors }
-        delete monitors[id]
-        // 旧会话的「不支持监控」标记同样作废（新会话会重新探测平台）
-        const monitorUnsupported = { ...s.monitorUnsupported }
-        delete monitorUnsupported[id]
-        // 该会话的 AI 对话随重连迁移到新会话 ID（上下文保留）
-        const aiChats = { ...s.aiChats }
-        if (aiChats[id]) {
-          aiChats[info.id] = aiChats[id]
-          delete aiChats[id]
-        }
-        return {
-          sessions,
-          groups,
-          ui: { ...s.ui, panelTabs: tabs },
-          activeGroupId: tab?.groupId ?? s.activeGroupId,
-          activeSessionId: s.activeSessionId === id ? info.id : s.activeSessionId,
-          exitedSessions: exited,
-          monitors,
-          monitorUnsupported,
-          aiChats
-        }
-      })
-      reconnectingIds.delete(id)
+          const sessions = s.sessions.filter((x) => x.id !== id).concat(info)
+          const exited = new Set(s.exitedSessions)
+          exited.delete(id)
+          // 旧会话的指标随之作废（新会话的指标由主进程重新采集）
+          const monitors = { ...s.monitors }
+          delete monitors[id]
+          // 旧会话的「不支持监控」标记同样作废（新会话会重新探测平台）
+          const monitorUnsupported = { ...s.monitorUnsupported }
+          delete monitorUnsupported[id]
+          // 该会话的 AI 对话随重连迁移到新会话 ID（上下文保留）
+          const aiChats = { ...s.aiChats }
+          if (aiChats[id]) {
+            aiChats[info.id] = aiChats[id]
+            delete aiChats[id]
+          }
+          return {
+            sessions,
+            groups,
+            ui: { ...s.ui, panelTabs: tabs },
+            activeGroupId: tab?.groupId ?? s.activeGroupId,
+            activeSessionId: s.activeSessionId === id ? info.id : s.activeSessionId,
+            exitedSessions: exited,
+            monitors,
+            monitorUnsupported,
+            aiChats
+          }
+        })
+      } catch (e) {
+        // 失败必须显式提示：否则终端停在「会话已结束」却毫无反馈，用户只会以为重连按钮坏了
+        const { message } = await import('antd')
+        message.error(`重连失败：${e instanceof Error ? e.message : String(e)}`)
+      } finally {
+        // 无论成败都要摘掉屏蔽标记：留着会让该会话后续的 closed 事件被永久忽略
+        reconnectingIds.delete(id)
+      }
     },
 
     splitActivePane: async (direction) => {
@@ -1044,18 +1052,45 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     openNoteFolder: async () => {
       const result = await window.api.notes.openFolder()
-      if (!result) return false
-      set({ noteFolder: result.root, noteFileTree: result.items })
-      return true
+      if (!result) return null
+      return get().addNoteRoots(result.roots)
     },
 
-    openNoteFile: async () => {
-      return window.api.notes.openFile()
+    addNoteRoots: async (roots) => {
+      // 同一目录（Windows / macOS 不区分大小写）只允许出现一次；父子目录不互斥
+      const existing = get().noteRoots
+      const fresh: string[] = []
+      for (const root of roots) {
+        if (!root) continue
+        if (existing.some((r) => sameNoteRoot(r, root))) continue
+        if (fresh.some((r) => sameNoteRoot(r, root))) continue
+        fresh.push(root)
+      }
+      if (fresh.length === 0) return { added: 0, skipped: roots.length }
+      const trees: Record<string, NoteFileItem[]> = {}
+      for (const root of fresh) {
+        trees[root] = await window.api.notes.refreshFolder(root)
+      }
+      set((s) => ({
+        noteRoots: [...s.noteRoots, ...fresh],
+        noteTrees: { ...s.noteTrees, ...trees }
+      }))
+      return { added: fresh.length, skipped: roots.length - fresh.length }
     },
 
-    readNoteFile: async (filePath) => {
-      const root = get().noteFolder
-      if (!root) throw new Error('未打开笔记文件夹')
+    removeNoteRoot: (root) => {
+      // 只从侧边栏移除，磁盘文件不动
+      set((s) => {
+        const noteRoots = s.noteRoots.filter((r) => !sameNoteRoot(r, root))
+        const noteTrees: Record<string, NoteFileItem[]> = {}
+        for (const [key, value] of Object.entries(s.noteTrees)) {
+          if (noteRoots.includes(key)) noteTrees[key] = value
+        }
+        return { noteRoots, noteTrees }
+      })
+    },
+
+    readNoteFile: async (root, filePath) => {
       return window.api.notes.readFile(root, filePath)
     },
 
@@ -1063,35 +1098,37 @@ export const useAppStore = create<AppStore>()((set, get) => {
       return window.api.notes.saveFile(filePath, content)
     },
 
-    createNoteFile: async (dirPath) => {
-      const root = get().noteFolder ?? ''
+    createNoteFile: async (root, dirPath) => {
       const result = await window.api.notes.newFile(root, dirPath ?? '')
-      // 刷新文件树
-      if (root) {
-        set({ noteFileTree: await window.api.notes.refreshFolder(root) })
-      }
+      // 刷新该目录的文件树，新文件才能出现在侧边栏
+      const items = await window.api.notes.refreshFolder(root)
+      set((s) => ({ noteTrees: { ...s.noteTrees, [root]: items } }))
       return result
     },
 
-    refreshNoteFolder: async () => {
-      const root = get().noteFolder
-      if (!root) return
-      set({ noteFileTree: await window.api.notes.refreshFolder(root) })
+    refreshNoteFolder: async (root) => {
+      const targets = root ? [root] : get().noteRoots
+      const results = await Promise.all(targets.map((r) => window.api.notes.refreshFolder(r)))
+      set((s) => {
+        const noteTrees = { ...s.noteTrees }
+        targets.forEach((r, i) => {
+          noteTrees[r] = results[i]
+        })
+        return { noteTrees }
+      })
     },
 
-    renameNoteFile: async (oldPath, newName) => {
-      const root = get().noteFolder
-      if (!root) throw new Error('未打开笔记文件夹')
+    renameNoteFile: async (root, oldPath, newName) => {
       const newPath = await window.api.notes.renameFile(root, oldPath, newName)
-      set({ noteFileTree: await window.api.notes.refreshFolder(root) })
+      const items = await window.api.notes.refreshFolder(root)
+      set((s) => ({ noteTrees: { ...s.noteTrees, [root]: items } }))
       return newPath
     },
 
-    deleteNoteFile: async (filePath) => {
-      const root = get().noteFolder
-      if (!root) throw new Error('未打开笔记文件夹')
+    deleteNoteFile: async (root, filePath) => {
       await window.api.notes.deleteFile(root, filePath)
-      set({ noteFileTree: await window.api.notes.refreshFolder(root) })
+      const items = await window.api.notes.refreshFolder(root)
+      set((s) => ({ noteTrees: { ...s.noteTrees, [root]: items } }))
     },
 
     selectPlugin: (id) => {
@@ -2619,13 +2656,13 @@ if (typeof window !== 'undefined' && window.api?.notes?.saveSession) {
     const files = s.ui.panelTabs
       .filter((t) => t.type === 'note' && t.noteFilePath)
       .map((t) => t.noteFilePath as string)
-    const key = JSON.stringify({ folder: s.noteFolder, files })
+    const key = JSON.stringify({ folders: s.noteRoots, files })
     if (key === lastNoteSession) return
     lastNoteSession = key
     if (noteSessionTimer) clearTimeout(noteSessionTimer)
     noteSessionTimer = setTimeout(() => {
       noteSessionTimer = null
-      void window.api.notes.saveSession({ folder: s.noteFolder, files })
+      void window.api.notes.saveSession({ folders: s.noteRoots, files })
     }, 400)
   })
 }

@@ -707,20 +707,12 @@ export function TerminalView({
     }
 
     term.onData((data) => {
-      // 会话已结束：拦截回车重连 / Ctrl+D 关闭，其余按键吞掉（对齐 Web 终端重连逻辑）
+      // 会话已结束：只认 Enter（重连）与 Ctrl+D（关闭），其余按键吞掉（对齐 Web 终端重连逻辑）
       if (exitedRef.current) {
-        if (!actionRef.current) {
-          actionRef.current = true
-          if (data === '\r') {
-            term.write('\r\n\x1b[36m● 正在重连…\x1b[0m\r\n')
-            // 内嵌终端走自定义回调（就地重开，更新本地会话状态）；标签页终端走全局重连
-            if (onExitedReconnectRef.current) onExitedReconnectRef.current()
-            else void useAppStore.getState().reconnectSession(session.id)
-          } else if (data === '\x04') {
-            if (onExitedCloseRef.current) onExitedCloseRef.current()
-            else void useAppStore.getState().closeSession(session.id)
-          }
-        }
+        // ⚠️ 只有真正命中动作的键才允许上锁：早期版本对「任意按键」上锁，
+        // 用户回来随手按下的第一个无关键就把重连 / Ctrl+D / 重连按钮一起永久锁死了
+        if (data === '\r') runExitedActionRef.current?.('reconnect')
+        else if (data === '\x04') runExitedActionRef.current?.('close')
         return
       }
       // ZMODEM 传输期间禁用手动输入，避免破坏协议
@@ -911,7 +903,9 @@ export function TerminalView({
   // 镜像最新“已结束”状态，供 onData 回调（创建时只绑定一次）读取
   const exitedRef = useRef(exited)
   exitedRef.current = exited
-  // 重连/关闭动作只触发一次，避免连按产生多个会话
+  // 重连/关闭串行化：同一时刻只允许一个，避免连按产生多个会话。
+  // ⚠️ 但「锁上就必须能解锁」：动作没生效（失败 / 被拦截 / 永不回包）时必须放开，
+  // 否则重连按钮、Enter、Ctrl+D 会一起永久失灵（早期的一次性闩锁就是这么坏的）。
   const actionRef = useRef(false)
   // 退出后的重连/关闭走自定义回调时，用 ref 镜像最新引用（onData 回调创建时只绑定一次，
   // 闭包里若直接读 prop 会拿到旧值；内嵌终端的回调随 term 状态变化，必须读最新）
@@ -919,11 +913,56 @@ export function TerminalView({
   onExitedReconnectRef.current = onExitedReconnect
   const onExitedCloseRef = useRef(onExitedClose)
   onExitedCloseRef.current = onExitedClose
+
+  /** 会话结束后的两个出口：Enter 重连 / Ctrl+D 关闭（失败可重试，并在终端里给出反馈） */
+  const runExitedAction = useCallback(
+    (action: 'reconnect' | 'close') => {
+      if (actionRef.current) return
+      actionRef.current = true
+      const targetId = session.id
+      const term = termRef.current
+      if (action === 'reconnect') term?.write('\r\n\x1b[36m● 正在重连…\x1b[0m\r\n')
+      let settled = false
+      function finish(err?: unknown): void {
+        if (settled) return
+        settled = true
+        window.clearTimeout(timer)
+        // 会话已不在结束态 = 这次动作生效了（标签被新会话替换 / 已关闭），保持上锁避免重复触发
+        if (!useAppStore.getState().exitedSessions.has(targetId)) return
+        // 仍停在结束态：放开闩锁，允许再次重连或关闭
+        actionRef.current = false
+        if (err) {
+          const text = err instanceof Error ? err.message : String(err)
+          const label = action === 'reconnect' ? '重连失败' : '关闭失败'
+          term?.write(`\r\n\x1b[31m● ${label}：${text}\x1b[0m\r\n`)
+        }
+        term?.write('\x1b[90m  按 Enter 重连 · 按 Ctrl+D 关闭标签\x1b[0m\r\n')
+      }
+      // IPC 极端情况下可能永不回包：超时兜底把闩锁放开，别让用户干等一个已经没戏的动作
+      const timer = window.setTimeout(() => finish(new Error('操作超时')), 30_000)
+      // 内嵌终端走自定义回调（就地重开 / 就地关闭）；标签页终端走全局动作
+      const run =
+        action === 'reconnect'
+          ? onExitedReconnectRef.current
+            ? Promise.resolve(onExitedReconnectRef.current())
+            : useAppStore.getState().reconnectSession(targetId)
+          : onExitedCloseRef.current
+            ? Promise.resolve(onExitedCloseRef.current())
+            : useAppStore.getState().closeSession(targetId)
+      run.then(() => finish(), (e: unknown) => finish(e))
+    },
+    [session.id]
+  )
+  // onData 只在创建时绑定一次，用 ref 镜像最新实现（与 exitedRef 同理）
+  const runExitedActionRef = useRef(runExitedAction)
+  runExitedActionRef.current = runExitedAction
   // 会话结束后：把提示直接写进终端（对齐 Web 端子做法，不再弹浮层），并聚焦以接收回车重连 / Ctrl+D 关闭
   const exitNoticeRef = useRef(false)
   useEffect(() => {
     if (!exited) {
       exitNoticeRef.current = false
+      // 会话复活（重连成功 / 换会话）后必须解锁，否则下一次结束就再也按不动了
+      actionRef.current = false
       return
     }
     const term = termRef.current
@@ -1099,17 +1138,11 @@ export function TerminalView({
           {showConnect && <SshConnectCard session={session} progress={connectStage} />}
         </div>
       )}
-      {/* 会话结束后右下角提供显式重连按钮：与「按 Enter 重连」等价（同样是只触发一次的保护） */}
+      {/* 会话结束后右下角提供显式重连按钮：与「按 Enter 重连」等价（同一条重试通道） */}
       {exited && (
         <button
           type="button"
-          onClick={() => {
-            if (actionRef.current) return
-            actionRef.current = true
-            termRef.current?.write('\r\n\x1b[36m● 正在重连…\x1b[0m\r\n')
-            if (onExitedReconnectRef.current) onExitedReconnectRef.current()
-            else void useAppStore.getState().reconnectSession(session.id)
-          }}
+          onClick={() => runExitedAction('reconnect')}
           className="absolute bottom-3 right-3 z-10 flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs text-foreground shadow-lg transition-colors hover:bg-secondary"
         >
           <RotateCw className="size-3.5" />

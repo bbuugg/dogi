@@ -698,26 +698,28 @@ export interface ScriptsSlice {
 }
 
 export interface NotesSlice {
-  /** 已打开的笔记文件夹根路径（null = 未打开文件夹） */
-  noteFolder: string | null
-  /** 笔记文件夹的文件树（侧边栏展示） */
-  noteFileTree: NoteFileItem[]
-  /** 打开本地文件夹作为笔记目录（弹系统文件夹选择框） */
-  openNoteFolder: () => Promise<boolean>
-  /** 打开单个本地 Markdown 文件 */
-  openNoteFile: () => Promise<NoteFileContent | null>
-  /** 读取文件夹内指定文件（filePath 为相对路径） */
-  readNoteFile: (filePath: string) => Promise<NoteFileContent>
+  /** 已打开的笔记目录绝对路径（顺序 = 侧边栏顺序；同一目录只出现一次，父子可同时打开） */
+  noteRoots: string[]
+  /** 各目录的 Markdown 文件树（key = 目录绝对路径） */
+  noteTrees: Record<string, NoteFileItem[]>
+  /** 弹系统框选择目录并加入侧边栏（可多选；已存在的跳过）。null = 用户取消 */
+  openNoteFolder: () => Promise<{ added: number; skipped: number } | null>
+  /** 把若干目录加入侧边栏（openNoteFolder 去掉对话框的部分：去重 → 扫描 → 并入） */
+  addNoteRoots: (roots: string[]) => Promise<{ added: number; skipped: number }>
+  /** 从侧边栏移除目录（只影响列表，不删磁盘文件） */
+  removeNoteRoot: (root: string) => void
+  /** 读取目录内指定文件（filePath 为相对该目录的路径） */
+  readNoteFile: (root: string, filePath: string) => Promise<NoteFileContent>
   /** 保存内容到文件（filePath 为绝对路径） */
   saveNoteFile: (filePath: string, content: string) => Promise<{ mtime: number }>
-  /** 新建笔记文件（在已打开文件夹下或弹保存框） */
-  createNoteFile: (dirPath?: string) => Promise<NoteFileContent>
-  /** 刷新已打开的文件夹文件树 */
-  refreshNoteFolder: () => Promise<void>
-  /** 重命名文件（在已打开的文件夹内） */
-  renameNoteFile: (oldPath: string, newName: string) => Promise<string>
-  /** 删除文件（从已打开的文件夹中移除） */
-  deleteNoteFile: (filePath: string) => Promise<void>
+  /** 新建笔记文件（root = 所属目录，dirPath 为相对该目录的子目录路径，空串 = 根下） */
+  createNoteFile: (root: string, dirPath?: string) => Promise<NoteFileContent>
+  /** 刷新文件树（root 缺省 = 全部目录） */
+  refreshNoteFolder: (root?: string) => Promise<void>
+  /** 重命名文件（在所属目录内） */
+  renameNoteFile: (root: string, oldPath: string, newName: string) => Promise<string>
+  /** 删除文件（磁盘删除，不可恢复） */
+  deleteNoteFile: (root: string, filePath: string) => Promise<void>
 }
 
 export interface ApiSlice {

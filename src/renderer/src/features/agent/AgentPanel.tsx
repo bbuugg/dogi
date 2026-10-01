@@ -7,7 +7,6 @@ import { cn } from 'cn'
 import {
   ChevronRight,
   CirclePause,
-  Folder,
   FolderPlus,
   Import,
   Loader2,
@@ -285,21 +284,6 @@ export function AgentPanel() {
                     )}
                     title={w.path}
                   >
-                    <Folder
-                      className={cn(
-                        'size-4 shrink-0',
-                        isActiveWs ? 'text-primary' : 'text-muted-foreground'
-                      )}
-                    />
-                    {/*
-                      名称与展开箭头必须是这一行的**同级 flex 子项**：
-                      - 名称**不要**给 `flex-1`：它按自身宽度占位，箭头才会随名称长度往右走，
-                        最长只能顶到右侧那排按钮（「新建会话」…）之前，再长就截断成省略号；
-                      - 两者都在 flex 行里，由 `items-center` 按**中线**对齐（不会走基线错位）；
-                      - `min-w-0 truncate` 保证长名字不出省略号以外的溢出，
-                        也不会把箭头挤出可视区（看起来像「没有展开图标」）。
-                    */}
-                    <span className="min-w-0 truncate">{w.name}</span>
                     <button
                       type="button"
                       title={isExpanded ? '收起会话' : '展开会话'}
@@ -313,6 +297,16 @@ export function AgentPanel() {
                         className={cn('size-4 transition-transform duration-200', isExpanded && 'rotate-90')}
                       />
                     </button>
+                    {/*
+                      名称与展开箭头必须是这一行的**同级 flex 子项**：
+                      - 名称**不要**给 `flex-1`：它按自身宽度占位，箭头才会随名称长度往右走，
+                        最长只能顶到右侧那排按钮（「新建会话」…）之前，再长就截断成省略号；
+                      - 两者都在 flex 行里，由 `items-center` 按**中线**对齐（不会走基线错位）；
+                      - `min-w-0 truncate` 保证长名字不出省略号以外的溢出，
+                        也不会把箭头挤出可视区（看起来像「没有展开图标」）。
+                    */}
+                    <span className="min-w-0 truncate">{w.name}</span>
+
                     {/* 弹性空隙：吃掉「名称 + 箭头」到行尾按钮之间的余量，名称再长也止步于按钮左侧 */}
                     <span className="flex-1" aria-hidden="true" />
                     {/* 行尾操作全部收进「更多」下拉（导入 / 新建会话 / 重命名 / 删除） */}

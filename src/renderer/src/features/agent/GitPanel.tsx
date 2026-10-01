@@ -858,7 +858,7 @@ export function GitPanel({
                 }
               }}
             />
-            <div className="mt-1.5 flex items-center gap-1.5">
+            <div className="mt-1.5 flex justify-end items-center gap-1.5">
               <Button type="primary" size="small" disabled={!canCommit} onClick={() => void commit(false)}>
                 提交
               </Button>

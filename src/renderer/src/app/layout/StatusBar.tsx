@@ -1,20 +1,15 @@
-import { PLUGINS_ACTIVITY_ID } from '@/app/activity-ids'
 import { useAppStore } from '@/stores/app-store'
 import { Button, Dropdown, type MenuProps } from 'antd'
 import {
   ArrowRightLeft,
-  Boxes,
   Check,
   Command as CommandIcon,
   FileDown,
   FileUp,
-  ListPlus,
   Menu,
   Monitor,
   Moon,
   Palette,
-  Plus,
-  ScrollText,
   Settings,
   Sun
 } from 'lucide-react'
@@ -52,17 +47,13 @@ export function StatusBar({ right }: { right?: ReactNode }) {
 }
 
 /**
- * 左下角全局菜单：命令面板、管理脚本、插件、添加主机、导入 / 导出（二级菜单）、设置。
+ * 左下角全局菜单：命令面板、导入 / 导出（二级菜单）、设置、主题。
  *
  * 用 antd `Dropdown` 而不是自绘 Popover：「导入 / 导出」需要**二级菜单**，
  * Dropdown 的 menu 支持 `children` 直接展开成浮层子菜单，不用自己管悬停与定位。
  */
 function MenuButton({ onTransfer }: { onTransfer: (mode: TransferMode) => void }) {
   const setCommandPaletteOpen = useAppStore((s) => s.setCommandPaletteOpen)
-  const selectActivity = useAppStore((s) => s.selectActivity)
-  const openScriptsSection = useAppStore((s) => s.openScriptsSection)
-  const setSshDialog = useAppStore((s) => s.setSshDialog)
-  const openLogsTab = useAppStore((s) => s.openLogsTab)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const preferences = useAppStore((s) => s.preferences)
   const setTheme = useAppStore((s) => s.setTheme)
@@ -144,11 +135,6 @@ function MenuButton({ onTransfer }: { onTransfer: (mode: TransferMode) => void }
         </span>
       )
     },
-    { key: 'manage-scripts', icon: <ListPlus className={icon} />, label: '管理脚本' },
-    { key: 'plugins', icon: <Boxes className={icon} />, label: '插件管理' },
-    { key: 'add-host', icon: <Plus className={icon} />, label: '添加主机' },
-    { key: 'logs', icon: <ScrollText className={icon} />, label: '主机日志' },
-    { type: 'divider' },
     {
       key: 'transfer',
       icon: <ArrowRightLeft className={icon} />,
@@ -185,10 +171,6 @@ function MenuButton({ onTransfer }: { onTransfer: (mode: TransferMode) => void }
       return
     }
     if (key === 'command-palette') run(() => setCommandPaletteOpen(true))()
-    else if (key === 'manage-scripts') run(openScriptsSection)()
-    else if (key === 'plugins') run(() => selectActivity(PLUGINS_ACTIVITY_ID))()
-    else if (key === 'add-host') run(() => setSshDialog(true, null))()
-    else if (key === 'logs') run(openLogsTab)()
     else if (key === 'settings') run(() => setSettingsOpen(true))()
     // 主题子菜单的叶子：明暗 / 配色
     else if (key.startsWith('theme:')) {

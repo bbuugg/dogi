@@ -534,16 +534,13 @@ const api = {
       deleteNotes?: boolean
     ): Promise<{ groups: NoteGroup[]; notes: NoteEntry[] }> =>
       ipcRenderer.invoke('notes:groups:delete', id, deleteNotes),
-    /** 打开本地文件夹：返回文件夹根路径与 Markdown 文件树 */
-    openFolder: (): Promise<{ root: string; items: NoteFileItem[] } | null> =>
+    /** 打开本地笔记目录（可多选）：返回选中的目录绝对路径与各自的 Markdown 文件树 */
+    openFolder: (): Promise<{ roots: string[]; trees: Record<string, NoteFileItem[]> } | null> =>
       ipcRenderer.invoke('notes:openFolder'),
-    /** 打开单个本地 Markdown 文件 */
-    openFile: (): Promise<NoteFileContent | null> =>
-      ipcRenderer.invoke('notes:openFile'),
-    /** 上次打开的笔记文件夹与文件（启动时恢复用） */
+    /** 上次打开的笔记目录与文件（启动时恢复用） */
     getSession: (): Promise<NoteSession> => ipcRenderer.invoke('notes:session:get'),
-    /** 保存笔记会话（只传变化的部分：folder 或 files） */
-    saveSession: (patch: { folder?: string | null; files?: string[] }): Promise<NoteSession> =>
+    /** 保存笔记会话（只传变化的部分：folders 或 files） */
+    saveSession: (patch: { folders?: string[]; files?: string[] }): Promise<NoteSession> =>
       ipcRenderer.invoke('notes:session:save', patch),
     /** 读取文件夹内指定文件（filePath 为相对路径） */
     readFile: (root: string, filePath: string): Promise<NoteFileContent> =>

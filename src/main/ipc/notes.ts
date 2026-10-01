@@ -1,7 +1,8 @@
 import { dialog, ipcMain } from 'electron'
 import { readFile, writeFile, stat, readdir } from 'node:fs/promises'
-import { join, relative, sep } from 'node:path'
+import { join, relative, resolve, sep } from 'node:path'
 import { storage } from '../services/storage'
+import { sameNoteRoot } from '@shared/note-folders'
 import type { IpcContext } from './shared'
 import type { NoteFileItem, NoteFileContent } from '@shared/types'
 
@@ -54,10 +55,10 @@ async function scanDir(dir: string, depth = 0): Promise<NoteFileItem[]> {
 }
 
 /**
- * 笔记 IPC：打开本地文件夹 / 读写 Markdown 文件。
+ * 笔记 IPC：管理多个本地笔记目录 / 读写 Markdown 文件。
  *
- * 改造后的笔记不再存储在 electron-store 里，而是直接对应本地 `.md` 文件。
- * 侧边栏展示文件树，编辑页读写磁盘文件，保存 = 写回原文件。
+ * 侧边栏可以同时打开多个目录（同一目录只出现一次，父子不互斥），每个目录一棵文件树；
+ * 编辑页读写磁盘文件，保存 = 写回原文件。打开的目录列表由渲染端随会话落盘（noteSession）。
  */
 export function registerNotesIpc(ctx: IpcContext): void {
   // ---------- 旧版笔记 CRUD（仅保留用于数据传输兼容） ----------
@@ -82,72 +83,61 @@ export function registerNotesIpc(ctx: IpcContext): void {
   // ---------- 新版：本地文件操作 ----------
 
   /**
-   * 打开本地文件夹：弹系统文件夹选择框，扫描其中的 Markdown 文件树。
-   * 返回 { root, items } —— root 是绝对路径（供后续读写），items 是树形结构。
+   * 打开笔记目录：弹系统文件夹选择框（可多选），逐个扫描其中的 Markdown 文件树。
+   * 返回 { roots, trees } —— roots 是绝对路径（供后续读写），trees 按根路径给树。
+   * 「是否已在侧边栏」的去重由渲染端判断（store 才是当前打开状态的真源），
+   * 这里只保证一次选择内部不重复、路径是 resolve 过的规范形态。
    */
-  ipcMain.handle('notes:openFolder', async (): Promise<{ root: string; items: NoteFileItem[] } | null> => {
-    const window = ctx.win()
-    if (!window || window.isDestroyed()) return null
-    if (window.isMinimized()) window.restore()
-    window.setAlwaysOnTop(true)
-    window.focus()
-    let result: Electron.OpenDialogReturnValue
-    try {
-      result = await dialog.showOpenDialog(window, {
-        title: '选择笔记文件夹',
-        properties: ['openDirectory']
-      })
-    } finally {
-      window.setAlwaysOnTop(false)
-    }
-    if (result.canceled || result.filePaths.length === 0) return null
-    const root = result.filePaths[0]
-    const items = await scanDir(root)
-    return { root, items }
-  })
-
-  /**
-   * 打开单个本地文件：弹系统文件框选一个 Markdown 文件，读取内容返回。
-   */
-  ipcMain.handle('notes:openFile', async (): Promise<NoteFileContent | null> => {
-    const window = ctx.win()
-    if (!window || window.isDestroyed()) return null
-    if (window.isMinimized()) window.restore()
-    window.setAlwaysOnTop(true)
-    window.focus()
-    let result: Electron.OpenDialogReturnValue
-    try {
-      result = await dialog.showOpenDialog(window, {
-        title: '打开笔记文件',
-        properties: ['openFile'],
-        filters: [
-          { name: 'Markdown', extensions: ['md', 'markdown', 'mdown', 'mdx'] },
-          { name: '全部文件', extensions: ['*'] }
-        ]
-      })
-    } finally {
-      window.setAlwaysOnTop(false)
-    }
-    if (result.canceled || result.filePaths.length === 0) return null
-    const filePath = result.filePaths[0]
-    try {
-      const buf = await readFile(filePath)
-      if (buf.length > MAX_FILE_SIZE) {
-        throw new Error('文件过大（超过 10MB），不支持打开')
+  ipcMain.handle(
+    'notes:openFolder',
+    async (): Promise<{ roots: string[]; trees: Record<string, NoteFileItem[]> } | null> => {
+      let picked: string[]
+      // 探针旁路（同 sftp:uploadDir 的 DOGI_SFTP_UPLOAD_DIR 约定，仅验证脚本设置，
+      // 正常运行不设）：原生目录选择框无法自动化。多个目录用 `|` 分隔。
+      const bypass = process.env.DOGI_NOTES_OPEN_DIRS
+      if (bypass) {
+        picked = []
+        for (const part of bypass.split('|')) {
+          const p = resolve(part.trim())
+          if (!p || picked.some((x) => sameNoteRoot(x, p))) continue
+          picked.push(p)
+        }
+      } else {
+        const window = ctx.win()
+        if (!window || window.isDestroyed()) return null
+        if (window.isMinimized()) window.restore()
+        window.setAlwaysOnTop(true)
+        window.focus()
+        let result: Electron.OpenDialogReturnValue
+        try {
+          result = await dialog.showOpenDialog(window, {
+            title: '选择笔记目录（可多选）',
+            properties: ['openDirectory', 'multiSelections']
+          })
+        } finally {
+          window.setAlwaysOnTop(false)
+        }
+        if (result.canceled || result.filePaths.length === 0) return null
+        picked = result.filePaths.map((p) => resolve(p))
       }
-      const s = await stat(filePath)
-      return { path: filePath, content: buf.toString('utf8'), mtime: s.mtimeMs }
-    } catch (e) {
-      throw new Error(`读取文件失败：${e instanceof Error ? e.message : String(e)}`)
+      const roots: string[] = []
+      for (const p of picked) {
+        if (!roots.some((x) => sameNoteRoot(x, p))) roots.push(p)
+      }
+      const trees: Record<string, NoteFileItem[]> = {}
+      for (const root of roots) {
+        trees[root] = await scanDir(root)
+      }
+      return { roots, trees }
     }
-  })
+  )
 
   /**
    * 读取指定路径的文件内容（从侧边栏文件树点击打开时调用）。
-   * filePath 是相对于文件夹根的相对路径，root 是文件夹绝对路径。
+   * filePath 是相对于所属目录根的相对路径，root 是目录绝对路径；
+   * root 传空时 filePath 视为绝对路径（编辑页按标签里的绝对路径重读用）。
    */
   ipcMain.handle('notes:readFile', async (_e, root: string, filePath: string): Promise<NoteFileContent> => {
-    // root 为空时 filePath 是绝对路径（直接打开的单个文件）；否则 filePath 是相对路径
     const fullPath = root ? join(root, filePath) : filePath
     try {
       const buf = await readFile(fullPath)
@@ -181,37 +171,13 @@ export function registerNotesIpc(ctx: IpcContext): void {
   })
 
   /**
-   * 新建笔记文件：在指定文件夹下创建一个新的 .md 文件并返回路径。
-   * root 为空时弹保存框让用户选位置；非空时在文件夹下新建。
+   * 新建笔记文件：在指定目录下创建一个新的 .md 文件并返回绝对路径。
+   * dirPath 是相对该目录的子目录路径（空串 = 直接在根下）。
    */
   ipcMain.handle('notes:newFile', async (_e, root: string, dirPath: string): Promise<NoteFileContent> => {
+    if (!root) throw new Error('未打开笔记目录')
     const name = `untitled-${Date.now()}.md`
-    const fullPath = root ? join(root, dirPath || '.', name) : name
-
-    if (!root) {
-      // 没有打开文件夹时弹保存框
-      const window = ctx.win()
-      if (!window || window.isDestroyed()) throw new Error('窗口不可用')
-      if (window.isMinimized()) window.restore()
-      window.setAlwaysOnTop(true)
-      window.focus()
-      let result: Electron.SaveDialogReturnValue
-      try {
-        result = await dialog.showSaveDialog(window, {
-          title: '新建笔记',
-          defaultPath: name,
-          filters: [{ name: 'Markdown', extensions: ['md'] }]
-        })
-      } finally {
-        window.setAlwaysOnTop(false)
-      }
-      if (result.canceled || !result.filePath) throw new Error('用户取消')
-      const savePath = result.filePath
-      await writeFile(savePath, '', 'utf8')
-      const s = await stat(savePath)
-      return { path: savePath, content: '', mtime: s.mtimeMs }
-    }
-
+    const fullPath = join(root, dirPath || '.', name)
     try {
       await writeFile(fullPath, '', 'utf8')
       const s = await stat(fullPath)
@@ -250,26 +216,26 @@ export function registerNotesIpc(ctx: IpcContext): void {
   ipcMain.handle('notes:session:get', () => storage.getNoteSession())
 
   /**
-   * 保存笔记会话。渲染端只传变化的那一部分（folder 或 files）。
+   * 保存笔记会话。渲染端只传变化的那一部分（folders 或 files）。
    */
   ipcMain.handle(
     'notes:session:save',
-    (_e, patch: { folder?: string | null; files?: string[] }) => storage.saveNoteSession(patch)
+    (_e, patch: { folders?: string[]; files?: string[] }) => storage.saveNoteSession(patch)
   )
 
   /**
-   * 删除文件（从已打开的文件夹中移除）。
+   * 删除文件（从所属目录中删除磁盘文件）。
    */
   ipcMain.handle('notes:deleteFile', async (_e, root: string, filePath: string): Promise<void> => {
-    // root 为空时 filePath 是绝对路径（直接打开的单个文件），与 readFile 保持一致
+    // root 为空时 filePath 是绝对路径，与 readFile 保持一致
     const fullPath = root ? join(root, filePath) : filePath
-    const { unlink } = await import('node:fs/promises')
+    const { rm } = await import('node:fs/promises')
     try {
-      await unlink(fullPath)
+      // recursive：目录也能删（右键「删除」对子目录同样可用，Windows 上 unlink 目录会 EPERM）；
+      // force：文件只读属性 / 仍被占用导致的 EPERM、以及不存在(ENOENT) 一并忽略，
+      // 避免在 Windows 上动不动就报「operation not permitted」。
+      await rm(fullPath, { recursive: true, force: true })
     } catch (e) {
-      // 文件本来就不在了（被其它程序删掉 / 重复删除）＝ 用户想要的「删掉」已经达成，
-      // 不该报错 —— 否则界面上会留下一个删不掉、还报「删除失败」的幽灵条目。
-      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return
       throw new Error(`删除文件失败：${e instanceof Error ? e.message : String(e)}`)
     }
   })

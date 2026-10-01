@@ -1,6 +1,6 @@
 import { Button, Dropdown } from 'antd'
 import type { MenuProps } from 'antd'
-import { ChevronRight, Folder, Plus } from 'lucide-react'
+import { ChevronRight, Plus } from 'lucide-react'
 import { useMemo, type ReactNode } from 'react'
 import { useDrag } from 'react-dnd'
 import { cn } from 'cn'
@@ -112,14 +112,6 @@ export function SidebarGroupRow({
       >
         <div className="flex min-w-0 flex-1 items-center gap-1.5">
           {/* 文件夹图标对齐 AI 侧栏的工作区行 */}
-          <Folder className="size-4 shrink-0 text-muted-foreground" />
-          {/* 名称不加 flex-1：箭头才紧随名称往右走（同 AI 侧栏的工作区行） */}
-          <span
-            className="truncate text-sm font-medium text-muted-foreground"
-            style={color ? { color: tintText(color) } : undefined}
-          >
-            {name}
-          </span>
           <button
             type="button"
             title={expanded ? '收起' : '展开'}
@@ -134,6 +126,13 @@ export function SidebarGroupRow({
               style={color ? { color } : undefined}
             />
           </button>
+          {/* 名称不加 flex-1：箭头才紧随名称往右走（同 AI 侧栏的工作区行） */}
+          <span
+            className="truncate text-sm font-medium text-muted-foreground"
+            style={color ? { color: tintText(color) } : undefined}
+          >
+            {name}
+          </span>
           {afterCount}
           <Button
             type="text"

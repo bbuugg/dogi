@@ -604,16 +604,35 @@ class StorageService {
 
   // ---------- 笔记 ----------
   /**
-   * 上次打开的笔记文件夹与文件（重启后恢复）。
-   * 字段是后加的，老存档里没有 → 缺省返回空会话。
+   * 上次打开的笔记目录与文件（重启后恢复）。
+   * 字段是后加的，老存档里没有 → 缺省返回空会话；
+   * 旧格式（folder 单值 / 只打开单个文件）读取时迁移成 folders 数组。
    */
   getNoteSession(): NoteSession {
-    return this.store.get('noteSession') ?? { folder: null, files: [] }
+    const raw = this.store.get('noteSession') as
+      | { folders?: unknown; files?: unknown; folder?: unknown }
+      | undefined
+    if (!raw) return { folders: [], files: [] }
+    const folders = Array.isArray(raw.folders)
+      ? raw.folders.filter((f): f is string => typeof f === 'string' && f.length > 0)
+      : typeof raw.folder === 'string' && raw.folder
+        ? [raw.folder]
+        : []
+    return {
+      folders,
+      files: Array.isArray(raw.files) ? raw.files.filter((f): f is string => typeof f === 'string') : []
+    }
   }
 
-  /** 保存笔记会话：只覆盖传入的部分（folder 或 files） */
-  saveNoteSession(patch: { folder?: string | null; files?: string[] }): NoteSession {
-    const next: NoteSession = { ...this.getNoteSession(), ...patch }
+  /**
+   * 保存笔记会话：只覆盖传入的部分（folders 或 files）。
+   * ⚠️ 必须用 `'x' in patch` 判断（同 saveAgentConversation），不能用 ?? 合并 ——
+   * 关掉最后一个目录 / 关掉全部标签时要能显式存回空数组，否则清不掉。
+   */
+  saveNoteSession(patch: { folders?: string[]; files?: string[] }): NoteSession {
+    const next = this.getNoteSession()
+    if ('folders' in patch) next.folders = patch.folders ?? []
+    if ('files' in patch) next.files = patch.files ?? []
     this.store.set('noteSession', next)
     return next
   }
