@@ -56,23 +56,42 @@ function safeStringify(v: unknown): string {
 }
 
 /**
- * 判断一个错误是否「可重试的网络中断」——这类错误重发同一条消息通常能成功，
- * 适合在界面给出「重试」入口（而不是把整轮丢给用户重输）。
+ * 错误文本里的「可重试」特征词。
  *
- * 判定依据（沿 cause 链向上找）：
+ * 为什么不能只看结构化字段：不少网关（尤其免费 / 中转模型）把失败包成**一句话**，
+ * 既不挂 `code` 也不挂 `statusCode`、更不会设 `isRetryable` —— 例如
+ * `Internal error: Rate limit exceeded: free-models-per-day-stealth`。
+ * 只认那些字段会漏判，表现为「明明是可重试的失败却直接报错、看不到任何重试」。
+ */
+const RETRYABLE_MESSAGE =
+  /rate[ _-]?limit|too many requests|\b429\b|internal (server )?error|bad gateway|gateway time-?out|service unavailable|temporarily unavailable|overloaded|time-?out|socket hang up|connection reset/i
+
+/**
+ * 判断一个错误是否「可重试的网络中断」——这类错误重发同一条消息通常能成功，
+ * 适合自动重试（而不是把整轮丢给用户重输）。
+ *
+ * 判定依据（沿 cause 链向上找，最多 6 层，兼容字符串）：
  * - AI SDK 的 `APICallError.isRetryable === true`（网关返回 5xx / 429 时也会置位）
- * - 经典断流信号：`code === 'ECONNRESET'` / `'ETIMEDOUT'` / `'UND_ERR_BODY_TIMEOUT'`
+ * - HTTP 状态码 429 / 5xx
+ * - 经典断流信号：`code === 'ECONNRESET'` / `'ETIMEDOUT'` / `'UND_ERR_BODY_TIMEOUT'` / `'ENOTFOUND'`
  * - undici 在 TLS 连接被对端中途掐掉时报的 `TypeError: terminated`
+ * - **兜底**：错误文本命中 `RETRYABLE_MESSAGE`（限流 / 网关错误这类只有一句话的失败）
  */
 export function isRetryableNetworkError(err: unknown): boolean {
   let cur: unknown = err
-  for (let i = 0; i < 6 && cur instanceof Error; i++) {
+  for (let i = 0; i < 6 && cur != null; i++) {
+    if (typeof cur === 'string') {
+      if (RETRYABLE_MESSAGE.test(cur)) return true
+      break
+    }
+    if (!(cur instanceof Error)) break
     const e = cur as Error & {
       code?: string
       isRetryable?: boolean
       statusCode?: number
     }
     if (e.isRetryable === true) return true
+    if (e.statusCode === 429 || (typeof e.statusCode === 'number' && e.statusCode >= 500)) return true
     if (
       e.code === 'ECONNRESET' ||
       e.code === 'ETIMEDOUT' ||
@@ -82,6 +101,7 @@ export function isRetryableNetworkError(err: unknown): boolean {
       return true
     }
     if (e.message === 'terminated') return true
+    if (typeof e.message === 'string' && RETRYABLE_MESSAGE.test(e.message)) return true
     cur = (e as { cause?: unknown }).cause
   }
   return false

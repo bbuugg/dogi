@@ -1067,6 +1067,17 @@ export interface AiSettings {
    */
   maxSteps?: number
   /**
+   * 模型请求失败后的自动重试次数。`0` = **不重试**；缺省 = 2。
+   * 生效值见 `@shared/ai-timeouts` 的 `resolveMaxRetries`，界面在「设置 → AI → 超时」。
+   *
+   * 由主进程**自己驱动**（不再走 mastra 的 `modelSettings.maxRetries`）：每次重试都会发一条
+   * `retry` 事件，界面据此显示「第 N 次重试」。只对可重试的网络类错误生效；失败的那一次
+   * 尝试若已经执行过工具就不再重试（避免重复副作用）。
+   *
+   * ⚠️ 与界面上的「断流了，重试」按钮无关：那是网络中断后**由用户**重发这一轮。
+   */
+  maxRetries?: number
+  /**
    * 已登记的 ACP agent 配置 —— **在 AI Agent 侧边栏的「导入」弹窗里维护**（检测 / 手动添加），
    * 不再有独立的设置页。ACP 会话创建时绑定其中之一，之后不可切换。
    */
@@ -1224,7 +1235,18 @@ export interface AiChatRequest {
 }
 
 export type AiMessagePart =
-  | { type: 'text'; text: string }
+  | {
+      type: 'text'
+      text: string
+      /**
+       * 该段是一次流式失败落下的错误文案（`⚠️` 前缀）。
+       *
+       * 模型级重试**每次尝试失败都会发一个 error 事件**，追加会堆成一长串重复文案，
+       * 所以靠这个标记让「后到的错误替换前一个」，且后续正文增量不再合并进这段文本
+       * （否则重试成功后正文会被接在错误文案后面）。
+       */
+      error?: true
+    }
   | { type: 'reasoning'; text: string }
   | {
       type: 'tool-call'
@@ -1258,6 +1280,14 @@ export type AiStreamEvent =
   | { type: 'context-compressed'; info: ContextCompression }
   | { type: 'finish'; finishReason: string }
   | { type: 'error'; message: string; retryable?: boolean }
+  /**
+   * 模型请求因可重试的网络错误失败，正在重试（第 `attempt` 次）。
+   *
+   * 是「通知」不是内容增量：**不落盘**、也不代表本轮结束 —— 渲染端据此清掉这一次尝试
+   * 已渲染的部分输出，并显示一条**自替换**的「第 N 次重试」提示（屏幕上只留最新一次）。
+   * `maxRetries` = 生效的重试上限（设置里 `0` = 不重试，此时不会有这条事件）。
+   */
+  | { type: 'retry'; attempt: number; maxRetries: number }
 
 // ---------- AI Agent（工作区编程/运维助手） ----------
 
@@ -1339,7 +1369,12 @@ export interface AgentConversation {
 }
 
 export type AgentMessagePart =
-  | { type: 'text'; text: string }
+  | {
+      type: 'text'
+      text: string
+      /** 该段是一次流式失败落下的错误文案（`⚠️` 前缀），语义见 `AiMessagePart` 的同名字段 */
+      error?: true
+    }
   | { type: 'reasoning'; text: string }
   | {
       type: 'tool-call'
@@ -1398,6 +1433,14 @@ export type AgentStreamEvent =
   | { type: 'context-compressed'; info: ContextCompression }
   | { type: 'finish'; finishReason: string }
   | { type: 'error'; message: string; retryable?: boolean }
+  /**
+   * 模型请求因可重试的网络错误失败，正在重试（第 `attempt` 次）。
+   *
+   * 是「通知」不是内容增量：**不落盘**、也不代表本轮结束 —— 渲染端据此清掉这一次尝试
+   * 已渲染的部分输出，并显示一条**自替换**的「第 N 次重试」提示（屏幕上只留最新一次）。
+   * `maxRetries` = 生效的重试上限（设置里 `0` = 不重试，此时不会有这条事件）。
+   */
+  | { type: 'retry'; attempt: number; maxRetries: number }
 
 /** Agent 确认模式下**改动类工具**（执行命令 / 写入 / 编辑 / 删除）执行前的主进程请示 */
 export interface AgentConfirmRequest {

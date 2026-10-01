@@ -5,7 +5,11 @@ import { detectInstalledAcpAgents } from '../services/ai/acp-detect'
 import {
   listWorkspaceDir,
   readWorkspaceFile,
-  writeWorkspaceFile
+  writeWorkspaceFile,
+  deleteWorkspacePath,
+  renameWorkspacePath,
+  createWorkspacePath,
+  copyWorkspacePath
 } from '../services/ai/workspace-fs'
 import {
   ensureWorkspaceConfigDir,
@@ -173,6 +177,46 @@ export function registerAgentIpc(ctx: IpcContext): void {
     'agent:fs:write',
     (_e, payload: { workspaceId: string; path: string; content: string }) =>
       writeWorkspaceFile(requireWorkspace(payload.workspaceId), payload.path, payload.content)
+  )
+  // ---------- 工作区文件（右键菜单 / 触屏长按：删、重命名、新建、复制/剪切粘贴） ----------
+  ipcMain.handle('agent:fs:delete', (_e, payload: { workspaceId: string; path: string }) =>
+    deleteWorkspacePath(requireWorkspace(payload.workspaceId), payload.path)
+  )
+  ipcMain.handle(
+    'agent:fs:rename',
+    (_e, payload: { workspaceId: string; path: string; name: string }) =>
+      renameWorkspacePath(requireWorkspace(payload.workspaceId), payload.path, payload.name)
+  )
+  ipcMain.handle(
+    'agent:fs:create',
+    (
+      _e,
+      payload: { workspaceId: string; dir: string; name: string; type: 'file' | 'dir' }
+    ) =>
+      createWorkspacePath(
+        requireWorkspace(payload.workspaceId),
+        payload.dir,
+        payload.name,
+        payload.type
+      )
+  )
+  ipcMain.handle(
+    'agent:fs:copy',
+    (
+      _e,
+      payload: {
+        workspaceId: string
+        from: string
+        toDir: string
+        mode: 'copy' | 'move'
+      }
+    ) =>
+      copyWorkspacePath(
+        requireWorkspace(payload.workspaceId),
+        payload.from,
+        payload.toDir,
+        payload.mode
+      )
   )
 
   // ---------- 工作区目录配置（`<工作区>/.dogi/workspace.json`：快捷功能等） ----------

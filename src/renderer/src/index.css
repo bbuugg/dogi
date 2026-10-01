@@ -231,6 +231,11 @@
   animation: ai-line-in 0.25s ease-out;
 }
 
+/* 「第 N 次重试」指示器：与 .ai-line 同样的淡入上移，配合 React key=attempt 重播 */
+.retry-line {
+  animation: ai-line-in 0.25s ease-out;
+}
+
 /* 对话流「正在生成」三点指示器（TypingDots） */
 @keyframes agent-typing-bounce {
   0%,

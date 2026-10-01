@@ -9,6 +9,7 @@ import { findTailStart, TurnFold, turnStepSummary } from '@/features/agent/turn-
 import { TokenUsageRow } from '@/features/agent/TokenUsageRow'
 import { ConversationUsageBar } from '@/features/agent/ConversationUsageBar'
 import { sumUsage } from '@shared/agent-usage'
+import { RetryIndicator } from '@/features/agent/RetryIndicator'
 import { TypingDots } from '@/features/agent/TypingDots'
 import {
   Conversation,
@@ -174,7 +175,8 @@ function MessageBubbleImpl({
   tailCount,
   onDelete,
   pendingConfirm,
-  usage
+  usage,
+  retrying
 }: {
   role: 'user' | 'assistant'
   parts: AiMessagePart[]
@@ -192,6 +194,8 @@ function MessageBubbleImpl({
   pendingConfirm: AiConfirmRequest | null
   /** 这一轮的用量统计（仅助手消息、一轮跑完后才有） */
   usage?: TurnUsage
+  /** 模型请求正在重试（第 N 次）：把「正在生成」的三点替换成单条「第 N 次重试」 */
+  retrying?: { attempt: number; maxRetries: number } | null
 }) {
   const del = canDelete ? (
     <MessageDeleteButton count={tailCount} onConfirm={onDelete} />
@@ -308,7 +312,16 @@ function MessageBubbleImpl({
       )}
       {units.slice(tailStart).map((unit, k) => renderUnit(unit, tailStart + k))}
       {usage && <TokenUsageRow usage={usage} className="px-3" />}
-      {showDots && <TypingDots className="flex items-center gap-1.5 px-3 py-2" />}
+      {showDots &&
+        (retrying ? (
+          <RetryIndicator
+            key={retrying.attempt}
+            attempt={retrying.attempt}
+            className="px-3 py-2"
+          />
+        ) : (
+          <TypingDots className="flex items-center gap-1.5 px-3 py-2" />
+        ))}
       {/* 消息下方：复制原始 Markdown / 删除（生成中内容还在变，一轮结束再显示）；
           invisible 而不是不渲染：保留占位，hover 时不会把消息挤动 */}
       <div className="invisible flex items-center gap-1 px-3 group-hover/msg:visible">
@@ -333,7 +346,8 @@ const MessageBubble = memo(
     a.canDelete === b.canDelete &&
     a.tailCount === b.tailCount &&
     a.pendingConfirm === b.pendingConfirm &&
-    a.usage === b.usage
+    a.usage === b.usage &&
+    a.retrying === b.retrying
 )
 
 /**
@@ -974,6 +988,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                         onDelete={() => deleteAiMessagesFrom(sessionId ?? '', msg.id)}
                         pendingConfirm={pendingConfirm}
                         usage={msg.usage}
+                        retrying={chat?.retrying ?? null}
                       />
                     </div>
                   ))}

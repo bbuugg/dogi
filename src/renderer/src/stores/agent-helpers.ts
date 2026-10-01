@@ -203,12 +203,34 @@ export function notifyAgentFinished(conversationId: string, finishReason: string
   })
 }
 
+/**
+ * 把一次流式失败落成「可替换」的文本 part。
+ *
+ * 模型级重试（见 `AiSettings.maxRetries`）**每次尝试失败都会发一个 error 事件**，
+ * 而 error 事件是往消息尾部 **push** 的 —— 直接追加会让同一轮里堆出 N 段几乎一样的
+ * `⚠️ …` 文案。所以这里带 `error: true` 标记：
+ * - 后到的错误**替换**前一个（同一轮只留最后一条失败原因）；
+ * - `text-delta` 不再往这段文本上合并（否则重试成功后正文被接在错误文案后面）。
+ */
+type ErrorAwarePart = { type: string; text?: string; error?: true }
+
+/** 末尾是错误文案时返回 false —— 正文增量不能合并进它 */
+function canAppendText(part: ErrorAwarePart | undefined): part is { type: 'text'; text: string } {
+  return part?.type === 'text' && !part.error
+}
+
+/** 末尾是错误文案时返回它（供 pushErrorPart 替换），否则 undefined */
+function errorPartAt<T extends ErrorAwarePart>(parts: T[]): T | undefined {
+  const last = parts[parts.length - 1]
+  return last?.type === 'text' && last.error ? last : undefined
+}
+
 /** Agent 回复生成中的占位 assistant 消息尾部追加 part */
 export function appendAgentPart(parts: AgentChatMessage['parts'], event: AgentStreamEvent) {
   const next = [...parts]
   if (event.type === 'text-delta') {
     const last = next[next.length - 1]
-    if (last?.type === 'text') {
+    if (canAppendText(last)) {
       next[next.length - 1] = { type: 'text', text: last.text + event.delta }
     } else {
       next.push({ type: 'text', text: event.delta })
@@ -235,11 +257,14 @@ export function appendAgentPart(parts: AgentChatMessage['parts'], event: AgentSt
       output: event.output,
       isError: event.isError
     })
+  } else if (event.type === 'retry') {
+    // 重试是「通知」不是内容：不建 part —— 界面在气泡的「正在生成」位置显示「第 N 次重试」
+    // （清空半截输出 + 记录 retrying 由 app-store 的 retry 分支做）
   } else if (event.type === 'error') {
-    next.push({
-      type: 'text',
-      text: `⚠️ ${event.message}`
-    })
+    const part = { type: 'text', text: `⚠️ ${event.message}`, error: true } as const
+    const at = errorPartAt(next)
+    if (at !== undefined) next[next.length - 1] = part
+    else next.push(part)
   }
   return next
 }
@@ -252,7 +277,7 @@ export function appendAssistantPart(
   const next = [...parts]
   if (event.type === 'text-delta') {
     const last = next[next.length - 1]
-    if (last?.type === 'text') {
+    if (canAppendText(last)) {
       next[next.length - 1] = { type: 'text', text: last.text + event.delta }
     } else {
       next.push({ type: 'text', text: event.delta })
@@ -279,8 +304,14 @@ export function appendAssistantPart(
       output: event.output,
       isError: event.isError
     })
+  } else if (event.type === 'retry') {
+    // 重试是「通知」不是内容：不建 part（界面在气泡的「正在生成」位置显示「第 N 次重试」）
   } else if (event.type === 'error') {
-    next.push({ type: 'text', text: `\n\n⚠️ ${event.message}` })
+    // ⚠️ 前面留两个换行：终端助手是单行气泡里的 markdown，与正文同段会糊在一起
+    const part = { type: 'text', text: `\n\n⚠️ ${event.message}`, error: true } as const
+    const at = errorPartAt(next)
+    if (at !== undefined) next[next.length - 1] = part
+    else next.push(part)
   }
   return next
 }

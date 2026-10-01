@@ -117,8 +117,16 @@
 - 自定义标题栏、状态栏（保存状态 / 监控条 / AI 开关 / 传输托盘 / 左下角全局菜单）、标签关闭确认
   （确认框画在标签面板内部、页面确认后 emit 关闭，机制见 6.5 第 32 条）。
 - 主题：明暗 + 强调色方案 + 终端独立配色；**首帧不闪**（见 4.6）。
-- 托盘常驻、单实例锁、最小化到托盘。
+- 文件视图（Agent 工作区）：左侧文件树 + 右侧多标签编辑区，树上**右键 / 触屏长按**菜单支持
+  打开 / 重命名 / 复制 / 剪切 / 粘贴 / 删除 / 新建文件与文件夹（见 4.21）。
+- 托盘常驻、单实例锁（仅打包版，dev 可多开）、最小化到托盘。
 - **数据导入 / 导出**：主机 / 笔记 / 接口请求打包成 zip（自实现，见 6.7）。
+
+### Agent 工作区文件视图
+
+- 左侧文件树（懒加载，忽略规则与 Agent 工具一致）+ 右侧多标签编辑区，Monaco 编辑、Ctrl+S 保存
+- **右键 / 触屏长按**文件或目录：打开、重命名、复制、剪切、粘贴到此处、删除、新建文件 / 文件夹。
+  复制撞名自动加「副本」后缀，移动撞名直接报错；删 / 移 / 重命名已打开的文件会先关掉它的标签（见 4.21）
 
 ### 1.4 目录地图
 
@@ -168,6 +176,7 @@ scripts/                   # 探针 / 验证脚本（见 5.2），不参与构�
 ```bash
 npm install                # 依赖（见 6.1 第 2 条：npm 12 会静默跳过安装脚本）
 npm run dev                # Vite dev server(5174) + main/preload watch + Electron 自动重启
+npm run dev:extra          # 多开一个 dev 实例（复用已跑的 dev server；dev 不申请单实例锁）
 npm run typecheck          # tsc：node 侧 + web 侧，两个都要过
 npm run build              # typecheck + main + preload + renderer 全量构建到 out/
 npm run start              # 运行已构建产物（electron .）
@@ -755,6 +764,33 @@ ACP 是「别人的 agent 在别人的进程里管自己的会话」。本应用
 - 验证：`scripts/verify-context-compression.mjs`（`.tooltest` 包装跑真源码，覆盖不超预算零拷贝、
   切轮边界、摘要失败回退、非法预算；摘要成功路径要真调模型，属集成验证）。
 
+### 4.21 文件视图（Agent 工作区）：树、菜单、以及「先关标签再动盘」
+
+左侧文件树 + 右侧多标签编辑区（`features/agent/AgentFilesPanel.tsx`）。树懒加载（点开一层读一层），
+忽略规则与 Agent 工具一致（`.gitignore` + `DEFAULT_IGNORE_DIRS`，见 4.8）。
+
+**右键菜单 / 触屏长按是同一份 menu**：行上包 antd `<Dropdown trigger={['contextMenu']}>`，
+再用 `useLongPressMenu`（同文件）补触屏 —— 500ms 长按、位移超 10px 取消、长按成功后**吞掉随之而来的
+那次 click**（否则会顺带展开目录 / 打开文件）。鼠标全程不参与长按逻辑（`pointerType === 'mouse'` 直接return）。
+
+**写操作四条通道**（`agent:fs:delete / rename / create / copy`，实现都在 `services/ai/workspace-fs.ts`，
+与 `list/read/write` 共用 `resolveInside` 边界；删除语义与 Agent 的 `delete_file` 工具一致，改一处同步另一处）：
+
+| 语义 | 约定 |
+| --- | --- |
+| 删除 | 目录 `rm -r`；根目录一律拒绝（删它等于抹掉整个工作区） |
+| 重命名 | 只改名字不换目录；名字不许带 `/` `\`、不许是 `.` / `..` |
+| 新建 | 父目录自动补；已存在**拒绝**，不覆盖 |
+| 复制 | 原名空着就照用；撞名才加后缀 `name 副本.ext` → `name 副本 2.ext`（后缀挂**原名**上，点开头的文件如 `.gitignore` 不算扩展名） |
+| 移动 | `mode: 'move'`；撞名**直接报错**（静默改名会让用户以为「移过去了」）；目录不许移进自己子目录；跨设备 rename 报 EXDEV 时退化成 copy+rm |
+
+⚠️ **删 / 移 / 重命名一个已打开的文件，必须先关掉它的标签**（`withTabsClosed`，未保存改动复用关标签那套确认）。
+不先关的话：标签还指着旧路径、Monaco 的 model 还按旧 URI 建，之后一次保存就**写到不复存在的路径上**。
+反过来把标签路径改到新位置要连 model 一起迁移（撤销栈 / 行尾 / 光标全得搬），所以选「关掉」。
+
+剪贴板是**渲染进程内存态、一次一项**（树上没有多选），刻意不碰系统剪贴板（会污染用户自己复制的内容）；
+剪切粘贴成功后立即清空（留着会让人以为还能再粘一次）。
+
 ---
 
 ## 五、验证工具链
@@ -805,6 +841,7 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 | `scripts/verify-agent-edit-match.ts` | edit_file 匹配引擎（`agent-core/edit-match.ts`，`node --experimental-strip-types` 直接跑）—— 精确替换、找不到 / 多处 / oldString===newString 的报错、replaceAll、9 级模糊匹配链逐个触发（行 trim / 块锚点 Levenshtein / 空白归一 / 缩进弹性 / 转义归一 / 边界 trim / 上下文感知）、转义还原撑大匹配被拒、CRLF 辅助函数（换行符归一是 Windows 下编辑 CRLF 文件的前提） |
 | `scripts/verify-agent-file-tools.mjs` | Agent 文件工具行为（`tools.ts` 真源码 + 真临时工作区，包装机制同 posix-command）—— read_file 大文件分段读取（旧实现 >20 万字符连 offset/limit 都抛错的回归）、单行截断、续读 offset 提示、相似文件建议、目录 / 二进制指引；**先读后改**（edit / 覆盖写前必须本会话 read_file 过，外部改动后要求重读，写入也记快照）；edit_file 多处命中不猜 / replaceAll / **CRLF 文件用 LF 的 oldString 编辑且保留 CRLF** / 缩进不一致仍命中；确认模式 guardWrite 拒绝与放行 |
 | `scripts/verify-agent-file-preview.mjs` | `dogi-ws://` 图片解码、SVG 预览↔编辑、`<video>` 的 206 Range、压缩包提示、`../` 越界 |
+| `scripts/verify-agent-error-parts.mjs` | 错误文案 part 的追加语义（`stores/agent-helpers.ts` 真源码，只桩掉 `app-store` / `types` 两条 import）—— 同一轮连着多个 `error` 事件（模型级重试每次尝试失败都发一个）**只留最后一条**、错误文案之后的正文增量另起一段、正文不会被接在 `⚠️ …` 后面；Agent 会话与终端 AI 助手两条路径都验 |
 | `scripts/verify-quick-actions.mjs` | `.dogi/workspace.json` 自动建目录、脏数据降级、下拉入口与顶栏同排、执行命令开终端、弹窗开关 |
 | `scripts/verify-host-logs.mjs` | 主机日志全链路：隔离实例 + 进程内 ssh2 测试服务器 —— SSH 四类来源标签与实时推送（`logs:entry`）、TOFU 指纹、隧道强断（error 级）/ 改名重启 / 停止、SFTP 失败路径、JSONL 落盘与清空归零、面板单例标签 / 过滤 / 搜索 |
 | `scripts/verify-windows-host.mjs` | Windows 主机支持全链路：三台进程内 ssh2 假服务器（Windows / GBK / Linux）—— `cmd /c ver` 平台探测、Windows 会话 0 条 `monitor:data` + `monitor:unsupported(windows)` + 徽标「不支持监控」、GBK 输出 xterm 渲染与输入字节=GBK 编码比对、Linux UTF-8 透传 + `monitor:data` 回归 |
@@ -878,6 +915,12 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 ⚠️ 历史脚本（`verify-agent-msglist` / `verify-agent-scroll-edit` / `verify-agent-aipanel` /
 `verify-acp-e2e` / `verify-acp-confirm` / `probe-reasoning` 等）**已不在本仓库**，
 本文档里引用它们的地方是保留当时的方法论，不是「去跑它」。
+
+**其他探针**（不起 Electron，直接 `node scripts/xxx.mjs`）：
+
+| 探针 | 回答的问题 |
+| --- | --- |
+| `scripts/probe-mastra-error-chunks.mjs` | 模型请求失败时 mastra `fullStream` 到底吐几个 `error` chunk —— 用于验证「错误文案为什么堆了多段」的归因（**升级 mastra 后必重跑**，见 6.6 第 30 条） |
 
 **浏览器相关的探针**（不起 Electron，直接 `node scripts/xxx.mjs`；**升级 Playwright 时重跑这几个**）：
 
@@ -1068,7 +1111,8 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 
 **16. 其他主进程约束**
 
-- **单实例锁**：已有一个 Dogi 在跑时，新进程直接退出并把已有实例调到前台。打包版与 dev 的 userData 不同，互不影响。
+- **单实例锁**：**仅打包版**生效 —— 已有 Dogi 在跑时新进程直接退出，并把已有实例调到前台；dev（`electron .`）不申请锁，可多开（`npm run dev:extra`）。锁由 Electron 按 userData 目录互斥。
+  ⚠️ dev 与打包版的 userData **是同一个**（`%APPDATA%\dogi` —— package.json 没有顶层 `productName`，Electron 拿 `name` 当目录名），所以 dev 多开之间、以及与常驻打包版之间会互相覆盖配置 / 标签页状态 / 窗口位置。
 - **托盘**：关闭窗口默认隐藏到托盘（`preferences.minimizeToTray`），`before-quit` 才置 `isQuiting` 让窗口真关。
   退出时 `will-quit` 要 `tray.destroy()`，否则托盘图标残留。
 - **菜单**：自定义菜单刻意**去掉 zoom 角色**，否则 Ctrl +/-/0 会缩放整个页面并抢在渲染端之前触发；
@@ -1406,6 +1450,32 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   `ls` / 管道 + 通配 / `grep -n` / for 循环 / `$HOME` 全按 POSIX 语义工作；不注入时回退 PowerShell
   且仍能执行；工具描述如实声明环境。需要 Git 时用 `DOGI_TEST_BASH` 指定 bash.exe 路径。
 
+**30. 错误文案要「可替换」而不是「可追加」；重试次数是 mastra 的 `modelSettings.maxRetries`**
+
+- **现场**：一次断流后消息里出现好几段几乎一样的 `⚠️ …` 文案（用户报告「多次重试的文案都追加显示出来了」）。
+- **根因（渲染端）**：`error` 事件在 `agent-helpers.ts` 的 `appendAgentPart` /
+  `appendAssistantPart` 里是往消息尾部 **push** 的。同理，任何「一轮里发两次 error」的路径都会堆出两段。
+  ⚠️ **别把它归因成「p-retry 每次尝试各发一个 error chunk」—— 实测不是**：
+  `scripts/probe-mastra-error-chunks.mjs` 用假 LanguageModel 跑 mastra 真源码，
+  always-500 时 `maxRetries=0` → 1 个 error chunk、`maxRetries=2`（模型被调 3 次）→ **仍只有 1 个**；
+  多步（先工具调用后失败）也只有 1 个；流中途 `controller.error()` / 迭代器抛 也都只 1 个
+  （mastra 把它包成 `deferredErrorChunk` 且 `for await` 不抛）。
+  升级 mastra 后**重跑这个探针**再下结论。
+- **正确做法**：错误 part 落成 `{ type: 'text', text: '⚠️ …', error: true }`
+  （两个 part 联合类型都加了这个可选标记，**不是**新 part 类型 —— 新类型要动
+  `toModelMessages` / 渲染 / ACP 装配一整条链，代价不值）。
+  - 后到的错误**替换**末尾那段（同一轮只留最后一条失败原因）；
+  - `text-delta` **不合并进**带 `error` 标记的段 —— 否则后续正文被接在错误文案后面。
+- ⚠️ 别用「文本以 `⚠️ ` 开头」来判：那会让模型正常输出的运维告警（`⚠️ 磁盘 90%`）也带上标记。
+- **重试次数**（顺带加进设置）：mastra 把 `modelSettings.maxRetries` 直接交给 p-retry 的 `retries`
+  （缺省 2），只在 `doStream` **开流前**失败时重试（`agent-BOxKOk3n.js` 的 `retryWithExponentialBackoff`）。
+  生效值见 `@shared/ai-timeouts` 的 `resolveMaxRetries`，界面在「设置 → AI → 超时 → 请求失败重试次数」，
+  `0` = 不限制。两条路径（`ai/agent.ts` 工作区 Agent、`ai/ai.ts` 终端助手）都要传。
+  ⚠️ **`0` 的代价**：翻译成 p-retry 的 `Infinity`，而 mastra 没设 `maxTimeout`，
+  退避延时趋近 `Infinity` 后被 Node 夹成 1ms —— 不会空转（每次尝试都是真请求），
+  但等于拿网关连接数去赌。别把 0 设成默认值。
+- **验证**：`scripts/verify-agent-error-parts.mjs`（跑 `agent-helpers.ts` 真源码）。
+
 ### 6.7 数据与文件
 
 **29. 导入 / 导出：zip 是自己实现的，凭据不导出**
@@ -1549,6 +1619,13 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
     多模态模型要「看图」得另做（当前 `toToolOutput` 会把 base64 截断成废数据）。
 - **验证覆盖的空白**：`ask_followup_question`（追问卡）、命令面板、快捷键分发、SFTP 传输取消、
   WebSocket 各帧类型目前**没有**端到端脚本，改动这些区域时优先补脚本或至少手动过一遍。
+- **历史脚本已移除**：见 5.2 末尾说明。
+
+---
+
+_本文档记录的是「为什么这么做」，不是「代码长什么样」—— 代码会变，约束背后的原因不会。_
+_新增条目时：写清触发信号与验证方式，别只写结论。_
+��区域时优先补脚本或至少手动过一遍。
 - **历史脚本已移除**：见 5.2 末尾说明。
 
 ---

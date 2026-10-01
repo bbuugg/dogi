@@ -317,6 +317,11 @@ export interface AiChatState {
   requestId: string | null
   error: string | null
   /**
+   * 模型请求正在重试（第 `attempt` 次）：界面据此显示一条**自替换**的「第 N 次重试」提示。
+   * 重试是「通知」不是内容 —— 不为它建消息 part，只在气泡的「正在生成」位置替换掉三点指示器。
+   */
+  retrying?: { attempt: number; maxRetries: number } | null
+  /**
    * 该终端会话使用的模型配置 id —— **按会话独立**，互不影响。
    * 未设置时回退到设置里的默认模型 `aiSettings.activeConfigId`。
    */
@@ -347,6 +352,11 @@ export interface AgentRunState {
   error: string | null
   /** 本轮是否因可重试的网络错误（如网关中途断流 ECONNRESET）失败，供界面给出「重试」入口 */
   retryable?: boolean
+  /**
+   * 模型请求正在重试（第 `attempt` 次）：界面据此显示一条**自替换**的「第 N 次重试」提示。
+   * 重试是「通知」不是内容 —— 不为它建消息 part，只在气泡的「正在生成」位置替换掉三点指示器。
+   */
+  retrying?: { attempt: number; maxRetries: number } | null
   /**
    * 最近一次上下文压缩的通知（只用于顶部提示一条，**不进消息历史**）。
    * 压缩只改「这一次请求怎么带上下文」，屏幕上的历史始终是原文。

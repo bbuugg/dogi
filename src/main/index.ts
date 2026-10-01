@@ -22,12 +22,24 @@ let tray: Tray | null = null
 let isQuiting = false
 
 /**
- * 单实例锁：已有一个 Dogi 在运行时，再次启动的进程直接退出，
- * 并通过 second-instance 事件把已有实例的主窗口调到前台。
- * 锁由 Electron 按应用 userData 目录互斥，打包与 dev 各自独立（userData 不同则互不影响）。
+ * 单实例锁：**只对打包版生效**，dev（`electron .`）不申请锁，可同时开多个实例。
+ *
+ * 打包版：已有一个 Dogi 在运行时，再次启动的进程直接退出，并通过 second-instance
+ * 事件把已有实例的主窗口调到前台。锁由 Electron 按应用 userData 目录互斥。
+ *
+ * 为什么用 app.isPackaged 判定、而不是看 VITE_DEV_SERVER_URL：
+ * `npm run start`（跑已构建产物）与 AGENTS 5.1 的 CDP 探针都是**未打包**但**没有**
+ * dev server，用环境变量会把「未打包」和「有 dev server」混为一谈。isPackaged 才是
+ * 「正式发布」的唯一准绳。
+ *
+ * ⚠️ dev 多开共用同一份 userData（%APPDATA%\dogi，打包版也是这个目录 —— package.json
+ * 没有顶层 productName，Electron 直接拿 name 当目录名），所以多开的实例之间、以及与
+ * 常驻的打包版之间会互相覆盖 config.json / 标签页状态 / 窗口位置 / host.log 的 seq。
+ * 要隔离就把 userData 改成按锁逐槽试探（dogi-dev → dogi-dev-2 …），别在这里另开锁。
  */
-const gotSingleInstanceLock = app.requestSingleInstanceLock()
-if (!gotSingleInstanceLock) {
+if (!app.isPackaged) {
+  console.log('[main] dev 模式（未打包）：不申请单实例锁，可同时打开多个实例')
+} else if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   app.on('second-instance', () => {

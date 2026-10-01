@@ -16,10 +16,11 @@ import { askFollowupBroker, buildAskFollowupTool } from './ask-followup'
 import { ASK_FOLLOWUP_HINT } from '@shared/ask-followup'
 import { resolveModel } from './resolve-model'
 import { compressContext } from './context'
-import { toModelMessages } from './agent-core'
+import { adaptMastraPart, toModelMessages } from './agent-core'
 import { armConfirmTimeout, modelRunTimeout } from './timeouts'
-import { describeError } from './error-utils'
-import { DEFAULT_MAX_STEPS } from '@shared/ai-timeouts'
+import { describeError, isRetryableNetworkError } from './error-utils'
+import { retryDelayMs, sleepWithSignal } from './retry'
+import { DEFAULT_MAX_STEPS, resolveMaxRetries } from '@shared/ai-timeouts'
 
 // 兼容旧引用路径（agent.ts 从 './ai' 取）
 export { resolveModel }
@@ -56,63 +57,6 @@ function sessionPlatformHint(platform: HostPlatform | undefined): string {
     return '本会话主机平台：类 Unix（BSD / macOS 等）——基础命令与 Linux 接近，但部分参数（如 ps/df）有差异，注意甄别。'
   }
   return ''
-}
-
-/** 将 Mastra 流事件转换为终端 AI 流事件。
- *  Mastra 的 fullStream 块为 { type, payload: {...} } 形态（文本/思考在 payload.text，
- *  工具在 payload.{toolCallId,toolName,args/result}），这里同时兼容 AI SDK 原生形态做兜底。 */
-function adaptMastraPart(part: {
-  type?: string
-  payload?: {
-    text?: unknown
-    toolCallId?: unknown
-    toolName?: unknown
-    args?: unknown
-    input?: unknown
-    result?: unknown
-    output?: unknown
-    error?: unknown
-  }
-  [k: string]: unknown
-}): AiStreamEvent | null {
-  const payload = part.payload
-  const str = (v: unknown) => (v == null ? '' : String(v))
-  switch (part.type) {
-    case 'text':
-    case 'text-delta':
-      return { type: 'text-delta', delta: str(payload?.text ?? part.text ?? part.textDelta ?? part.delta) }
-    case 'reasoning':
-    case 'reasoning-delta': {
-      const delta = str(payload?.text ?? part.reasoning ?? part.text ?? part.textDelta ?? part.delta)
-      return delta ? { type: 'reasoning-delta', delta } : null
-    }
-    case 'tool-call':
-      return {
-        type: 'tool-call',
-        toolCallId: str(payload?.toolCallId ?? part.toolCallId),
-        toolName: str(payload?.toolName ?? part.toolName),
-        input: (payload?.args ?? payload?.input ?? part.args ?? part.input ?? null) as unknown
-      }
-    case 'tool-result':
-      return {
-        type: 'tool-result',
-        toolCallId: str(payload?.toolCallId ?? part.toolCallId),
-        toolName: str(payload?.toolName ?? part.toolName),
-        output: (payload?.result ?? payload?.output ?? part.result ?? part.output ?? null) as unknown
-      }
-    case 'tool-error':
-      return {
-        type: 'tool-result',
-        toolCallId: str(payload?.toolCallId ?? part.toolCallId),
-        toolName: str(payload?.toolName ?? part.toolName),
-        output: `工具执行失败: ${describeError(payload?.error ?? part.error)}`,
-        isError: true
-      }
-    case 'error':
-      return { type: 'error', message: describeError(payload?.error ?? part.error) }
-    default:
-      return null
-  }
 }
 
 /** 当前的命令执行权限模式：每次执行时实时读取，支持对话中途切换 */
@@ -470,87 +414,144 @@ class AiAssistant extends EventEmitter {
       tools: tools as never
     })
 
-    let stream: { fullStream: AsyncIterable<unknown>; usage?: Promise<unknown> }
-    try {
-      stream = (await agent.stream(modelMessages as never, {
-        maxSteps: settings.maxSteps ?? DEFAULT_MAX_STEPS,
-        abortSignal: controller.signal,
-        modelSettings: {
-          // mastra 侧同样默认不限时；只设 firstChunkMs（见 timeouts.ts）
-          timeout: modelRunTimeout(settings.modelTimeoutMs),
-          ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
-          ...(config.maxTokens !== undefined ? { maxOutputTokens: config.maxTokens } : {})
-        }
-      })) as typeof stream
-    } catch (err) {
-      fail(describeError(err))
-      return { requestId }
-    }
-
-    void this.consumeMastraStream(requestId, stream)
+    // 起流 + 消费流整体交给带重试的 runStreamWithRetry（每次尝试都重建流）。
+    // ⚠️ 不再用 mastra 的 `modelSettings.maxRetries`：那条路只在 SDK 内部静默重试，界面看不到
+    //    任何迹象；自己驱动才能在每次重试时发一条 `retry` 事件（界面显示「第 N 次重试」）。
+    const maxRetries = resolveMaxRetries(settings.maxRetries)
+    void this.runStreamWithRetry(requestId, {
+      controller,
+      maxRetries,
+      start: () =>
+        agent.stream(modelMessages as never, {
+          maxSteps: settings.maxSteps ?? DEFAULT_MAX_STEPS,
+          abortSignal: controller.signal,
+          modelSettings: {
+            // mastra 侧同样默认不限时；只设 firstChunkMs（见 timeouts.ts）
+            timeout: modelRunTimeout(settings.modelTimeoutMs),
+            // 重试由 runStreamWithRetry 自己驱动，SDK 内部重试关掉（否则两套叠加、事件对不上）
+            maxRetries: 0,
+            ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
+            ...(config.maxTokens !== undefined ? { maxOutputTokens: config.maxTokens } : {})
+          }
+        }) as unknown as Promise<{ fullStream: AsyncIterable<unknown>; usage?: Promise<unknown> }>
+    })
     return { requestId }
   }
 
-  private async consumeMastraStream(
+  /**
+   * 跑一轮流式对话，带**自动重试**（与工作区 Agent 的 runStreamWithRetry 同一套语义）。
+   *
+   * 重试条件（需同时满足）：错误是**可重试的网络类错误**、用户没中止、重试次数没到上限，
+   * 且**失败的尝试没执行过工具**。每次重试前发一条 `retry` 事件 —— 界面据此清掉这一次
+   * 尝试的半截输出、显示「第 N 次重试」。
+   */
+  private async runStreamWithRetry(
     requestId: string,
-    stream: { fullStream: AsyncIterable<unknown>; usage?: Promise<unknown> }
+    opts: {
+      start: () => Promise<{ fullStream: AsyncIterable<unknown>; usage?: Promise<unknown> }>
+      controller: AbortController
+      maxRetries: number
+    }
   ): Promise<void> {
+    const { controller, maxRetries } = opts
     const startedAt = Date.now()
-    let firstTokenAt = 0
+    /** 已经重试过几次（发 retry 事件时先 +1，作为「第几次重试」） */
+    let retries = 0
+    /** 本轮是否已经真实执行过工具（发出过 tool-call）：有就不再自动重试 */
+    let toolExecuted = false
     try {
-      for await (const part of stream.fullStream) {
-        const p = part as { type: string; [k: string]: unknown }
-        if (
-          (p.type === 'text' ||
-            p.type === 'text-delta' ||
-            p.type === 'reasoning' ||
-            p.type === 'reasoning-delta') &&
-          !firstTokenAt
-        ) {
-          firstTokenAt = Date.now()
-        }
-        const event = adaptMastraPart(p)
-        if (event) this.emitEvent(requestId, event)
-      }
-      try {
-        const u = (await stream.usage) as
-          | {
-              promptTokens?: number
-              completionTokens?: number
-              totalTokens?: number
-              reasoningTokens?: number
-              cachedInputTokens?: number
-              inputTokens?: number
-              outputTokens?: number
+      for (;;) {
+        /** 首块时刻（TPS 的生成窗口起点）：每次尝试各算一份 */
+        let firstTokenAt = 0
+        try {
+          const stream = await opts.start()
+          for await (const part of stream.fullStream) {
+            const p = part as { type: string; [k: string]: unknown }
+            if (
+              (p.type === 'text' ||
+                p.type === 'text-delta' ||
+                p.type === 'reasoning' ||
+                p.type === 'reasoning-delta') &&
+              !firstTokenAt
+            ) {
+              firstTokenAt = Date.now()
             }
-          | undefined
-        if (u) {
-          const endAt = Date.now()
-          const durationMs = endAt - startedAt
-          const genWindowMs = firstTokenAt ? endAt - firstTokenAt : durationMs
-          const inputTokens = u.promptTokens ?? u.inputTokens ?? 0
-          const outputTokens = u.completionTokens ?? u.outputTokens ?? 0
-          const tps = genWindowMs > 0 ? outputTokens / (genWindowMs / 1000) : 0
-          this.emitEvent(requestId, {
-            type: 'usage',
-            usage: {
-              inputTokens,
-              outputTokens,
-              totalTokens: u.totalTokens ?? 0,
-              ...(u.reasoningTokens != null ? { reasoningTokens: u.reasoningTokens } : {}),
-              ...(u.cachedInputTokens != null ? { cachedInputTokens: u.cachedInputTokens } : {}),
-              durationMs,
-              tps: Math.round(tps * 10) / 10
+            const event = adaptMastraPart(p)
+            if (event) {
+              // 流内 error 块（不抛、只发事件）：底层可重试就抛出去，交给 catch 走重试 ——
+              // 否则限流 / 网关错误会被当成终态直接失败（界面停在 loading 后弹一句错误）
+              if (event.type === 'error') {
+                const rawPayload = p.payload as { error?: unknown } | undefined
+                const rawError = rawPayload?.error ?? p.error
+                if (isRetryableNetworkError(rawError)) {
+                  throw rawError instanceof Error ? rawError : new Error(event.message)
+                }
+              }
+              if (event.type === 'tool-call') toolExecuted = true
+              this.emitEvent(requestId, event)
             }
-          })
+          }
+          try {
+            const u = (await stream.usage) as
+              | {
+                  promptTokens?: number
+                  completionTokens?: number
+                  totalTokens?: number
+                  reasoningTokens?: number
+                  cachedInputTokens?: number
+                  inputTokens?: number
+                  outputTokens?: number
+                }
+              | undefined
+            if (u) {
+              const endAt = Date.now()
+              const durationMs = endAt - startedAt
+              const genWindowMs = firstTokenAt ? endAt - firstTokenAt : durationMs
+              const inputTokens = u.promptTokens ?? u.inputTokens ?? 0
+              const outputTokens = u.completionTokens ?? u.outputTokens ?? 0
+              const tps = genWindowMs > 0 ? outputTokens / (genWindowMs / 1000) : 0
+              this.emitEvent(requestId, {
+                type: 'usage',
+                usage: {
+                  inputTokens,
+                  outputTokens,
+                  totalTokens: u.totalTokens ?? 0,
+                  ...(u.reasoningTokens != null ? { reasoningTokens: u.reasoningTokens } : {}),
+                  ...(u.cachedInputTokens != null ? { cachedInputTokens: u.cachedInputTokens } : {}),
+                  durationMs,
+                  tps: Math.round(tps * 10) / 10
+                }
+              })
+            }
+          } catch {
+            // 用量缺失时静默跳过
+          }
+          this.emitEvent(requestId, { type: 'finish', finishReason: 'done' })
+          return
+        } catch (err) {
+          // 可重试的网络中断：用户没中止、没执行过工具、也没到次数上限 → 退避后重来
+          if (
+            !controller.signal.aborted &&
+            isRetryableNetworkError(err) &&
+            !toolExecuted &&
+            retries < maxRetries
+          ) {
+            retries += 1
+            this.emitEvent(requestId, { type: 'retry', attempt: retries, maxRetries })
+            console.warn(`[ai] 模型请求失败，第 ${retries} 次重试：${describeError(err)}`)
+            const waited = await sleepWithSignal(retryDelayMs(retries), controller.signal)
+            // 退避期间用户点了停止：按中止收场，不再重试
+            if (!waited) {
+              this.emitEvent(requestId, { type: 'finish', finishReason: 'aborted' })
+              return
+            }
+            continue
+          }
+          this.emitEvent(requestId, { type: 'error', message: describeError(err) })
+          this.emitEvent(requestId, { type: 'finish', finishReason: 'error' })
+          return
         }
-      } catch {
-        // 用量缺失时静默跳过
       }
-      this.emitEvent(requestId, { type: 'finish', finishReason: 'done' })
-    } catch (err) {
-      this.emitEvent(requestId, { type: 'error', message: describeError(err) })
-      this.emitEvent(requestId, { type: 'finish', finishReason: 'error' })
     } finally {
       this.clearPendingConfirms(requestId)
       // 挂着的提问也要收尾：不然工具 Promise 不 settle，回合永远卡着

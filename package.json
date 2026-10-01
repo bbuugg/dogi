@@ -1,6 +1,6 @@
 {
   "name": "dogi",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "description": "AI 驱动的研发运维工作台",
   "author": "Dogi",
   "main": "./out/main/index.js",
@@ -12,6 +12,7 @@
     "copy:rdp": "node scripts/copy-rdp.cjs",
     "predev": "npm run copy:monaco && npm run copy:rdp",
     "dev": "node scripts/dev.mjs",
+    "dev:extra": "node scripts/dev-extra.mjs",
     "prebuild": "npm run copy:monaco && npm run copy:rdp",
     "build": "npm run typecheck && vite build -c vite.main.mts && vite build -c vite.preload.mts && vite build",
     "start": "electron .",

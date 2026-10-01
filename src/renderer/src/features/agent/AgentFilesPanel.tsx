@@ -5,27 +5,36 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode
 } from 'react'
-import { Button, Modal, Tooltip, message } from 'antd'
+import { Button, Dropdown, Input, Modal, Tooltip, message, type MenuProps } from 'antd'
 import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ClipboardPaste,
+  Copy,
   File as FileIcon,
   FileAudio,
   FileCode,
   FileImage,
   FileJson,
+  FilePlus2,
   FileText,
   FileVideo,
   Files,
   Folder,
   FolderOpen,
+  FolderPlus,
   Loader2,
   Pencil,
+  Plus,
   RefreshCw,
   Save,
+  Scissors,
+  Trash2,
   Eye,
   X
 } from 'lucide-react'
@@ -149,6 +158,86 @@ function describeError(err: unknown): string {
   return raw.replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, '')
 }
 
+/** 触屏长按唤出右键菜单的时长（ms）。鼠标右键走 contextmenu，与它无关 */
+const LONG_PRESS_MS = 500
+/** 长按期间手指允许的位移（px）：超过就判定成滚动，取消唤出 */
+const LONG_PRESS_SLOP = 10
+
+/**
+ * 触屏长按 → 展开菜单。鼠标（含触控板）完全不参与，右键由 Dropdown 的 contextMenu
+ * 触发器负责 —— 所以这套 handlers 里第一件事就是把 mouse 分支挡掉。
+ *
+ * 两个必须处理干净的副作用：
+ * - **长按成功后那次 click**：不吞掉就会顺带展开目录 / 打开文件，菜单等于白发。
+ *   吞它的位置是 `onClickCapture`（捕获阶段先于按钮自己的 onClick，stopPropagation 有效）。
+ * - **长按期间滚动手势**：位移超过 LONG_PRESS_SLOP 立即取消，否则列表没法滚。
+ */
+function useLongPressMenu(): {
+  open: boolean
+  setOpen: (v: boolean) => void
+  rowHandlers: {
+    onPointerDown: (e: ReactPointerEvent) => void
+    onPointerMove: (e: ReactPointerEvent) => void
+    onPointerUp: () => void
+    onPointerCancel: () => void
+    onContextMenu: (e: ReactMouseEvent) => void
+    onClickCapture: (e: ReactMouseEvent) => void
+  }
+} {
+  const [open, setOpen] = useState(false)
+  const timer = useRef<number | null>(null)
+  const origin = useRef<{ x: number; y: number } | null>(null)
+  /** 这一次长按是否真的把菜单唤出来了（决定要不要吞掉随后的 click） */
+  const fired = useRef(false)
+
+  const cancel = useCallback((): void => {
+    if (timer.current !== null) {
+      window.clearTimeout(timer.current)
+      timer.current = null
+    }
+    origin.current = null
+  }, [])
+
+  useEffect(() => cancel, [cancel])
+
+  const rowHandlers = {
+    onPointerDown: (e: ReactPointerEvent): void => {
+      // 鼠标交给 contextmenu；别让左键长按也弹菜单
+      if (e.pointerType === 'mouse') return
+      origin.current = { x: e.clientX, y: e.clientY }
+      fired.current = false
+      cancel()
+      timer.current = window.setTimeout(() => {
+        timer.current = null
+        fired.current = true
+        setOpen(true)
+      }, LONG_PRESS_MS)
+    },
+    onPointerMove: (e: ReactPointerEvent): void => {
+      const start = origin.current
+      if (!start) return
+      if (
+        Math.abs(e.clientX - start.x) > LONG_PRESS_SLOP ||
+        Math.abs(e.clientY - start.y) > LONG_PRESS_SLOP
+      ) {
+        cancel()
+      }
+    },
+    onPointerUp: cancel,
+    onPointerCancel: cancel,
+    // 行内先截住：别让右键事件顺着 React 树冒泡到外层容器（否则两层菜单一起弹）
+    onContextMenu: (e: ReactMouseEvent): void => e.stopPropagation(),
+    onClickCapture: (e: ReactMouseEvent): void => {
+      if (!fired.current) return
+      fired.current = false
+      e.preventDefault()
+      e.stopPropagation()
+    }
+  }
+
+  return { open, setOpen, rowHandlers }
+}
+
 /** 一个目录的懒加载状态；`entries` 为 null 表示还没读过 */
 interface DirState {
   open: boolean
@@ -156,7 +245,12 @@ interface DirState {
   entries: AgentFsEntry[] | null
 }
 
-/** 文件树里的一行（目录与文件共用，靠 expandable 区分左侧占位） */
+/**
+ * 文件树里的一行（目录与文件共用，靠 expandable 区分左侧占位）。
+ *
+ * 传了 `menu` 就整行包一层 antd Dropdown：鼠标右键走 `contextMenu`，触屏走长按
+ * （见 useLongPressMenu —— 触屏没有右键，长按是唯一的唤出方式）。
+ */
 function TreeRow({
   depth,
   icon,
@@ -164,7 +258,8 @@ function TreeRow({
   active,
   expandable,
   open,
-  onClick
+  onClick,
+  menu
 }: {
   depth: number
   icon: ReactNode
@@ -173,8 +268,10 @@ function TreeRow({
   expandable?: boolean
   open?: boolean
   onClick: () => void
+  menu?: MenuProps
 }) {
-  return (
+  const longPress = useLongPressMenu()
+  const row = (
     <button
       type="button"
       onClick={onClick}
@@ -185,6 +282,7 @@ function TreeRow({
         active ? 'bg-primary/15 text-foreground' : 'text-muted-foreground',
         'hover:bg-foreground/10'
       )}
+      {...longPress.rowHandlers}
     >
       {expandable ? (
         open ? (
@@ -198,6 +296,18 @@ function TreeRow({
       {icon}
       <span className="min-w-0 flex-1 truncate">{label}</span>
     </button>
+  )
+  // 没有菜单的行（理论上都会传）：别包 Dropdown，省一层克隆开销
+  if (!menu) return row
+  return (
+    <Dropdown
+      open={longPress.open}
+      onOpenChange={longPress.setOpen}
+      trigger={['contextMenu']}
+      menu={menu}
+    >
+      {row}
+    </Dropdown>
   )
 }
 
@@ -259,6 +369,19 @@ export function AgentFilesPanel({
   /** 标签条溢出时左右箭头是否可用。箭头**常驻**（置灰 = 不可用）——按需出现会改变
    * 滚动区宽度，在临界宽度附近会反复横跳，常驻就没这个问题 */
   const [tabScroll, setTabScroll] = useState({ left: false, right: false })
+  /**
+   * 文件树剪贴板：**一次一项**（树上没有多选）。`cut` = 剪切，粘贴即移动。
+   * 刻意不碰系统剪贴板：往那里写文件路径会污染用户自己复制的内容，而这里的粘贴
+   * 只在同一个工作区内有意义。
+   */
+  const [clipboard, setClipboard] = useState<{ entry: AgentFsEntry; cut: boolean } | null>(null)
+  /** 重命名 / 新建的弹窗状态 */
+  const [renaming, setRenaming] = useState<{ entry: AgentFsEntry; text: string } | null>(null)
+  const [creating, setCreating] = useState<{ dir: string; type: 'file' | 'dir'; text: string } | null>(
+    null
+  )
+  /** 弹窗提交中：避免连点造成两次落盘 */
+  const [fsBusy, setFsBusy] = useState(false)
 
   /**
    * 当前工作区的状态：切换工作区的**那一帧**里 `panel` 还停在旧工作区（state 要等这次渲染
@@ -514,8 +637,15 @@ export function AgentFilesPanel({
     }))
   }
 
-  /** 关标签：有未保存的改动先确认（每个标签自己一份内容，所以只是「这条要丢」） */
-  const closeFile = (path: string): void => {
+  /**
+   * 关标签：有未保存的改动先确认（每个标签自己一份内容，所以只是「这条要丢」）。
+   * `onDone` / `onAbort` 给文件操作串流程用（删 / 移动前先关掉受影响的标签，
+   * 用户取消确认就等于取消整个操作）；界面上的关闭按钮只传路径。
+   */
+  const closeFile = (
+    path: string,
+    opts?: { onDone?: () => void; onAbort?: () => void }
+  ): void => {
     const target = files.find((f) => f.path === path)
     if (target && target.content !== target.savedContent) {
       Modal.confirm({
@@ -524,11 +654,16 @@ export function AgentFilesPanel({
         okText: '丢弃并关闭',
         cancelText: '取消',
         okButtonProps: { danger: true },
-        onOk: () => doCloseFile(path)
+        onOk: () => {
+          doCloseFile(path)
+          opts?.onDone?.()
+        },
+        onCancel: () => opts?.onAbort?.()
       })
       return
     }
     doCloseFile(path)
+    opts?.onDone?.()
   }
 
   /** 保存某个标签（缺省 = 当前标签） */
@@ -561,6 +696,231 @@ export function AgentFilesPanel({
     }
   }
 
+  // ── 文件树操作（右键菜单 / 触屏长按；树上没有多选，一次只作用于一项）──────────
+
+  /** 某个路径下已打开的标签（目录要连它内部的文件一起算上） */
+  const tabsUnder = (path: string): string[] =>
+    files.filter((f) => f.path === path || f.path.startsWith(`${path}/`)).map((f) => f.path)
+
+  /**
+   * 先关掉受影响的标签，再动盘。
+   *
+   * 为什么必须先关：删掉 / 移走 / 重命名一个已打开的文件后，标签还指着旧路径、
+   * Monaco 的 model 也按旧 URI 建，之后一次保存就会**写到不复存在的路径上**。
+   * 反过来把标签路径改到新位置要连 model 一起迁移（撤销栈 / 行尾 / 光标全得搬），
+   * 所以选「关掉标签」这条路 —— 与手动关标签完全同一套确认，未保存的改动不会悄悄消失。
+   */
+  const withTabsClosed = (path: string, next: () => void, onAbort?: () => void): void => {
+    const affected = tabsUnder(path)
+    if (!affected.length) {
+      next()
+      return
+    }
+    const step = (i: number): void => {
+      if (i >= affected.length) {
+        next()
+        return
+      }
+      closeFile(affected[i], {
+        onDone: () => step(i + 1),
+        onAbort: () => {
+          message.info('已取消，磁盘上的文件没有改动')
+          onAbort?.()
+        }
+      })
+    }
+    step(0)
+  }
+
+  /** 保证某个目录是展开的（新建 / 粘贴进去之后要能立刻看见结果） */
+  const expandDir = (dir: string): void => {
+    if (dir === '') return
+    if (dirs[dir]?.entries) {
+      setDirs((d) => ({ ...d, [dir]: { ...d[dir], open: true } }))
+      return
+    }
+    void loadDir(dir)
+  }
+
+  /** 删除（目录递归删）。相关标签关不掉（用户在确认框取消）就不删 */
+  const runDelete = (entry: AgentFsEntry): void => {
+    Modal.confirm({
+      title: entry.type === 'dir' ? '删除目录？' : '删除文件？',
+      content:
+        entry.type === 'dir'
+          ? `「${entry.name}」及其全部子项会被永久删除，无法恢复。`
+          : `「${entry.name}」会被永久删除，无法恢复。`,
+      okText: '删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: () =>
+        withTabsClosed(entry.path, () => {
+          void (async () => {
+            try {
+              await window.api.agent.fs.delete(workspaceId, entry.path)
+              message.success(`已删除${entry.type === 'dir' ? '目录' : '文件'}「${entry.name}」`)
+              refresh()
+            } catch (err) {
+              message.error(`删除失败：${describeError(err)}`)
+            }
+          })()
+        })
+    })
+  }
+
+  /** 复制 / 剪切：只记剪贴板，不碰盘 */
+  const runCopy = (entry: AgentFsEntry, cut: boolean): void => {
+    setClipboard({ entry, cut })
+    message.info(`已${cut ? '剪切' : '复制'}「${entry.name}」，到目标目录粘贴（右键 / 长按）`)
+  }
+
+  /** 粘贴到 toDir（为空 = 工作区根）。剪切 = 移动，源会消失，同样要先关它的标签 */
+  const runPaste = (toDir: string): void => {
+    const clip = clipboard
+    if (!clip) return
+    const apply = (): void => {
+      void (async () => {
+        try {
+          const created = await window.api.agent.fs.copy(
+            workspaceId,
+            clip.entry.path,
+            toDir,
+            clip.cut ? 'move' : 'copy'
+          )
+          // 剪切一次即失效：留着会让用户以为还能再粘一次（源已经没了）
+          if (clip.cut) setClipboard(null)
+          message.success(`已${clip.cut ? '移动' : '复制'}到 ${created.path}`)
+          refresh()
+          expandDir(toDir)
+        } catch (err) {
+          message.error(`${clip.cut ? '移动' : '复制'}失败：${describeError(err)}`)
+        }
+      })()
+    }
+    if (clip.cut) withTabsClosed(clip.entry.path, apply)
+    else apply()
+  }
+
+  /** 重命名提交 */
+  const submitRename = (): void => {
+    const target = renaming
+    const name = target?.text.trim() ?? ''
+    if (!target) return
+    if (!name || name === target.entry.name) {
+      setRenaming(null)
+      return
+    }
+    setFsBusy(true)
+    withTabsClosed(
+      target.entry.path,
+      () => {
+        void (async () => {
+          try {
+            await window.api.agent.fs.rename(workspaceId, target.entry.path, name)
+            message.success(`已重命名为「${name}」`)
+            setRenaming(null)
+            refresh()
+          } catch (err) {
+            message.error(`重命名失败：${describeError(err)}`)
+          } finally {
+            setFsBusy(false)
+          }
+        })()
+      },
+      () => setFsBusy(false)
+    )
+  }
+
+  /** 新建文件 / 文件夹：新建的文件直接打开，用不着再点一次 */
+  const submitCreate = (): void => {
+    const draft = creating
+    const name = draft?.text.trim() ?? ''
+    if (!draft || !name) return
+    setFsBusy(true)
+    void (async () => {
+      try {
+        const created = await window.api.agent.fs.create(workspaceId, draft.dir, name, draft.type)
+        message.success(`已新建${draft.type === 'dir' ? '目录' : '文件'}「${created.name}」`)
+        setCreating(null)
+        refresh()
+        expandDir(draft.dir)
+        if (created.type === 'file') await openFile(created)
+      } catch (err) {
+        message.error(`新建失败：${describeError(err)}`)
+      } finally {
+        setFsBusy(false)
+      }
+    })()
+  }
+
+  /** 某一行的右键菜单（触屏长按复用同一份 menu，见 TreeRow） */
+  const rowMenu = (entry: AgentFsEntry): MenuProps => ({
+    items: [
+      {
+        key: 'open',
+        icon:
+          entry.type === 'dir' ? (
+            <FolderOpen className="size-3.5" />
+          ) : (
+            <FileText className="size-3.5" />
+          ),
+        label: entry.type === 'dir' ? (dirs[entry.path]?.open ? '收起' : '展开') : '打开'
+      },
+      { key: 'rename', icon: <Pencil className="size-3.5" />, label: '重命名' },
+      { key: 'copy', icon: <Copy className="size-3.5" />, label: '复制' },
+      { key: 'cut', icon: <Scissors className="size-3.5" />, label: '剪切' },
+      // 文件行不给「粘贴」：粘到文件上语义不明，粘到它的父目录即可（父目录那一行有）
+      ...(entry.type === 'dir'
+        ? [
+            {
+              key: 'paste',
+              icon: <ClipboardPaste className="size-3.5" />,
+              label: '粘贴到此处',
+              disabled: !clipboard
+            }
+          ]
+        : []),
+      { type: 'divider' as const },
+      { key: 'delete', icon: <Trash2 className="size-3.5" />, label: '删除', danger: true }
+    ],
+    onClick: ({ key }) => {
+      if (key === 'open') {
+        if (entry.type === 'dir') toggleDir(entry.path)
+        else void openFile(entry)
+      } else if (key === 'rename') {
+        setRenaming({ entry, text: entry.name })
+      } else if (key === 'copy') {
+        runCopy(entry, false)
+      } else if (key === 'cut') {
+        runCopy(entry, true)
+      } else if (key === 'paste') {
+        runPaste(entry.path)
+      } else if (key === 'delete') {
+        runDelete(entry)
+      }
+    }
+  })
+
+  /** 树标题栏的「+」：新建 / 粘贴到根目录（放在头部而不是空白处右键 —— 触屏上有个
+   * 明确的点击目标，比「长按空白处」好发现） */
+  const treeMenu = (): MenuProps => ({
+    items: [
+      { key: 'newFile', icon: <FilePlus2 className="size-3.5" />, label: '新建文件' },
+      { key: 'newDir', icon: <FolderPlus className="size-3.5" />, label: '新建文件夹' },
+      {
+        key: 'paste',
+        icon: <ClipboardPaste className="size-3.5" />,
+        label: '粘贴到根目录',
+        disabled: !clipboard
+      }
+    ],
+    onClick: ({ key }) => {
+      if (key === 'newFile') setCreating({ dir: '', type: 'file', text: '' })
+      else if (key === 'newDir') setCreating({ dir: '', type: 'dir', text: '' })
+      else if (key === 'paste') runPaste('')
+    }
+  })
+
   /** 递归渲染某个目录下的条目 */
   const renderEntries = (dir: string, depth: number): ReactNode[] => {
     const state = dirs[dir]
@@ -585,6 +945,7 @@ export function AgentFilesPanel({
             }
             label={entry.name}
             onClick={() => toggleDir(entry.path)}
+            menu={rowMenu(entry)}
           />
         )
         if (open) {
@@ -612,6 +973,7 @@ export function AgentFilesPanel({
             label={entry.name}
             active={entry.path === activeFilePath}
             onClick={() => void openFile(entry)}
+            menu={rowMenu(entry)}
           />
         )
       }
@@ -643,8 +1005,19 @@ export function AgentFilesPanel({
               onClick={refresh}
             />
           </Tooltip>
+          {/* 新建 / 粘贴：触屏没有右键，长按也不如一个明确的按钮好发现 */}
+          <Dropdown trigger={['click']} placement="bottomRight" menu={treeMenu()}>
+            <Button
+              type="text"
+              size="small"
+              icon={<Plus className="size-3.5" />}
+              className="w-7 shrink-0 p-0 text-muted-foreground"
+              title="新建 / 粘贴"
+              aria-label="新建 / 粘贴"
+            />
+          </Dropdown>
         </div>
-        <div className="min-h-0 flex-1 overflow-auto pb-2">
+        <div className="min-h-0 flex-1 overflow-auto pb-2 select-none">
           {renderEntries('', 0)}
           {dirs['']?.loading && !dirs['']?.entries && (
             <div className="flex items-center gap-1.5 px-3 py-2 text-sm text-muted-foreground">
@@ -848,6 +1221,56 @@ export function AgentFilesPanel({
           )}
         </div>
       </div>
+
+      {/* 重命名 */}
+      <Modal
+        open={renaming !== null}
+        onCancel={() => setRenaming(null)}
+        title="重命名"
+        okText="保存"
+        cancelText="取消"
+        centered
+        width={400}
+        destroyOnHidden
+        confirmLoading={fsBusy}
+        okButtonProps={{ disabled: !renaming?.text.trim() }}
+        onOk={submitRename}
+      >
+        <Input
+          value={renaming?.text ?? ''}
+          onChange={(e) => setRenaming((r) => (r ? { ...r, text: e.target.value } : r))}
+          onPressEnter={submitRename}
+          placeholder="新名字"
+        />
+        <p className="mt-2 text-xs text-muted-foreground">
+          只改名字、不换目录；正在编辑这个文件时会先关掉它的标签（未保存的改动要你确认）。
+        </p>
+      </Modal>
+
+      {/* 新建文件 / 文件夹 */}
+      <Modal
+        open={creating !== null}
+        onCancel={() => setCreating(null)}
+        title={creating?.type === 'dir' ? '新建文件夹' : '新建文件'}
+        okText="新建"
+        cancelText="取消"
+        centered
+        width={400}
+        destroyOnHidden
+        confirmLoading={fsBusy}
+        okButtonProps={{ disabled: !creating?.text.trim() }}
+        onOk={submitCreate}
+      >
+        <Input
+          value={creating?.text ?? ''}
+          onChange={(e) => setCreating((c) => (c ? { ...c, text: e.target.value } : c))}
+          onPressEnter={submitCreate}
+          placeholder={creating?.type === 'dir' ? '文件夹名，如 components' : '文件名，如 index.ts'}
+        />
+        <p className="mt-2 text-xs text-muted-foreground">
+          将创建在 {creating?.dir || '工作区根目录'}；已存在的同名项不会被覆盖。
+        </p>
+      </Modal>
     </div>
   )
 }

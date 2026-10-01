@@ -12,6 +12,7 @@ import { clampTerminalFontSize } from '@/features/terminal/terminal-font'
 import { applyColorTheme } from '@/shared/lib/theme'
 import { requestTabClose, setTabCloseExecutor } from '@/shared/lib/tab-event-bus'
 import { DEFAULT_SHORTCUTS, findShortcutByEvent } from '@shared/shortcuts'
+import { DEFAULT_MAX_RETRIES } from '@shared/ai-timeouts'
 import { isUnderNoteRoot, sameNoteRoot } from '@shared/note-folders'
 import { create } from 'zustand'
 
@@ -315,7 +316,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
     shells: null,
 
     aiConfigs: [],
-    aiSettings: { permissionMode: 'full' },
+    aiSettings: { permissionMode: 'full', maxRetries: DEFAULT_MAX_RETRIES },
     aiChats: {},
     pendingConfirms: {},
 
@@ -1741,7 +1742,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
       set((s) => ({
         aiChats: {
           ...s.aiChats,
-          [sid]: { ...chat, messages: [...history, assistantMsg], streaming: true, error: null }
+          [sid]: {
+            ...chat,
+            messages: [...history, assistantMsg],
+            streaming: true,
+            error: null,
+            retrying: null
+          }
         }
       }))
 
@@ -1792,7 +1799,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
       await window.api.ai.abort(requestId)
       set((s) => ({
         aiChats: s.aiChats[sid]
-          ? { ...s.aiChats, [sid]: { ...s.aiChats[sid], streaming: false, requestId: null } }
+          ? {
+              ...s.aiChats,
+              [sid]: { ...s.aiChats[sid], streaming: false, requestId: null, retrying: null }
+            }
           : s.aiChats
       }))
     },
@@ -1872,13 +1882,39 @@ export const useAppStore = create<AppStore>()((set, get) => {
         return
       }
 
+      // 模型请求正在重试：清掉这一次尝试已渲染的半截输出，并记下「第 N 次重试」供界面提示
+      // （丢弃半截输出是刻意的 —— 重试 = 从头再跑这一轮，留着会和重试后的正文重复）
+      if (event.type === 'retry') {
+        set((s) => {
+          const chat = s.aiChats[sid]
+          if (!chat) return {}
+          const messages = [...chat.messages]
+          const last = messages[messages.length - 1]
+          if (last?.role === 'assistant') messages[messages.length - 1] = { ...last, parts: [] }
+          return {
+            aiChats: {
+              ...s.aiChats,
+              [sid]: {
+                ...chat,
+                messages,
+                retrying: { attempt: event.attempt, maxRetries: event.maxRetries }
+              }
+            }
+          }
+        })
+        return
+      }
+
       if (event.type === 'finish') {
         aiRequestSessions.delete(requestId)
         set((s) => {
           const chat = s.aiChats[sid]
           if (!chat) return {}
           return {
-            aiChats: { ...s.aiChats, [sid]: { ...chat, streaming: false, requestId: null } }
+            aiChats: {
+              ...s.aiChats,
+              [sid]: { ...chat, streaming: false, requestId: null, retrying: null }
+            }
           }
         })
         // 兜底：该对话已结束但仍有其挂起确认时按取消处理，避免主进程工具悬挂
@@ -1911,7 +1947,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 streaming: false,
                 requestId: null,
                 // 错误已内联到该条助手消息（⚠️），不再另设横幅，避免重复显示
-                error: null
+                error: null,
+                retrying: null
               }
             }
           }
@@ -1932,7 +1969,13 @@ export const useAppStore = create<AppStore>()((set, get) => {
             parts: appendAssistantPart(last.parts, event)
           }
         }
-        return { aiChats: { ...s.aiChats, [sid]: { ...chat, messages } } }
+        return {
+          aiChats: {
+            ...s.aiChats,
+            // 重试后的新尝试一旦开始产出内容，就把重试提示撤掉
+            [sid]: { ...chat, messages, ...(chat.retrying ? { retrying: null } : {}) }
+          }
+        }
       })
     },
 
@@ -2333,7 +2376,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
             // ACP：消息只进本地镜像（**不落盘**，那部分归 agent 自己管）
             agentAcpMessages: { ...s.agentAcpMessages, [cid]: [...history, assistantMsg] },
             agentConversations: patchConversation(s.agentConversations, cid, { title, kind }),
-            agentRuns: { ...s.agentRuns, [cid]: { streaming: true, requestId: null, error: null, retryable: false } }
+            agentRuns: {
+              ...s.agentRuns,
+              [cid]: { streaming: true, requestId: null, error: null, retryable: false, retrying: null }
+            }
           }
           : {
             agentConversations: patchConversation(s.agentConversations, cid, {
@@ -2341,7 +2387,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
               title,
               kind
             }),
-            agentRuns: { ...s.agentRuns, [cid]: { streaming: true, requestId: null, error: null, retryable: false } }
+            agentRuns: {
+              ...s.agentRuns,
+              [cid]: { streaming: true, requestId: null, error: null, retryable: false, retrying: null }
+            }
           }
       )
       // 会话元信息（标题 / 更新时刻；mastra 还含用户消息）立刻落盘：
@@ -2468,7 +2517,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
             ...(s.agentRuns[cid] ?? emptyAgentRun()),
             streaming: false,
             requestId: null,
-            retryable: false
+            retryable: false,
+            retrying: null
           }
         }
       }))
@@ -2652,6 +2702,27 @@ export const useAppStore = create<AppStore>()((set, get) => {
         return
       }
 
+      // 模型请求正在重试：清掉这一次尝试已渲染的半截输出，并记下「第 N 次重试」供界面提示。
+      // 丢弃半截输出是刻意的 —— 重试 = 从头再跑这一轮，留着会和重试后的正文重复。
+      if (event.type === 'retry') {
+        updateMessages((messages) => {
+          const next = [...messages]
+          const last = next[next.length - 1]
+          if (last?.role === 'assistant') next[next.length - 1] = { ...last, parts: [] }
+          return next
+        })
+        set((s) => ({
+          agentRuns: {
+            ...s.agentRuns,
+            [cid]: {
+              ...(s.agentRuns[cid] ?? emptyAgentRun()),
+              retrying: { attempt: event.attempt, maxRetries: event.maxRetries }
+            }
+          }
+        }))
+        return
+      }
+
       if (event.type === 'finish') {
         agentRequestConversations.delete(requestId)
         // 这次是「打开会话时回放历史」还是「真的跑了一轮」？回放不该发系统通知
@@ -2660,7 +2731,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
         set((s) => ({
           agentRuns: {
             ...s.agentRuns,
-            [cid]: { ...(s.agentRuns[cid] ?? emptyAgentRun()), streaming: false, requestId: null }
+            [cid]: {
+              ...(s.agentRuns[cid] ?? emptyAgentRun()),
+              streaming: false,
+              requestId: null,
+              retrying: null
+            }
           }
         }))
         // 应用不在前台时发系统通知（是否真弹由主进程按窗口状态 + 偏好决定）
@@ -2692,7 +2768,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 ...(s.agentRuns[cid] ?? emptyAgentRun()),
                 streaming: false,
                 requestId: null,
-                error: event.message
+                error: event.message,
+                retrying: null
               }
             }
           }))
@@ -2706,7 +2783,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 streaming: false,
                 requestId: null,
                 error: null,
-                retryable: event.retryable ?? false
+                retryable: event.retryable ?? false,
+                retrying: null
               }
             }
           }))
@@ -2719,6 +2797,16 @@ export const useAppStore = create<AppStore>()((set, get) => {
       }
 
       updateMessages((messages) => appendToLast(messages, event))
+      // 重试后的新尝试一旦开始产出内容，就把重试提示撤掉
+      // （先用 get 判断，避免每个流式帧都多一次 set）
+      if (get().agentRuns[cid]?.retrying) {
+        set((s) => ({
+          agentRuns: {
+            ...s.agentRuns,
+            [cid]: { ...(s.agentRuns[cid] ?? emptyAgentRun()), retrying: null }
+          }
+        }))
+      }
       // 流式期间增量落盘：中途关掉应用也不至于丢掉这一轮已有的产出
       // （ACP 会话没有消息要落盘，跳过）
       if (!isAcp) persistConversationThrottled(cid)

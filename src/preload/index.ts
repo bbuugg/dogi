@@ -445,7 +445,29 @@ const api = {
       read: (workspaceId: string, path: string): Promise<AgentFsFile> =>
         ipcRenderer.invoke('agent:fs:read', { workspaceId, path }),
       write: (workspaceId: string, path: string, content: string): Promise<void> =>
-        ipcRenderer.invoke('agent:fs:write', { workspaceId, path, content })
+        ipcRenderer.invoke('agent:fs:write', { workspaceId, path, content }),
+      /** 删除文件 / 目录（目录递归删） */
+      delete: (workspaceId: string, path: string): Promise<void> =>
+        ipcRenderer.invoke('agent:fs:delete', { workspaceId, path }),
+      /** 重命名（只改名字；目标同名会被主进程拒绝） */
+      rename: (workspaceId: string, path: string, name: string): Promise<AgentFsEntry> =>
+        ipcRenderer.invoke('agent:fs:rename', { workspaceId, path, name }),
+      /** 在 dir 下新建文件 / 目录；已存在会被主进程拒绝（不覆盖） */
+      create: (
+        workspaceId: string,
+        dir: string,
+        name: string,
+        type: 'file' | 'dir'
+      ): Promise<AgentFsEntry> =>
+        ipcRenderer.invoke('agent:fs:create', { workspaceId, dir, name, type }),
+      /** 复制（同名自动加「副本」后缀）/ 移动（mode: 'move'，同名报错）到 toDir */
+      copy: (
+        workspaceId: string,
+        from: string,
+        toDir: string,
+        mode: 'copy' | 'move'
+      ): Promise<AgentFsEntry> =>
+        ipcRenderer.invoke('agent:fs:copy', { workspaceId, from, toDir, mode })
     },
     /**
      * 工作区目录配置（`<工作区>/.dogi/workspace.json`）：快捷功能等跟着项目走的配置。

@@ -1,9 +1,11 @@
 import {
   CONFIRM_TIMEOUT_OPTIONS,
   DEFAULT_CONFIRM_TIMEOUT_MS,
+  DEFAULT_MAX_RETRIES,
   DEFAULT_MAX_STEPS,
   DEFAULT_MODEL_TIMEOUT_MS,
-  MODEL_TIMEOUT_OPTIONS
+  MODEL_TIMEOUT_OPTIONS,
+  NO_RETRY
 } from '@shared/ai-timeouts'
 import { useAppStore } from '@/stores/app-store'
 import { InputNumber, Select } from 'antd'
@@ -27,6 +29,7 @@ export function TimeoutSettings() {
   const confirmMs = aiSettings.confirmTimeoutMs ?? DEFAULT_CONFIRM_TIMEOUT_MS
   const modelMs = aiSettings.modelTimeoutMs ?? DEFAULT_MODEL_TIMEOUT_MS
   const maxSteps = aiSettings.maxSteps ?? DEFAULT_MAX_STEPS
+  const maxRetries = aiSettings.maxRetries ?? DEFAULT_MAX_RETRIES
 
   return (
     <div className="space-y-5">
@@ -74,6 +77,23 @@ export function TimeoutSettings() {
           max={10000}
           value={maxSteps}
           onChange={(v) => void saveAiSettings({ maxSteps: v ?? DEFAULT_MAX_STEPS })}
+          style={{ width: SELECT_WIDTH }}
+        />
+      </div>
+
+      <div className="rounded-md">
+        <div className="text-sm font-medium">请求失败重试次数</div>
+        <p className="mt-1 mb-3 text-xs leading-4 text-muted-foreground">
+          模型请求因网络中断、限流或服务端错误失败后自动重试的次数（只重试请求本身；
+          已经把工具跑起来的那一次不会再自动重试，避免重复执行命令 / 写文件）。
+          填 0 表示不重试；默认 2 次。重试时对话流里会显示「第 N 次重试」。
+        </p>
+        <InputNumber
+          aria-label="请求失败重试次数"
+          min={NO_RETRY}
+          max={100}
+          value={maxRetries}
+          onChange={(v) => void saveAiSettings({ maxRetries: v ?? DEFAULT_MAX_RETRIES })}
           style={{ width: SELECT_WIDTH }}
         />
       </div>

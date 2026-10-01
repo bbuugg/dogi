@@ -16,6 +16,7 @@ import { MessageEditButton } from '@/features/agent/MessageEditButton'
 import { MessageOutline } from '@/features/agent/MessageOutline'
 import { QueuedAgentMessages } from '@/features/agent/QueuedAgentMessages'
 import { ReasoningPanel } from '@/features/agent/ReasoningPanel'
+import { RetryIndicator } from '@/features/agent/RetryIndicator'
 import { SidePanel, type SidePanelTab } from '@/features/agent/SidePanel'
 import { TokenUsageRow } from '@/features/agent/TokenUsageRow'
 import { TOOL_LABELS, ToolCallRow, toolRunStatus } from '@/features/agent/ToolCallRow'
@@ -284,6 +285,8 @@ function MessageBubbleImpl({
   // 空档期（还没吐出任何内容，或最后一步是已完成的工具、正文尚未开始）显示三点，
   // 否则「点了发送却什么都没有」的那几秒看起来像卡住了
   const showDots = !!streaming && (units.length === 0 || (last?.kind === 'tool' && !!last.result))
+  // 模型请求正在重试：把「正在生成」的三点换成单条「第 N 次重试」（半截输出已由 store 清掉）
+  const retrying = useAppStore((s) => s.agentRuns[conversationId ?? '']?.retrying)
 
   // 一轮已完成（助手消息、且不是正在流式、且没有待回答的追问卡）：把「末尾连续正文之前」的过程
   // 收进一个折叠组，只留最终回答可见；与 fishwork 的 TurnStepGroup 等价。
@@ -361,7 +364,12 @@ function MessageBubbleImpl({
       )}
       {units.slice(tailStart).map((unit, k) => renderUnit(unit, tailStart + k))}
       {message.usage && <TokenUsageRow usage={message.usage} />}
-      {showDots && <TypingDots />}
+      {showDots &&
+        (retrying ? (
+          <RetryIndicator key={retrying.attempt} attempt={retrying.attempt} />
+        ) : (
+          <TypingDots />
+        ))}
       {/* 生成中就露出复制按钮没有意义（内容还在变），一轮结束再显示；
           「没有正文可复制」的情况由 MessageCopyButton 自己兜（返回 null）——
           纯思考 + 工具调用的轮次本来就不会有按钮，别在这里再判一次（见 4.3 的折叠规则）；
@@ -1719,7 +1727,9 @@ export function AgentPage({
                           <span className="block truncate">{modelNameOnly(opt.label)}</span>
                         )}
                       />
-                      {streaming && (
+                      {/* 只显示一个按钮：有输入内容时优先「发送」（进行中也照发，进队列）；
+                          无输入内容且进行中才显示「停止」 */}
+                      {streaming && !input.trim() ? (
                         <Button
                           type="text"
                           danger
@@ -1730,15 +1740,16 @@ export function AgentPage({
                             if (conversationId) void abortAgent(conversationId)
                           }}
                         />
+                      ) : (
+                        <Button
+                          type="text"
+                          icon={<Send className="size-4" />}
+                          disabled={!input.trim() || !hasConfig}
+                          title={streaming ? '加入待发送队列' : '发送'}
+                          className="shrink-0"
+                          onClick={handleSend}
+                        />
                       )}
-                      <Button
-                        type="text"
-                        icon={<Send className="size-4" />}
-                        disabled={!input.trim() || !hasConfig}
-                        title={streaming ? '加入待发送队列' : '发送'}
-                        className="shrink-0"
-                        onClick={handleSend}
-                      />
                     </div>
                   </div>
                 </div>

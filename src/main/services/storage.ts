@@ -25,6 +25,7 @@ import type {
   SshProfile,
   SshTunnel
 } from '@shared/types'
+import { DEFAULT_MAX_RETRIES } from '@shared/ai-timeouts'
 import { DEFAULT_SHORTCUTS } from '@shared/shortcuts'
 
 interface StoreSchema {
@@ -58,7 +59,7 @@ interface StoreSchema {
 
 const DEFAULT_SKILL_SETTINGS: SkillSettings = { disabled: [], extraDirs: [] }
 
-const DEFAULT_AI_SETTINGS: AiSettings = { permissionMode: 'full' }
+const DEFAULT_AI_SETTINGS: AiSettings = { permissionMode: 'full', maxRetries: DEFAULT_MAX_RETRIES }
 const DEFAULT_PREFERENCES: Preferences = {
   theme: 'system',
   colorTheme: 'neutral',

@@ -354,7 +354,7 @@ export function BrowserPane({
         onPaste={onPaste}
         onContextMenu={(e) => e.preventDefault()}
         className={cn(
-          'relative min-h-0 flex-1 overflow-hidden bg-white outline-none',
+          'relative min-h-0 flex-1 overflow-hidden bg-background outline-none',
           started && 'cursor-default'
         )}
       >
