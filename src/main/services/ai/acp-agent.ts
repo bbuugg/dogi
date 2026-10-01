@@ -45,6 +45,7 @@ import type {
 import { storage } from '../storage'
 import type { AgentConfirmSink } from './agent'
 import { HistoryAssembler, pushHistoryUpdate, toolLabelOf } from './acp-history'
+import { acpToolKindOf, acpToolTitle } from '@shared/acp-tools'
 import { readWorkspaceTextFile, writeWorkspaceTextFile } from './acp-fs'
 import { armConfirmTimeout } from './timeouts'
 
@@ -180,7 +181,10 @@ function toStreamEvent(update: SessionUpdate): AgentStreamEvent | null {
         type: 'tool-call',
         toolCallId: update.toolCallId,
         toolName: toolLabelOf(update),
-        input: update.rawInput ?? {}
+        input: update.rawInput ?? {},
+        // kind → 中文工具名（拿不到 name 时的唯一线索），title → 工具名后面的明细
+        acpKind: acpToolKindOf(update),
+        title: acpToolTitle(update.title)
       }
     case 'tool_call_update': {
       if (update.status !== 'completed' && update.status !== 'failed') return null

@@ -14,16 +14,22 @@
 import { randomUUID } from 'node:crypto'
 import type { SessionUpdate } from '@agentclientprotocol/sdk'
 import type { AgentChatMessage, AgentMessagePart } from '@shared/types'
+import { acpToolKindOf, acpToolName, acpToolTitle } from '@shared/acp-tools'
 
-/** 工具调用卡片的展示名：ACP 只保证 title，name 是可选的程序化名称 */
+/**
+ * 工具调用卡片的展示名（工具名）。
+ *
+ * 口径严格对齐 fishwork `packages/acp/src/acp.ts` 的 `acpToolName`：
+ * **只认协议里的 `name`，绝不拿 `title` 兜底**（`title` 可能是文件路经 / 整段命令，
+ * 顶到标题上就是用户反馈的「工具名位置显示成文件路经」）。
+ *
+ * `name` 缺失时返回占位名 `tool` —— 这不是丢信息：中文工具名改由协议里的 **`kind`** 翻出来
+ * （见 `acpToolKindOf` 与渲染端的 `toolCardTitle`），`title` 则作为「工具名后面的明细」透出。
+ */
 export function toolLabelOf(update: SessionUpdate): string {
-  if (update.sessionUpdate === 'tool_call') {
-    return update.name ?? update.title ?? 'tool'
-  }
-  if (update.sessionUpdate === 'tool_call_update') {
-    return update.title ?? 'tool'
-  }
-  return 'tool'
+  // 防御取值：`SessionUpdate` 是联合类型，只有 tool_call 那几支才有 name，
+  // 直接 `update.name` 过不了类型（联合里存在没有该字段的分支）。
+  return acpToolName((update as { name?: unknown }).name)
 }
 
 export class HistoryAssembler {
@@ -74,9 +80,22 @@ export class HistoryAssembler {
    * 所以结果常常落到已经开了新消息之后）。结果被塞进那条新消息、而它的调用在旧消息里，
    * 渲染端按 toolCallId 找不到对应调用，只能当成「孤儿结果」**补在末尾** ——
    * 看起来就是「正文说完后面莫名多出两条工具调用」，整条消息又因为末尾不是正文被折叠，
-   * 于是正文也跟着被藏进折叠条里。
+   * 于是正文也跟着被藏进折叠条里。按 id 找回调用消息就能配对。
+   *
+   * ⚠️ **一轮 = 一条助手消息，轮次边界只由用户消息界定**（见 `pushContent`：来一条
+   * `user_message_chunk` 才开新的一轮）。这一轮里所有的思考 / 工具 / 正文都进同一条消息，
+   * 渲染端 `findTailStart` 保留该轮末尾最后一段正文、把上面的过程折成**一个**条 ——
+   * 与 fishwork 的 `TurnStepGroup` 完全一致。
+   *
+   * 早期版本在这里按 `hasFinishedTurn` 遇到新 `tool_call` 就强行拆新消息，本意是「没 messageId
+   * 时找回多轮结构」，但实际上会把**同一轮内**的「工具→回答→工具→回答」拆成多条小消息，
+   * 每条各带一个折叠条 —— 正是用户反馈的「折叠了很多个」。工具调用不是轮次边界，不能拿来切分。
+   * 没有 messageId 且回放又不带用户消息时，多轮会糊成一条消息（降级成一个折叠条、
+   * `findTailStart` 保留最后正文），这是拿不到边界时的最优解，不会比拆碎更糟。
    */
   pushTool(part: AgentMessagePart): void {
+    // 工具结果按 toolCallId 回到调用所在的消息（避免孤儿结果）；调用与结果都归属当前这条
+    // 助手消息（一轮 = 一条消息，由 user_message_chunk 边界切分）
     const owner =
       part.type === 'tool-result' ? this.findCallOwner(part.toolCallId) : null
     const message =
@@ -131,7 +150,10 @@ export function pushHistoryUpdate(assembler: HistoryAssembler, update: SessionUp
         type: 'tool-call',
         toolCallId: update.toolCallId,
         toolName: toolLabelOf(update),
-        input: update.rawInput ?? {}
+        input: update.rawInput ?? {},
+        // kind → 中文工具名（toolLabelOf 拿不到 name 时的唯一线索），title → 工具名后面的明细
+        acpKind: acpToolKindOf(update),
+        title: acpToolTitle(update.title)
       })
       return
     case 'tool_call_update':

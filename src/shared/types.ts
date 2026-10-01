@@ -1253,6 +1253,10 @@ export type AiMessagePart =
       toolCallId: string
       toolName: string
       input: unknown
+      /** ACP 工具的人类可读描述（路径 / 命令等），只作「工具名后面的明细」展示，绝不进工具名 */
+      title?: string
+      /** ACP 协议的工具种类（read / edit / execute …）：拿不到 name 时靠它翻出中文工具名 */
+      acpKind?: string
     }
   | {
       type: 'tool-result'
@@ -1266,7 +1270,7 @@ export type AiStreamEvent =
   | { type: 'text-delta'; delta: string }
   /** 模型思考内容增量（推理模型 / 思考型模型） */
   | { type: 'reasoning-delta'; delta: string }
-  | { type: 'tool-call'; toolCallId: string; toolName: string; input: unknown }
+  | { type: 'tool-call'; toolCallId: string; toolName: string; input: unknown; title?: string; acpKind?: string }
   | {
       type: 'tool-result'
       toolCallId: string
@@ -1381,6 +1385,10 @@ export type AgentMessagePart =
       toolCallId: string
       toolName: string
       input: unknown
+      /** ACP 工具的人类可读描述（路径 / 命令等），只作「工具名后面的明细」展示，绝不进工具名 */
+      title?: string
+      /** ACP 协议的工具种类（read / edit / execute …）：拿不到 name 时靠它翻出中文工具名 */
+      acpKind?: string
     }
   | {
       type: 'tool-result'
@@ -1419,7 +1427,7 @@ export type AgentStreamEvent =
   | { type: 'history'; messages: AgentChatMessage[] }
   | { type: 'text-delta'; delta: string }
   | { type: 'reasoning-delta'; delta: string }
-  | { type: 'tool-call'; toolCallId: string; toolName: string; input: unknown }
+  | { type: 'tool-call'; toolCallId: string; toolName: string; input: unknown; title?: string; acpKind?: string }
   | {
       type: 'tool-result'
       toolCallId: string

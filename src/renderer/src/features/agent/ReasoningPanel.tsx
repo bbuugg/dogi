@@ -1,4 +1,4 @@
-import { Brain, Loader2 } from 'lucide-react'
+import { Brain } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { useStickToBottom } from 'use-stick-to-bottom'
 import { cn } from 'cn'
@@ -20,6 +20,26 @@ import { CollapsibleRow } from '@/features/agent/CollapsibleRow'
  * 是「一条横条」而不是卡片 —— 无边框、无底色，只有 hover 时的淡底。
  * Agent 页（工作区助手）与终端 AI 助手共用同一份实现。
  */
+/**
+ * 思考时长文案（收起时横条上那四个字）。
+ *
+ * fishwork 只到「思考了 N 秒」一档，这里补了分钟档 —— 复杂任务思考几分钟很常见，
+ * 显示成「思考了 187 秒」不如「思考了 3 分 7 秒」直觉。
+ *
+ * ⚠️ `null`（没量到）/ 不足 1 秒（ceil 出来是 0）都显示「思考了一会儿」：那是「想了一下」的
+ * 自然说法，比「思考了 0 秒」体面。fishwork 对 `duration === 0` 也是这么处理的，它还特意注释
+ * 过一件事：这时**绝不能再走「正在思考…」那个流光分支**，否则思考不到 1 秒就结束时，
+ * 收起后的头部会一直闪着，看着像还没想完。
+ */
+export function thinkingDurationText(durationSec: number | null): string {
+  if (durationSec === null || durationSec <= 0) return '思考了一会儿'
+  if (durationSec < 60) return `思考了 ${durationSec} 秒`
+  const minutes = Math.floor(durationSec / 60)
+  const rest = durationSec % 60
+  if (rest === 0) return `思考了 ${minutes} 分钟`
+  return `思考了 ${minutes} 分 ${rest} 秒`
+}
+
 export function ReasoningPanel({ text, streaming }: { text: string; streaming: boolean }) {
   // 思考中**默认展开**（内容实时可见），思考结束后**自动折叠**成一条横条。
   // 展开态跟随 streaming 的跳变：true→false 折叠，false→true（多步推理又开思考）展开；
@@ -30,6 +50,32 @@ export function ReasoningPanel({ text, streaming }: { text: string; streaming: b
     if (prevStreamingRef.current === streaming) return
     prevStreamingRef.current = streaming
     setOpen(streaming)
+  }, [streaming])
+
+  /**
+   * 思考计时：与 fishwork `ai-elements/reasoning.tsx` 的 duration 同一口径 ——
+   * 只在这个组件里量「流式开始 → 流式结束」这段墙钟时间（`Date.now()`），**不落盘**。
+   *
+   * 为什么不落盘：思考时长是过程信息，ACP 会话的消息根本不在本地（回放时 agent 也没报这次
+   * 思考花了多久），想让它跨重载存活只能让主进程给 reasoning part 补时间戳，链路长且对
+   * ACP 回放无解。代价是组件卸载（切走会话 / 重新挂载）后退化成「思考了一会儿」—— fishwork
+   * 同样如此：它的 duration 也只活在组件状态里。
+   */
+  const startAtRef = useRef<number | null>(null)
+  const [durationSec, setDurationSec] = useState<number | null>(null)
+  useEffect(() => {
+    if (streaming) {
+      // 多步推理时流式会 true→false→true 反复：只在「上一轮已结算」后才重新起表
+      if (startAtRef.current === null) startAtRef.current = Date.now()
+      return
+    }
+    if (startAtRef.current === null) return
+    const elapsed = Date.now() - startAtRef.current
+    startAtRef.current = null
+    // 多步推理（同一次思考里流式暂停又继续）是**累加**而不是覆盖：每一段都算了时间，
+    // 最后显示的才是这次思考的总时长，而不是最后那一段。
+    const segmentSec = Math.ceil(elapsed / 1000) // 向上取整：0.4 秒也说「1 秒」
+    setDurationSec((prev) => (prev ?? 0) + segmentSec)
   }, [streaming])
 
   /**
@@ -53,13 +99,7 @@ export function ReasoningPanel({ text, streaming }: { text: string; streaming: b
       onOpenChange={setOpen}
       stickToBottom
       showChevron={!streaming}
-      icon={
-        streaming ? (
-          <Loader2 className="size-4 shrink-0 animate-spin text-primary" />
-        ) : (
-          <Brain className="size-4 shrink-0 text-muted-foreground/70" />
-        )
-      }
+      icon={<Brain className="size-4 shrink-0 text-muted-foreground/70" />}
       body={
         // 思考内容整体比正文浅一档（text-muted-foreground，与 CollapsibleRow 的默认一致，
         // 这里显式写出来是为了别被外层样式改动带跑）：它是过程，不是正文
@@ -67,15 +107,15 @@ export function ReasoningPanel({ text, streaming }: { text: string; streaming: b
       }
     >
       {/* 「思考中」带柔和流光（见 index.css 的 .reasoning-thinking）：思考结束换成静止的
-          「思考了一会儿」，动画只服务于「还在进行中」这件事；两种状态都用 muted 底色，
-          不抢正文（正文是 foreground） */}
+          「思考了 X 秒 / X 分 X 秒」，动画只服务于「还在进行中」这件事；两种状态都用 muted
+          底色，不抢正文（正文是 foreground） */}
       <span
         className={cn(
           'shrink-0 font-medium',
           streaming ? 'reasoning-thinking' : 'text-muted-foreground'
         )}
       >
-        {streaming ? '思考中...' : '思考了一会儿'}
+        {streaming ? '思考中...' : thinkingDurationText(durationSec)}
       </span>
       {/* 单行预览只在「流式中且未展开」时出现：展开后内容已经在下面了。
           `h-[1.4em]` + `leading-[1.4]` 让视口**正好一行高**（em 取本元素 text-xs 的 12px），

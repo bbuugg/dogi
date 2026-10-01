@@ -56,6 +56,37 @@ function stripUndefined(env: NodeJS.ProcessEnv): Record<string, string> {
   return result
 }
 
+/**
+ * 关闭终端时把「终端里正在运行的程序」一并杀掉，而不是让它们变成孤儿进程继续跑。
+ *
+ * 根因：直接 `proc.kill()` 只会杀掉 shell 自己，它内部启动的子进程（如正在跑的 dev server、
+ * htop、python app.py）会被 init 收养成孤儿、继续占用端口/资源 —— 即用户反馈的「关了终端程序还在」。
+ *
+ * - POSIX：`forkpty` 把 shell 放进独立进程组（pid 即组 leader），对**负 pid** 发信号即可连带杀掉
+ *   整组子进程；若当前进程无权操作该组（理论上不会）则退回只杀 shell 自身。
+ * - Windows：conpty/winpty 不会自动连带子进程，用 `taskkill /T` 杀掉整棵进程树。
+ *
+ * ⚠️ 仅在 shell 仍存活时调用：shell 已退出后它的 pid 可能被 OS 回收复用，此时再对负 pid 发信号
+ * 会误伤无关进程组，所以 `alive` 为 false 时直接跳过（孤儿子进程这种极端场景不在此处理）。
+ */
+function killProcessTree(pid: number, alive: boolean): void {
+  if (!pid || !alive) return
+  if (process.platform === 'win32') {
+    // /F 强制、/T 连带子树（控制台壳 + 它衍生出的程序）
+    cpExec(`taskkill /F /T /PID ${pid}`, () => {})
+    return
+  }
+  try {
+    process.kill(-pid, 'SIGKILL')
+  } catch {
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      // 进程可能已退出
+    }
+  }
+}
+
 /** 本地 PTY 会话 */
 class LocalSession implements InternalSession {
   info: SessionInfo
@@ -130,10 +161,14 @@ class LocalSession implements InternalSession {
   }
 
   kill(): void {
-    try {
-      this.proc.kill()
-    } catch {
-      // 忽略
+    // 连带杀掉 shell 衍生出的子进程（进程组），否则它们会变成孤儿继续运行
+    if (!this.info.exited) {
+      killProcessTree(this.proc.pid, true)
+      try {
+        this.proc.kill()
+      } catch {
+        // 忽略
+      }
     }
   }
 
@@ -832,6 +867,10 @@ class MoshSession implements InternalSession {
     this.ready = false
     this.logClosed('会话已关闭')
     this.clearBootstrapTimer()
+    // 本地 mosh-client 是个 PTY，连带杀掉它的子进程树
+    if (this.proc && !this.info.exited) {
+      killProcessTree(this.proc.pid, true)
+    }
     try {
       this.proc?.kill()
     } catch {

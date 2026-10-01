@@ -338,6 +338,8 @@ function MessageBubbleImpl({
         key={i}
         toolName={unit.call.toolName}
         input={unit.call.input}
+        title={unit.call.title}
+        acpKind={unit.call.acpKind}
         output={unit.result?.output}
         isError={unit.result?.isError}
         status={toolRunStatus({

@@ -155,4 +155,29 @@ const run = (updates: SessionUpdate[]) => {
   check('只有状态更新的「空消息」不产出', messages.length === 1, String(messages.length))
 }
 
+// ---------- 7. 没有 messageId 也没有 user 消息：多轮助手内容要拆成多条消息 ----------
+{
+  // 模拟 agent 在 session/load 回放时既不给 messageId、也不回放 user 消息的常见情况：
+  // 两轮各自的「工具调用 → 结果 → 答案」被启发式合并成一条会整段折叠，必须按轮拆开。
+  const messages = run([
+    call('c1'),
+    done('c1'),
+    { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '第一轮结论' } } as SessionUpdate,
+    call('c2'),
+    done('c2'),
+    { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '第二轮结论' } } as SessionUpdate
+  ])
+  check('无 messageId 多轮：每轮拆成独立的助手消息', messages.length === 2, String(messages.length))
+  check(
+    '第一轮：调用/结果/答案成对保留',
+    shape(messages[0].parts).join('|') === 'tool-call:c1|tool-result:c1|text',
+    shape(messages[0].parts).join('|')
+  )
+  check(
+    '第二轮：调用/结果/答案成对保留',
+    shape(messages[1].parts).join('|') === 'tool-call:c2|tool-result:c2|text',
+    shape(messages[1].parts).join('|')
+  )
+}
+
 console.log('\nALL PASS')

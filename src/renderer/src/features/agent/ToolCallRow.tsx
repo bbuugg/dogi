@@ -24,6 +24,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { Tooltip } from 'antd'
 import { cn } from 'cn'
 import { CollapsibleRow } from '@/features/agent/CollapsibleRow'
+import { ACP_KIND_LABELS, ACP_UNNAMED_TOOL } from '@shared/acp-tools'
 import { MessageCopyButton } from '@/features/agent/MessageCopyButton'
 import { buildFileDiff } from '@/features/agent/tool-file-diff'
 import { FileDiffView } from '@/shared/components/FileDiffView'
@@ -70,8 +71,27 @@ const TOOL_ICONS: Record<string, LucideIcon> = {
   'ask_followup_question': CircleQuestionMark
 }
 
+/**
+ * 工具卡**头部标题**：内置工具名 → ACP 种类（`acpKind`）→ 原始名。
+ *
+ * 严格对齐 fishwork `lib/parts.ts` 的 `toolCardTitle`：
+ * - 内置工具（`read_file` / `execute_command` …）用内置中文名；
+ * - 命中占位名（ACP agent 没给 `name`）时，**拿 `kind` 翻中文名**（`读取` / `编辑文件` /
+ *   `执行命令` …）—— 这才是「工具名」的来源，绝不退化成一刀切的「工具调用」；
+ * - ⚠️ 这条路**永远不碰 `title`**：title 是文件路经 / 整段命令，详见 `ToolCallRow` 的明细；
+ * - 以上都没有：说明这是 agent 自己报的名字，原样显示。
+ */
+export function toolCardTitle(name: string, kind?: string): string {
+  const builtin = TOOL_LABELS[name]
+  if (builtin) return builtin
+  if (!name || name === ACP_UNNAMED_TOOL) {
+    return (kind ? ACP_KIND_LABELS[kind] : undefined) ?? ACP_KIND_LABELS[ACP_UNNAMED_TOOL]
+  }
+  return ACP_KIND_LABELS[name] ?? ACP_KIND_LABELS[name.toLowerCase()] ?? name
+}
+
 export function toolLabel(toolName: string): string {
-  return TOOL_LABELS[toolName] ?? toolName
+  return toolCardTitle(toolName)
 }
 
 export function toolIcon(toolName: string): LucideIcon {
@@ -117,15 +137,20 @@ const STATUS_META: Record<ToolRunStatus, { label: string; Icon: LucideIcon; cls:
   cancelled: { label: '已取消', Icon: CircleSlash, cls: 'text-muted-foreground/60' }
 }
 
-/** 优先当作「主参数」展示的字段名（按顺序取第一个命中的） */
+/** 优先当作「主参数」展示的字段名（按顺序取第一个命中的）。对齐 fishwork 的 renderBuiltinDirect */
 const ARG_KEYS = [
   'path',
   'file_path',
   'filePath',
-  'target',
   'command',
+  'cmd',
   'query',
   'pattern',
+  'keyword',
+  'name',
+  'skill',
+  'target',
+  'url',
   'glob',
   'keys',
   'cwd',
@@ -135,6 +160,8 @@ const ARG_KEYS = [
 
 /**
  * 从工具入参里挑一个最能说明「这次在干什么」的字符串（横条上工具名右侧那段等宽预览）。
+ * 与 fishwork 的 `renderBuiltinDirect` 对齐：命令类加 `$ ` 前缀（命令不放内容区第一块，
+ * 折叠态下也能直接看到跑的是什么），其余工具取主入参（路径 / 查询 / 名称…）。
  *
  * ⚠️ 找不到可读的字符串时返回**空串**而不是 `JSON.stringify(obj)`：像
  * `ask_followup_question` 的 `{questions:[…]}`、或 `{limit:500}` 这种纯结构化入参，
@@ -146,16 +173,29 @@ export function toolArgPreview(input: unknown): string {
   if (typeof input === 'string') return input
   if (typeof input !== 'object') return String(input)
   const obj = input as Record<string, unknown>
+  let subject = ''
   for (const key of ARG_KEYS) {
     const v = obj[key]
-    if (typeof v === 'string' && v.trim()) return v
+    if (typeof v === 'string' && v.trim()) {
+      subject = v
+      break
+    }
     if (Array.isArray(v) && v.length > 0) {
       const joined = v.filter((x) => typeof x === 'string').join(' ')
-      if (joined.trim()) return joined
+      if (joined.trim()) {
+        subject = joined
+        break
+      }
     }
   }
-  const first = Object.values(obj).find((v) => typeof v === 'string' && v.trim())
-  return typeof first === 'string' ? first : ''
+  if (!subject) {
+    const first = Object.values(obj).find((v) => typeof v === 'string' && v.trim())
+    if (typeof first === 'string') subject = first
+  }
+  if (!subject) return ''
+  // 命令类加 `$ ` 前缀，与 fishwork 一致：一眼看出是条要执行的命令
+  if ('command' in obj || 'cmd' in obj) return `$ ${subject}`
+  return subject
 }
 
 /** 超过这个长度才给预览挂 Tooltip：短值（路径 / 文件名）横条上本来就完整可见，弹提示是多余的 */
@@ -215,7 +255,9 @@ export function ToolCallRow({
   isError,
   status,
   confirm,
-  className
+  className,
+  title,
+  acpKind
 }: {
   toolName: string
   /** 工具入参（tool-call 的 input） */
@@ -227,6 +269,10 @@ export function ToolCallRow({
   /** 待批准时的确认区（各页按钮文案不同，由调用方给） */
   confirm?: ReactNode
   className?: string
+  /** ACP 工具的人类可读描述（路径 / 命令等），只作「工具名后面的明细」兜底展示，绝不进工具名 */
+  title?: string
+  /** ACP 协议的工具种类（read / edit / execute …）：拿不到 name 时靠它翻出中文工具名 */
+  acpKind?: string
 }) {
   const [open, setOpen] = useState(status === 'pending')
 
@@ -247,7 +293,10 @@ export function ToolCallRow({
   const inputText = hideParams || input == null ? '' : clip(formatJson(input))
   const errorText = isError ? clip(formatJson(output)) : ''
   const outputText = fileDiff || isError || output === undefined ? '' : clip(formatJson(output))
-  const preview = toolArgPreview(input).replace(/\s+/g, ' ')
+  // 工具名后面的明细：优先取入参里最能说明「在干什么」的主参数（路径 / 命令 / 查询…），
+  // ACP 工具入参偏薄（或压根没有）时回退到 agent 给的 title（路径 / 命令描述）。
+  // ⚠️ title 只进这里、绝不进工具名（见 toolLabelOf）：否则脚本 / 命令类会把整段命令顶替工具名。
+  const preview = (toolArgPreview(input) || title || '').replace(/\s+/g, ' ')
   const hasBody = Boolean(fileDiff || inputText || errorText || outputText || confirm)
 
   return (
@@ -303,7 +352,7 @@ export function ToolCallRow({
           待在末尾 —— 预览 min-w-0 truncate 吃溢出，图标 shrink-0 不参与收缩。
           预览超长时挂 Tooltip 给全文（截断只是 CSS，DOM 里文本是完整的）。 */}
       <span className="max-w-[10rem] shrink-0 truncate font-medium text-muted-foreground">
-        {toolLabel(toolName)}
+        {toolCardTitle(toolName, acpKind)}
       </span>
       {preview && (
         <Tooltip title={preview.length > PREVIEW_TOOLTIP_MIN ? preview : undefined}>

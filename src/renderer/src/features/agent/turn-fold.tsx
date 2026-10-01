@@ -24,27 +24,24 @@ import { ASK_FOLLOWUP_TOOL } from '@shared/ask-followup'
 /**
  * 折叠组的终点（= 可见尾巴的起点）：它之前的一切收进折叠组。
  *
- * 首选「**末尾连续正文**的起点」—— 那是最终回答，必须整段可见。
+ * 取「**末尾连续正文**的起点」—— 那是这一轮的最终回答，必须整段可见。
+ * 与 fishwork `components/chat/message-parts.tsx` 的 tailStart 逐条对应：
+ * 一轮通常以正文收尾，中间的思考 / 工具调用都在它之前，折成一条。
+ * 整条消息一个正文块都没有（纯思考 + 工具调用）时 `tailStart === units.length`：
+ * 全部折进折叠条 —— 那是正常形态，不是 bug。
  *
- * ⚠️ 但**末尾不是正文时不能把正文一起折进去**（用户报告）：ACP 导入的历史里
- * 「正文说完 → 后面还跟着几步工具调用」很常见（甚至因为工具结果的归属问题被排到正文之后），
- * 只按「末尾连续正文」算，`tailStart` 会等于 `units.length` —— **整条消息（含正文）全被折进
- * 折叠条**，界面上看不到任何输出，却能点到复制按钮（复制出一条你看不见的正文）。
- * 所以退一步：拿**最后一个正文块**当答案的锚点，它之后的工具行留在可见区。
- * 整条消息一个正文块都没有（纯思考 + 工具调用）时折叠全部 —— 那是正常形态，不是 bug。
+ * ⚠️ 这里以前有个「末尾不是正文就回退到最后一个正文块」的分支，是为了绕开 ACP 回放
+ * 里的**孤儿工具结果**：结果被塞到正文之后，`tailStart` 会算到 `units.length`，
+ * 导致正文被折进折叠条、界面上看不到任何输出。那个根因已经在源头修掉了 ——
+ * `acp-history.ts` 的 `pushTool` 现在按 `toolCallId` 把结果送回**调用所在的那条消息**，
+ * 一轮的正文天然就是最后一段，这个分支也就成了多余（且是 fishwork 没有的额外行为）。
  */
 export function findTailStart(units: { kind: string }[]): number {
   let tailStart = units.length
   while (tailStart > 0 && units[tailStart - 1].kind === 'text') {
     tailStart--
   }
-  // 末尾本来就是正文：末尾连续正文全部可见（原行为）
-  if (tailStart < units.length) return tailStart
-  // 末尾不是正文：回到最后一个正文块，把它（及它之后的工具行）留在外面
-  for (let i = units.length - 1; i >= 0; i--) {
-    if (units[i].kind === 'text') return i
-  }
-  return units.length
+  return tailStart
 }
 
 /** 折叠条摘要：思考 ×N · 工具调用 ×N · 提问 ×N */
@@ -87,7 +84,7 @@ export function TurnFold({ summary, children }: { summary: string; children: Rea
         onClick={() => setOpen((v) => !v)}
         className={cn(
           // w-fit 让箭头贴着摘要文字、不铺满整行；max-w-full 封顶，过长由 truncate 吃掉
-          'flex w-fit max-w-full items-center gap-1.5 rounded text-left text-sm',
+          'flex w-fit max-w-full items-center gap-1.5 rounded text-left text-sm mb-2',
           'text-muted-foreground transition-colors hover:text-foreground'
         )}
       >
