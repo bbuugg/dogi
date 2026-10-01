@@ -782,6 +782,8 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 | `scripts/verify-builtin-playwright-mcp.mjs` | 内置 Playwright MCP（`browserToolMode: system` 用的那个）stdio 冒烟：真实子进程跑 CLI —— initialize → tools/list → **真实 browser_navigate**（headless Edge 打开页面）→ browser_snapshot 看到内容。防的是 overrides 强制 mcp 用顶层 playwright 1.63 稳定版后，某次升级 mcp 引入了 1.64+ 才有的 API |
 | `scripts/verify-agent-posix-command.mjs` | Agent `execute_command` 的 Windows POSIX 执行环境（`agent-core` 真源码）：注入 Git Bash 后 `ls` / 管道 + 通配 / `grep -n` / for 循环 / `$HOME` 按 POSIX 语义工作；不注入时回退 PowerShell 且仍可执行；工具描述如实声明环境。需 `DOGI_TEST_BASH=<bash.exe>` 指定 Git Bash |
 | `scripts/verify-agent-status.mjs` | 会话列表三态图标 + 系统通知三条路径（前台挡下 / 开关关闭 / 最小化后真发出 —— **会真的弹一条通知**） |
+| `scripts/verify-agent-edit-match.ts` | edit_file 匹配引擎（`agent-core/edit-match.ts`，`node --experimental-strip-types` 直接跑）—— 精确替换、找不到 / 多处 / oldString===newString 的报错、replaceAll、9 级模糊匹配链逐个触发（行 trim / 块锚点 Levenshtein / 空白归一 / 缩进弹性 / 转义归一 / 边界 trim / 上下文感知）、转义还原撑大匹配被拒、CRLF 辅助函数（换行符归一是 Windows 下编辑 CRLF 文件的前提） |
+| `scripts/verify-agent-file-tools.mjs` | Agent 文件工具行为（`tools.ts` 真源码 + 真临时工作区，包装机制同 posix-command）—— read_file 大文件分段读取（旧实现 >20 万字符连 offset/limit 都抛错的回归）、单行截断、续读 offset 提示、相似文件建议、目录 / 二进制指引；**先读后改**（edit / 覆盖写前必须本会话 read_file 过，外部改动后要求重读，写入也记快照）；edit_file 多处命中不猜 / replaceAll / **CRLF 文件用 LF 的 oldString 编辑且保留 CRLF** / 缩进不一致仍命中；确认模式 guardWrite 拒绝与放行 |
 | `scripts/verify-agent-file-preview.mjs` | `dogi-ws://` 图片解码、SVG 预览↔编辑、`<video>` 的 206 Range、压缩包提示、`../` 越界 |
 | `scripts/verify-quick-actions.mjs` | `.dogi/workspace.json` 自动建目录、脏数据降级、下拉入口与顶栏同排、执行命令开终端、弹窗开关 |
 | `scripts/verify-host-logs.mjs` | 主机日志全链路：隔离实例 + 进程内 ssh2 测试服务器 —— SSH 四类来源标签与实时推送（`logs:entry`）、TOFU 指纹、隧道强断（error 级）/ 改名重启 / 停止、SFTP 失败路径、JSONL 落盘与清空归零、面板单例标签 / 过滤 / 搜索 |

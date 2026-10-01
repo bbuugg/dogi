@@ -6,14 +6,14 @@ import type { ModelMessage, TextPart, ToolCallPart, ToolResultPart } from 'ai'
 
 /** 工具结果的输出结构（ai 包没有单独导出这个类型，从 ToolResultPart 派生） */
 type ToolResultOutput = ToolResultPart['output']
-import { buildAgentTools, type AgentPermissionMode, type AgentToolOptions } from './tools'
+import { buildAgentTools, type AgentPermissionMode, type AgentToolOptions, type AgentFileState, type AgentFileSnapshot } from './tools'
 import { buildSkillsPromptSection, type AgentSkill } from './skills'
 import type { TurnUsage } from '@shared/types'
 
 /** Agent 单轮对话的最大工具步数（工作流比终端助手更长） */
 export const MAX_STEPS = 25
 
-export type { AgentPermissionMode, AgentToolOptions, AgentSkill }
+export type { AgentPermissionMode, AgentToolOptions, AgentFileState, AgentFileSnapshot, AgentSkill }
 export { buildAgentTools }
 
 /** Agent 消息（渲染端历史的结构化镜像，与 @shared/types.AiChatMessage 同构） */
@@ -69,9 +69,10 @@ export function buildAgentSystemPrompt(
     '你的职责：理解用户意图，主动使用工具在工作区内完成开发与运维任务。',
     '可用工具：',
     '- list_files / find_files / read_file：动手前先了解项目结构与目标文件；find_files 按文件名通配符找文件（如 *.ts、**/*.test.tsx）；',
+    '- read_file：输出每行带「行号: 内容」前缀，默认最多 2000 行；大文件按结尾提示的 offset 续读，避免反复读 30 行级别的小窗口；可以并行发起多个独立的读取 / 搜索调用提高效率；',
     '- search_files：按正则搜索文件内容，定位符号、配置与报错来源；结果很多时用 filesOnly 只拿「文件:命中数」，要看上下文用 context；',
-    '- write_file：创建 / 整体覆盖文件（覆盖前先 read_file 确认原文）；',
-    '- edit_file：局部查找替换编辑（oldText 要带足够上下文，避免误伤相似片段）；',
+    '- edit_file：精确替换（oldString → newString）。必须先用 read_file 读过目标文件；oldString 从读取输出复制（不要带「行号: 」前缀），带足够上下文保证唯一；多处出现时扩大上下文或传 replaceAll: true（重命名变量用它）；',
+    '- write_file：只用于新建文件或有意的整体重写；覆盖已有文件前必须先读过，优先用 edit_file 做局部修改；',
     '- delete_file：删除文件（目录必须显式 recursive=true）；不可恢复，删前先确认路径；',
     '- execute_command：在工作区目录执行命令（构建、测试、git、安装依赖、启动服务等）。',
     '使用约定：',
@@ -79,7 +80,7 @@ export function buildAgentSystemPrompt(
     '- 所有路径一律使用相对工作区根目录的路径；',
     '- 执行命令前先简要说明意图；命令输出是事实依据，失败时结合输出排查原因，不要盲目反复重试同一条命令；',
     '- 删除文件、覆盖文件、危险命令（rm -rf、git push --force、DROP TABLE 等）先说明影响再执行；',
-    '- 涉及修改文件时，先 read_file 看清楚原文再编辑；编辑后如可能，用 execute_command 验证 —— 优先跑项目自带的类型检查 / lint（如 npm run typecheck、npm run lint），这是最快的静态验证手段；',
+    '- 修改文件前必须先 read_file 看清原文，编辑基于最新内容；编辑后如可能，用 execute_command 验证 —— 优先跑项目自带的类型检查 / lint（如 npm run typecheck、npm run lint），这是最快的静态验证手段；',
     '- 任务完成时用简洁的中文总结做了什么、验证结果如何，以及遗留事项。'
   ]
   const skillsSection = buildSkillsPromptSection(skills)

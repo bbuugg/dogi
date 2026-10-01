@@ -18,7 +18,10 @@ export type {
   AgentPermissionMode,
   AgentStreamEvent,
   AgentToolOptions,
+  AgentFileState,
+  AgentFileSnapshot,
   AgentSkill
 } from './agent'
 export { buildSkillsPromptSection, buildReadSkillTool, SKILL_FILE } from './skills'
 export { resolveInside, createIgnoreChecker, parseGitignore, relPathOf } from './workspace'
+export { createAgentFileState } from './tools'

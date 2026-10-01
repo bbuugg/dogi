@@ -13,19 +13,56 @@ import { promises as fs } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { tool, type ToolSet } from 'ai'
 import { z } from 'zod'
+import {
+  convertToLineEnding,
+  detectLineEnding,
+  normalizeLineEndings,
+  replaceContent
+} from './edit-match'
 import { buildReadSkillTool, type AgentSkill } from './skills'
 import { createIgnoreChecker, relPathOf, resolveInside } from './workspace'
 
 export type AgentPermissionMode = 'full' | 'confirm'
 
-/** 单次文件读取 / 搜索的结果字符上限 */
-const MAX_FILE_CHARS = 200_000
+/**
+ * read_file 单次输出的字符上限。超了就停在这一行，给出「用 offset=N 继续」的指引
+ * （与 opencode 的 50KB 封顶同一思路：模型该按窗口读大文件，而不是一口气吞进去）。
+ */
+const MAX_READ_OUTPUT_CHARS = 60_000
+/** read_file 单行截断长度（minified / 压缩成一行的文件不再撑爆结果） */
+const MAX_READ_LINE_CHARS = 2000
+/** read_file 拒绝读取的文件大小上限（文本工作区文件远达不到；超出建议走 search / 命令） */
+const MAX_READ_FILE_BYTES = 30_000_000
+/** 二进制探测的采样字节数 */
+const BINARY_SAMPLE_BYTES = 8192
 /** 命令输出保留上限（超出时保留头部 4KB + 尾部 26KB） */
 const MAX_CMD_OUT = 30_000
 /** 搜索文件的大小上限（1MB，跳过大文件避免卡死） */
 const MAX_SEARCH_FILE_SIZE = 1_048_576
 /** 搜索命中的单行截断长度 */
 const MAX_LINE_CHARS = 200
+
+/** 一个已读文件的快照：写 / 编辑前用它判定「模型手里的内容还是不是新的」 */
+export interface AgentFileSnapshot {
+  mtimeMs: number
+  size: number
+}
+
+/**
+ * 会话级的「已读文件」状态（先读后改的依据）。
+ *
+ * 工具集每轮对话都会重建（见 services/ai/agent.ts），这个状态必须由调用方持有并跨轮
+ * 传入 —— 与 Claude Code 的 ReadState 同一语义：read_file 记录快照，write_file /
+ * edit_file 校验快照（没读过 / 读后被外部改动都不放行）。
+ */
+export interface AgentFileState {
+  /** key 为文件绝对路径 */
+  reads: Map<string, AgentFileSnapshot>
+}
+
+export function createAgentFileState(): AgentFileState {
+  return { reads: new Map() }
+}
 
 export interface AgentToolOptions {
   /** 确认模式下**会改动东西的工具**（执行命令 / 写 / 编辑 / 删除）执行前需用户批准 */
@@ -43,6 +80,11 @@ export interface AgentToolOptions {
    * （ls / grep / sed / 管道……）；空值：回退 PowerShell。POSIX 平台不走这个字段（始终 bash）。
    */
   bashPath?: string | null
+  /**
+   * 「先读后改」状态（见 AgentFileState）。不传时跳过校验（探针 / 轻量调用方），
+   * 正常 Agent 路径必须传，否则模型可以不看文件就覆盖内容。
+   */
+  fileState?: AgentFileState
 }
 
 function clampInt(v: number | undefined, min: number, max: number, fallback: number): number {
@@ -50,19 +92,37 @@ function clampInt(v: number | undefined, min: number, max: number, fallback: num
   return Math.max(min, Math.min(max, Math.trunc(v)))
 }
 
-/** 读取文本文件：二进制（含 NUL）与超大文件直接报错，让模型改用 search/分段 */
-async function readTextFile(abs: string): Promise<string> {
-  const stat = await fs.stat(abs)
-  if (stat.isDirectory()) throw new Error(`不是文件：${basename(abs)}`)
-  const buf = await fs.readFile(abs)
-  if (buf.includes(0)) throw new Error('二进制文件，无法以文本方式读取')
-  const text = buf.toString('utf8')
-  if (text.length > MAX_FILE_CHARS) {
-    throw new Error(
-      `文件过大（${text.length} 字符），请先用 search_files 定位关键内容，再用 read_file 的 offset/limit 分段读取`
-    )
+/**
+ * 二进制探测（采样首部）：含 NUL 即判二进制；不可打印字符（除 \t \n \r 等控制空白外）
+ * 占比超 30% 也判二进制 —— 与 opencode 同一启发式，能挡住「读出来全是乱码」的浪费。
+ */
+function looksBinary(buf: Buffer): boolean {
+  const n = Math.min(buf.length, BINARY_SAMPLE_BYTES)
+  if (n === 0) return false
+  let nonPrintable = 0
+  for (let i = 0; i < n; i++) {
+    const b = buf[i]
+    if (b === 0) return true
+    if (b < 9 || (b > 13 && b < 32)) nonPrintable++
   }
-  return text
+  return nonPrintable / n > 0.3
+}
+
+/** 找不到文件时，在同一目录里找名字相近的文件给模型指路（大小写不敏感，最多 3 个） */
+async function suggestSimilarFiles(abs: string): Promise<string[]> {
+  try {
+    const dir = dirname(abs)
+    const base = basename(abs).toLowerCase()
+    const entries = await fs.readdir(dir)
+    return entries
+      .filter((e) => {
+        const l = e.toLowerCase()
+        return l !== base && (l.includes(base) || base.includes(l))
+      })
+      .slice(0, 3)
+  } catch {
+    return []
+  }
 }
 
 // ---------- 文件系统遍历 ----------
@@ -386,6 +446,7 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
   const needConfirm = opts.permissionMode === 'confirm' && !!confirm
   const isWin = process.platform === 'win32'
   const bashPath = opts.bashPath ?? null
+  const fileState = opts.fileState
   // 工具描述必须如实描述执行环境，模型才会放心用对应风格的命令
   const shellNote = isWin
     ? bashPath
@@ -415,6 +476,46 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
       : `用户拒绝了这次调用（${denied}）。请询问用户接下来希望怎么做，不要擅自重试同一步。`
   }
 
+  /**
+   * 「先读后改」：成功读到文件后记录快照（write / edit 成功后也记录 —— 写完的内容
+   * 模型自然是知道的，后续编辑不必强制重读）。
+   */
+  const noteRead = async (abs: string): Promise<void> => {
+    if (!fileState) return
+    try {
+      const st = await fs.stat(abs)
+      fileState.reads.set(abs, { mtimeMs: st.mtimeMs, size: st.size })
+    } catch {
+      // 文件刚被删等情况：不记快照，后续写 / 编辑自然会拿到「不存在」的明确报错
+    }
+  }
+
+  /**
+   * 写 / 编辑前的「先读后改」校验。返回 null = 放行；返回字符串 = 拒绝说明
+   * （同 guardWrite 的约定：这是预期内的回绝，让模型自行纠正，不当作工具报错打断整轮）。
+   *
+   * 校验两件事：本会话读过该文件（模型必须基于真实内容修改，不许凭想象覆盖）；
+   * 读取之后文件没被外部改动（模型手里的内容还作数）。
+   */
+  const assertReadForModify = async (abs: string, action: string): Promise<string | null> => {
+    if (!fileState) return null
+    const rel = relPathOf(root, abs)
+    const snap = fileState.reads.get(abs)
+    if (!snap) {
+      return `${action}失败：本次会话还没有读过 ${rel}。请先 read_file 查看文件内容，再基于真实内容做修改（不要凭记忆或猜测覆盖文件）。`
+    }
+    let stat: Awaited<ReturnType<typeof fs.stat>>
+    try {
+      stat = await fs.stat(abs)
+    } catch {
+      return `${action}失败：${rel} 在读取之后已不存在（可能被外部删除）。请先确认文件状态。`
+    }
+    if (stat.mtimeMs !== snap.mtimeMs || stat.size !== snap.size) {
+      return `${action}失败：${rel} 在读取之后又被修改过（可能是用户或其它程序改的）。请重新 read_file 确认最新内容后再试。`
+    }
+    return null
+  }
+
   return {
     list_files: tool({
       description:
@@ -436,83 +537,163 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
 
     read_file: tool({
       description:
-        '读取文件内容并附行号，用于理解源码 / 配置 / 文档。路径相对工作区根目录。大文件可用 offset/limit 分段读取。',
+        '读取文件内容。输出每行带「行号: 内容」前缀（构造 edit_file 的 oldString 时只要冒号后面的原文，绝不要把行号前缀带进去）。' +
+        '默认最多 2000 行；大文件按结尾提示的 offset 继续读取，不要反复读 30 行级别的小窗口。' +
+        '要找内容位置先用 search_files；不确定文件名先用 find_files。路径相对工作区根目录。',
       inputSchema: z.object({
         path: z.string().describe('相对工作区的文件路径'),
         offset: z.number().optional().describe('起始行号（1 起），缺省 1'),
-        limit: z.number().optional().describe('返回行数上限，默认 500，最大 2000')
+        limit: z.number().optional().describe('返回行数上限，默认 2000，最大 2000')
       }),
-      execute: async ({ path, offset = 1, limit = 500 }) => {
+      execute: async ({ path, offset = 1, limit }) => {
         const abs = resolveInside(root, path)
-        const text = await readTextFile(abs)
-        const lines = text.split('\n')
+        let stat: Awaited<ReturnType<typeof fs.stat>>
+        try {
+          stat = await fs.stat(abs)
+        } catch {
+          const suggestions = await suggestSimilarFiles(abs)
+          const relDir = relPathOf(root, dirname(abs))
+          const prefix = relDir === '.' ? '' : `${relDir}/`
+          const hint = suggestions.length
+            ? `\n\n你是不是想要这些文件之一？\n${suggestions.map((s) => `${prefix}${s}`).join('\n')}`
+            : ''
+          throw new Error(`文件不存在：${path}${hint}`)
+        }
+        if (stat.isDirectory()) {
+          throw new Error(`${path} 是目录。要浏览目录结构请用 list_files。`)
+        }
+        if (stat.size > MAX_READ_FILE_BYTES) {
+          throw new Error(
+            `文件过大（${(stat.size / 1_048_576).toFixed(1)}MB），read_file 不支持。请用 search_files 定位内容，或用 execute_command（如 sed -n '10,50p' ${path}）按需查看。`
+          )
+        }
+        const buf = await fs.readFile(abs)
+        if (looksBinary(buf)) throw new Error('二进制文件，无法以文本方式读取')
+        const text = buf.toString('utf8')
+        const lines = text.split('\n').map((l) => (l.endsWith('\r') ? l.slice(0, -1) : l))
         const start = Math.max(0, offset - 1)
-        const slice = lines.slice(start, start + clampInt(limit, 1, 2000, 500))
-        const body = slice
-          .map((l, i) => `${String(start + i + 1).padStart(5)} | ${l}`)
-          .join('\n')
-        const truncated = start + slice.length < lines.length ? `\n…（共 ${lines.length} 行，已截断）` : ''
-        return `${relPathOf(root, abs)}（共 ${lines.length} 行）\n${body}${truncated}`
+        if (start >= lines.length && !(offset === 1 && lines.length === 0)) {
+          throw new Error(`offset ${offset} 超出范围（文件共 ${lines.length} 行）`)
+        }
+        const cap = clampInt(limit, 1, 2000, 2000)
+        // 逐行取出，直到行数上限或输出字符上限：字符上限触发时提示从下一行续读
+        const taken: string[] = []
+        let chars = 0
+        let cutByChars = false
+        const end = Math.min(start + cap, lines.length)
+        for (let i = start; i < end; i++) {
+          let line = lines[i]
+          if (line.length > MAX_READ_LINE_CHARS) {
+            line = `${line.slice(0, MAX_READ_LINE_CHARS)}…（本行超长，已截断）`
+          }
+          const size = line.length + 1
+          if (taken.length > 0 && chars + size > MAX_READ_OUTPUT_CHARS) {
+            cutByChars = true
+            break
+          }
+          taken.push(line)
+          chars += size
+        }
+        const last = start + taken.length
+        let footer: string
+        if (cutByChars) {
+          footer = `\n\n（输出已达字符上限，显示第 ${offset}-${last} 行。用 offset=${last + 1} 继续读取）`
+        } else if (last < lines.length) {
+          footer = `\n\n（显示第 ${offset}-${last} 行，共 ${lines.length} 行。用 offset=${last + 1} 继续读取）`
+        } else {
+          footer = `\n\n（文件结尾，共 ${lines.length} 行）`
+        }
+        const body = taken.map((l, i) => `${start + i + 1}: ${l}`).join('\n')
+        await noteRead(abs)
+        return `${relPathOf(root, abs)}（共 ${lines.length} 行）\n${body}${footer}`
       }
     }),
 
     write_file: tool({
       description:
-        '创建或整体覆盖写入一个文件（自动创建父目录）。会覆盖已有内容，写入前请先 read_file 确认原文。路径相对工作区根目录。',
+        '创建新文件，或对已有文件做**有意的整体重写**（自动创建父目录）。' +
+        '优先用 edit_file 做局部修改，不要动不动整文件重写；也不要主动创建文档类文件（README / *.md）除非用户明确要求。' +
+        '覆盖已有文件前必须先用 read_file 读过（本会话内），否则会被拒绝。路径相对工作区根目录。',
       inputSchema: z.object({
         path: z.string().describe('相对工作区的文件路径'),
         content: z.string().describe('完整文件内容')
       }),
       execute: async ({ path, content }, options) => {
         const abs = resolveInside(root, path)
+        const rel = relPathOf(root, abs)
+        // 已存在的文件必须先读过：防止模型凭想象把用户文件整个覆盖掉
+        const exists = await fs
+          .stat(abs)
+          .then(() => true)
+          .catch(() => false)
+        if (exists) {
+          const stale = await assertReadForModify(abs, '覆盖写入')
+          if (stale) return stale
+        }
         // 会覆盖已有内容、且无法撤销：与执行命令同一道闸
-        const refused = await guardWrite(`文件未写入：${relPathOf(root, abs)}`, {
+        const refused = await guardWrite(`文件未写入：${rel}`, {
           toolCallId: options.toolCallId,
           toolName: 'write_file',
-          command: `写入文件 ${relPathOf(root, abs)}（${content.length} 字符）`
+          command: `写入文件 ${rel}（${content.length} 字符，${exists ? '覆盖' : '新建'}）`
         })
         if (refused) return refused
         await fs.mkdir(dirname(abs), { recursive: true })
         await fs.writeFile(abs, content, 'utf8')
-        return `已写入 ${relPathOf(root, abs)}（${content.length} 字符）`
+        await noteRead(abs)
+        return `${exists ? '已覆盖写入' : '已创建'} ${rel}（${content.length} 字符）`
       }
     }),
 
     edit_file: tool({
       description:
-        '对文件做多处查找替换编辑（只改局部，不整体重写）。oldText 必须能在文件中找到（找不到即报错，不落盘）；同一段文本多处出现时全部替换。oldText 要带上足够上下文，避免误伤其它相似片段。',
+        '对文件做精确的字符串替换（只改局部，不整体重写）。必须先用 read_file 读过目标文件（本会话内），oldString 从读取输出中复制（不要带「行号: 」前缀）。' +
+        'oldString 必须唯一命中：多处出现时报错 —— 请扩大上下文使其唯一，或传 replaceAll: true 全部替换（重命名变量等场景）。' +
+        '找不到时通常是细节记岔了：重新 read_file 再试。路径相对工作区根目录。',
       inputSchema: z.object({
         path: z.string().describe('相对工作区的文件路径'),
-        edits: z
-          .array(
-            z.object({
-              oldText: z.string().describe('要查找的原文片段'),
-              newText: z.string().describe('替换后的文本')
-            })
-          )
-          .describe('按顺序应用的替换列表')
+        oldString: z.string().describe('要替换的原文片段（必须与文件内容精确一致，且在文件中唯一）'),
+        newString: z.string().describe('替换后的文本（必须与 oldString 不同）'),
+        replaceAll: z
+          .boolean()
+          .optional()
+          .describe('替换 oldString 的全部出现（默认 false，此时多处出现会报错）')
       }),
-      execute: async ({ path, edits }, options) => {
+      execute: async ({ path, oldString, newString, replaceAll = false }, options) => {
         const abs = resolveInside(root, path)
-        let text = await readTextFile(abs)
-        const applied: string[] = []
-        for (const { oldText, newText } of edits) {
-          if (!oldText.trim()) throw new Error('oldText 不能为空')
-          const count = text.split(oldText).length - 1
-          if (count === 0) throw new Error(`未找到要替换的内容：${oldText.slice(0, 60)}`)
-          text = text.split(oldText).join(newText)
-          applied.push(`${oldText.slice(0, 40)}${oldText.length > 40 ? '…' : ''}（${count} 处）`)
+        const rel = relPathOf(root, abs)
+        if (!oldString.trim()) {
+          throw new Error(
+            'oldString 不能为空。编辑已有文件请提供要替换的原文；新建 / 整体重写请用 write_file。'
+          )
         }
-        // 替换都在内存里试算过了（oldText 全找得到）才请示：确认卡是为了「真的会落盘」
-        // 这一步，为一次注定失败的编辑打扰用户没有意义。
-        const refused = await guardWrite(`文件未被编辑：${relPathOf(root, abs)}`, {
+        // 先读后改：模型必须基于真实内容修改（文件不存在时给「用 write_file」的指引）
+        const exists = await fs
+          .stat(abs)
+          .then(() => true)
+          .catch(() => false)
+        if (!exists) throw new Error(`文件不存在：${path}。新建文件请用 write_file。`)
+        const stale = await assertReadForModify(abs, '编辑')
+        if (stale) return stale
+        const buf = await fs.readFile(abs)
+        if (looksBinary(buf)) throw new Error('二进制文件，无法编辑')
+        const contentOld = buf.toString('utf8')
+        // 换行符归一：模型输出恒为 \n；文件是 CRLF 时把 old/new 转成 \r\n 再匹配，
+        // 写回时天然保留文件的换行风格（Windows 下没有这步，编辑 CRLF 文件必失败）
+        const ending = detectLineEnding(contentOld)
+        const old = convertToLineEnding(normalizeLineEndings(oldString), ending)
+        const replacement = convertToLineEnding(normalizeLineEndings(newString), ending)
+        // 匹配 + 试算都在内存里完成（找不到 / 多处 / 抓错块在这里抛错），
+        // 确认卡为「真的会落盘」而弹，注定失败的编辑不值得打扰用户。
+        const applied = replaceContent(contentOld, old, replacement, replaceAll)
+        const refused = await guardWrite(`文件未被编辑：${rel}`, {
           toolCallId: options.toolCallId,
           toolName: 'edit_file',
-          command: `编辑文件 ${relPathOf(root, abs)}（${edits.length} 处替换）`
+          command: `编辑文件 ${rel}（精确替换${replaceAll ? '，全部出现' : ''}）`
         })
         if (refused) return refused
-        await fs.writeFile(abs, text, 'utf8')
-        return `已应用 ${applied.length} 处编辑（${relPathOf(root, abs)}）：${applied.join('；')}`
+        await fs.writeFile(abs, applied.text, 'utf8')
+        await noteRead(abs)
+        return `已编辑 ${rel}（替换 ${applied.count} 处）`
       }
     }),
 

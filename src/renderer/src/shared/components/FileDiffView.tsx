@@ -2,7 +2,7 @@
  * 「代码修改前后对比」：git 风格的 unified diff 视图。
  *
  * 目前**只有工具卡在用**：`features/agent/tool-file-diff.ts` 的 `buildFileDiff` 从工具
- * **入参**还原 hunks —— edit_file 的 oldText / newText 做行级 diff、write_file 的整文件
+ * **入参**还原 hunks —— edit_file 的 oldString / newString（旧会话历史是 edits[]）做行级 diff、write_file 的整文件
  * 当作「空 → 全文」的全量新增、delete_file 只给一句提示。
  *
  * 源代码管理面板**暂时还是它自己的内联实现**（`GitPanel.tsx` 里那个按行首字符上色的

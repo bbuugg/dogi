@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import {
   ArrowRightLeft,
   ArrowUp,
@@ -11,9 +11,10 @@ import {
   Pencil,
   RefreshCw,
   Trash2,
-  Upload
+  Upload,
+  X
 } from 'lucide-react'
-import { Button, Dropdown, Input, Modal, Spin, message, type MenuProps } from 'antd'
+import { Button, Checkbox, Dropdown, Input, Modal, Spin, message, type MenuProps } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'
 import { joinSftpPath, normalizeSftpPath } from '@shared/sftp-path'
@@ -43,6 +44,12 @@ function formatTime(ts: number): string {
  * 上传文件夹（递归，目录内每个文件一笔）/
  * 下载（文件 / 整个文件夹）/ 复制 / 移动（跨目录）/ 重命名 / 删除（目录递归）。
  * 所有传输进度汇聚到全局 store（见 TransferTray），在状态栏右下角统一展示。
+ *
+ * 交互增强：
+ * - **拖拽上传**：把本地文件 / 文件夹拖到页面任意处，松手即上传到当前浏览的远端目录
+ *   （路径经 `app.getPathForFile` 取出，走不弹对话框的 `sftp:uploadPaths`，与终端拖拽同源）。
+ * - **多选 + 操作栏**：点击行选中、Ctrl/⌘ 点切换、Shift 点范围选、表头勾选全选；
+ *   有选中项时顶部出现操作栏（下载 / 复制 / 移动 / 删除 / 取消选择），批量作用于所有选中项。
  */
 export function SftpPage({ profileId, tabId }: { profileId: string; tabId?: string }) {
   const profile = useAppStore((s) => s.profiles.find((p) => p.id === profileId))
@@ -62,10 +69,16 @@ export function SftpPage({ profileId, tabId }: { profileId: string; tabId?: stri
   const [mkdirName, setMkdirName] = useState('')
   const [renaming, setRenaming] = useState<SftpEntry | null>(null)
   const [renameText, setRenameText] = useState('')
-  const [pendingRemove, setPendingRemove] = useState<SftpEntry | null>(null)
-  /** 复制 / 移动的目标目录弹窗状态（entry + 模式）；目标路径 = targetDir + entry.name */
-  const [targetOp, setTargetOp] = useState<{ entry: SftpEntry; mode: 'move' | 'copy' } | null>(null)
+  /** 删除确认：支持批量（数组），确认时逐个删除 */
+  const [pendingRemove, setPendingRemove] = useState<SftpEntry[] | null>(null)
+  /** 复制 / 移动的目标目录弹窗状态（entries + 模式）；目标路径 = targetDir + entry.name */
+  const [targetOp, setTargetOp] = useState<{ entries: SftpEntry[]; mode: 'move' | 'copy' } | null>(null)
   const [targetDir, setTargetDir] = useState('')
+
+  /** 多选：选中的远端路径集合（entries 刷新后自动剔除已不存在的项） */
+  const [selected, setSelected] = useState<Set<string>>(() => new Set())
+  /** Shift 范围选的锚点 */
+  const anchorRef = useRef<string | null>(null)
 
   /** 挂载/卸载标记：防止异步回包写到已卸载的组件上（还得多关一次连接） */
   const aliveRef = useRef(true)
@@ -98,6 +111,15 @@ export function SftpPage({ profileId, tabId }: { profileId: string; tabId?: stri
     },
     [connId]
   )
+
+  // entries 变化后：把已不存在的选中项剔除（删除 / 移动走后列表里就没有了）
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev
+      const valid = new Set(entries.filter((e) => prev.has(e.path)).map((e) => e.path))
+      return valid.size === prev.size ? prev : valid
+    })
+  }, [entries])
 
   // 建连 + 初始列目录
   useEffect(() => {
@@ -191,12 +213,20 @@ export function SftpPage({ profileId, tabId }: { profileId: string; tabId?: stri
   }
 
   const confirmRemove = async (): Promise<void> => {
-    const entry = pendingRemove
-    if (!entry) return
+    const items = pendingRemove
+    if (!items) return
     setPendingRemove(null)
+    const dirs = items.filter((i) => i.isDir)
+    const files = items.length - dirs.length
     try {
-      await window.api.sftp.remove(connId, entry.path)
-      message.success(`已删除「${entry.name}」`)
+      for (const entry of items) {
+        await window.api.sftp.remove(connId, entry.path)
+      }
+      message.success(
+        `已删除 ${items.length} 项` +
+          (dirs.length ? `（含 ${dirs.length} 个文件夹）` : '') +
+          (files ? `（含 ${files} 个文件）` : '')
+      )
       void load(path)
     } catch (e) {
       message.error('删除失败：' + (e instanceof Error ? e.message : String(e)))
@@ -228,10 +258,10 @@ export function SftpPage({ profileId, tabId }: { profileId: string; tabId?: stri
     })()
   }
 
-  /** 打开「复制 / 移动到…」弹窗，目标目录默认当前目录 */
-  const openTargetOp = (entry: SftpEntry, mode: 'move' | 'copy'): void => {
+  /** 打开「复制 / 移动到…」弹窗，目标目录默认当前目录（支持批量） */
+  const openTargetOp = (entries: SftpEntry[], mode: 'move' | 'copy'): void => {
     setTargetDir(path)
-    setTargetOp({ entry, mode })
+    setTargetOp({ entries, mode })
   }
 
   /** 确认复制 / 移动：to = targetDir + entry.name（与移动/复制同名的文件会被覆盖） */
@@ -241,21 +271,26 @@ export function SftpPage({ profileId, tabId }: { profileId: string; tabId?: stri
     const dir = targetDir.trim()
     if (!dir) return
     setTargetOp(null)
-    const to = joinSftpPath(dir, op.entry.name)
-    try {
-      const result =
-        op.mode === 'move'
-          ? await window.api.sftp.move(connId, op.entry.path, to)
-          : await window.api.sftp.copy(connId, op.entry.path, to)
-      // 用户手动取消（进度条上的取消按钮）：不打扰、也不报错
-      if (result.canceled) return
-      message.success(`${op.mode === 'move' ? '已移动' : '已复制'}「${op.entry.name}」到 ${dir}`)
-      void load(path)
-    } catch (e) {
-      message.error(
-        `${op.mode === 'move' ? '移动' : '复制'}失败：` + (e instanceof Error ? e.message : String(e))
-      )
+    let canceled = false
+    let lastErr: string | undefined
+    for (const entry of op.entries) {
+      const to = joinSftpPath(dir, entry.name)
+      try {
+        const result =
+          op.mode === 'move'
+            ? await window.api.sftp.move(connId, entry.path, to)
+            : await window.api.sftp.copy(connId, entry.path, to)
+        // 用户手动取消（进度条上的取消按钮）：不打扰、也不报错
+        if (result.canceled) canceled = true
+      } catch (e) {
+        lastErr = e instanceof Error ? e.message : String(e)
+      }
     }
+    if (canceled && !lastErr) message.info(`已取消${op.mode === 'move' ? '移动' : '复制'}`)
+    else if (lastErr) message.error(`${op.mode === 'move' ? '移动' : '复制'}失败：` + lastErr)
+    else message.success(`已${op.mode === 'move' ? '移动' : '复制'} ${op.entries.length} 项到 ${dir}`)
+    setSelected(new Set())
+    void load(path)
   }
 
   const upload = (): void => {
@@ -295,6 +330,72 @@ export function SftpPage({ profileId, tabId }: { profileId: string; tabId?: stri
     })()
   }
 
+  // ---- 多选 ----
+  const selectedEntries = entries.filter((e) => selected.has(e.path))
+  const allSelected = entries.length > 0 && selected.size === entries.length
+  const someSelected = selected.size > 0
+
+  const clearSelection = (): void => {
+    setSelected(new Set())
+    anchorRef.current = null
+  }
+
+  const selectAll = (): void => {
+    setSelected(new Set(entries.map((e) => e.path)))
+    anchorRef.current = entries.length ? entries[entries.length - 1].path : null
+  }
+
+  /** 行点击：普通点选单个；Ctrl/⌘ 切换；Shift 范围选 */
+  const onRowClick = (e: ReactMouseEvent, entry: SftpEntry): void => {
+    if (e.shiftKey && anchorRef.current != null) {
+      const a = entries.findIndex((x) => x.path === anchorRef.current)
+      const b = entries.findIndex((x) => x.path === entry.path)
+      if (a >= 0 && b >= 0) {
+        const [lo, hi] = a < b ? [a, b] : [b, a]
+        setSelected((prev) => {
+          const next = new Set(prev)
+          for (let i = lo; i <= hi; i++) next.add(entries[i].path)
+          return next
+        })
+      }
+      anchorRef.current = entry.path
+      return
+    }
+    if (e.ctrlKey || e.metaKey) {
+      setSelected((prev) => {
+        const next = new Set(prev)
+        if (next.has(entry.path)) next.delete(entry.path)
+        else next.add(entry.path)
+        return next
+      })
+      anchorRef.current = entry.path
+      return
+    }
+    setSelected(new Set([entry.path]))
+    anchorRef.current = entry.path
+  }
+
+  /** 选中框切换单个（不触发行点击） */
+  const toggleSelect = (path: string): void => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+    anchorRef.current = path
+  }
+
+  /** 批量下载：目录走 downloadDir，文件走 download（各自一个系统对话框） */
+  const bulkDownload = (): void => {
+    const items = selectedEntries
+    clearSelection()
+    for (const entry of items) {
+      if (entry.isDir) downloadDir(entry)
+      else download(entry)
+    }
+  }
+
   const rowMenu = (entry: SftpEntry): MenuProps => ({
     items: [
       ...(entry.isDir
@@ -313,19 +414,86 @@ export function SftpPage({ profileId, tabId }: { profileId: string; tabId?: stri
       if (key === 'open') enter(entry)
       else if (key === 'download') download(entry)
       else if (key === 'downloadDir') downloadDir(entry)
-      else if (key === 'copy') openTargetOp(entry, 'copy')
-      else if (key === 'move') openTargetOp(entry, 'move')
+      else if (key === 'copy') openTargetOp([entry], 'copy')
+      else if (key === 'move') openTargetOp([entry], 'move')
       else if (key === 'rename') {
         setRenaming(entry)
         setRenameText(entry.name)
-      } else if (key === 'delete') setPendingRemove(entry)
+      } else if (key === 'delete') setPendingRemove([entry])
     }
   })
+
+  // ---- 拖拽上传：页面任意处拖入文件/文件夹，松手即传到当前远端目录 ----
+  const rootRef = useRef<HTMLDivElement>(null)
+  const dragDepthRef = useRef(0)
+  const [dragOver, setDragOver] = useState(false)
+  useEffect(() => {
+    const el = rootRef.current
+    if (!el) return
+    const hasFiles = (e: DragEvent): boolean =>
+      !!e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files')
+    const onDragEnter = (e: DragEvent) => {
+      if (!hasFiles(e)) return
+      e.preventDefault()
+      dragDepthRef.current += 1
+      setDragOver(true)
+    }
+    const onDragOver = (e: DragEvent) => {
+      if (!hasFiles(e)) return
+      // 必须 preventDefault：否则 drop 不触发，浏览器会直接打开被拖入的文件
+      e.preventDefault()
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+    }
+    const onDragLeave = (e: DragEvent) => {
+      if (!hasFiles(e)) return
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+      if (dragDepthRef.current === 0) setDragOver(false)
+    }
+    const onDrop = (e: DragEvent) => {
+      if (!hasFiles(e)) return
+      e.preventDefault()
+      dragDepthRef.current = 0
+      setDragOver(false)
+      if (connecting || error) {
+        message.info('连接未就绪，暂不能上传')
+        return
+      }
+      // 拖入的 File 只有经 webUtils 才拿得到本地真实路径（Electron 32 起没有 File.path）
+      const paths = Array.from(e.dataTransfer?.files ?? [])
+        .map((f) => window.api.app.getPathForFile(f))
+        .filter((p) => !!p) as string[]
+      if (!paths.length) return
+      void (async () => {
+        try {
+          const result = await window.api.sftp.uploadPaths(connId, path, paths)
+          if (result.ok) message.success(`已上传 ${result.count ?? paths.length} 项到 ${path}`)
+          else if (result.canceled) message.info('已取消上传')
+          else message.error('上传失败：' + (result.error ?? ''))
+        } catch (err) {
+          message.error('上传失败：' + (err instanceof Error ? err.message : String(err)))
+        } finally {
+          void load(path)
+        }
+      })()
+    }
+    el.addEventListener('dragenter', onDragEnter)
+    el.addEventListener('dragover', onDragOver)
+    el.addEventListener('dragleave', onDragLeave)
+    el.addEventListener('drop', onDrop)
+    return () => {
+      el.removeEventListener('dragenter', onDragEnter)
+      el.removeEventListener('dragover', onDragOver)
+      el.removeEventListener('dragleave', onDragLeave)
+      el.removeEventListener('drop', onDrop)
+      dragDepthRef.current = 0
+      setDragOver(false)
+    }
+  }, [connId, path, connecting, error, load])
 
   const title = profile ? `${profile.name}（${profile.username}@${profile.host}）` : 'SFTP'
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-background">
+    <div ref={rootRef} className="relative flex h-full min-h-0 flex-col bg-background">
       {/* 工具栏：返回上级 + 路径 + 刷新 / 新建文件夹 / 上传 */}
       <div className="flex shrink-0 items-center gap-2 px-3 py-2">
         <span className="shrink-0 text-xs font-medium text-muted-foreground" title={title}>
@@ -385,6 +553,60 @@ export function SftpPage({ profileId, tabId }: { profileId: string; tabId?: stri
         </Dropdown>
       </div>
 
+      {/* 多选操作栏：常驻显示；未选中时按钮禁用 */}
+      <div className="flex shrink-0 items-center gap-2 border-y border-border/60 bg-secondary/40 px-3 py-1.5">
+        <span className="shrink-0 text-xs font-medium text-foreground">已选 {selected.size} 项</span>
+        <div className="ml-auto flex items-center gap-1">
+          <Button
+            type="text"
+            size="small"
+            icon={<Download className="size-3.5" />}
+            disabled={!someSelected}
+            onClick={bulkDownload}
+            title="下载选中项（目录走文件夹下载）"
+          >
+            下载
+          </Button>
+          <Button
+            type="text"
+            size="small"
+            icon={<Copy className="size-3.5" />}
+            disabled={!someSelected}
+            onClick={() => openTargetOp(selectedEntries, 'copy')}
+          >
+            复制到…
+          </Button>
+          <Button
+            type="text"
+            size="small"
+            icon={<ArrowRightLeft className="size-3.5" />}
+            disabled={!someSelected}
+            onClick={() => openTargetOp(selectedEntries, 'move')}
+          >
+            移动到…
+          </Button>
+          <Button
+            type="text"
+            size="small"
+            danger
+            icon={<Trash2 className="size-3.5" />}
+            disabled={!someSelected}
+            onClick={() => setPendingRemove(selectedEntries)}
+          >
+            删除
+          </Button>
+          <Button
+            type="text"
+            size="small"
+            icon={<X className="size-3.5" />}
+            disabled={!someSelected}
+            onClick={clearSelection}
+          >
+            取消选择
+          </Button>
+        </div>
+      </div>
+
       {/* 文件列表 */}
       <div className="min-h-0 flex-1 overflow-auto">
         {connecting ? (
@@ -398,8 +620,15 @@ export function SftpPage({ profileId, tabId }: { profileId: string; tabId?: stri
           </div>
         ) : (
           <>
-            {/* 表头 */}
+            {/* 表头（首列勾选框支持全选） */}
             <div className="sticky top-0 z-10 flex items-center gap-3 border-b border-border/60 bg-background px-3 py-1.5 text-xs font-medium text-muted-foreground">
+              <Checkbox
+                className="shrink-0"
+                checked={allSelected}
+                indeterminate={someSelected && !allSelected}
+                disabled={entries.length === 0}
+                onChange={(e) => (e.target.checked ? selectAll() : clearSelection())}
+              />
               <span className="min-w-0 flex-1">名称</span>
               <span className="w-24 shrink-0 text-right">大小</span>
               <span className="w-44 shrink-0">修改时间</span>
@@ -412,19 +641,23 @@ export function SftpPage({ profileId, tabId }: { profileId: string; tabId?: stri
             ) : (
               <div className="flex flex-col">
                 {entries.map((entry) => (
-                  <Dropdown
-                    key={entry.path}
-                    trigger={['contextMenu']}
-                    menu={rowMenu(entry)}
-                  >
+                  <Dropdown key={entry.path} trigger={['contextMenu']} menu={rowMenu(entry)}>
                     <div
                       className={cn(
-                        'flex cursor-pointer items-center gap-3 border-b border-border/40 px-3 py-2 hover:bg-secondary/60',
+                        'group flex cursor-pointer items-center gap-3 border-b border-border/40 px-3 py-2 hover:bg-secondary/60',
+                        selected.has(entry.path) && 'bg-primary/10 hover:bg-primary/15',
                         loading && 'opacity-60'
                       )}
+                      onClick={(e) => onRowClick(e, entry)}
                       onDoubleClick={() => enter(entry)}
                       title={entry.isDir ? '双击进入' : undefined}
                     >
+                      <Checkbox
+                        className="shrink-0"
+                        checked={selected.has(entry.path)}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={() => toggleSelect(entry.path)}
+                      />
                       {entry.isDir ? (
                         <Folder className="size-5 shrink-0 text-sky-500" />
                       ) : (
@@ -459,6 +692,15 @@ export function SftpPage({ profileId, tabId }: { profileId: string; tabId?: stri
           </>
         )}
       </div>
+
+      {/* 拖拽高亮：pointer-events-none 保证拖拽事件继续落在容器上（不打断深度计数） */}
+      {dragOver && (
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-md border-2 border-dashed border-primary bg-primary/10">
+          <div className="rounded-md border border-border bg-card/95 px-3 py-1.5 text-xs text-foreground shadow">
+            松手即可上传到 {path}
+          </div>
+        </div>
+      )}
 
       {/* 新建文件夹 */}
       <Modal
@@ -497,8 +739,8 @@ export function SftpPage({ profileId, tabId }: { profileId: string; tabId?: stri
         onOk={() => void submitTargetOp()}
       >
         <p className="mb-2 text-sm text-muted-foreground">
-          「{targetOp?.entry.name}」{targetOp?.entry.isDir ? '（含其全部内容）' : ''}{' '}
-          将{targetOp?.mode === 'move' ? '移动' : '复制'}到：
+          将{targetOp?.mode === 'move' ? '移动' : '复制'} {targetOp?.entries.length ?? 0} 项
+          {targetOp?.entries.some((e) => e.isDir) ? '（含文件夹，将递归处理）' : ''} 到：
         </p>
         <Input
           autoFocus
@@ -508,7 +750,7 @@ export function SftpPage({ profileId, tabId }: { profileId: string; tabId?: stri
           onPressEnter={() => void submitTargetOp()}
         />
         <p className="mt-2 text-xs text-muted-foreground">
-          目标路径：{targetDir.trim() ? joinSftpPath(targetDir.trim(), targetOp?.entry.name ?? '') : '—'}
+          目标路径：{targetDir.trim() ? joinSftpPath(targetDir.trim(), targetOp?.entries[0]?.name ?? '') : '—'}
           （同名文件会被覆盖）
         </p>
       </Modal>
@@ -534,7 +776,7 @@ export function SftpPage({ profileId, tabId }: { profileId: string; tabId?: stri
         />
       </Modal>
 
-      {/* 删除确认（目录会递归删除，必须明确警示） */}
+      {/* 删除确认（目录会递归删除，必须明确警示）；支持批量 */}
       <Modal
         open={pendingRemove !== null}
         onCancel={() => setPendingRemove(null)}
@@ -548,7 +790,8 @@ export function SftpPage({ profileId, tabId }: { profileId: string; tabId?: stri
         onOk={() => void confirmRemove()}
       >
         <p className="text-sm text-muted-foreground">
-          「{pendingRemove?.name}」将被{pendingRemove?.isDir ? '递归删除（包括目录内全部内容）' : '删除'}
+          将删除 {pendingRemove?.length ?? 0} 项
+          {pendingRemove?.some((e) => e.isDir) ? '（含文件夹，将递归删除其全部内容）' : ''}
           ，该操作不可撤销。
         </p>
       </Modal>

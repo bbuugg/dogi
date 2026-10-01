@@ -884,9 +884,7 @@ class AcpAgentService extends EventEmitter {
         console.error(
           `[acp-agent] 会话就绪 session=${ws.sessionId}` +
             (ws.modelOption ? ` model=${ws.modelOption.currentValue}` : '') +
-            (ws.availableModes.length
-              ? ` 档位=${ws.defaultModeId}（可选 ${ws.availableModes.map((m) => m.id).join('/')}）`
-              : '')
+            ` 档位=${ws.defaultModeId ?? '无'}（可选 ${ws.availableModes.length ? ws.availableModes.map((m) => m.id).join('/') : '无'}）`
         )
         resolveSession()
         await new Promise<void>((resolve) => {
@@ -1058,6 +1056,12 @@ class AcpAgentService extends EventEmitter {
     params: RequestPermissionRequest
   ): Promise<RequestPermissionResponse> {
     const { toolCall, options } = params
+    // 收到权限请求就记一笔：full 模式是静默放行的，不记日志会让人误以为「agent 从不来问」。
+    // 这行是诊断用的，grep '[acp-agent] 收到权限请求' 就能确认某 agent（含 pi-acp）到底发不发请求。
+    console.error(
+      `[acp-agent] 收到权限请求 tool=${toolCall.title ?? toolCall.toolCallId}` +
+        ` options=[${options.map((o) => o.kind).join(', ')}]`
+    )
     const settings = storage.getAiSettings()
     const requestId = ws.currentRequestId
 

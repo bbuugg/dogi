@@ -20,7 +20,9 @@ import {
   MAX_STEPS,
   buildAgentSystemPrompt,
   buildAgentTools,
-  toModelMessages
+  createAgentFileState,
+  toModelMessages,
+  type AgentFileState
 } from './agent-core'
 import type {
   AgentChatRequest,
@@ -168,6 +170,26 @@ class AgentService extends EventEmitter {
   private pendingConfirms = new Map<string, PendingConfirm>()
   /** 确认请求串行链：前一个确认被应答（或中止）后才弹下一个 */
   private confirmChain: Promise<unknown> = Promise.resolve()
+  /**
+   * 「先读后改」状态按会话持有（read_file 记录快照，write/edit 校验）。
+   * 工具集每轮重建，状态必须活在服务里才跨得了轮；超过上限丢弃最早的会话
+   * （丢了的后果只是那条会话下次要先重读一遍，无正确性风险）。
+   */
+  private fileStates = new Map<string, AgentFileState>()
+  private static readonly MAX_FILE_STATES = 64
+
+  private fileStateFor(conversationId: string): AgentFileState {
+    let state = this.fileStates.get(conversationId)
+    if (!state) {
+      if (this.fileStates.size >= AgentService.MAX_FILE_STATES) {
+        const oldest = this.fileStates.keys().next().value
+        if (oldest !== undefined) this.fileStates.delete(oldest)
+      }
+      state = createAgentFileState()
+      this.fileStates.set(conversationId, state)
+    }
+    return state
+  }
 
   setConfirmSink(sink: AgentConfirmSink | null): void {
     this.confirmSink = sink
@@ -275,7 +297,8 @@ class AgentService extends EventEmitter {
         permissionMode: settings.permissionMode === 'confirm' ? 'confirm' : 'full',
         requestConfirm: (r) => this.requestConfirm(workspace.name, { requestId, ...r }),
         skills,
-        bashPath: agentBashPath()
+        bashPath: agentBashPath(),
+        fileState: this.fileStateFor(req.conversationId)
       }),
       // 浏览器能力：默认用应用自带的（无窗口、画面在面板里）；只有内置 Playwright MCP
       // 被显式打开时才让位给它（两者同名工具互斥，见 appBrowserTools）

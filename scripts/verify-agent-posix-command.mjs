@@ -25,6 +25,7 @@ const TMP = join(ROOT, '.cmdtest')
 const CORE = 'src/main/services/ai/agent-core'
 const FILES = [
   [`${CORE}/tools.ts`, 'core/tools.ts'],
+  [`${CORE}/edit-match.ts`, 'core/edit-match.ts'],
   [`${CORE}/skills.ts`, 'core/skills.ts'],
   [`${CORE}/workspace.ts`, 'core/workspace.ts']
 ]
@@ -32,9 +33,12 @@ const FILES = [
 const REWRITES = {
   'core/tools.ts': [
     ["from './skills'", "from './skills.ts'"],
-    ["from './workspace'", "from './workspace.ts'"]
+    ["from './workspace'", "from './workspace.ts'"],
+    ["from './edit-match'", "from './edit-match.ts'"]
   ],
-  'core/skills.ts': [["from './workspace'", "from './workspace.ts'"]]
+  'core/skills.ts': [["from './workspace'", "from './workspace.ts'"]],
+  'core/edit-match.ts': [],
+  'core/workspace.ts': []
 }
 
 rmSync(TMP, { recursive: true, force: true })

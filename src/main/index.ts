@@ -132,11 +132,11 @@ function createWindow(): void {
   const iconPath = resolveIconPath()
   mainWindow = new BrowserWindow({
     width: bounds?.width ?? 1280,
-    height: bounds?.height ?? 800,
+    height: bounds?.height ?? 720,
     x: bounds?.x,
     y: bounds?.y,
-    minWidth: 1280,
-    minHeight: 800,
+    minWidth: 1024,
+    minHeight: 640,
     show: false,
     icon: iconPath,
     // 自定义标题栏：隐藏系统标题栏但保留窗口阴影/圆角/动画；
