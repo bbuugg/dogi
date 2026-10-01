@@ -876,6 +876,15 @@ export interface AiModelConfig {
   maxTokens?: number
   /** 携带的历史消息条数 */
   contextMessages?: number
+  /**
+   * 上下文预算（token）：历史转成请求前先估算 token，超过它就触发**上下文压缩**
+   * （旧轮摘要成一段、保留近期原文，见 services/ai/context.ts）。
+   * 缺省 80k；接大上下文模型时可以调大。
+   *
+   * 与 contextMessages 是两道独立的闸：前者按**条数**截断（先过），后者按 **token**
+   * 决定要不要摘要（后过）。两道都过不了的极端情况（单轮就超预算）不压缩。
+   */
+  contextBudget?: number
   createdAt: number
   updatedAt: number
 }
@@ -1053,6 +1062,11 @@ export interface AiSettings {
    */
   modelTimeoutMs?: number
   /**
+   * Agent 单轮对话允许的最大工具调用步数（AI SDK `streamText`/`Agent.stream` 的
+   * `maxSteps`）。不设 = 缺省 500；工作区 Agent 与终端 AI 助手共用此上限。
+   */
+  maxSteps?: number
+  /**
    * 已登记的 ACP agent 配置 —— **在 AI Agent 侧边栏的「导入」弹窗里维护**（检测 / 手动添加），
    * 不再有独立的设置页。ACP 会话创建时绑定其中之一，之后不可切换。
    */
@@ -1149,6 +1163,42 @@ export interface TurnUsage {
   tps: number
 }
 
+/**
+ * 整个会话的累计用量（各轮 `TurnUsage` 的合计）。
+ *
+ * 与 `TurnUsage` 的差别：**没有耗时 / TPS** —— 那两个是单轮指标，跨轮累计没有意义
+ * （总耗时 ≠ 各轮耗时之和，各轮之间还有排队 / 等审批的间隙）。
+ * 这里只累计 token 数，供会话头部展示「这个会话一共烧了多少 token」。
+ */
+export interface ConversationUsage {
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  /** 其中「思考」tokens（不少模型把这部分算进 output 里） */
+  reasoningTokens: number
+  /** 命中缓存的输入 tokens */
+  cachedInputTokens: number
+}
+
+/**
+ * 一次上下文压缩的统计（用于在会话顶部提示「上下文已压缩」）。
+ *
+ * 只是**通知**，不进入消息历史：压缩改的是「这一次请求怎么带上下文」，
+ * 屏幕上的历史始终是原文（可翻、可复制、可编辑重发）。
+ */
+export interface ContextCompression {
+  /** 压缩前的估算 token 数 */
+  beforeTokens: number
+  /** 压缩后的估算 token 数 */
+  afterTokens: number
+  /** 被摘要掉的旧轮数 */
+  summarizedTurns: number
+  /** 保留原文的近期轮数 */
+  keptTurns: number
+  /** 摘要请求失败、已回退成截断（旧轮是直接丢掉的，不是摘要） */
+  truncated: boolean
+}
+
 /** AI 聊天消息（简化版 UIMessage，主进程与渲染进程一致） */
 export interface AiChatMessage {
   id: string
@@ -1204,8 +1254,10 @@ export type AiStreamEvent =
     }
   /** 一轮结束时的用量统计（input/output/total tokens、tps、耗时等） */
   | { type: 'usage'; usage: TurnUsage }
+  /** 本轮请求发出前触发了上下文压缩（只是通知，不进消息历史） */
+  | { type: 'context-compressed'; info: ContextCompression }
   | { type: 'finish'; finishReason: string }
-  | { type: 'error'; message: string }
+  | { type: 'error'; message: string; retryable?: boolean }
 
 // ---------- AI Agent（工作区编程/运维助手） ----------
 
@@ -1342,8 +1394,10 @@ export type AgentStreamEvent =
     }
   /** 一轮结束时的用量统计（input/output/total tokens、tps、耗时等） */
   | { type: 'usage'; usage: TurnUsage }
+  /** 本轮请求发出前触发了上下文压缩（只是通知，不进消息历史） */
+  | { type: 'context-compressed'; info: ContextCompression }
   | { type: 'finish'; finishReason: string }
-  | { type: 'error'; message: string }
+  | { type: 'error'; message: string; retryable?: boolean }
 
 /** Agent 确认模式下**改动类工具**（执行命令 / 写入 / 编辑 / 删除）执行前的主进程请示 */
 export interface AgentConfirmRequest {

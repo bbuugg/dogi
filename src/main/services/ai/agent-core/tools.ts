@@ -190,20 +190,35 @@ async function searchDir(
     }
     if (!ent.isFile()) continue
     if (fileRe && !fileRe.test(ent.name)) continue
-    const stat = await fs.stat(abs)
-    if (stat.size > MAX_SEARCH_FILE_SIZE) continue
-    const buf = await fs.readFile(abs)
-    if (buf.includes(0)) continue
-    const source = buf.toString('utf8').split('\n')
-    const hits: Array<{ line: number; text: string }> = []
-    for (let i = 0; i < source.length && acc.hits < acc.max; i++) {
-      re.lastIndex = 0
-      if (re.test(source[i])) {
-        hits.push({ line: i + 1, text: source[i].trimEnd().slice(0, MAX_LINE_CHARS) })
-        acc.hits++
-      }
+    await searchFile(abs, root, re, needSource, acc)
+  }
+}
+
+/** 单文件内容搜索：命中即累计进 `acc`。大文件 / 二进制直接跳过。 */
+async function searchFile(
+  abs: string,
+  root: string,
+  re: RegExp,
+  needSource: boolean,
+  acc: SearchAcc
+): Promise<void> {
+  if (acc.hits >= acc.max) return
+  const stat = await fs.stat(abs)
+  if (stat.size > MAX_SEARCH_FILE_SIZE) return
+  const buf = await fs.readFile(abs)
+  if (buf.includes(0)) return
+  const source = buf.toString('utf8').split('\n')
+  const hits: Array<{ line: number; text: string }> = []
+  for (let i = 0; i < source.length && acc.hits < acc.max; i++) {
+    re.lastIndex = 0
+    if (re.test(source[i])) {
+      hits.push({ line: i + 1, text: source[i].trimEnd().slice(0, MAX_LINE_CHARS) })
+      acc.hits++
     }
-    if (hits.length) acc.files.push(needSource ? { rel, hits, source } : { rel, hits })
+  }
+  if (hits.length) {
+    const rel = relPathOf(root, abs)
+    acc.files.push(needSource ? { rel, hits, source } : { rel, hits })
   }
 }
 
@@ -702,7 +717,7 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
         '在工作区中按正则搜索文件内容（自动跳过忽略目录、二进制与大文件）。返回命中文件的相对路径、行号与行内容。用于定位符号、关键配置与错误来源。结果很多时用 filesOnly 只拿「文件:命中数」省上下文；要看代码上下文用 context。',
       inputSchema: z.object({
         pattern: z.string().describe('正则表达式（默认区分大小写）'),
-        path: z.string().optional().describe('搜索起点目录（相对工作区），缺省为根目录'),
+        path: z.string().optional().describe('搜索起点：相对工作区的目录或单个文件；缺省为根目录'),
         filePattern: z.string().optional().describe('限定文件名正则，如 "\\.(ts|tsx|json)$"'),
         caseInsensitive: z
           .boolean()
@@ -744,12 +759,21 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
         }
         const absDir = resolveInside(root, path)
         const stat = await fs.stat(absDir)
-        if (!stat.isDirectory()) throw new Error(`不是目录：${path || '.'}`)
         const ignored = await createIgnoreChecker(root)
         const ctx = clampInt(context, 0, 5, 0)
         const max = clampInt(maxResults, 1, 1000, 200)
         const acc: SearchAcc = { files: [], hits: 0, max }
-        await searchDir(absDir, root, re, fileRe, ignored, acc, ctx > 0)
+        if (stat.isDirectory()) {
+          await searchDir(absDir, root, re, fileRe, ignored, acc, ctx > 0)
+        } else {
+          // path 指向单个文件：直接在文件内搜索（仍受 filePattern / ignore 约束）
+          const rel = relPathOf(root, absDir)
+          if (ignored(rel, false)) return '（未找到匹配）'
+          if (fileRe && !fileRe.test(basename(absDir))) {
+            return '（文件名不匹配 filePattern）'
+          }
+          await searchFile(absDir, root, re, ctx > 0, acc)
+        }
         if (!acc.files.length) return '（未找到匹配）'
         if (filesOnly) {
           const rows = acc.files.map((f) => `${f.rel}:${f.hits.length}`)

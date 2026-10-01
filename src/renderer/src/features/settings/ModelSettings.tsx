@@ -49,6 +49,7 @@ interface FormState {
   temperature: string
   maxTokens: string
   contextMessages: string
+  contextBudget: string
 }
 
 const EMPTY: FormState = {
@@ -61,7 +62,8 @@ const EMPTY: FormState = {
   apiStyle: 'default',
   temperature: '',
   maxTokens: '',
-  contextMessages: '20'
+  contextMessages: '20',
+  contextBudget: ''
 }
 
 function toForm(config: AiModelConfig | null): FormState {
@@ -76,7 +78,8 @@ function toForm(config: AiModelConfig | null): FormState {
     apiStyle: config.apiStyle ?? 'default',
     temperature: config.temperature !== undefined ? String(config.temperature) : '',
     maxTokens: config.maxTokens !== undefined ? String(config.maxTokens) : '',
-    contextMessages: String(config.contextMessages ?? 20)
+    contextMessages: String(config.contextMessages ?? 20),
+    contextBudget: config.contextBudget !== undefined ? String(config.contextBudget) : ''
   }
 }
 
@@ -171,6 +174,8 @@ export function ModelSettings() {
         temperature: editing.temperature ? Number(editing.temperature) : undefined,
         maxTokens: editing.maxTokens ? Number(editing.maxTokens) : undefined,
         contextMessages: Number(editing.contextMessages) || 20,
+        // 空串 = 不写字段，主进程回退默认 80k（别把 0 写进去，那会让压缩永远触发）
+        contextBudget: editing.contextBudget ? Number(editing.contextBudget) : undefined,
         createdAt: 0,
         updatedAt: 0
       })
@@ -510,6 +515,19 @@ export function ModelSettings() {
                   value={editing.contextMessages}
                   onChange={(e) => patch({ contextMessages: e.target.value })}
                 />
+              </div>
+              <div className="grid gap-1.5">
+                <span className="text-xs font-medium text-foreground">上下文预算 (Tokens)</span>
+                <Input
+                  type="number"
+                  placeholder="默认 80000"
+                  value={editing.contextBudget}
+                  onChange={(e) => patch({ contextBudget: e.target.value })}
+                />
+                <span className="text-xs text-muted-foreground">
+                  历史超过这个 token 数就触发上下文压缩：旧的若干轮摘要成一段、保留近期原文（屏幕上的历史不会被删）。
+                  接大上下文模型时可以调大，留空则用 80000。
+                </span>
               </div>
             </div>
             {error && <p className="text-xs text-destructive">{error}</p>}

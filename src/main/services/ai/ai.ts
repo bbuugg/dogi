@@ -15,8 +15,11 @@ import { mcpManager } from './mcp'
 import { askFollowupBroker, buildAskFollowupTool } from './ask-followup'
 import { ASK_FOLLOWUP_HINT } from '@shared/ask-followup'
 import { resolveModel } from './resolve-model'
+import { compressContext } from './context'
 import { toModelMessages } from './agent-core'
 import { armConfirmTimeout, modelRunTimeout } from './timeouts'
+import { describeError } from './error-utils'
+import { DEFAULT_MAX_STEPS } from '@shared/ai-timeouts'
 
 // 兼容旧引用路径（agent.ts 从 './ai' 取）
 export { resolveModel }
@@ -33,19 +36,12 @@ const DEFAULT_SYSTEM_PROMPT = [
   '部分命令会启动交互式 / 前台程序（如 htop、top、vim、nano、less、man、watch、python、node 等），它们占据终端且不返回 shell 提示符。执行这类命令后，不要继续向该会话输入新命令，应先用 send_keys 工具发送退出指令（多数程序用 "q"，卡死用 "C-c"，个别用 "exit" / "C-d"），并用 read_terminal_output 确认已回到 shell 提示符后再继续。'
 ].join('\n')
 
-const MAX_STEPS = 15
-
 /** 由 ipc 层注入：把确认请求与其最终结果（用户回复 / 中止）广播给渲染进程 */
 export interface ConfirmSink {
   /** 弹出一张确认卡 */
   request(req: AiConfirmRequest): void
   /** 确认已有结论（渲染端据此移除卡片） */
   resolved(id: string): void
-}
-
-function describeError(err: unknown): string {
-  if (err instanceof Error) return err.message
-  return String(err)
 }
 
 /** 绑定会话的宿主平台提示（平台探测已知时注入，驱动模型使用对应语法的命令） */
@@ -430,7 +426,22 @@ class AiAssistant extends EventEmitter {
 
     const model = resolveModel(config, req.modelId)
     const historyLimit = config.contextMessages ?? 20
-    const modelMessages = toModelMessages(history.slice(-historyLimit))
+    // 与工作区 Agent 同口径：先按条数截断，再按 token 预算压缩（只影响本次请求，不动历史）
+    const { messages: modelMessages, compressed } = await compressContext(
+      toModelMessages(history.slice(-historyLimit)),
+      {
+        budget: config.contextBudget,
+        model: config,
+        modelId: req.modelId,
+        signal: controller.signal
+      }
+    )
+    if (compressed) {
+      // ⚠️ 延后到 invoke 回包之后：渲染端在 await 返回之后才登记 requestId → 会话，
+      // 此刻发出的事件认不出归属会被丢掉（同 agent.ts / ipc/agent.ts 的说明）。
+      const info = compressed
+      setTimeout(() => this.emitEvent(requestId, { type: 'context-compressed', info }), 0)
+    }
 
     const mode = settings.permissionMode === 'confirm' ? 'confirm' : 'full'
     const modeHint =
@@ -462,7 +473,7 @@ class AiAssistant extends EventEmitter {
     let stream: { fullStream: AsyncIterable<unknown>; usage?: Promise<unknown> }
     try {
       stream = (await agent.stream(modelMessages as never, {
-        maxSteps: MAX_STEPS,
+        maxSteps: settings.maxSteps ?? DEFAULT_MAX_STEPS,
         abortSignal: controller.signal,
         modelSettings: {
           // mastra 侧同样默认不限时；只设 firstChunkMs（见 timeouts.ts）

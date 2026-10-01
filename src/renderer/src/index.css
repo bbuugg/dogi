@@ -295,7 +295,7 @@
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  animation: reasoning-shimmer 1.9s ease-in-out infinite;
+  animation: reasoning-shimmer 1.5s ease-in-out reverse infinite;
 }
 
 /* 关掉动效的系统偏好：退回纯色 —— 不这么做文字会一直是透明的（渐变靠裁剪显示，没有动画就等于不显示） */

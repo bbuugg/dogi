@@ -6,7 +6,6 @@
  * 仍然与 Electron 解耦：只依赖 ai / zod / node 内置模块，随主进程一起打包。
  */
 export {
-  MAX_STEPS,
   buildAgentSystemPrompt,
   toModelMessages,
   adaptAgentPart,

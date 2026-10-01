@@ -115,35 +115,80 @@ function normalizeDeltaToolCalls(delta: Record<string, unknown>): boolean {
  * 所以这里在 fetch 层做一次字段改名，再交给 deepseek 的 chat 模型解析 ——
  * 既不用自己实现整套 OpenAI 协议，也不依赖具体是哪个网关。
  */
-export function normalizeReasoningFetch(
-  ...args: Parameters<typeof globalThis.fetch>
-): ReturnType<typeof globalThis.fetch> {
-  return globalThis.fetch(...args).then((res) => {
-    const contentType = res.headers.get('content-type') ?? ''
-    if (!res.body || !contentType.includes('text/event-stream')) return res
+/**
+ * undici 的 fetch 默认带 `bodyTimeout = 300000ms`（5 分钟「不活动超时」）：
+ * 流式响应只要 5 分钟内没收到新 chunk，undici 就直接 `terminate` 连接，
+ * 上层看到的是 `TypeError: terminated` → `read ECONNRESET`，且响应头一切正常
+ * （status=200、content-type: text/event-stream）—— 正是「流开了一半被掐」的样子。
+ * 长任务（写大文件、多轮工具、模型长思考停顿）极易踩到。
+ *
+ * ⚠️ 这里**故意不接代理 / 跳过 TLS**：`AiModelConfig` 上从来没有 `proxy` /
+ * `rejectUnauthorized` 这两个字段（它们在 `ApiHttpRequest` / `WsConnectOptions` 上，
+ * 是接口调试用的），设置页也没给模型配置开过这两个输入 —— 早先这里按「配置里有」
+ * 写了 `getDispatcher()`，结果两个分支永远走不到（恒 `undefined`），还把
+ * `typecheck:node` 弄挂（`build` → `typecheck` → `typecheck:node`，直接阻断构建）。
+ * 真要给模型请求加代理，得先把字段加到 `AiModelConfig` + 设置页表单 + 存储，
+ * 别只在这里读一个不存在的字段。
+ */
 
-    let buffer = ''
-    const stream = res.body.pipeThrough(
-      new TransformStream<Uint8Array, Uint8Array>({
-        transform(chunk, controller) {
-          buffer += sseDecoder.decode(chunk, { stream: true })
-          const lines = buffer.split('\n')
-          // 最后一段可能是被切断的半行，留在缓冲里等下一块
-          buffer = lines.pop() ?? ''
-          if (!lines.length) return
-          controller.enqueue(sseEncoder.encode(lines.map(rewriteSseLine).join('\n') + '\n'))
-        },
-        flush(controller) {
-          if (buffer) controller.enqueue(sseEncoder.encode(rewriteSseLine(buffer)))
-        }
-      })
-    )
-    const headers = new Headers(res.headers)
-    // 体积/编码已变，留着会让上层按错误的长度或压缩方式解析
-    headers.delete('content-length')
-    headers.delete('content-encoding')
-    return new Response(stream, { status: res.status, statusText: res.statusText, headers })
-  })
+/** 浏览器 UA：部分 CDN / WAF 会对「脚本 UA」的长 SSE 流做限制或重置连接 */
+const AI_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+
+/** 给 AI 请求构造 fetch 选项：关掉流式空闲超时 + 补浏览器 UA */
+function buildAIFetchOptions(init?: RequestInit): RequestInit {
+  const opts: Record<string, unknown> = { ...init, headersTimeout: 0, bodyTimeout: 0 }
+  const headers = new Headers(init?.headers)
+  if (!headers.has('user-agent')) headers.set('user-agent', AI_USER_AGENT)
+  opts.headers = headers
+  return opts as RequestInit
+}
+
+function boundFetch() {
+  return (
+    input: Parameters<typeof globalThis.fetch>[0],
+    init?: Parameters<typeof globalThis.fetch>[1]
+  ): ReturnType<typeof globalThis.fetch> => globalThis.fetch(input, buildAIFetchOptions(init))
+}
+
+/** 只关超时 + 补 UA 的流式 fetch（不重写 SSE），给不需要字段归一化的 provider 用 */
+export function streamingFetch() {
+  return boundFetch()
+}
+
+export function normalizeReasoningFetch() {
+  const base = boundFetch()
+  return (
+    input: Parameters<typeof globalThis.fetch>[0],
+    init?: Parameters<typeof globalThis.fetch>[1]
+  ): ReturnType<typeof globalThis.fetch> =>
+    base(input, init).then((res) => {
+      const contentType = res.headers.get('content-type') ?? ''
+      if (!res.body || !contentType.includes('text/event-stream')) return res
+
+      let buffer = ''
+      const stream = res.body.pipeThrough(
+        new TransformStream<Uint8Array, Uint8Array>({
+          transform(chunk, controller) {
+            buffer += sseDecoder.decode(chunk, { stream: true })
+            const lines = buffer.split('\n')
+            // 最后一段可能是被切断的半行，留在缓冲里等下一块
+            buffer = lines.pop() ?? ''
+            if (!lines.length) return
+            controller.enqueue(sseEncoder.encode(lines.map(rewriteSseLine).join('\n') + '\n'))
+          },
+          flush(controller) {
+            if (buffer) controller.enqueue(sseEncoder.encode(rewriteSseLine(buffer)))
+          }
+        })
+      )
+      const headers = new Headers(res.headers)
+      // 体积/编码已变，留着会让上层按错误的长度或压缩方式解析
+      headers.delete('content-length')
+      headers.delete('content-encoding')
+      return new Response(stream, { status: res.status, statusText: res.statusText, headers })
+    })
 }
 
 /**
@@ -158,19 +203,27 @@ export function resolveModel(config: AiModelConfig, modelId?: string): LanguageM
   const model = modelId || config.model
   switch (config.kind) {
     case 'anthropic': {
-      const provider = createAnthropic({ apiKey: config.apiKey, baseURL: config.baseURL })
+      const provider = createAnthropic({
+        apiKey: config.apiKey,
+        baseURL: config.baseURL,
+        fetch: streamingFetch()
+      })
       return provider(model)
     }
     case 'deepseek': {
       const provider = createDeepSeek({
         apiKey: config.apiKey,
         baseURL: config.baseURL,
-        fetch: normalizeReasoningFetch
+        fetch: normalizeReasoningFetch()
       })
       return provider(model)
     }
     case 'google': {
-      const provider = createGoogleGenerativeAI({ apiKey: config.apiKey, baseURL: config.baseURL })
+      const provider = createGoogleGenerativeAI({
+        apiKey: config.apiKey,
+        baseURL: config.baseURL,
+        fetch: streamingFetch()
+      })
       return provider(model)
     }
     case 'openai-compatible': {
@@ -179,14 +232,14 @@ export function resolveModel(config: AiModelConfig, modelId?: string): LanguageM
         const provider = createOpenAI({
           apiKey: config.apiKey ?? 'EMPTY',
           baseURL: config.baseURL,
-          fetch: normalizeReasoningFetch
+          fetch: normalizeReasoningFetch()
         })
         return provider.responses(model)
       }
       const provider = createDeepSeek({
         apiKey: config.apiKey ?? 'EMPTY',
         baseURL: config.baseURL,
-        fetch: normalizeReasoningFetch
+        fetch: normalizeReasoningFetch()
       })
       return provider(model)
     }
@@ -198,7 +251,7 @@ export function resolveModel(config: AiModelConfig, modelId?: string): LanguageM
         apiKey: config.apiKey ?? 'EMPTY',
         baseURL: config.baseURL,
         // 官方不会发 type:"" 这种脏数据，但用户可能把 kind:'openai' 指向兼容网关
-        fetch: normalizeReasoningFetch
+        fetch: normalizeReasoningFetch()
       })
       return style === 'responses' ? provider.responses(model) : provider.chat(model)
     }

@@ -16,6 +16,7 @@ import type {
   AgentBackend,
   AgentChatMessage,
   AgentConfirmRequest,
+  ContextCompression,
   AgentConversation,
   AgentStreamEvent,
   AgentWorkspace,
@@ -322,6 +323,11 @@ export interface AiChatState {
   configId?: string
   /** 配置下的具体模型 id（配置挂了多个模型时按会话选择）；缺省用配置的默认模型 */
   modelId?: string
+  /**
+   * 最近一次上下文压缩的通知（只用于顶部提示一条，**不进消息历史**）。
+   * 发新的一轮时由主进程重新覆盖；压缩没触发时为 undefined。
+   */
+  contextNotice?: ContextCompression
 }
 
 export function emptyAiChat(): AiChatState {
@@ -339,10 +345,30 @@ export interface AgentRunState {
   /** 进行中的对话请求 id（用于事件路由与中止） */
   requestId: string | null
   error: string | null
+  /** 本轮是否因可重试的网络错误（如网关中途断流 ECONNRESET）失败，供界面给出「重试」入口 */
+  retryable?: boolean
+  /**
+   * 最近一次上下文压缩的通知（只用于顶部提示一条，**不进消息历史**）。
+   * 压缩只改「这一次请求怎么带上下文」，屏幕上的历史始终是原文。
+   */
+  contextNotice?: ContextCompression
 }
 
 export function emptyAgentRun(): AgentRunState {
   return { streaming: false, requestId: null, error: null }
+}
+
+/**
+ * 待发送队列里的一条消息（会话进行中用户继续发的内容）。
+ *
+ * 形态参考 fishwork 的 `QueuedMessage`。**只活在内存里**：它和输入框里没发出去的草稿
+ * 是同一类「还没交给 agent 的输入」，跟着会话走但不落盘（`AgentConversation` 只存真正
+ * 发出去的消息）。
+ */
+export interface QueuedAgentMessage {
+  id: string
+  text: string
+  createdAt: number
 }
 
 // ---------------------------------------------------------------------------
@@ -863,6 +889,13 @@ export interface AgentSlice {
   acpStates: Record<string, AcpConversationState>
   /** 正在回放历史的 ACP 会话（key = conversationId），供会话页显示加载态 */
   acpLoading: Record<string, boolean>
+  /**
+   * **待发送队列**（key = conversationId）：会话进行中用户继续发的消息先排在这里，
+   * 本轮自然结束后由 `pumpAgentQueue` 按顺序接上（见 `submitAgentMessage`）。
+   *
+   * 按会话隔离：两个会话各跑各的，互不串队。
+   */
+  agentQueues: Record<string, QueuedAgentMessage[]>
   /** Agent 确认模式下等待用户处理的命令执行请求（key 为确认 id） */
   agentPendingConfirms: Record<string, AgentConfirmRequest>
   followupRequests: Record<string, AskFollowupRequest>
@@ -944,6 +977,8 @@ export interface AgentSlice {
   deleteAgentMessagesFrom: (messageId: string, conversationId: string) => Promise<void>
   /** 编辑后重发：删掉这条及其之后的全部消息，再用新文本重新发起这一轮 */
   resendAgentMessage: (messageId: string, text: string, conversationId: string) => Promise<void>
+  /** 断流重试：找到该 assistant 消息前一条用户消息，删掉它及其之后、用原文本重发这一轮 */
+  retryAgentTurn: (conversationId: string, assistantMessageId: string) => Promise<void>
   /**
    * 发出该会话的一条用户消息。
    *
@@ -951,6 +986,19 @@ export interface AgentSlice {
    * 落盘 —— 一条草稿在此之前不进列表、也不落盘（见 `isDraftConversation`）。
    */
   sendAgentMessage: (text: string, conversationId: string) => Promise<void>
+  /**
+   * **用户点发送时走的入口**：会话空闲就直接发，正在跑就排进 `agentQueues`。
+   * `sendAgentMessage` 是「一定真的发一轮」的底层动作，不含入队判断。
+   */
+  submitAgentMessage: (text: string, conversationId: string) => Promise<void>
+  /** 把一条消息追加到该会话的待发送队列 */
+  enqueueAgentMessage: (text: string, conversationId: string) => void
+  /** 从队列里删掉一条 */
+  removeQueuedAgentMessage: (id: string, conversationId: string) => void
+  /** 立刻发送队列里的某一条（摘出来马上开新一轮；会话正在跑则忽略） */
+  sendQueuedAgentMessage: (id: string, conversationId: string) => Promise<void>
+  /** 队列泵：会话空闲且队列非空时弹出第一条接着发（本轮结束时 / 切到空闲会话时调用） */
+  pumpAgentQueue: (conversationId: string) => void
   /** 中止指定会话的对话（必传，理由同 `sendAgentMessage`） */
   abortAgent: (conversationId: string) => Promise<void>
   handleAgentEvent: (requestId: string, event: AgentStreamEvent) => void

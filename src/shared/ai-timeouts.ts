@@ -11,6 +11,9 @@ export const DEFAULT_CONFIRM_TIMEOUT_MS = 0
 /** 模型请求「首个内容块」的缺省超时：5 分钟（与 Node fetch 自身的响应头超时持平） */
 export const DEFAULT_MODEL_TIMEOUT_MS = 5 * 60 * 1000
 
+/** Agent 单轮对话允许的最大工具调用步数（AI SDK 的 `maxSteps`） */
+export const DEFAULT_MAX_STEPS = 500
+
 /**
  * 审批等待的可选档位（确认模式下等用户点「允许 / 拒绝」的时长）。
  *

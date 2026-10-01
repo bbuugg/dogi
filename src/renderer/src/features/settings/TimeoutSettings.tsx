@@ -1,11 +1,12 @@
 import {
   CONFIRM_TIMEOUT_OPTIONS,
   DEFAULT_CONFIRM_TIMEOUT_MS,
+  DEFAULT_MAX_STEPS,
   DEFAULT_MODEL_TIMEOUT_MS,
   MODEL_TIMEOUT_OPTIONS
 } from '@shared/ai-timeouts'
 import { useAppStore } from '@/stores/app-store'
-import { Select } from 'antd'
+import { InputNumber, Select } from 'antd'
 
 /** 下拉宽度与终端设置里的一致，两个设置项看上去才是同一套 */
 const SELECT_WIDTH = 224
@@ -25,6 +26,7 @@ export function TimeoutSettings() {
   const saveAiSettings = useAppStore((s) => s.saveAiSettings)
   const confirmMs = aiSettings.confirmTimeoutMs ?? DEFAULT_CONFIRM_TIMEOUT_MS
   const modelMs = aiSettings.modelTimeoutMs ?? DEFAULT_MODEL_TIMEOUT_MS
+  const maxSteps = aiSettings.maxSteps ?? DEFAULT_MAX_STEPS
 
   return (
     <div className="space-y-5">
@@ -57,6 +59,22 @@ export function TimeoutSettings() {
           onChange={(v) => void saveAiSettings({ modelTimeoutMs: v })}
           style={{ width: SELECT_WIDTH }}
           options={MODEL_TIMEOUT_OPTIONS}
+        />
+      </div>
+
+      <div className="rounded-md">
+        <div className="text-sm font-medium">工具调用最大步数</div>
+        <p className="mt-1 mb-3 text-xs leading-4 text-muted-foreground">
+          AI SDK 单轮对话内允许连续调用工具（执行命令 / 读写文件等）的最大次数。达到上限后
+          即使还有未完成的工具调用也会停止本轮。默认 500，复杂任务需要多步编排时可调大。
+        </p>
+        <InputNumber
+          aria-label="工具调用最大步数"
+          min={1}
+          max={10000}
+          value={maxSteps}
+          onChange={(v) => void saveAiSettings({ maxSteps: v ?? DEFAULT_MAX_STEPS })}
+          style={{ width: SELECT_WIDTH }}
         />
       </div>
     </div>

@@ -17,7 +17,6 @@ import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import type { ToolSet } from 'ai'
 import {
-  MAX_STEPS,
   buildAgentSystemPrompt,
   buildAgentTools,
   createAgentFileState,
@@ -31,8 +30,11 @@ import type {
   BrowserChannel
 } from '@shared/types'
 import { resolveModel } from './ai'
+import { compressContext } from './context'
 import { askFollowupBroker, buildAskFollowupTool } from './ask-followup'
 import { armConfirmTimeout, modelRunTimeout } from './timeouts'
+import { DEFAULT_MAX_STEPS } from '@shared/ai-timeouts'
+import { describeError, isRetryableNetworkError } from './error-utils'
 import { skillsForAgent } from './skills'
 import { findGitBash } from '../terminal/shells'
 import { ASK_FOLLOWUP_HINT } from '@shared/ask-followup'
@@ -77,11 +79,6 @@ function appBrowserTools(req: AgentChatRequest, workspacePath: string, mcpTools:
 export interface AgentConfirmSink {
   request(req: AgentConfirmRequest): void
   resolved(id: string): void
-}
-
-function describeError(err: unknown): string {
-  if (err instanceof Error) return err.message
-  return String(err)
 }
 
 /** 将 Mastra 流事件转换为 Agent 流事件。
@@ -309,9 +306,27 @@ class AgentService extends EventEmitter {
       ...buildAskFollowupTool(requestId)
     }
     const hasBrowser = Object.keys(tools).some((k) => k.startsWith('browser_'))
-    const model = resolveModel(config)
+    // ⚠️ 必须带上 req.modelId：会话在「同一配置下切换具体模型」时，modelId 是用户选的，
+    // 不传就回退到配置的默认模型 —— 表现为「切换模型不生效，请求还在用旧模型」。
+    const model = resolveModel(config, req.modelId)
     const historyLimit = config.contextMessages ?? 20
-    const modelMessages = toModelMessages(req.history.slice(-historyLimit))
+    // 两道独立的闸：先按**条数**截断（contextMessages），再按**token**压缩（contextBudget）。
+    // 压缩只改「这一次请求怎么带上下文」，不碰落盘的历史（屏幕上的原文始终可翻可复制）。
+    const { messages: modelMessages, compressed } = await compressContext(
+      toModelMessages(req.history.slice(-historyLimit)),
+      {
+        budget: config.contextBudget,
+        model: config,
+        modelId: req.modelId,
+        signal: controller.signal
+      }
+    )
+    if (compressed) {
+      // ⚠️ 必须延后到 invoke 回包之后（见 ipc/agent.ts 的注释）：此刻 requestId 还没登记进
+      // chatConversations，广播出去的事件渲染端认不出归属、会被整条丢掉。
+      const info = compressed
+      setTimeout(() => this.emitEvent(requestId, { type: 'context-compressed', info }), 0)
+    }
 
     const { Agent } = await import('@mastra/core/agent')
     const agent = new Agent({
@@ -328,7 +343,7 @@ class AgentService extends EventEmitter {
     let stream: { fullStream: AsyncIterable<unknown>; usage?: Promise<unknown> }
     try {
       stream = (await agent.stream(modelMessages as never, {
-        maxSteps: MAX_STEPS,
+        maxSteps: settings.maxSteps ?? DEFAULT_MAX_STEPS,
         abortSignal: controller.signal,
         modelSettings: {
           // mastra 侧同样默认不限时；只设 firstChunkMs（见 timeouts.ts）
@@ -404,7 +419,18 @@ class AgentService extends EventEmitter {
       }
       this.emitEvent(requestId, { type: 'finish', finishReason: 'done' })
     } catch (err) {
-      this.emitEvent(requestId, { type: 'error', message: describeError(err) })
+      const elapsed = firstTokenAt ? Date.now() - firstTokenAt : -1
+      console.error(
+        `[agent] 流式对话中断 requestId=${requestId} ` +
+          `首块时间=${firstTokenAt || '未输出任何文本'} ` +
+          `流已持续=${elapsed >= 0 ? elapsed + 'ms' : 'N/A'} ` +
+          `(负值=首块前就断，多为鉴权/请求被拒；正值=输出中途断，多为连接/网关超时断流)`
+      )
+      this.emitEvent(requestId, {
+        type: 'error',
+        message: describeError(err),
+        retryable: isRetryableNetworkError(err)
+      })
       this.emitEvent(requestId, { type: 'finish', finishReason: 'error' })
     } finally {
       this.clearPendingConfirms(requestId)

@@ -735,6 +735,26 @@ ACP 是「别人的 agent 在别人的进程里管自己的会话」。本应用
 - 验证：`scripts/verify-api-body-types.mjs`（主进程真源码 + 进程内 HTTP 服务器，逐字节比对文件内容）、
   `scripts/verify-api-body-ui.mjs`（真界面点选 / 填表 / 选本地文件 / 发送 / 落盘回读）。
 
+### 4.20 上下文压缩 + 会话累计 token：压缩只改「这一次请求」，不改历史
+
+移植自 fishwork（`packages/agent/src/context.ts`）。**两道独立的闸**，顺序固定：
+先按**条数**截断（`AiModelConfig.contextMessages`，缺省 20），再按 **token** 预算压缩
+（`AiModelConfig.contextBudget`，缺省 80k，设置页可填）。两道都过不了的极端情况（单轮就超预算）不压缩。
+
+- **按轮摘要而不是按 token 滑窗**：滑窗从中间切断 tool-call / tool-result 会破坏协议
+  （tool 消息必须紧跟它的 assistant），按轮切天然合法；代价是粒度粗，但摘要也是模型做的。
+- ⚠️ **压缩结果不落盘、不改会话记录**：它只决定「这一次 `agent.stream()` 带哪些消息」，
+  屏幕上的历史始终是原文（可翻 / 可复制 / 可编辑重发）。所以**会话累计 token 是现算的**
+  （`@shared/agent-usage` 的 `sumUsage`），不在会话上另存累计字段 —— 另存就多出一个可能与消息对不上的副本。
+- **摘要失败 → 回退成截断**（`truncated: true`）：保证请求还能发出去，不会因为一次摘要失败把整轮搞挂；
+  界面如实写「摘要失败，旧轮已截断丢弃」，不假装细节还在。
+- 事件 `context-compressed` 只是**通知**，不进消息 parts。⚠️ 必须 `setTimeout(…, 0)` 延后再发：
+  此刻 requestId 还没登记进 `chatConversations` / 渲染端的 `aiRequestSessions`，直接广播会被整条丢掉（同 4.2）。
+- 两条提示条（`ConversationUsageBar`）粘在消息列**顶部**：累计 token 与压缩通知都是「关于整段会话」的元信息。
+  ACP 会话不参与（历史由 agent 自己管，`messages` 恒空）。
+- 验证：`scripts/verify-context-compression.mjs`（`.tooltest` 包装跑真源码，覆盖不超预算零拷贝、
+  切轮边界、摘要失败回退、非法预算；摘要成功路径要真调模型，属集成验证）。
+
 ---
 
 ## 五、验证工具链
@@ -803,6 +823,7 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 | `scripts/verify-agent-conversation-model.mjs` | Agent 会话「形态 / 模型选择」的持久化：**真启动两次应用**（同一 `--user-data-dir`）—— 保存带 `modelId` 读得回、不带 `modelId` 再存时保留旧值（`in` 语义）、显式 `undefined` 才清空、重启后 `kind` / `modelId` / `configId` 仍在；**ACP 会话**的 `acpAgentId` / `acpSessionId` 落盘、不带 `kind` 再存时绑定保留、**消息恒为空**（哪怕传了消息） |
 | `scripts/verify-agent-acp-import.mjs` | AI Agent 侧边栏 + ACP 会话「登记 → 新建/导入 → 回放」的界面链路（隔离实例 + CDP，见 4.3 / 4.18）：工作区行尾只有一个「更多操作」下拉（导入 / 新建会话 / 重命名 / 删除）→ **「新建会话」是草稿**：`kind` 为 undefined、**不进侧边栏列表**、页面上写明「发出第一条消息才建会话」、同一工作区连点两次是同一个空页 → 选内置模型只写草稿 → 发首条消息转正（标题取那条消息、`mastra`、进列表）→ **导入弹窗只做 选 agent / 拉取会话 / 导入**（无检测 / 手动添加 / 新建会话按钮），无 agent 时提示、footer「ACP 设置」打开设置弹窗并定位到 ACP agent 分组、「拉取会话」对起不来的 agent 有反馈 → 用**真实路径**建 ACP 草稿（新建会话 + `setAcpConversationModel` 预置 agent）→ 模型下拉只列**设置里勾选的**模型、**宽度被限死** → `history` 事件渲染成消息流、**正文不被折进折叠条**（注入 `[思考, 工具, 正文, 工具, 工具]`：正文在折叠体**外面**、纯工具轮次无复制按钮，见 6.6 第 34 条）、ACP 没有「编辑重发」入口 → ACP 草稿发首条消息转正（`acp` + 绑定带上、消息不落盘、进列表）、无草稿残留 → **标签右键菜单**：一级只有「关闭标签」，其余关闭方式收进「关闭」二级。⚠️ 断言列表行数要用 `[data-conversation-id]`（store 条数含草稿）；模型下拉要取**可见标签**里那个（每个标签各渲染一份，隐藏的那份选项按它自己的会话算，会是「暂无数据」）；**悬停展开 antd 子菜单**：真鼠标移动推不出 React 的 `onMouseEnter`，要对标题元素派发**带 `relatedTarget` 的 mouseover**；子菜单弹出层类名是 `.ant-dropdown-menu-submenu-popup`（不是老的 submenu-popup）；合成 contextmenu 没有 clientX/Y，右键要用 `Input.dispatchMouseEvent` 真事件（菜单弹在 (0,0) 会让后续坐标全错）；见 5.1 的「隔离实例首帧不提交」坑（探针里要先 `bringToFront` + `reload`） |
 | `scripts/verify-skills.mjs` | 技能发现（含 junction 安装）、无 frontmatter 退化、额外根目录、设置页渲染与开关落盘 |
+| `scripts/verify-context-compression.mjs` | 上下文压缩与会话累计（见 4.20）：`.tooltest` 包装直接跑 `services/ai/context.ts` 与 `@shared/agent-usage` **真源码** —— `estimateTokens` 口径、未超预算**零拷贝**、空历史、单轮超预算不压缩、摘要失败回退截断（含 `truncated` 标记与占位说明）、保留比例决定留几轮、非法预算回退默认值；累计 token 累加 / `totalTokens` 不反推 / 缺字段不产生 NaN。⚠️ 摘要失败用例靠**指向本机没人监听的端口**（`127.0.0.1:1`）触发，不碰外网 |
 | `scripts/check-missing-color-utils.mjs` | 扫描产物 CSS，找出「语义色令牌漏映射导致整族工具类没生成」 |
 | `scripts/shot-titlebar.mjs` | 强制 hover 截图 + 计算样式，查标题栏配色 |
 | `scripts/browser-input.test.ts` | 浏览器面板的坐标映射纯函数（`object-contain` 留白 / 画面矩形 / 黑边丢点 / 滚轮）。**能直接跑**：`node --experimental-strip-types scripts/browser-input.test.ts`（被测文件只有 type-only import，不需要 `.tooltest` 包装） |

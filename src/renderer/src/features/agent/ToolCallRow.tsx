@@ -102,6 +102,12 @@ export function toolRunStatus(args: {
 /**
  * 状态以**图标**呈现（文字太占位，横条右侧只留一个记号），`label` 只做 hover 提示
  * 与无障碍名称。running 的图标自转（见下方 render）。
+ *
+ * ⚠️ 全部图标统一 `size-4`（与行首工具图标、右侧展开箭头同尺寸）：之前状态图标是
+ * `size-3.5`，它与 16px 的两个邻居**名义尺寸和描边粗细**（lucide 描边 = 2 × 尺寸/24）
+ * 都差一档 —— 三个图标摆一行时它看着又小又轻，跟左边的文字不在一个「视觉尺寸」上。
+ * 行内垂直居中由 CollapsibleRow 的 `items-center` 负责（实测各项中心完全对齐），
+ * 这里要保的是**光学尺寸一致**，不是靠再挪几像素去补。
  */
 const STATUS_META: Record<ToolRunStatus, { label: string; Icon: LucideIcon; cls: string }> = {
   pending: { label: '待批准', Icon: Clock, cls: 'text-amber-600 dark:text-amber-400' },
@@ -127,7 +133,14 @@ const ARG_KEYS = [
   'sessionId'
 ]
 
-/** 从工具入参里挑一个最能说明「这次在干什么」的字符串（横条中间那段等宽预览） */
+/**
+ * 从工具入参里挑一个最能说明「这次在干什么」的字符串（横条上工具名右侧那段等宽预览）。
+ *
+ * ⚠️ 找不到可读的字符串时返回**空串**而不是 `JSON.stringify(obj)`：像
+ * `ask_followup_question` 的 `{questions:[…]}`、或 `{limit:500}` 这种纯结构化入参，
+ * 序列化出来是几百字符的 JSON 噪声，截断后也读不出什么。横条上留个工具名就够 ——
+ * 完整入参在展开体的「参数」段里一直都在。
+ */
 export function toolArgPreview(input: unknown): string {
   if (input == null) return ''
   if (typeof input === 'string') return input
@@ -142,12 +155,11 @@ export function toolArgPreview(input: unknown): string {
     }
   }
   const first = Object.values(obj).find((v) => typeof v === 'string' && v.trim())
-  return typeof first === 'string' ? first : JSON.stringify(obj)
+  return typeof first === 'string' ? first : ''
 }
 
-/** 命令类工具不在横条上放参数预览：命令往往又长又绕，收起时只留工具名更清爽，
- *  命令全文展开看「参数」段仍然完整可见 */
-const NO_PREVIEW_TOOLS = new Set(['execute_command', 'run_in_terminal'])
+/** 超过这个长度才给预览挂 Tooltip：短值（路径 / 文件名）横条上本来就完整可见，弹提示是多余的 */
+const PREVIEW_TOOLTIP_MIN = 40
 
 /**
  * 展开体里**不显示「参数」段**的工具：参数要么在横条预览里已经写明，要么毫无信息量，
@@ -185,7 +197,7 @@ function clip(text: string): string {
 /**
  * 工具调用横条（参考 ainav/sdk 的 ToolCallBlock，样式全部 Tailwind 重写）。
  *
- * 收起时就是一行：[工具图标] [中文名] [主参数预览] [状态图标] [›]；
+ * 收起时就是一行：[工具图标] [中文名] [入参预览（截断）] [状态图标]；
  * 展开后：
  * - **改文件的工具**（write_file / edit_file / delete_file）显示 git 风格的**前后对比**，
  *   不显示原始入参 / 结果 —— 参数里是整份文件内容，读起来毫无意义（见 tool-file-diff.ts）；
@@ -235,9 +247,7 @@ export function ToolCallRow({
   const inputText = hideParams || input == null ? '' : clip(formatJson(input))
   const errorText = isError ? clip(formatJson(output)) : ''
   const outputText = fileDiff || isError || output === undefined ? '' : clip(formatJson(output))
-  const preview = NO_PREVIEW_TOOLS.has(toolName)
-    ? ''
-    : toolArgPreview(input).replace(/\s+/g, ' ')
+  const preview = toolArgPreview(input).replace(/\s+/g, ' ')
   const hasBody = Boolean(fileDiff || inputText || errorText || outputText || confirm)
 
   return (
@@ -246,6 +256,10 @@ export function ToolCallRow({
       open={open}
       onOpenChange={setOpen}
       expandable={hasBody}
+      // 「调用中」不画右侧展开箭头：还在跑的时候展开体里只有入参、没有结果可看，
+      // 箭头纯属噪音（自转的状态图标已经把「进行中」说清楚了）；拿到结果（成功/失败）
+      // 才出现箭头，提示那时才有值得展开的东西。仅隐藏箭头，可展开性不变。
+      showChevron={status !== 'running'}
       bodyClassName="flex flex-col gap-2"
       icon={
         <Icon
@@ -279,21 +293,30 @@ export function ToolCallRow({
         </>
       }
     >
-      {/* 工具名 vs 参数预览：**只有预览吃溢出**。
+      {/* 工具名 vs 入参预览：**只有预览吃溢出**。
           ⚠️ 名字必须是 shrink-0 —— 否则长预览（命令、路径、URL…）会把名字一起挤扁成省略号，
           看起来像「工具名被截断」；名字自身用 max-w 封顶（未知工具名可能很长）。
           配色：工具名/预览都比正文浅一档（正文是 foreground，这里 muted 系）——
-          工具调用是「过程」，不该和正文抢注意力。 */}
+          工具调用是「过程」，不该和正文抢注意力。
+
+          执行状态图标在预览**之后**（本行的最右端，展开箭头之前）：命令有多长都不影响它
+          待在末尾 —— 预览 min-w-0 truncate 吃溢出，图标 shrink-0 不参与收缩。
+          预览超长时挂 Tooltip 给全文（截断只是 CSS，DOM 里文本是完整的）。 */}
       <span className="max-w-[10rem] shrink-0 truncate font-medium text-muted-foreground">
         {toolLabel(toolName)}
       </span>
       {preview && (
-        <span className="min-w-0 truncate font-mono text-xs text-muted-foreground/70">
-          {preview}
-        </span>
+        <Tooltip title={preview.length > PREVIEW_TOOLTIP_MIN ? preview : undefined}>
+          <span
+            data-tool-preview
+            className="min-w-0 truncate font-mono text-xs text-muted-foreground/70"
+          >
+            {preview}
+          </span>
+        </Tooltip>
       )}
       <Tooltip title={meta.label}>
-        <StatusIcon aria-label={meta.label} className={cn('size-3.5 shrink-0', meta.cls)} />
+        <StatusIcon aria-label={meta.label} className={cn('size-4 shrink-0', meta.cls)} />
       </Tooltip>
     </CollapsibleRow>
   )

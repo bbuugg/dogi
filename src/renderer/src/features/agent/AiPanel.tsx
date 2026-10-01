@@ -7,6 +7,8 @@ import { ReasoningPanel } from '@/features/agent/ReasoningPanel'
 import { TOOL_LABELS, ToolCallRow, toolRunStatus } from '@/features/agent/ToolCallRow'
 import { findTailStart, TurnFold, turnStepSummary } from '@/features/agent/turn-fold'
 import { TokenUsageRow } from '@/features/agent/TokenUsageRow'
+import { ConversationUsageBar } from '@/features/agent/ConversationUsageBar'
+import { sumUsage } from '@shared/agent-usage'
 import { TypingDots } from '@/features/agent/TypingDots'
 import {
   Conversation,
@@ -44,6 +46,7 @@ import {
   memo,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ComponentRef,
@@ -101,6 +104,8 @@ function buildRenderUnits(parts: AiMessagePart[]): RenderUnit[] {
     if (part.type === 'text') {
       units.push({ kind: 'text', text: part.text })
     } else if (part.type === 'reasoning') {
+      // 空 / 纯空白的思考块直接丢弃（与 AgentPage 同口径，注释见那里的 buildRenderUnits）
+      if (!part.text.trim()) continue
       const last = units[units.length - 1]
       if (last?.kind === 'reasoning') {
         last.text += part.text
@@ -130,7 +135,8 @@ function buildRenderUnits(parts: AiMessagePart[]): RenderUnit[] {
       }
     }
   }
-  return units
+  // 尾部 trim：模型常在段间吐 `\n\n`，思考结束（由展开转收起）的那一帧会多出几行空白
+  return units.map((u) => (u.kind === 'reasoning' ? { ...u, text: u.text.trimEnd() } : u))
 }
 
 /** 待批准的确认区（插在工具横条的展开体里）：终端命令必须先过这一关 */
@@ -430,6 +436,12 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   // 每个终端会话一个独立的 AI 对话：面板展示所属会话的上下文
   const chat = useAppStore((s) => (sessionId ? s.aiChats[sessionId] : undefined))
   const messages = chat?.messages ?? NO_MESSAGES
+  /** 会话累计 token（现算）与最近一次上下文压缩通知 */
+  const totalUsage = useMemo(
+    () => (messages.some((m) => m.usage) ? sumUsage(messages) : null),
+    [messages]
+  )
+  const contextNotice = chat?.contextNotice
   const aiStreaming = chat?.streaming ?? false
   const aiError = chat?.error ?? null
   const deleteAiMessagesFrom = useAppStore((s) => s.deleteAiMessagesFrom)
@@ -944,6 +956,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                 resetKey={`${sessionId ?? '__no_session__'}#${scrollResetSeq}`}
               >
                 <ConversationContent>
+                  {/* 会话累计 token + 上下文已压缩（与工作区 Agent 同款）*/}
+                  <ConversationUsageBar usage={totalUsage} notice={contextNotice} className="px-3" />
                   {messages.map((msg, index) => (
                     <div key={msg.id} data-message-id={msg.id} className="pb-3">
                       <MessageBubble

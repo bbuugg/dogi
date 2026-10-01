@@ -2,6 +2,7 @@ import { AgentFilesPanel } from '@/features/agent/AgentFilesPanel'
 import { AiMarkdown } from '@/features/agent/AiMarkdown'
 import { AskFollowupCard } from '@/features/agent/AskFollowupCard'
 import { BrowserPane } from '@/features/agent/BrowserPane'
+import { ConversationUsageBar } from '@/features/agent/ConversationUsageBar'
 import {
   Conversation,
   ConversationContent,
@@ -13,6 +14,7 @@ import { MessageCopyButton } from '@/features/agent/MessageCopyButton'
 import { MessageDeleteButton } from '@/features/agent/MessageDeleteButton'
 import { MessageEditButton } from '@/features/agent/MessageEditButton'
 import { MessageOutline } from '@/features/agent/MessageOutline'
+import { QueuedAgentMessages } from '@/features/agent/QueuedAgentMessages'
 import { ReasoningPanel } from '@/features/agent/ReasoningPanel'
 import { SidePanel, type SidePanelTab } from '@/features/agent/SidePanel'
 import { TokenUsageRow } from '@/features/agent/TokenUsageRow'
@@ -26,6 +28,7 @@ import { useTabEventBus } from '@/shared/lib/use-tab-event-bus'
 import { useInlineConfirm } from '@/shared/components/InlineConfirm'
 import { conversationKind, isDraftConversation, useAppStore } from '@/stores/app-store'
 import { ASK_FOLLOWUP_TOOL } from '@shared/ask-followup'
+import { sumUsage } from '@shared/agent-usage'
 import { DEFAULT_BROWSER_VIEWPORT, agentBrowserSessionId } from '@shared/browser'
 import type {
   AgentChatMessage,
@@ -60,7 +63,8 @@ import {
   Square,
   SquareTerminal,
   Terminal,
-  X
+  X,
+  RotateCcw
 } from 'lucide-react'
 import {
   type ComponentRef,
@@ -69,6 +73,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState
 } from 'react'
@@ -123,6 +128,11 @@ function buildRenderUnits(parts: AgentMessagePart[]): RenderUnit[] {
     if (part.type === 'text') {
       units.push({ kind: 'text', text: part.text })
     } else if (part.type === 'reasoning') {
+      // 空 / 纯空白的思考块直接丢弃：reasoning 是模型按需吐的（部分 provider 首包会给个空
+      // part、thinking 标签切换处也会插空段），留着会渲染成一个**纯空白的思考横条** ——
+      // 既看不见内容，又占一行高度与折叠条的「思考 ×N」计数。
+      // 「粘到上一块」的判断放在丢弃之后，所以后到的空白段不会截断前一段的合并。
+      if (!part.text.trim()) continue
       const last = units[units.length - 1]
       if (last?.kind === 'reasoning') {
         last.text += part.text
@@ -152,7 +162,9 @@ function buildRenderUnits(parts: AgentMessagePart[]): RenderUnit[] {
       }
     }
   }
-  return units
+  // 尾部 trim：模型常在段间吐 `\n\n`，思考结束（由展开转收起）的那一帧会多出几行空白，
+  // 表现为展开体底部突然长高一点。首部的缩进 / 换行是正文的一部分，不动。
+  return units.map((u) => (u.kind === 'reasoning' ? { ...u, text: u.text.trimEnd() } : u))
 }
 
 /**
@@ -213,7 +225,8 @@ function MessageBubbleImpl({
   onEdit,
   canDelete,
   tailCount,
-  pendingConfirm
+  pendingConfirm,
+  isLastAssistant
 }: {
   /** 本消息所属会话：删除要显式指定会话，不能靠 store 的「当前选中」兜底 */
   conversationId: string | null
@@ -228,6 +241,8 @@ function MessageBubbleImpl({
   /** 含本条在内、会被一起删掉的消息条数 */
   tailCount: number
   pendingConfirm: AgentConfirmRequest | null
+  /** 这条是否是会话里最后一条助手消息（仅它有权展示「断流重试」按钮） */
+  isLastAssistant?: boolean
 }) {
   const deleteAgentMessagesFrom = useAppStore((s) => s.deleteAgentMessagesFrom)
   const del =
@@ -277,6 +292,10 @@ function MessageBubbleImpl({
   const hasPendingFollowup = units.some(
     (u) => u.kind === 'tool' && u.call.toolName === ASK_FOLLOWUP_TOOL && !!followupRequests[u.call.toolCallId]
   )
+  // 本次失败是否「可重试的网络中断」：仅最后一条助手消息有权展示重试按钮，
+  // 避免历史里任何一条失败消息都冒出按钮（旧失败消息不是最后一条，自然不显示）
+  const chatRetryable = useAppStore((s) => s.agentRuns[conversationId ?? '']?.retryable)
+  const retryAgentTurn = useAppStore((s) => s.retryAgentTurn)
   const turnDone = message.role === 'assistant' && !streaming && !hasPendingFollowup
   const tailStart = turnDone ? findTailStart(units) : 0
   const foldedUnits = tailStart > 0 ? units.slice(0, tailStart) : null
@@ -351,6 +370,20 @@ function MessageBubbleImpl({
         {!streaming && <MessageCopyButton text={rawText} title="复制原文（Markdown）" />}
         {del}
       </div>
+      {(isLastAssistant && chatRetryable && message.role === 'assistant') && (
+        <div className="flex items-center gap-2 pt-1">
+          <Button
+            size="small"
+            icon={<RotateCcw className="size-3.5" />}
+            onClick={() => conversationId && void retryAgentTurn(conversationId, message.id)}
+          >
+            断流了，重试
+          </Button>
+          <span className="text-xs text-muted-foreground">
+            网关在流式响应中途断开了连接，可点此重发这一轮
+          </span>
+        </div>
+      )}
     </div>
   )
 }
@@ -473,6 +506,12 @@ export function AgentPage({
   const replaying = isAcp && conversationId ? (acpLoading[conversationId] ?? false) : false
   const streaming = run?.streaming ?? false
   const error = run?.error ?? null
+  /** 会话累计 token（现算，不存副本）与最近一次上下文压缩通知 */
+  const totalUsage = useMemo(
+    () => (messages.some((m) => m.usage) ? sumUsage(messages) : null),
+    [messages]
+  )
+  const contextNotice = run?.contextNotice
 
   // ---------- 关闭拦截 ----------
   // Agent 正在运行（streaming）时关闭标签会丢失上下文，所以拦截后在**本标签面板内**
@@ -531,7 +570,7 @@ export function AgentPage({
     }
     return null
   })
-  const sendAgentMessage = useAppStore((s) => s.sendAgentMessage)
+  const submitAgentMessage = useAppStore((s) => s.submitAgentMessage)
   const resendAgentMessage = useAppStore((s) => s.resendAgentMessage)
   const abortAgent = useAppStore((s) => s.abortAgent)
   const setSidebarCollapsed = useAppStore((s) => s.setSidebarCollapsed)
@@ -1113,8 +1152,11 @@ export function AgentPage({
   }, [])
 
   const handleSend = () => {
-    if (streaming || !input.trim() || !hasConfig || !conversationId) return
+    if (!input.trim() || !hasConfig || !conversationId) return
     const text = input
+    // 编辑重发只在空闲时可发：它会**先删掉**这条及其之后的消息，而 `sendAgentMessage`
+    // 在流式期间直接返回 —— 先删后发不出去就丢内容了（所以这里要在清输入框之前拦）
+    if (editing && streaming) return
     setInput('')
     // 自己发消息 / 编辑重发：让消息区瞬时落底（用户翻在上方也要回到底部）
     setScrollResetSeq((s) => s + 1)
@@ -1123,7 +1165,8 @@ export function AgentPage({
       setEditing(null)
       void resendAgentMessage(id, text, conversationId)
     } else {
-      void sendAgentMessage(text, conversationId)
+      // 正在跑就排进待发送队列（判定在 store 里），本轮自然结束后自动接上
+      void submitAgentMessage(text, conversationId)
     }
   }
 
@@ -1510,6 +1553,10 @@ export function AgentPage({
                 resetKey={`${conversationId ?? '__none__'}#${scrollResetSeq}`}
               >
                 <ConversationContent>
+                  {/* 会话累计 token + 上下文已压缩：粘在消息列顶部，随消息滚动（见 ConversationUsageBar）*/}
+                  <div className="mx-auto w-full max-w-3xl px-5">
+                    <ConversationUsageBar usage={totalUsage} notice={contextNotice} />
+                  </div>
                   {messages.map((m, index) => (
                     <div
                       key={m.id}
@@ -1528,6 +1575,7 @@ export function AgentPage({
                         canDelete={!streaming && !isAcp}
                         tailCount={messages.length - index}
                         pendingConfirm={pendingConfirm}
+                        isLastAssistant={index === messages.length - 1 && m.role === 'assistant'}
                       />
                     </div>
                   ))}
@@ -1575,6 +1623,16 @@ export function AgentPage({
                     'focus-within:border-primary/50 focus-within:bg-muted/70'
                   )}
                 >
+                  {/* 待发送队列作为 header 渲染在**同一张卡片内**，与输入框浑然一体 */}
+                  {conversationId && (
+                    <QueuedAgentMessages
+                      conversationId={conversationId}
+                      onEdit={(text) => {
+                        setInput(text)
+                        requestAnimationFrame(() => textareaRef.current?.focus())
+                      }}
+                    />
+                  )}
                   <Input.TextArea
                     ref={textareaRef}
                     value={input}
@@ -1593,19 +1651,22 @@ export function AgentPage({
                     placeholder={
                       editing
                         ? '改完按 Enter 重新发送（会先删除这条及其之后的全部消息）'
-                        : hasConfig
-                          ? `在「${active.name}」中描述你的任务…（Enter 发送 · Shift+Enter 换行）`
-                          : isAcp
+                        : !hasConfig
+                          ? isAcp
                             ? '这个会话绑定的 ACP agent 已被移除，请删除后重新导入'
                             : '请先在设置中配置 AI 模型'
+                          : streaming
+                            ? '本轮结束后接着发这条…（Enter 加入队列 · Shift+Enter 换行）'
+                            : `在「${active.name}」中描述你的任务…（Enter 发送 · Shift+Enter 换行）`
                     }
                     autoSize={{ minRows: 2, maxRows: 8 }}
                     variant="borderless"
                     className="agent-input max-h-52 w-full border-none bg-transparent px-3 py-2.5 text-[13px] shadow-none"
                   />
-                  {/* 工具行：权限在左，模型选择紧贴发送按钮（模型 + 发送/停止 一组靠右） */}
+                  {/* 工具行：权限在左，模型选择紧贴发送按钮（模型 + 发送/停止 一组靠右）。
+                      左侧权限按钮固定不挤，右侧整组可压缩（模型选择吸收挤压、按钮 shrink-0 保持原样） */}
                   <div className="flex items-center justify-between gap-2 px-2 py-1.5">
-                    <div className="flex min-w-0 items-center gap-0.5">
+                    <div className="flex shrink-0 items-center gap-0.5">
                       <Dropdown
                         trigger={['click']}
                         placement="topLeft"
@@ -1642,13 +1703,13 @@ export function AgentPage({
                         />
                       </Dropdown>
                     </div>
-                    <div className="flex shrink-0 items-center gap-1">
+                    <div className="flex min-w-0 items-center gap-1">
                       <McpConfigPopover />
                       <Select
                         size="small"
                         variant="borderless"
                         placement="topLeft"
-                        className="bare-select max-w-44"
+                        className="bare-select min-w-0 max-w-44 flex-1"
                         value={modelSelectValue}
                         onChange={(v) => handleModelSelect(v)}
                         placeholder="选择模型"
@@ -1658,27 +1719,26 @@ export function AgentPage({
                           <span className="block truncate">{modelNameOnly(opt.label)}</span>
                         )}
                       />
-                      {streaming ? (
+                      {streaming && (
                         <Button
                           type="text"
                           danger
                           icon={<Square className="size-4" />}
-                          title="停止生成"
+                          title="停止生成（已排队的消息会保留）"
                           className="shrink-0"
                           onClick={() => {
                             if (conversationId) void abortAgent(conversationId)
                           }}
                         />
-                      ) : (
-                        <Button
-                          type="text"
-                          icon={<Send className="size-4" />}
-                          disabled={!input.trim() || !hasConfig}
-                          title="发送"
-                          className="shrink-0"
-                          onClick={handleSend}
-                        />
                       )}
+                      <Button
+                        type="text"
+                        icon={<Send className="size-4" />}
+                        disabled={!input.trim() || !hasConfig}
+                        title={streaming ? '加入待发送队列' : '发送'}
+                        className="shrink-0"
+                        onClick={handleSend}
+                      />
                     </div>
                   </div>
                 </div>

@@ -8,10 +8,8 @@ import type { ModelMessage, TextPart, ToolCallPart, ToolResultPart } from 'ai'
 type ToolResultOutput = ToolResultPart['output']
 import { buildAgentTools, type AgentPermissionMode, type AgentToolOptions, type AgentFileState, type AgentFileSnapshot } from './tools'
 import { buildSkillsPromptSection, type AgentSkill } from './skills'
-import type { TurnUsage } from '@shared/types'
-
-/** Agent 单轮对话的最大工具步数（工作流比终端助手更长） */
-export const MAX_STEPS = 25
+import type { ContextCompression, TurnUsage } from '@shared/types'
+import { describeError } from '../error-utils'
 
 export type { AgentPermissionMode, AgentToolOptions, AgentFileState, AgentFileSnapshot, AgentSkill }
 export { buildAgentTools }
@@ -50,6 +48,8 @@ export type AgentStreamEvent =
     }
   /** 一轮结束时的用量统计（input/output/total tokens、tps、耗时等） */
   | { type: 'usage'; usage: TurnUsage }
+  /** 本轮请求发出前触发了上下文压缩（只是通知，不进消息历史） */
+  | { type: 'context-compressed'; info: ContextCompression }
   | { type: 'finish'; finishReason: string }
   | { type: 'error'; message: string }
 
@@ -185,11 +185,6 @@ export function toModelMessages(
     flush()
   }
   return messages
-}
-
-function describeError(err: unknown): string {
-  if (err instanceof Error) return err.message
-  return String(err)
 }
 
 /** 将 AI SDK 流事件转换为 Agent 流事件（兼容字段名差异） */

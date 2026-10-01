@@ -25,6 +25,7 @@ export {
   type PanelGroup,
   type AiChatState,
   type AgentRunState,
+  type QueuedAgentMessage,
   type TransferItem,
   type UiState,
   type AppStore,
@@ -329,6 +330,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
     acpLoading: {},
     agentPendingConfirms: {},
     followupRequests: {},
+    // 待发送队列：会话进行中继续发的消息排在这里（只存内存，见 QueuedAgentMessage）
+    agentQueues: {},
     workspaceConfigs: {},
 
     skills: [],
@@ -1859,6 +1862,16 @@ export const useAppStore = create<AppStore>()((set, get) => {
         return
       }
 
+      // 上下文压缩：只记一条通知供顶部提示，**不改历史**（屏幕上的原文始终保留）
+      if (event.type === 'context-compressed') {
+        set((s) => {
+          const chat = s.aiChats[sid]
+          if (!chat) return {}
+          return { aiChats: { ...s.aiChats, [sid]: { ...chat, contextNotice: event.info } } }
+        })
+        return
+      }
+
       if (event.type === 'finish') {
         aiRequestSessions.delete(requestId)
         set((s) => {
@@ -2024,6 +2037,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
       set((s) => {
         // 主进程已级联删掉该工作区的会话，本地同步一份
         const conversations = s.agentConversations.filter((c) => c.workspaceId !== id)
+        // 这些会话的待发送队列一并丢掉（会话没了，排着的消息无处可发）
+        const agentQueues = Object.fromEntries(
+          Object.entries(s.agentQueues).filter(([cid]) =>
+            conversations.some((c) => c.id === cid)
+          )
+        )
         const workspaceId =
           s.activeAgentWorkspaceId === id ? (workspaces[0]?.id ?? null) : s.activeAgentWorkspaceId
         const ensured = ensureConversation(conversations, workspaceId ?? '')
@@ -2033,6 +2052,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           agentWorkspaces: workspaces,
           agentConversations: ensured.conversations,
           workspaceConfigs,
+          agentQueues,
           activeAgentWorkspaceId: workspaceId,
           activeAgentConversationId: ensured.activeId,
           // 级联删掉的会话，它们的标签也要跟着关（否则停在「会话不存在」上）
@@ -2197,7 +2217,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       }
     },
 
-    selectAgentConversation: (id) =>
+    selectAgentConversation: (id) => {
       set((s) => {
         const conversation = s.agentConversations.find((c) => c.id === id)
         return {
@@ -2205,8 +2225,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
           // 标签化之后「选中会话」= 把它的标签带到前台（侧边栏点击走的就是这条）
           ...(conversation ? addOrFocusTab(s, agentTab(conversation)) : {})
         }
-      }),
-
+      })
+      // 切到一个已经跑完、但还排着消息的会话（比如上一轮是在别的会话里跑完的）→ 接着发
+      get().pumpAgentQueue(id)
+    },
     renameAgentConversation: async (id, title) => {
       const next = title.trim() || DEFAULT_CONVERSATION_TITLE
       set((s) => ({
@@ -2244,6 +2266,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
         const { [id]: _removedAcp, ...agentAcpMessages } = s.agentAcpMessages
         const { [id]: _removedState, ...acpStates } = s.acpStates
         const { [id]: _removedLoading, ...acpLoading } = s.acpLoading
+        // 待发送队列也跟着没（会话都没了，排着的消息无处可发）
+        const { [id]: _removedQueue, ...agentQueues } = s.agentQueues
         // 删的正是当前会话时，切到同工作区剩下的最近一个，没有就现建
         const ensured =
           s.activeAgentConversationId === id
@@ -2255,6 +2279,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           agentAcpMessages,
           acpStates,
           acpLoading,
+          agentQueues,
           activeAgentConversationId: ensured.activeId,
           // 会话没了，它的标签也跟着关
           ...closeMissingAgentTabs(s, new Set(ensured.conversations.map((c) => c.id)))
@@ -2308,7 +2333,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             // ACP：消息只进本地镜像（**不落盘**，那部分归 agent 自己管）
             agentAcpMessages: { ...s.agentAcpMessages, [cid]: [...history, assistantMsg] },
             agentConversations: patchConversation(s.agentConversations, cid, { title, kind }),
-            agentRuns: { ...s.agentRuns, [cid]: { streaming: true, requestId: null, error: null } }
+            agentRuns: { ...s.agentRuns, [cid]: { streaming: true, requestId: null, error: null, retryable: false } }
           }
           : {
             agentConversations: patchConversation(s.agentConversations, cid, {
@@ -2316,7 +2341,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
               title,
               kind
             }),
-            agentRuns: { ...s.agentRuns, [cid]: { streaming: true, requestId: null, error: null } }
+            agentRuns: { ...s.agentRuns, [cid]: { streaming: true, requestId: null, error: null, retryable: false } }
           }
       )
       // 会话元信息（标题 / 更新时刻；mastra 还含用户消息）立刻落盘：
@@ -2357,6 +2382,73 @@ export const useAppStore = create<AppStore>()((set, get) => {
       }
     },
 
+    submitAgentMessage: async (text, conversationId) => {
+      const trimmed = text.trim()
+      const cid = conversationId
+      if (!cid || !trimmed) return
+      // 会话正在跑 → 排进队列，等本轮自然结束后接上；空闲则直接发一轮
+      if ((get().agentRuns[cid] ?? emptyAgentRun()).streaming) {
+        get().enqueueAgentMessage(trimmed, cid)
+        return
+      }
+      await get().sendAgentMessage(trimmed, cid)
+    },
+
+    enqueueAgentMessage: (text, conversationId) => {
+      const cid = conversationId
+      const trimmed = text.trim()
+      if (!cid || !trimmed) return
+      set((s) => ({
+        agentQueues: {
+          ...s.agentQueues,
+          [cid]: [
+            ...(s.agentQueues[cid] ?? []),
+            { id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, text: trimmed, createdAt: Date.now() }
+          ]
+        }
+      }))
+    },
+
+    removeQueuedAgentMessage: (id, conversationId) => {
+      const cid = conversationId
+      if (!cid) return
+      set((s) => {
+        const current = s.agentQueues[cid]
+        if (!current?.some((m) => m.id === id)) return {}
+        // 最后一条删掉时直接丢整个 key（保持 `agentQueues` 干净，不留空数组）
+        const { [cid]: _dropped, ...rest } = s.agentQueues
+        return { agentQueues: current.length > 1 ? { ...rest, [cid]: current.filter((m) => m.id !== id) } : rest }
+      })
+    },
+
+    sendQueuedAgentMessage: async (id, conversationId) => {
+      const cid = conversationId
+      if (!cid) return
+      // 正在跑就点不了「现在发」：那时点下去也发不出去（只会重新入队），不如直接置灰
+      if ((get().agentRuns[cid] ?? emptyAgentRun()).streaming) return
+      const item = (get().agentQueues[cid] ?? []).find((m) => m.id === id)
+      if (!item) return
+      get().removeQueuedAgentMessage(id, cid)
+      await get().sendAgentMessage(item.text, cid)
+    },
+
+    /**
+     * 队列泵：会话空闲且队列非空时弹出第一条接着跑。
+     * 由本轮自然结束（`handleAgentEvent` 的 finish）与切到空闲会话（`selectAgentConversation`）
+     * 调用，形成「一条接一条」的链式执行。
+     *
+     * ⚠️ 报错与用户手动停止都**不**接续：队列留着，等用户自己再发或重试（与 fishwork 一致）。
+     */
+    pumpAgentQueue: (conversationId) => {
+      const cid = conversationId
+      if (!cid) return
+      if ((get().agentRuns[cid] ?? emptyAgentRun()).streaming) return
+      const next = (get().agentQueues[cid] ?? [])[0]
+      if (!next) return
+      get().removeQueuedAgentMessage(next.id, cid)
+      void get().sendAgentMessage(next.text, cid)
+    },
+
     abortAgent: async (conversationId) => {
       // 必传：删除会话 / 工作区时也显式指定，避免留下孤儿请求
       const cid = conversationId
@@ -2372,7 +2464,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
       set((s) => ({
         agentRuns: {
           ...s.agentRuns,
-          [cid]: { ...(s.agentRuns[cid] ?? emptyAgentRun()), streaming: false, requestId: null }
+          [cid]: {
+            ...(s.agentRuns[cid] ?? emptyAgentRun()),
+            streaming: false,
+            requestId: null,
+            retryable: false
+          }
         }
       }))
     },
@@ -2447,6 +2544,25 @@ export const useAppStore = create<AppStore>()((set, get) => {
         }
       }))
       await get().sendAgentMessage(trimmed, cid)
+    },
+
+    /** 断流重试：找到该 assistant 消息前一条用户消息，删掉它及其之后、用原文本重发这一轮。
+     *  复用 resendAgentMessage 的「截断 + 重发」语义，避免同一句话在历史里出现两遍。 */
+    retryAgentTurn: async (conversationId, assistantMessageId) => {
+      const cid = conversationId
+      const conversation = get().agentConversations.find((c) => c.id === cid)
+      if (!conversation || conversation.kind === 'acp') return
+      if ((get().agentRuns[cid] ?? emptyAgentRun()).streaming) return
+      const idx = conversation.messages.findIndex((m) => m.id === assistantMessageId)
+      if (idx < 1) return
+      const userMsg = conversation.messages[idx - 1]
+      if (userMsg?.role !== 'user') return
+      const text = userMsg.parts
+        .filter((p) => p.type === 'text')
+        .map((p) => (p.type === 'text' ? p.text : ''))
+        .join('')
+      if (!text.trim()) return
+      await get().resendAgentMessage(userMsg.id, text, cid)
     },
 
     handleAgentEvent: (requestId, event) => {
@@ -2524,6 +2640,18 @@ export const useAppStore = create<AppStore>()((set, get) => {
         return
       }
 
+      // 上下文压缩：只记一条通知供顶部提示，**不改历史也不落盘**
+      // （压缩改的是「这一次请求怎么带上下文」，屏幕上的原文始终可翻 / 可复制 / 可编辑重发）
+      if (event.type === 'context-compressed') {
+        set((s) => ({
+          agentRuns: {
+            ...s.agentRuns,
+            [cid]: { ...(s.agentRuns[cid] ?? emptyAgentRun()), contextNotice: event.info }
+          }
+        }))
+        return
+      }
+
       if (event.type === 'finish') {
         agentRequestConversations.delete(requestId)
         // 这次是「打开会话时回放历史」还是「真的跑了一轮」？回放不该发系统通知
@@ -2544,6 +2672,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
         for (const c of Object.values(get().agentPendingConfirms)) {
           if (c.requestId === requestId) void get().resolveAgentConfirm(c.id, false)
         }
+        // 自然收尾：把队列里的下一条顶上来接着跑（被中止 / 报错的那条不会走到这里，
+        // 队列留着等用户自己处理 —— 见 pumpAgentQueue）
+        get().pumpAgentQueue(cid)
         return
       }
 
@@ -2574,7 +2705,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 ...(s.agentRuns[cid] ?? emptyAgentRun()),
                 streaming: false,
                 requestId: null,
-                error: null
+                error: null,
+                retryable: event.retryable ?? false
               }
             }
           }))

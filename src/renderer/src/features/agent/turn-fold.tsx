@@ -13,6 +13,12 @@ import { ASK_FOLLOWUP_TOOL } from '@shared/ask-followup'
  *
  * 这与 reasoning / tool 各自的 CollapsibleRow 是两层：每个工具仍是一条可点的横条，而它们整体
  * 再被这一层「过程折叠条」收住，让长轮次的对话流不至于被一堆工具横条淹没。
+ *
+ * 样式口径与 fishwork 的 TurnStepGroup 一致，也与本目录的 `CollapsibleRow`（思考行 / 工具行）
+ * **完全同款**：**纯文字行** —— 无边框、无底色、无左侧图标，常规字重 + text-muted-foreground，
+ * hover 只提亮文字（不铺底色），箭头 size-4 贴在摘要文字**右侧**，整行按内容宽度收（w-fit）。
+ * 此前这里是个带 `border` + `bg-muted/40` 的方块、箭头还在**左边**、字号 text-xs，三层横条
+ * 摆在一起时折叠条像个卡片，与里面的工具行不是一套东西。
  */
 
 /**
@@ -68,26 +74,30 @@ export function turnStepSummary(
  * 受控 open 默认 false（dogi 没有 fishwork 那种 loadMessages 覆盖导致的子树重挂载问题，
  * 但保持受控更稳）。展开体用 grid-rows 0fr/1fr 做高度过渡，外层 overflow-hidden 兜住收起态。
  * 不额外处理滚动：dogi 的尾部跟随只在用户贴底时生效，展开时若已贴底就继续贴底，符合预期。
+ *
+ * ⚠️ 触发行必须是 `flex` 而不是 `inline-flex`：行内级盒子会被父级 line-height 撑出一个更高的
+ * 行盒（多出来的留白掉在下方），这条摘要就会比旁边的工具条偏上、与下一条的间距也偏松。
  */
 export function TurnFold({ summary, children }: { summary: string; children: ReactNode }) {
   const [open, setOpen] = useState(false)
   return (
-    <div>
+    <div className="min-w-0">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
         className={cn(
-          'flex w-full min-w-0 items-center gap-1.5 rounded-md border border-border/50 bg-muted/40 px-2.5 py-1.5 text-left',
-          'text-xs text-muted-foreground transition-colors hover:bg-muted/70'
+          // w-fit 让箭头贴着摘要文字、不铺满整行；max-w-full 封顶，过长由 truncate 吃掉
+          'flex w-fit max-w-full items-center gap-1.5 rounded text-left text-sm',
+          'text-muted-foreground transition-colors hover:text-foreground'
         )}
       >
+        <span className="min-w-0 truncate">{summary}</span>
         <ChevronRight
           className={cn(
-            'size-3.5 shrink-0 transition-transform duration-200',
+            'size-4 shrink-0 opacity-40 transition-transform duration-200',
             open && 'rotate-90'
           )}
         />
-        <span className="min-w-0 truncate">{summary}</span>
       </button>
       <div
         className={cn(
@@ -96,7 +106,7 @@ export function TurnFold({ summary, children }: { summary: string; children: Rea
         )}
       >
         <div className="min-h-0 overflow-hidden">
-          <div className="flex flex-col gap-5 py-2 pl-1">{children}</div>
+          <div className="flex flex-col gap-4 pt-2">{children}</div>
         </div>
       </div>
     </div>
