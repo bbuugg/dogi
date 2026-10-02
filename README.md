@@ -64,7 +64,7 @@ Electron + React 的桌面研发运维工具：把「连机器 → 干活 → �
 - **应用内快捷键**可自定义并做冲突检测（新建终端 `Ctrl+Alt+T`、打开设置 `Ctrl+Alt+S`、开关 Agent 内嵌终端等）
 - **主题**：明暗 + 强调色方案 + 终端独立配色；**首帧不闪**（preload 在页面脚本前同步取偏好并应用）
 - 自定义标题栏、状态栏（保存状态 / 监控条 / AI 开关 / 传输托盘 / 全局菜单）、关闭标签二次确认
-- 系统托盘常驻、单实例锁（仅打包版，dev 可多开）、最小化到托盘
+- 系统托盘常驻、单实例锁、最小化到托盘
 - **数据导入 / 导出**：主机 / 笔记 / 接口请求打包成 zip（自实现 zip，凭据不导出）
 
 ### 插件
@@ -127,7 +127,6 @@ dev 编排在 `scripts/dev.mjs`（Vite dev server + main/preload watch + 重建�
 ```bash
 npm install          # 安装依赖
 npm run dev          # 开发模式（Vite dev server + main/preload watch + Electron 自动重启）
-npm run dev:extra    # 再多开一个 dev 实例（复用已在跑的 dev server；dev 下无单实例锁）
 npm run build        # 类型检查 + 全量构建（out/）
 npm run start        # 运行已构建产物
 npm run typecheck    # 仅类型检查（node + web）

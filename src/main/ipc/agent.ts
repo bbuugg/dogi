@@ -233,7 +233,7 @@ export function registerAgentIpc(ctx: IpcContext): void {
   ipcMain.handle('agent:chat', async (_e, req: AgentChatRequest) => {
     // 会话形态**按会话固定**：优先取请求里带的（渲染端是会话记录的唯一真源），
     // 其次回退到磁盘上的会话记录 —— 老会话记录缺 kind 时按 mastra 处理。
-    const conv = storage.listAgentConversations().find((c) => c.id === req.conversationId)
+    const conv = storage.getAgentConversation(req.conversationId)
     const kind: AgentBackend = req.kind ?? conv?.kind ?? 'mastra'
     const result =
       kind === 'acp' ? await acpAgentService.chat(req) : await agentService.chat(req)

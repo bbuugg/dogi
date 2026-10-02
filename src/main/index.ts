@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { app, BrowserWindow, Menu, nativeTheme, Tray } from 'electron'
+import { app, BrowserWindow, Menu, nativeTheme, Tray, type Rectangle } from 'electron'
 import { registerIpc, openExternalSafe } from './ipc/index'
 import { requestRendererFlush } from './ipc/system'
 import { browserSessions } from './services/browser/session'
@@ -22,24 +22,18 @@ let tray: Tray | null = null
 let isQuiting = false
 
 /**
- * 单实例锁：**只对打包版生效**，dev（`electron .`）不申请锁，可同时开多个实例。
+ * 单实例锁：**所有形态都生效**，任何时候只允许打开一个 Dogi。
+ * 已有实例在运行时，再次启动的进程直接退出，并通过 second-instance 事件把已有实例的
+ * 主窗口调到前台。锁由 Electron 按应用 userData 目录互斥。
  *
- * 打包版：已有一个 Dogi 在运行时，再次启动的进程直接退出，并通过 second-instance
- * 事件把已有实例的主窗口调到前台。锁由 Electron 按应用 userData 目录互斥。
- *
- * 为什么用 app.isPackaged 判定、而不是看 VITE_DEV_SERVER_URL：
- * `npm run start`（跑已构建产物）与 AGENTS 5.1 的 CDP 探针都是**未打包**但**没有**
- * dev server，用环境变量会把「未打包」和「有 dev server」混为一谈。isPackaged 才是
- * 「正式发布」的唯一准绳。
- *
- * ⚠️ dev 多开共用同一份 userData（%APPDATA%\dogi，打包版也是这个目录 —— package.json
- * 没有顶层 productName，Electron 直接拿 name 当目录名），所以多开的实例之间、以及与
- * 常驻的打包版之间会互相覆盖 config.json / 标签页状态 / 窗口位置 / host.log 的 seq。
- * 要隔离就把 userData 改成按锁逐槽试探（dogi-dev → dogi-dev-2 …），别在这里另开锁。
+ * ⚠️ dev 与打包版共用同一份 userData（%APPDATA%\dogi —— package.json 没有顶层
+ * productName，Electron 拿 name 当目录名），所以本机常驻打包版时，直接跑 `electron .`
+ * 会被锁挡下并 `app.quit()`。
+ * 需要并存时不要在这里按环境放行，改用 `--user-data-dir=<临时目录>` 起隔离实例
+ * （AGENTS 5.1 的 CDP 探针就是这么做的）。
  */
-if (!app.isPackaged) {
-  console.log('[main] dev 模式（未打包）：不申请单实例锁，可同时打开多个实例')
-} else if (!app.requestSingleInstanceLock()) {
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotSingleInstanceLock) {
   app.quit()
 } else {
   app.on('second-instance', () => {
@@ -214,17 +208,22 @@ function createWindow(): void {
     if (input.key === 'F5') event.preventDefault()
   })
 
+  // 拖拽 / 缩放期间这两个事件会**高频触发**（Windows 上拖动标题栏时每秒几十次），
+  // 见 saveBounds 的注释：只暂存，不立刻写盘
   mainWindow.on('resize', saveBounds)
   mainWindow.on('move', saveBounds)
   // 关闭时：未真正退出且开启了「最小化到托盘」则隐藏而非销毁，
   // 程序继续在托盘运行；从托盘「退出」会置 isQuiting 让窗口真正关闭。
   mainWindow.on('close', (e) => {
+    // 先把防抖窗口内最后一次移动落盘，再决定隐藏还是真关
+    flushBounds()
     if (!isQuiting && storage.getPreferences().minimizeToTray) {
       e.preventDefault()
       mainWindow?.hide()
     }
   })
   mainWindow.on('closed', () => {
+    flushBounds()
     mainWindow = null
   })
 
@@ -236,10 +235,42 @@ function createWindow(): void {
   }
 }
 
+/** 窗口位置 / 尺寸落盘的防抖窗口（ms）：拖拽停下来后这么久没有新事件才写一次盘 */
+const BOUNDS_SAVE_DEBOUNCE_MS = 400
+
+let boundsTimer: ReturnType<typeof setTimeout> | null = null
+let pendingBounds: Rectangle | null = null
+
+/**
+ * 窗口 bounds 的「防抖暂存」（真正的落盘在 flushBounds）。
+ *
+ * ⚠️ 为什么不在这里直接 `storage.setWindowBounds(...)`：
+ * `move` / `resize` 在拖拽期间会**高频触发**（Windows 上窗口每移动一点就来一次），
+ * 而 electron-store 底层的 conf 每次 `get`/`set` 都要**同步整文件读盘 + JSON.parse +
+ * 全量 AJV 校验**（`set` 更是「读两遍 + 写一遍」，见 conf 的 `get store()` / `set store()`）。
+ * 于是「鼠标每动一下 → 反复读写 + 校验整个 config.json」会把主进程阻塞住，
+ * 表现就是**拖动窗口 / 拉边框一顿一顿的**。
+ *
+ * 正确做法：拖动期间只更新内存里的待写值并重置定时器，停下来或退出前再落一次盘。
+ * （另外会话那几 MB 历史已从主 store 拆出去，见 services/conversation-store.ts，
+ *   这样即使是这一下写入也不再背着它们。）
+ */
 function saveBounds(): void {
-  if (mainWindow && !mainWindow.isMinimized() && !mainWindow.isDestroyed()) {
-    storage.setWindowBounds(mainWindow.getBounds())
+  if (!mainWindow || mainWindow.isMinimized() || mainWindow.isDestroyed()) return
+  pendingBounds = mainWindow.getBounds()
+  if (boundsTimer) clearTimeout(boundsTimer)
+  boundsTimer = setTimeout(flushBounds, BOUNDS_SAVE_DEBOUNCE_MS)
+}
+
+/** 立即把待写的 bounds 落盘（防抖到点 / 关闭 / 退出时调用；没有待写值就什么也不做） */
+function flushBounds(): void {
+  if (boundsTimer) {
+    clearTimeout(boundsTimer)
+    boundsTimer = null
   }
+  if (!pendingBounds) return
+  storage.setWindowBounds(pendingBounds)
+  pendingBounds = null
 }
 
 app.whenReady().then(async () => {
@@ -268,6 +299,8 @@ app.whenReady().then(async () => {
 // 真正退出前置位标志，确保关闭事件不再被拦截（否则会再次最小化到托盘）
 app.on('before-quit', () => {
   isQuiting = true
+  // 兜底：防抖窗口内退出时把最后一次窗口位置补上（窗口已 close 过则这里无事发生）
+  flushBounds()
 })
 
 // 退出时销毁托盘图标，避免残留在系统托盘区

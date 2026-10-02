@@ -1,8 +1,6 @@
 import Store from 'electron-store'
 import { safeStorage } from 'electron'
 import type {
-  AgentBackend,
-  AgentChatMessage,
   AgentConversation,
   AgentWorkspace,
   AiModelConfig,
@@ -27,6 +25,7 @@ import type {
 } from '@shared/types'
 import { DEFAULT_MAX_RETRIES } from '@shared/ai-timeouts'
 import { DEFAULT_SHORTCUTS } from '@shared/shortcuts'
+import { conversationStore, type SaveConversationInput } from './conversation-store'
 
 interface StoreSchema {
   sshProfiles: SshProfile[]
@@ -49,7 +48,15 @@ interface StoreSchema {
   apiHistory: ApiHistoryEntry[]
   shortcuts: ShortcutConfig[]
   agentWorkspaces: AgentWorkspace[]
-  agentConversations: AgentConversation[]
+  /**
+   * @deprecated 会话已拆到 `<userData>/agent-conversations/` 下的独立文件
+   * （见 `services/conversation-store.ts`）。
+   *
+   * 保留这个字段**只为一次性迁移**（构造期读取旧存档并搬进文件，然后删掉本键），
+   * 之后所有读写一律走 `conversationStore` —— 别再往这里写，那会把几 MB 的会话历史
+   * 重新塞回「每次 get/set 都要全量读盘 + 校验」的主 store 里。
+   */
+  agentConversations?: AgentConversation[]
   /** 技能的用户选择（启停 / 额外根目录）——技能内容本身在磁盘上，不进这里 */
   skillSettings: SkillSettings
   windowBounds?: { x?: number; y?: number; width: number; height: number }
@@ -89,62 +96,6 @@ const DEFAULT_PREFERENCES: Preferences = {
 /** 密钥类字段加密前缀（safeStorage 密文 base64） */
 const ENC_PREFIX = 'enc:'
 
-/** 会话默认标题（渲染端也有一份同值常量） */
-const DEFAULT_CONVERSATION_TITLE = '新会话'
-
-/**
- * 旧存档里的会话形态（0.0.6 及以前）。
- *
- * 当时的模型是「工作区 / 会话各有一个 `backend`，`configId` 的含义由它决定」，
- * 且 `ai-sdk` 是第三种后端 —— 现在只有 `kind: 'mastra' | 'acp'` 两种，需要读时迁移。
- */
-type LegacyConversation = Partial<AgentConversation> & {
-  id: string
-  workspaceId: string
-  backend?: 'ai-sdk' | 'acp' | 'mastra'
-  /** 旧字段：`ai-sdk` 下是 AiModelConfig.id，`acp` 下是 AcpAgentConfig.id */
-  configId?: string
-}
-
-/**
- * 把存档里的会话规整成当前形态（**读取时迁移，不写回**，下次保存自然落成新形态）。
- *
- * - `backend`（含已移除的 `'ai-sdk'`）→ `kind`：`'acp'` 仍是 acp，其余一律按 mastra；
- * - 旧 ACP 会话的 `configId` 存的是 `AcpAgentConfig.id` → 迁到 `acpAgentId`；
- * - 旧 ACP 会话没有 `acpSessionId`（当时每次都是 `session/new`），保持 undefined，
- *   首轮对话时由主进程补建并把新 id 回填；
- * - 旧 ACP 会话确实在本地存过消息，但新架构下 ACP 会话的消息由 agent 自己管理
- *   （打开时 `session/load` 回放），这里直接丢掉本地副本，避免显示一份不再更新的僵尸历史。
- */
-function normalizeConversation(raw: LegacyConversation): AgentConversation {
-  const kind: AgentBackend =
-    raw.kind === 'acp' || (!raw.kind && raw.backend === 'acp') ? 'acp' : 'mastra'
-  const base = {
-    id: raw.id,
-    workspaceId: raw.workspaceId,
-    title: raw.title ?? DEFAULT_CONVERSATION_TITLE,
-    createdAt: raw.createdAt ?? Date.now(),
-    updatedAt: raw.updatedAt ?? Date.now()
-  }
-  if (kind === 'acp') {
-    return {
-      ...base,
-      kind: 'acp',
-      messages: [],
-      modelId: raw.modelId,
-      acpAgentId: raw.acpAgentId ?? raw.configId,
-      acpSessionId: raw.acpSessionId
-    }
-  }
-  return {
-    ...base,
-    kind: 'mastra',
-    messages: raw.messages ?? [],
-    configId: raw.configId,
-    modelId: raw.modelId
-  }
-}
-
 class StorageService {
   private store = new Store<StoreSchema>({
     defaults: {
@@ -165,7 +116,8 @@ class StorageService {
       apiHistory: [],
       shortcuts: DEFAULT_SHORTCUTS,
       agentWorkspaces: [],
-      agentConversations: [],
+      // ⚠️ 这里**刻意不给 `agentConversations` 设默认值**：会话在独立文件里，
+      // 给了默认值会让 `store.get` 永远返回 `[]`，迁移判据（键是否存在）就失效了
       skillSettings: DEFAULT_SKILL_SETTINGS
     }
   })
@@ -173,6 +125,29 @@ class StorageService {
   constructor() {
     this.migrateBrowserToolMode()
     this.migrateSshPrivateKeyAtRest()
+    this.migrateAgentConversationsToFiles()
+  }
+
+  /**
+   * 一次性迁移：会话历史上是**整个数组**塞在主 store 里的 `agentConversations` 键
+   * （实测能到 4.76MB，占整个配置文件的 97%）。现在改成一会话一文件
+   * （见 `services/conversation-store.ts`），这里把存量逐个搬进文件，然后删掉主 store 的键。
+   *
+   * 搬运是幂等的（同名文件直接覆盖），中途失败下次启动会重跑；键删掉之后这段就再也不进。
+   */
+  private migrateAgentConversationsToFiles(): void {
+    const legacy = this.store.get('agentConversations')
+    if (!Array.isArray(legacy)) return
+    if (legacy.length > 0) {
+      // 先把全部会话写进文件，**确认都成功**才删源数据：
+      // 中途失败（磁盘满等）就保留原数组，下次启动重跑 —— 写文件是幂等的覆盖写
+      try {
+        conversationStore.importLegacy(legacy)
+      } catch {
+        return
+      }
+    }
+    this.store.delete('agentConversations')
   }
 
   /**
@@ -1085,89 +1060,39 @@ class StorageService {
     const next = this.store.get('agentWorkspaces').filter((w) => w.id !== id)
     this.store.set('agentWorkspaces', next)
     // 工作区没了，它的会话也一并清掉，避免留下永远看不到的孤儿数据
-    this.store.set(
-      'agentConversations',
-      this.store.get('agentConversations').filter((c) => c.workspaceId !== id)
-    )
+    conversationStore.deleteByWorkspace(id)
     return next
   }
 
-  // ---------- Agent 会话 ----------
-  /** 全部会话（读取时把旧存档迁移成当前形态，见 normalizeConversation） */
+  // ---------- Agent 会话（独立文件存储，见 services/conversation-store.ts） ----------
+  /**
+   * 全部会话。
+   *
+   * 这里只是转发 —— 会话**不在**本 store 里（它的体量占了原配置文件的 97%，
+   * 而 conf 每次 get/set 都要全量读盘 + AJV 校验，放这儿会把主进程拖垮），
+   * 详见 `conversation-store.ts` 顶部的说明。
+   */
   listAgentConversations(): AgentConversation[] {
-    return this.store
-      .get('agentConversations')
-      .map((c) => normalizeConversation(c as LegacyConversation))
+    return conversationStore.list()
   }
 
   /**
-   * 保存会话（upsert）：不传 id 视为新建。
+   * 按 id 取单条会话。
    *
-   * 返回保存后的**单个**会话而不是全量列表 —— 会话带完整消息历史、体量可能很大，
-   * 全量返回会让每次保存都把所有会话再传一遍。
+   * `agent:chat` 每次提问都要拿会话形态（kind），**必须走这个而不是 list 一遍再 find**
+   * —— 会话文件加起来有几 MB，为了读一个 kind 把所有会话读进来是纯浪费。
    */
-  saveAgentConversation(input: {
-    id?: string
-    workspaceId: string
-    /** 会话形态；不传沿用旧值（新会话按 mastra） */
-    kind?: AgentBackend
-    title?: string
-    /** 仅 mastra 有意义：ACP 会话的消息由 agent 自己管理，这里一律写空 */
-    messages?: AgentChatMessage[]
-    /** 仅 mastra */
-    configId?: string
-    /** 具体模型 id：`mastra` 是配置里的模型，`acp` 是 agent 上报的模型 value */
-    modelId?: string
-    /** 仅 acp：绑定的 ACP agent 配置 id */
-    acpAgentId?: string
-    /** 仅 acp：agent 侧的会话 id */
-    acpSessionId?: string
-  }): AgentConversation {
-    // 先迁移一遍：旧记录没有 kind，靠 normalize 补出来，后续的 prev 取值才是新语义
-    const conversations = this.store
-      .get('agentConversations')
-      .map((c) => normalizeConversation(c as LegacyConversation))
-    const now = Date.now()
-    const prev = input.id ? conversations.find((c) => c.id === input.id) : undefined
-    const kind: AgentBackend = input.kind ?? prev?.kind ?? 'mastra'
-    const isAcp = kind === 'acp'
-    // 各字段一律用 `'x' in input` 判断而不是 `??`：渲染端落盘时**每次都显式带上**这些字段，
-    // 其中 `undefined` 表示「这个字段要清掉（没选 / 走默认）」—— 必须能覆盖旧值，
-    // 否则把会话从某个模型切回默认就永远切不回来（见 AGENTS.md 4.3）。
-    const conversation: AgentConversation = {
-      id: input.id || crypto.randomUUID(),
-      workspaceId: input.workspaceId,
-      kind,
-      title: input.title ?? prev?.title ?? DEFAULT_CONVERSATION_TITLE,
-      // ACP 会话的消息归 agent 管：本地不保存任何消息
-      messages: isAcp ? [] : (input.messages ?? prev?.messages ?? []),
-      configId: isAcp ? undefined : 'configId' in input ? input.configId : prev?.configId,
-      modelId: 'modelId' in input ? input.modelId : prev?.modelId,
-      acpAgentId: isAcp
-        ? 'acpAgentId' in input
-          ? input.acpAgentId
-          : prev?.acpAgentId
-        : undefined,
-      acpSessionId: isAcp
-        ? 'acpSessionId' in input
-          ? input.acpSessionId
-          : prev?.acpSessionId
-        : undefined,
-      createdAt: prev?.createdAt ?? now,
-      updatedAt: now
-    }
-    const next = prev
-      ? conversations.map((c) => (c.id === conversation.id ? conversation : c))
-      : [...conversations, conversation]
-    this.store.set('agentConversations', next)
-    return conversation
+  getAgentConversation(id: string): AgentConversation | undefined {
+    return conversationStore.get(id)
+  }
+
+  /** 保存会话（upsert）：不传 id 视为新建；返回保存后的单个会话 */
+  saveAgentConversation(input: SaveConversationInput): AgentConversation {
+    return conversationStore.save(input)
   }
 
   deleteAgentConversation(id: string): void {
-    this.store.set(
-      'agentConversations',
-      this.store.get('agentConversations').filter((c) => c.id !== id)
-    )
+    conversationStore.delete(id)
   }
 
   // ---------- MCP servers ----------

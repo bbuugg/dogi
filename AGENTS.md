@@ -119,7 +119,7 @@
 - 主题：明暗 + 强调色方案 + 终端独立配色；**首帧不闪**（见 4.6）。
 - 文件视图（Agent 工作区）：左侧文件树 + 右侧多标签编辑区，树上**右键 / 触屏长按**菜单支持
   打开 / 重命名 / 复制 / 剪切 / 粘贴 / 删除 / 新建文件与文件夹（见 4.21）。
-- 托盘常驻、单实例锁（仅打包版，dev 可多开）、最小化到托盘。
+- 托盘常驻、单实例锁、最小化到托盘。
 - **数据导入 / 导出**：主机 / 笔记 / 接口请求打包成 zip（自实现，见 6.7）。
 
 ### Agent 工作区文件视图
@@ -176,7 +176,6 @@ scripts/                   # 探针 / 验证脚本（见 5.2），不参与构�
 ```bash
 npm install                # 依赖（见 6.1 第 2 条：npm 12 会静默跳过安装脚本）
 npm run dev                # Vite dev server(5174) + main/preload watch + Electron 自动重启
-npm run dev:extra          # 多开一个 dev 实例（复用已跑的 dev server；dev 不申请单实例锁）
 npm run typecheck          # tsc：node 侧 + web 侧，两个都要过
 npm run build              # typecheck + main + preload + renderer 全量构建到 out/
 npm run start              # 运行已构建产物（electron .）
@@ -1111,8 +1110,8 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 
 **16. 其他主进程约束**
 
-- **单实例锁**：**仅打包版**生效 —— 已有 Dogi 在跑时新进程直接退出，并把已有实例调到前台；dev（`electron .`）不申请锁，可多开（`npm run dev:extra`）。锁由 Electron 按 userData 目录互斥。
-  ⚠️ dev 与打包版的 userData **是同一个**（`%APPDATA%\dogi` —— package.json 没有顶层 `productName`，Electron 拿 `name` 当目录名），所以 dev 多开之间、以及与常驻打包版之间会互相覆盖配置 / 标签页状态 / 窗口位置。
+- **单实例锁**：**所有形态都生效**，任何时候只允许打开一个 Dogi —— 已有实例在跑时新进程直接退出，并把已有实例调到前台。锁由 Electron 按 userData 目录互斥。
+  ⚠️ dev 与打包版的 userData **是同一个**（`%APPDATA%\dogi` —— package.json 没有顶层 `productName`，Electron 拿 `name` 当目录名），所以常驻打包版在跑时直接 `electron .` 会被锁挡下 `app.quit()`。**不要按环境放行锁**，需要并存就起 `--user-data-dir=<临时目录>` 的隔离实例（见 5.1）。
 - **托盘**：关闭窗口默认隐藏到托盘（`preferences.minimizeToTray`），`before-quit` 才置 `isQuiting` 让窗口真关。
   退出时 `will-quit` 要 `tray.destroy()`，否则托盘图标残留。
 - **菜单**：自定义菜单刻意**去掉 zoom 角色**，否则 Ctrl +/-/0 会缩放整个页面并抢在渲染端之前触发；
