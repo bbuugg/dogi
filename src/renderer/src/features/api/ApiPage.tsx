@@ -817,7 +817,7 @@ export function ApiPage({ requestId, tabId }: { requestId: string; tabId?: strin
                 GET/HEAD 的提醒挂在这一排（而不是 Monaco 的工具栏）—— 三种形态都要提示，
                 且请求构造区本来就容易被响应面板压扁，不额外占一行高度。
               */}
-              <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 pb-2">
+              <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 py-2">
                 <Segmented
                   options={BODY_TYPE_OPTIONS}
                   value={bodyType}

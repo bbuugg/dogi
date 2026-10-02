@@ -7,8 +7,7 @@ import { ReasoningPanel } from '@/features/agent/ReasoningPanel'
 import { TOOL_LABELS, ToolCallRow, toolRunStatus } from '@/features/agent/ToolCallRow'
 import { findTailStart, TurnFold, turnStepSummary } from '@/features/agent/turn-fold'
 import { TokenUsageRow } from '@/features/agent/TokenUsageRow'
-import { ConversationUsageBar } from '@/features/agent/ConversationUsageBar'
-import { sumUsage } from '@shared/agent-usage'
+import { ContextNoticeBar } from '@/features/agent/ContextNoticeBar'
 import { RetryIndicator } from '@/features/agent/RetryIndicator'
 import { TypingDots } from '@/features/agent/TypingDots'
 import {
@@ -47,7 +46,6 @@ import {
   memo,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
   type ComponentRef,
@@ -452,11 +450,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   // 每个终端会话一个独立的 AI 对话：面板展示所属会话的上下文
   const chat = useAppStore((s) => (sessionId ? s.aiChats[sessionId] : undefined))
   const messages = chat?.messages ?? NO_MESSAGES
-  /** 会话累计 token（现算）与最近一次上下文压缩通知 */
-  const totalUsage = useMemo(
-    () => (messages.some((m) => m.usage) ? sumUsage(messages) : null),
-    [messages]
-  )
+  /** 最近一次上下文压缩通知（终端助手没有上下文圆环，累计 token 不在这里展示） */
   const contextNotice = chat?.contextNotice
   const aiStreaming = chat?.streaming ?? false
   const aiError = chat?.error ?? null
@@ -972,8 +966,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                 resetKey={`${sessionId ?? '__no_session__'}#${scrollResetSeq}`}
               >
                 <ConversationContent>
-                  {/* 会话累计 token + 上下文已压缩（与工作区 Agent 同款）*/}
-                  <ConversationUsageBar usage={totalUsage} notice={contextNotice} className="px-3" />
+                  {/* 上下文已压缩（与工作区 Agent 同款；累计 token 已收进工作区 Agent 的上下文圆环）*/}
+                  <ContextNoticeBar notice={contextNotice} className="px-3" />
                   {messages.map((msg, index) => (
                     <div key={msg.id} data-message-id={msg.id} className="pb-3">
                       <MessageBubble

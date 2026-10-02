@@ -996,6 +996,29 @@ export interface AgentSlice {
   ) => Promise<void>
   /** 清空指定会话的消息（保留会话本身）；ACP 会话清的是本地镜像 */
   clearAgentMessages: (conversationId: string) => void
+  /**
+   * 手动压缩进行中：圆环转圈 + 按钮进 loading。
+   *
+   * 同时禁发输入（但不禁打字）—— 压缩期间发出的那一轮如果也带上刚写的检查点，
+   * 语义会很难解释；让用户等这一下更清楚。
+   */
+  contextCompressing: boolean
+  /**
+   * 手动压缩某个会话的上下文：把「最后一轮之外」的旧轮摘要成一段并落成检查点。
+   *
+   * 成功后本地会话的 `contextSummary` 一起改（即时反馈，主进程才是落库的真源）。
+   *
+   * `ok: false` 且 `fatal` 缺省 = **这次没做**（如不足两轮），`reason` 可直接展示；
+   * `fatal: true` 才是真故障（IPC 抛错）。调用方据此决定用 info 还是 error 提示 ——
+   * 「对话不足两轮」报红是错的，用户会以为哪里坏了。
+   */
+  compressAgentContext: (
+    conversationId: string
+  ) => Promise<{ ok: boolean; reason?: string; fatal?: boolean }>
+  /** 清除摘要检查点，回到全文历史（原始消息一直在，所以无损） */
+  clearAgentContextSummary: (
+    conversationId: string
+  ) => Promise<{ ok: boolean; reason?: string; fatal?: boolean }>
   /** 删除某条消息及其之后的全部消息（用于「从这里重新开始」）；流式期间由 UI 侧禁用 */
   deleteAgentMessagesFrom: (messageId: string, conversationId: string) => Promise<void>
   /** 编辑后重发：删掉这条及其之后的全部消息，再用新文本重新发起这一轮 */

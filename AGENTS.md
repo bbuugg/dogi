@@ -758,8 +758,11 @@ ACP 是「别人的 agent 在别人的进程里管自己的会话」。本应用
   界面如实写「摘要失败，旧轮已截断丢弃」，不假装细节还在。
 - 事件 `context-compressed` 只是**通知**，不进消息 parts。⚠️ 必须 `setTimeout(…, 0)` 延后再发：
   此刻 requestId 还没登记进 `chatConversations` / 渲染端的 `aiRequestSessions`，直接广播会被整条丢掉（同 4.2）。
-- 两条提示条（`ConversationUsageBar`）粘在消息列**顶部**：累计 token 与压缩通知都是「关于整段会话」的元信息。
+- 消息列**顶部**只粘一条提示条（`ContextNoticeBar`）：**上下文已压缩**（自动 / 手动压缩都写它）。
   ACP 会话不参与（历史由 agent 自己管，`messages` 恒空）。
+  ⚠️ **会话累计 token 不在这里**，它在输入框的上下文圆环（`ContextRing`）详情里的「会话累计」段 ——
+  与 fishwork 一致。累计每轮都在变，粘顶部会一直晃，而且是圆环里同一份数据的第二个副本
+  （迁移时正是这个重复，别再搬回顶部）。
 - 验证：`scripts/verify-context-compression.mjs`（`.tooltest` 包装跑真源码，覆盖不超预算零拷贝、
   切轮边界、摘要失败回退、非法预算；摘要成功路径要真调模型，属集成验证）。
 
@@ -1504,6 +1507,23 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   渲染端不能假设「调工具必然先来一串 delta」。
 - **验证**：让 Agent 写一个 ≥2KB 的文件，卡片应从「转圈」变成文字逐帧变长（明细先出路径）；
   写完自动收回并显示 diff；中途「停止」后重开会话，消息里的工具卡不应残留「正在生成…」。
+
+**32. 「思考 / 缓存命中」token 恒为 0 = usage 只读了顶层字段**
+
+- **触发信号**：圆环详情里的「其中思考」「其中缓存命中」永远是 0（或整条不显示），
+  而思考内容本身是正常流出来的 —— 两条通道互不相干，别被「有思考内容」误导。
+- **根因**：AI SDK v6/v7 把这两项从顶层字段挪进了 `outputTokenDetails.reasoningTokens` /
+  `inputTokenDetails.cacheReadTokens`，顶层只留 inputTokens / outputTokens / totalTokens。
+  而 `services/ai/agent.ts` / `ai.ts` 当时只读 `u.reasoningTokens` / `u.cachedInputTokens`，
+  一个字段都命中不了（v5 时代的口径）。
+- **正确做法**：统一走 `agent-core/usage.ts` 的 `normalizeUsage`（多级兜底，含 OpenAI 原始形状的
+  `completionTokensDetails` / `promptTokensDetails`），并且**优先从 `finish` chunk 取**
+  （`readChunkUsage`）—— Mastra 的 `stream.usage` 是它自己归一化过的形状，明细不一定保留，
+  只当兜底。两条路径（工作区 Agent / 终端助手）共用同一份，别各写一遍。
+- **顺带**：`0` 与「没报」要分开 —— `normalizeUsage` 只在字段确实存在时才带上，
+  调用方据此决定显不显示；拿 0 冒充「上游报的 0」等于骗人。
+- **验证**：同一段长上下文连发两轮（第二轮会命中缓存），圆环详情的「其中缓存命中」不再为 0；
+  用推理模型（deepseek-reasoner / o 系等）时「其中思考」也不再为 0。
 
 ### 6.7 数据与文件
 

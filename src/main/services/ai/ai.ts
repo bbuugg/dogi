@@ -16,7 +16,13 @@ import { askFollowupBroker, buildAskFollowupTool } from './ask-followup'
 import { ASK_FOLLOWUP_HINT } from '@shared/ask-followup'
 import { resolveModel } from './resolve-model'
 import { compressContext } from './context'
-import { adaptMastraPart, toModelMessages } from './agent-core'
+import {
+  adaptMastraPart,
+  normalizeUsage,
+  readChunkUsage,
+  toModelMessages,
+  type RawUsage
+} from './agent-core'
 import { armConfirmTimeout, modelRunTimeout } from './timeouts'
 import { describeError, isRetryableNetworkError } from './error-utils'
 import { retryDelayMs, sleepWithSignal } from './retry'
@@ -482,6 +488,13 @@ class AiAssistant extends EventEmitter {
       for (;;) {
         /** 首块时刻（TPS 的生成窗口起点）：每次尝试各算一份 */
         let firstTokenAt = 0
+        /**
+         * 本轮用量。**优先取自 `finish` chunk**（AI SDK 原样透出的那份，字段最全），
+         * 拿不到才回退到 Mastra 的 `stream.usage` —— 后者是它自己归一化过的形状，
+         * 「思考 / 缓存命中」的明细不一定保留（见 `agent-core/usage.ts` 的说明）。
+         * 与工作区 Agent 同一套采集口径，别只改一边。
+         */
+        let rawUsage: RawUsage | null = null
         try {
           const stream = await opts.start()
           for await (const part of stream.fullStream) {
@@ -495,6 +508,8 @@ class AiAssistant extends EventEmitter {
             ) {
               firstTokenAt = Date.now()
             }
+            const chunkUsage = readChunkUsage(p)
+            if (chunkUsage) rawUsage = chunkUsage
             const event = adaptMastraPart(p)
             if (event) {
               // 流内 error 块（不抛、只发事件）：底层可重试就抛出去，交给 catch 走重试 ——
@@ -510,40 +525,35 @@ class AiAssistant extends EventEmitter {
               send(event)
             }
           }
-          try {
-            const u = (await stream.usage) as
-              | {
-                  promptTokens?: number
-                  completionTokens?: number
-                  totalTokens?: number
-                  reasoningTokens?: number
-                  cachedInputTokens?: number
-                  inputTokens?: number
-                  outputTokens?: number
-                }
-              | undefined
-            if (u) {
-              const endAt = Date.now()
-              const durationMs = endAt - startedAt
-              const genWindowMs = firstTokenAt ? endAt - firstTokenAt : durationMs
-              const inputTokens = u.promptTokens ?? u.inputTokens ?? 0
-              const outputTokens = u.completionTokens ?? u.outputTokens ?? 0
-              const tps = genWindowMs > 0 ? outputTokens / (genWindowMs / 1000) : 0
-              send({
-                type: 'usage',
-                usage: {
-                  inputTokens,
-                  outputTokens,
-                  totalTokens: u.totalTokens ?? 0,
-                  ...(u.reasoningTokens != null ? { reasoningTokens: u.reasoningTokens } : {}),
-                  ...(u.cachedInputTokens != null ? { cachedInputTokens: u.cachedInputTokens } : {}),
-                  durationMs,
-                  tps: Math.round(tps * 10) / 10
-                }
-              })
+          if (!rawUsage) {
+            try {
+              rawUsage = normalizeUsage(await stream.usage)
+            } catch {
+              // 用量缺失时静默跳过
             }
-          } catch {
-            // 用量缺失时静默跳过
+          }
+          if (rawUsage) {
+            const endAt = Date.now()
+            const durationMs = endAt - startedAt
+            const genWindowMs = firstTokenAt ? endAt - firstTokenAt : durationMs
+            const tps =
+              genWindowMs > 0 ? rawUsage.outputTokens / (genWindowMs / 1000) : 0
+            send({
+              type: 'usage',
+              usage: {
+                inputTokens: rawUsage.inputTokens,
+                outputTokens: rawUsage.outputTokens,
+                totalTokens: rawUsage.totalTokens,
+                ...(rawUsage.reasoningTokens != null
+                  ? { reasoningTokens: rawUsage.reasoningTokens }
+                  : {}),
+                ...(rawUsage.cachedInputTokens != null
+                  ? { cachedInputTokens: rawUsage.cachedInputTokens }
+                  : {}),
+                durationMs,
+                tps: Math.round(tps * 10) / 10
+              }
+            })
           }
           send({ type: 'finish', finishReason: 'done' })
           return

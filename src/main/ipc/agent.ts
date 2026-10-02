@@ -2,6 +2,7 @@ import { ipcMain } from 'electron'
 import { agentService } from '../services/ai/agent'
 import { acpAgentService } from '../services/ai/acp-agent'
 import { detectInstalledAcpAgents } from '../services/ai/acp-detect'
+import { clearConversationSummary, compressConversationNow } from '../services/ai/context-summary'
 import {
   listWorkspaceDir,
   readWorkspaceFile,
@@ -120,6 +121,15 @@ export function registerAgentIpc(ctx: IpcContext): void {
     // 会话没了，它的浏览器 profile（登录态等）跟着删 —— 见 session.ts 的 purge 说明
     await browserSessions.purge(agentBrowserSessionId(id))
   })
+
+  // ---------- 上下文摘要检查点（手动压缩） ----------
+  // 原始消息一条不动：压缩只改「组装发往模型的历史」，所以清除摘要就是无损回到全文。
+  ipcMain.handle('agent:context:compress', (_e, conversationId: string) =>
+    compressConversationNow(conversationId)
+  )
+  ipcMain.handle('agent:context:clear', (_e, conversationId: string) =>
+    clearConversationSummary(conversationId)
+  )
 
   // ---------- ACP：检测 / 会话发现 / 历史回放 / 模型切换 ----------
   /** 扫描本机 PATH 里已安装的已知 ACP agent（导入弹窗的「检测」用） */

@@ -23,6 +23,8 @@ export type {
 } from './agent'
 export { adaptMastraPart } from './mastra-stream'
 export type { MastraAdaptedEvent } from './mastra-stream'
+export { normalizeUsage, readChunkUsage } from './usage'
+export type { RawUsage } from './usage'
 export { buildSkillsPromptSection, buildReadSkillTool, SKILL_FILE } from './skills'
 export { resolveInside, createIgnoreChecker, parseGitignore, relPathOf } from './workspace'
 export { createAgentFileState } from './tools'

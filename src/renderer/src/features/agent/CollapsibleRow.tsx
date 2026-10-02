@@ -1,7 +1,8 @@
 import { cn } from 'cn'
 import { ChevronRight } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { useStickToBottom } from 'use-stick-to-bottom'
+import { useConversationOptional } from './Conversation'
 
 /**
  * 扁平行外壳（参考 ainav/sdk 的 CollapsibleRow，样式全部用 Tailwind 重写）。
@@ -63,14 +64,29 @@ export function CollapsibleRow({
    * 就跳一帧，展开的思考过程看着是一格一格地蹦。库还顺带接管了「用户上滚就暂停跟随、
    * 滚回底部自动恢复」，不用自己算 scrollHeight 差值。
    *
-   * 只在 `stickToBottom` 时挂 ref：工具行这类「展开后内容不再变」的块不需要自动吸底，
-   * 挂了反而会在打开时平白把用户拽到底部。
+   * ⚠️ 两个 ref **无条件挂载**（别按 `stickToBottom` 条件传 `undefined`）：
+   * 库的 `contentRef` 是 callback ref，拿到元素才建 ResizeObserver 开始观察内容高度。
+   * 条件挂载会把观察起点拖到「开关翻转的那一帧」，而流式入参的第一帧往往正是内容
+   * 开始变长的那一刻 —— 首屏要等 observer 的异步回调才滚，开关来回翻转还会反复建 /
+   * 拆 observer。无条件挂载后，观察从挂载起就在，首滚由下面这个 effect 显式给出。
+   * 代价是 `initial` 只能给 `false`：挂载时不许自动落底，否则工具行这类「展开后内容
+   * 不再变」的块一展开就被平白拽到底部。
    */
-  const { scrollRef, contentRef } = useStickToBottom({ initial: 'instant' })
-  const setScrollRef = stickToBottom ? scrollRef : undefined
-  const setContentRef = stickToBottom ? contentRef : undefined
+  const { scrollRef, contentRef, scrollToBottom } = useStickToBottom({ initial: false })
+  useEffect(() => {
+    if (stickToBottom) void scrollToBottom({ animation: 'instant' })
+  }, [stickToBottom, scrollToBottom])
+
+  /**
+   * 用户手动开合：先让消息区**退出自动贴底**（`holdScroll`），内容才会在原地下方长出来。
+   * 不退出的话，展开这一下让消息区内容变高、贴底逻辑把视图拽到底部 ——
+   * 用户点的那张卡被顶上去，看起来像「点展开、页面往上滚」。
+   * （fishwork 的 `PartView` 里每个折叠块都这么做，见 `useConversationOptional` 的注释。）
+   */
+  const conversation = useConversationOptional()
 
   const toggle = () => {
+    conversation?.holdScroll()
     if (openProp === undefined) setOpenState((v) => !v)
     onOpenChange?.(!open)
   }
@@ -124,16 +140,16 @@ export function CollapsibleRow({
             整段文字重新折行、看着像「往左跳了一下」（长思考 / 长工具输出都踩得到）。
           */}
           <div
-            ref={setScrollRef}
+            ref={scrollRef}
             className={cn(
               'min-h-0',
               open ? 'max-h-64 overflow-y-auto [scrollbar-gutter:stable] mt-4' : 'overflow-hidden'
             )}
             // 与消息区同一个理由：关掉 Chromium 的滚动锚定，滚动位置由库显式管理
-            style={stickToBottom ? { overflowAnchor: 'none' } : undefined}
+            style={{ overflowAnchor: 'none' }}
           >
             <div
-              ref={setContentRef}
+              ref={contentRef}
               className={cn(
                 'my-1 ml-2.5 border-l border-border py-1 pl-2.5 pr-1',
                 'text-[13px] leading-relaxed text-muted-foreground',

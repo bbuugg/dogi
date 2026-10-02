@@ -32,14 +32,31 @@ class Cdp {
     this.ws = ws
     this.id = 0
     this.pending = new Map()
+    /** method -> Set<cb>：CDP 的事件帧（没有 id）走这里，别和请求/响应混在一起 */
+    this.listeners = new Map()
     ws.addEventListener('message', (ev) => {
       const msg = JSON.parse(ev.data)
+      if (msg.id === undefined) {
+        const cbs = this.listeners.get(msg.method)
+        if (cbs) for (const cb of [...cbs]) cb(msg.params)
+        return
+      }
       const p = this.pending.get(msg.id)
       if (!p) return
       this.pending.delete(msg.id)
       if (msg.error) p.reject(new Error(JSON.stringify(msg.error)))
       else p.resolve(msg.result)
     })
+  }
+
+  /**
+   * 订阅 CDP 事件（如 `Input.dragIntercepted`）。
+   * 原来的实现里事件帧因为取不到 id 被直接丢掉，做拖拽拦截时必须先能收到事件。
+   */
+  on(method, cb) {
+    if (!this.listeners.has(method)) this.listeners.set(method, new Set())
+    this.listeners.get(method).add(cb)
+    return () => this.listeners.get(method)?.delete(cb)
   }
 
   send(method, params = {}) {

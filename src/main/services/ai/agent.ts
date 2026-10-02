@@ -21,8 +21,11 @@ import {
   buildAgentSystemPrompt,
   buildAgentTools,
   createAgentFileState,
+  normalizeUsage,
+  readChunkUsage,
   toModelMessages,
-  type AgentFileState
+  type AgentFileState,
+  type RawUsage
 } from './agent-core'
 import type {
   AgentChatRequest,
@@ -31,7 +34,8 @@ import type {
   BrowserChannel
 } from '@shared/types'
 import { resolveModel } from './ai'
-import { compressContext } from './context'
+import { compressContext, withSummaryPrefix } from './context'
+import { sliceByCheckpoint } from './context-summary'
 import { askFollowupBroker, buildAskFollowupTool } from './ask-followup'
 import { armConfirmTimeout, modelRunTimeout } from './timeouts'
 import { DEFAULT_MAX_STEPS, resolveMaxRetries } from '@shared/ai-timeouts'
@@ -244,10 +248,15 @@ class AgentService extends EventEmitter {
     // 不传就回退到配置的默认模型 —— 表现为「切换模型不生效，请求还在用旧模型」。
     const model = resolveModel(config, req.modelId)
     const historyLimit = config.contextMessages ?? 20
-    // 两道独立的闸：先按**条数**截断（contextMessages），再按**token**压缩（contextBudget）。
-    // 压缩只改「这一次请求怎么带上下文」，不碰落盘的历史（屏幕上的原文始终可翻可复制）。
+    // 三道闸，**顺序不能换**：① 手动压缩的检查点切片 → ② 按条数截断 → ③ 按 token 自动压缩。
+    // ① 必须在 ② 之前：反过来 slice(-historyLimit) 可能把刚注入的摘要消息本身切掉，
+    // 检查点就白设了（而且是静默白设，界面看不出任何异常）。
+    // ③ 只改「这一次请求怎么带上下文」，不碰落盘的历史（屏幕上的原文始终可翻可复制）。
+    const conversation = storage.getAgentConversation(req.conversationId)
+    const sliced = sliceByCheckpoint(req.history, conversation?.contextSummary)
+    const recent = toModelMessages(sliced.messages.slice(-historyLimit))
     const { messages: modelMessages, compressed } = await compressContext(
-      toModelMessages(req.history.slice(-historyLimit)),
+      sliced.summaryText ? withSummaryPrefix(recent, sliced.summaryText) : recent,
       {
         budget: config.contextBudget,
         model: config,
@@ -343,6 +352,13 @@ class AgentService extends EventEmitter {
       for (;;) {
         /** 首块时刻（TPS 的生成窗口起点）：每次尝试各算一份 */
         let firstTokenAt = 0
+        /**
+         * 本轮用量。**优先取自 `finish` chunk**（AI SDK 原样透出的那份，字段最全），
+         * 拿不到才回退到 Mastra 的 `stream.usage` —— 后者是它自己归一化过的形状，
+         * 「思考 / 缓存命中」的明细不一定保留（见 `agent-core/usage.ts` 的说明）。
+         * 多步时每个 step 都会带 usage，后写覆盖先写，最终留的是整轮累计值。
+         */
+        let rawUsage: RawUsage | null = null
         try {
           const stream = await opts.start()
           for await (const part of stream.fullStream) {
@@ -356,6 +372,8 @@ class AgentService extends EventEmitter {
             ) {
               firstTokenAt = Date.now()
             }
+            const chunkUsage = readChunkUsage(p)
+            if (chunkUsage) rawUsage = chunkUsage
             const event = adaptMastraPart(p)
             if (event) {
               // 流内 error 块（不抛、只发事件）：底层可重试就抛出去，交给 catch 走重试 ——
@@ -371,40 +389,35 @@ class AgentService extends EventEmitter {
               send(event)
             }
           }
-          try {
-            const u = (await stream.usage) as
-              | {
-                  promptTokens?: number
-                  completionTokens?: number
-                  totalTokens?: number
-                  reasoningTokens?: number
-                  cachedInputTokens?: number
-                  inputTokens?: number
-                  outputTokens?: number
-                }
-              | undefined
-            if (u) {
-              const endAt = Date.now()
-              const durationMs = endAt - startedAt
-              const genWindowMs = firstTokenAt ? endAt - firstTokenAt : durationMs
-              const inputTokens = u.promptTokens ?? u.inputTokens ?? 0
-              const outputTokens = u.completionTokens ?? u.outputTokens ?? 0
-              const tps = genWindowMs > 0 ? outputTokens / (genWindowMs / 1000) : 0
-              send({
-                type: 'usage',
-                usage: {
-                  inputTokens,
-                  outputTokens,
-                  totalTokens: u.totalTokens ?? 0,
-                  ...(u.reasoningTokens != null ? { reasoningTokens: u.reasoningTokens } : {}),
-                  ...(u.cachedInputTokens != null ? { cachedInputTokens: u.cachedInputTokens } : {}),
-                  durationMs,
-                  tps: Math.round(tps * 10) / 10
-                }
-              })
+          if (!rawUsage) {
+            try {
+              rawUsage = normalizeUsage(await stream.usage)
+            } catch {
+              // 用量缺失时静默跳过
             }
-          } catch {
-            // 用量缺失时静默跳过
+          }
+          if (rawUsage) {
+            const endAt = Date.now()
+            const durationMs = endAt - startedAt
+            const genWindowMs = firstTokenAt ? endAt - firstTokenAt : durationMs
+            const tps =
+              genWindowMs > 0 ? rawUsage.outputTokens / (genWindowMs / 1000) : 0
+            send({
+              type: 'usage',
+              usage: {
+                inputTokens: rawUsage.inputTokens,
+                outputTokens: rawUsage.outputTokens,
+                totalTokens: rawUsage.totalTokens,
+                ...(rawUsage.reasoningTokens != null
+                  ? { reasoningTokens: rawUsage.reasoningTokens }
+                  : {}),
+                ...(rawUsage.cachedInputTokens != null
+                  ? { cachedInputTokens: rawUsage.cachedInputTokens }
+                  : {}),
+                durationMs,
+                tps: Math.round(tps * 10) / 10
+              }
+            })
           }
           send({ type: 'finish', finishReason: 'done' })
           return

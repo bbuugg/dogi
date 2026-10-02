@@ -3,6 +3,7 @@ import { safeStorage } from 'electron'
 import type {
   AgentConversation,
   AgentWorkspace,
+  ConversationContextSummary,
   AiModelConfig,
   AiPermissionMode,
   AiSettings,
@@ -1093,6 +1094,19 @@ class StorageService {
 
   deleteAgentConversation(id: string): void {
     conversationStore.delete(id)
+  }
+
+  /**
+   * 设置 / 清除会话的上下文摘要检查点（**手动压缩的落库口**）。
+   *
+   * `null` = 清除，回到全文历史。原始消息一条不动，所以清除是无损、可逆的。
+   * 会话不存在时返回 undefined（调用方据此报「会话不存在」）。
+   */
+  setAgentContextSummary(
+    id: string,
+    summary: ConversationContextSummary | null
+  ): AgentConversation | undefined {
+    return conversationStore.setContextSummary(id, summary)
   }
 
   // ---------- MCP servers ----------

@@ -333,6 +333,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
     followupRequests: {},
     // 待发送队列：会话进行中继续发的消息排在这里（只存内存，见 QueuedAgentMessage）
     agentQueues: {},
+    // 手动压缩上下文进行中（全局一个在跑就够了：它要调模型，不是本地操作）
+    contextCompressing: false,
     workspaceConfigs: {},
 
     skills: [],
@@ -2535,6 +2537,69 @@ export const useAppStore = create<AppStore>()((set, get) => {
           }
         }
       }))
+    },
+
+    /**
+     * 手动压缩某个会话的上下文（主进程摘要并落成检查点，原始消息一条不动）。
+     *
+     * 本地这份 `contextSummary` 只是**给界面看的即时反馈** —— 落库的真源在主进程
+     * （所以它不在 `persistConversation` 的落盘请求里，两边各管各的、不会互相覆盖）。
+     */
+    compressAgentContext: async (conversationId) => {
+      const cid = conversationId
+      if (!cid) return { ok: false, reason: '没有打开的会话' }
+      if (get().contextCompressing) return { ok: false, reason: '压缩正在进行中' }
+      set({ contextCompressing: true })
+      try {
+        const res = await window.api.agent.compressContext(cid)
+        if (!res.ok) return { ok: false, reason: res.reason ?? '压缩未执行' }
+        const summary = res.summary
+        if (summary) {
+          set((s) => ({
+            agentConversations: s.agentConversations.map((c) =>
+              c.id === cid ? { ...c, contextSummary: summary } : c
+            )
+          }))
+          // 复用顶部那条提示：手动压缩也属于「上下文被压过了」，不必再发明一条横幅
+          set((s) => ({
+            agentRuns: {
+              ...s.agentRuns,
+              [cid]: { ...(s.agentRuns[cid] ?? emptyAgentRun()), contextNotice: summary.stats }
+            }
+          }))
+        }
+        return { ok: true }
+      } catch (err) {
+        return {
+          ok: false,
+          fatal: true,
+          reason: err instanceof Error ? err.message : String(err)
+        }
+      } finally {
+        set({ contextCompressing: false })
+      }
+    },
+
+    /** 清除摘要检查点：之后每轮回到全文历史（原始消息一直在，所以无损） */
+    clearAgentContextSummary: async (conversationId) => {
+      const cid = conversationId
+      if (!cid) return { ok: false, reason: '没有打开的会话' }
+      try {
+        const res = await window.api.agent.clearContextSummary(cid)
+        if (!res.ok) return { ok: false, reason: res.reason ?? '清除未执行' }
+        set((s) => ({
+          agentConversations: s.agentConversations.map((c) =>
+            c.id === cid ? { ...c, contextSummary: undefined } : c
+          )
+        }))
+        return { ok: true }
+      } catch (err) {
+        return {
+          ok: false,
+          fatal: true,
+          reason: err instanceof Error ? err.message : String(err)
+        }
+      }
     },
 
     clearAgentMessages: (conversationId) => {

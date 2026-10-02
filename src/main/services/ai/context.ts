@@ -16,10 +16,11 @@
 import { generateText } from 'ai'
 import type { ModelMessage } from 'ai'
 import type { AiModelConfig, ContextCompression } from '@shared/types'
+import { DEFAULT_CONTEXT_BUDGET, resolveContextBudget } from '@shared/context-budget'
 import { resolveModel } from './resolve-model'
 
-/** 默认上下文预算（token）：低于此数不触发压缩。留足系统提示词 + 本轮输入 + 输出余量。 */
-export const DEFAULT_CONTEXT_BUDGET = 80_000
+/** 默认上下文预算：真源在 shared（渲染端的用量圆环用同一个值算分母） */
+export { DEFAULT_CONTEXT_BUDGET, resolveContextBudget }
 /** 触发压缩后，保留的「近期原文」占预算的比例（其余的旧轮摘要掉） */
 export const KEEP_RECENT_RATIO = 0.5
 /** 摘要请求的最大输出 token */
@@ -80,8 +81,8 @@ function messageToText(m: ModelMessage): string {
   return out.join('\n')
 }
 
-/** 一组消息的 token 数 */
-function countTokens(messages: ModelMessage[]): number {
+/** 一组消息的 token 数（手动压缩落检查点时要统计压缩前后，也是导出给外部用的） */
+export function countTokens(messages: ModelMessage[]): number {
   let sum = 0
   for (const m of messages) sum += estimateTokens(messageToText(m))
   return sum
@@ -99,12 +100,47 @@ function modelMessagesToText(messages: ModelMessage[]): string {
 }
 
 /**
- * 把 ModelMessage 切成「轮」：每个 user 消息开始新的一轮，tool 消息归到前一个 assistant 那轮。
- * 第一个消息如果不是 user（历史从 assistant / tool 中途开始），它独自成一轮（前导轮）。
+ * 只做「把这一段历史摘要成一段中文」这一件事 —— **自动压缩与手动检查点共用**。
+ *
+ * 失败返回 `null` 而不抛：调用方据此决定回退策略（自动压缩回退成截断继续发；
+ * 手动压缩则整个操作失败、不落一个没有正文的检查点）。
  */
-function splitTurns(messages: ModelMessage[]): ModelMessage[][] {
-  const turns: ModelMessage[][] = []
-  let current: ModelMessage[] = []
+export async function summarizeHistory(
+  messages: ModelMessage[],
+  opts: {
+    model: AiModelConfig
+    modelId?: string
+    maxTokens?: number
+    signal?: AbortSignal
+  }
+): Promise<string | null> {
+  try {
+    const transcript = modelMessagesToText(messages)
+    if (!transcript.trim()) return null
+    const { text } = await generateText({
+      model: resolveModel(opts.model, opts.modelId) as never,
+      system: SUMMARY_SYSTEM,
+      messages: [{ role: 'user', content: transcript }],
+      maxOutputTokens: opts.maxTokens ?? SUMMARY_MAX_TOKENS,
+      ...(opts.signal ? { abortSignal: opts.signal } : {})
+    })
+    return text?.trim() || null
+  } catch (err) {
+    console.warn('[context] 上下文摘要失败：', err)
+    return null
+  }
+}
+
+/**
+ * 把消息切成「轮」：每个 user 消息开始新的一轮，tool 消息归到前一个 assistant 那轮。
+ * 第一个消息如果不是 user（历史从 assistant / tool 中途开始），它独自成一轮（前导轮）。
+ *
+ * 泛型：自动压缩切 `ModelMessage[]`，手动压缩落检查点时切的是 `AgentChatMessage[]`
+ * （要靠轮边界找到「最后一条保留的消息 id」）—— 两边规则必须一致，所以共用这一个函数。
+ */
+export function splitTurns<T extends { role: string }>(messages: T[]): T[][] {
+  const turns: T[][] = []
+  let current: T[] = []
   for (const m of messages) {
     if (m.role === 'user' && current.length > 0) {
       turns.push(current)
@@ -156,6 +192,19 @@ function mergeAdjacentText(messages: ModelMessage[]): ModelMessage[] {
 }
 
 /**
+ * 在历史最前面注入一条「摘要」消息 —— **手动压缩检查点**用（自动压缩自己拼摘要，见 compressContext）。
+ *
+ * 摘要以 user 角色插入：它后面紧跟的第一条保留消息通常也是 user（那一轮的开头），
+ * 连续同角色会被部分 provider 拒，所以过一遍 mergeAdjacentText。
+ */
+export function withSummaryPrefix(messages: ModelMessage[], text: string): ModelMessage[] {
+  return mergeAdjacentText([
+    { role: 'user', content: `（以下是对先前对话的摘要，替代原始历史）\n\n${text}` },
+    ...messages
+  ])
+}
+
+/**
  * 按预算压缩上下文。
  *
  * - 不超预算 → 原样返回（`compressed = null`，调用方零感知）；
@@ -177,10 +226,7 @@ export async function compressContext(
     signal?: AbortSignal
   }
 ): Promise<CompressResult> {
-  const budget =
-    typeof opts.budget === 'number' && Number.isFinite(opts.budget) && opts.budget > 0
-      ? opts.budget
-      : DEFAULT_CONTEXT_BUDGET
+  const budget = resolveContextBudget(opts.budget)
   const keepRatio = opts.keepRecentRatio ?? KEEP_RECENT_RATIO
   const summaryMaxTokens = opts.summaryMaxTokens ?? SUMMARY_MAX_TOKENS
 
@@ -210,21 +256,13 @@ export async function compressContext(
   const oldTurns = turns.slice(0, summarizedTurns).flat()
   const recent = turns.slice(summarizedTurns).flat()
 
-  // 摘要：失败就回退成截断
-  let summary: string | null = null
-  try {
-    const transcript = modelMessagesToText(oldTurns)
-    const { text } = await generateText({
-      model: resolveModel(opts.model, opts.modelId) as never,
-      system: SUMMARY_SYSTEM,
-      messages: [{ role: 'user', content: transcript }],
-      maxOutputTokens: summaryMaxTokens,
-      ...(opts.signal ? { abortSignal: opts.signal } : {})
-    })
-    summary = text?.trim() || null
-  } catch (err) {
-    console.warn('[context] 上下文摘要失败，回退为截断：', err)
-  }
+  // 摘要：失败就回退成截断（见 summarizeHistory 的注释）
+  const summary = await summarizeHistory(oldTurns, {
+    model: opts.model,
+    modelId: opts.modelId,
+    maxTokens: summaryMaxTokens,
+    signal: opts.signal
+  })
 
   const summaryText = summary
     ? `（以下为先前 ${summarizedTurns} 轮对话的摘要，已压缩替代原文）\n\n${summary}`

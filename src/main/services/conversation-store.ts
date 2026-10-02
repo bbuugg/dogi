@@ -1,7 +1,12 @@
 import { app } from 'electron'
 import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { AgentBackend, AgentChatMessage, AgentConversation } from '@shared/types'
+import type {
+  AgentBackend,
+  AgentChatMessage,
+  AgentConversation,
+  ConversationContextSummary
+} from '@shared/types'
 
 /** 会话默认标题（渲染端也有一份同值常量） */
 const DEFAULT_CONVERSATION_TITLE = '新会话'
@@ -40,6 +45,11 @@ function normalizeConversation(raw: LegacyConversation): AgentConversation {
     id: raw.id,
     workspaceId: raw.workspaceId,
     title: raw.title ?? DEFAULT_CONVERSATION_TITLE,
+    // ⚠️ 这个函数是**显式重建对象**（不 spread raw），所以每个要保留的字段都必须在这里列出。
+    // 漏掉 contextSummary 的后果不是「读出来少个字段」，而是：读回来丢 → 缓存里没了 →
+    // 用户下一次发消息触发 save → 文件被重写成没有检查点的版本 → 压缩成果**永久丢失**。
+    // 加新字段时务必在这里补一行。
+    contextSummary: raw.contextSummary,
     createdAt: raw.createdAt ?? Date.now(),
     updatedAt: raw.updatedAt ?? Date.now()
   }
@@ -207,6 +217,11 @@ export class ConversationStore {
           ? input.acpSessionId
           : prev?.acpSessionId
         : undefined,
+      // ⚠️ 上下文摘要检查点**原样保留**、这里不做任何合并：
+      // 它归主进程所有（生成 / 清除都走 `setContextSummary`），而渲染端的落盘请求里
+      // 根本没有这个字段 —— 如果这里跟着重建对象不带上它，用户每发一条消息
+      // 就会把手动压缩的成果悄悄抹掉。
+      contextSummary: prev?.contextSummary,
       createdAt: prev?.createdAt ?? now,
       updatedAt: now
     }
@@ -219,6 +234,33 @@ export class ConversationStore {
     this.ensureLoaded()
     this.cache.delete(id)
     rmSync(this.filePath(id), { force: true })
+  }
+
+  /**
+   * 设置 / 清除上下文摘要检查点（**手动压缩的落库口**，见 `ConversationContextSummary`）。
+   *
+   * 只改这一个字段，消息原封不动 —— 压缩只发生在「组装发往模型的历史」那一步，
+   * 所以清除它就是**完整、无损地**回到全文历史。
+   *
+   * 刻意不复用 `save`：那个是「upsert + 重建整条会话」的语义，而这里要的是
+   * 「就地打一个补丁」，走 save 会把渲染端传来的消息当成真源重写一遍。
+   */
+  setContextSummary(
+    id: string,
+    summary: ConversationContextSummary | null
+  ): AgentConversation | undefined {
+    this.ensureLoaded()
+    const prev = this.cache.get(id)
+    if (!prev) return undefined
+    const next: AgentConversation = {
+      ...prev,
+      // null 显式置 undefined（JSON 落盘时字段被丢弃）= 清除
+      contextSummary: summary ?? undefined,
+      updatedAt: Date.now()
+    }
+    this.cache.set(id, next)
+    this.writeFile(next)
+    return next
   }
 
   /** 工作区没了：它的会话一并删掉，避免留下永远看不到的孤儿数据 */

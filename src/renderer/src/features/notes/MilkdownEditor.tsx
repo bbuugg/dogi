@@ -4,7 +4,7 @@ import { imageBlockSchema } from '@milkdown/kit/component/image-block'
 // 链接用 link-tooltip 那一份命令（Crepe 工具条的「链接」按钮也是它）：弹浮层让人填地址，
 // 和 Typora 的 Ctrl+K 一致。preset/commonmark 里同名的那个是「直接给标记套 attrs」，空选区时会抛错。
 import { toggleLinkCommand } from '@milkdown/kit/component/link-tooltip'
-import { commandsCtx, KeymapReady, keymapCtx, type CmdKey } from '@milkdown/kit/core'
+import { commandsCtx, editorViewCtx, KeymapReady, keymapCtx, type CmdKey } from '@milkdown/kit/core'
 import type { Ctx, MilkdownPlugin } from '@milkdown/kit/ctx'
 import {
   addBlockTypeCommand,
@@ -20,6 +20,7 @@ import {
 import { insertTableCommand, strikethroughKeymap } from '@milkdown/kit/preset/gfm'
 import type { Command } from '@milkdown/kit/prose/state'
 import { replaceAll } from '@milkdown/kit/utils'
+import { installBlockDragDropFallback } from '@/features/notes/block-drag-drop'
 import { Milkdown, MilkdownProvider, useEditor } from '@milkdown/react'
 import '@milkdown/crepe/theme/common/style.css'
 import './MilkdownEditor.css'
@@ -242,6 +243,29 @@ function CrepeEditor({ value = '', onChange }: MilkdownEditorProps) {
     if (!editor) return
     editor.action(replaceAll(value))
   }, [value, get])
+
+  useEffect(() => {
+    const editor = get()
+    if (!editor) return
+    const view = editor.action((ctx) => ctx.get(editorViewCtx))
+    /**
+     * CDP 调试暴露：把 ProseMirror 的 `EditorView` 挂到 `window.__notesView`。
+     *
+     * 同一约定见 `stores/app-store.ts` 末尾的 `window.__store` —— 隔离实例的验证脚本
+     * （`scripts/verify-*.mjs`、`scripts/probe-*.mjs`）靠它驱动 / 检查真 UI。
+     *
+     * 为什么编辑器需要单独挂一个：ProseMirror 的 `EditorView` **没有**从 DOM 反查的入口
+     * （`dom.pmViewDesc` 是 `NodeViewDesc`，它不持有 view 引用），而块拖拽的关键状态
+     * 全在 view 上（`view.dragging` 由 Milkdown 在手柄的 dragstart 里设置，
+     * 两个 `handleDrop` 出口都在读它）。没有这个钩子，探针只能看到「事件到了」，
+     * 看不到「为什么没生效」。
+     */
+    ;(window as unknown as Record<string, unknown>).__notesView = view
+    // 块拖拽的 drop 兜底（react-dnd 的全局 capture 监听把 drop 掐掉了）。挂到 view.dom 上：
+    // 与 prosemirror-view 自己的处理器同节点，注册更晚 → 冒泡顺序天然排在其后，
+    // 这样才拿得到「PM 有没有处理过」的判据。见 block-drag-drop.ts。
+    return installBlockDragDropFallback(view.dom, () => view)
+  }, [get])
 
   return <Milkdown />
 }

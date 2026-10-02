@@ -23,6 +23,7 @@ import type {
   AiSettings,
   AiStreamEvent,
   ApiGroup,
+  ChatCompressResult,
   ApiHistoryEntry,
   ApiHttpRequest,
   ApiHttpResponse,
@@ -386,6 +387,16 @@ const api = {
     }): Promise<AgentConversation> => ipcRenderer.invoke('agent:conversations:save', input),
     deleteConversation: (id: string): Promise<void> =>
       ipcRenderer.invoke('agent:conversations:delete', id),
+    /**
+     * 手动压缩当前会话的上下文：把「最后一轮之外」的旧轮摘要成一段，落成检查点。
+     * 原始消息一条不动 —— 之后每轮发往模型的历史 = 摘要 + 检查点之后的原文。
+     * `ok: false` = 没压缩也没改动（如不足两轮），`reason` 可直接展示给用户。
+     */
+    compressContext: (conversationId: string): Promise<ChatCompressResult> =>
+      ipcRenderer.invoke('agent:context:compress', conversationId),
+    /** 清除摘要检查点，回到全文历史（无损、可逆） */
+    clearContextSummary: (conversationId: string): Promise<ChatCompressResult> =>
+      ipcRenderer.invoke('agent:context:clear', conversationId),
     chat: (req: AgentChatRequest): Promise<{ requestId: string }> =>
       ipcRenderer.invoke('agent:chat', req),
     abort: (requestId: string): Promise<void> => ipcRenderer.invoke('agent:abort', requestId),

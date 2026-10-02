@@ -2,7 +2,8 @@ import { AgentFilesPanel } from '@/features/agent/AgentFilesPanel'
 import { AiMarkdown } from '@/features/agent/AiMarkdown'
 import { AskFollowupCard } from '@/features/agent/AskFollowupCard'
 import { BrowserPane } from '@/features/agent/BrowserPane'
-import { ConversationUsageBar } from '@/features/agent/ConversationUsageBar'
+import { ContextNoticeBar } from '@/features/agent/ContextNoticeBar'
+import { ContextRing } from '@/features/agent/ContextRing'
 import {
   Conversation,
   ConversationContent,
@@ -30,6 +31,7 @@ import { useInlineConfirm } from '@/shared/components/InlineConfirm'
 import { conversationKind, isDraftConversation, useAppStore } from '@/stores/app-store'
 import { ASK_FOLLOWUP_TOOL } from '@shared/ask-followup'
 import { sumUsage } from '@shared/agent-usage'
+import { resolveContextBudget } from '@shared/context-budget'
 import { DEFAULT_BROWSER_VIEWPORT, agentBrowserSessionId } from '@shared/browser'
 import type {
   AgentChatMessage,
@@ -562,6 +564,50 @@ export function AgentPage({
   const effectiveConfigId = usable(conversation?.configId) ?? usable(aiSettings.activeConfigId)
   /** 可发消息：ACP 要有绑定的 agent；内置要有可用模型；未定形态时两边有其一即可 */
   const hasConfig = isAcp ? Boolean(boundAcp) : Boolean(effectiveConfigId) || (undecided && Boolean(boundAcp))
+
+  // ---------- 上下文用量圆环（输入框工具行，见 ContextRing） ----------
+  const contextCompressing = useAppStore((s) => s.contextCompressing)
+  const compressAgentContext = useAppStore((s) => s.compressAgentContext)
+  const clearAgentContextSummary = useAppStore((s) => s.clearAgentContextSummary)
+  /**
+   * 分子 = **最后一条带 usage 的助手消息**的 `inputTokens`。
+   *
+   * 用 provider 上报的真实值而不是本地 `estimateTokens`：后者只用来判「够不够触发压缩」，
+   * 差 20% 不影响是否触发，拿它展示会骗人。代价是流式过程中显示的是上一完成轮的值。
+   */
+  const lastUsageMessage = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (m.role === 'assistant' && m.usage) return m
+    }
+    return undefined
+  }, [messages])
+  const lastUsage = lastUsageMessage?.usage
+  /**
+   * 手动压缩之后、下一轮跑完之前：provider 上报的 `inputTokens` 还是**压缩前**那一轮的
+   * 值，直接拿它画圆环会显示成「压了等于没压」。这段时间用检查点里算好的 `afterTokens`
+   * 顶一下（本地估算），等下一轮跑完（新消息的 createdAt 晚于检查点）自然换成真实值。
+   */
+  const contextCheckpoint = conversation?.contextSummary
+  const compressedUsed =
+    contextCheckpoint &&
+    (!lastUsageMessage || contextCheckpoint.createdAt > lastUsageMessage.createdAt)
+      ? contextCheckpoint.stats.afterTokens
+      : null
+  const used = compressedUsed ?? lastUsage?.inputTokens ?? null
+  /**
+   * 分母 = 这个会话实际生效的预算，回退顺序与主进程**完全一致**
+   * （会话 configId → 设置里的 activeConfigId → 默认 80k）。
+   *
+   * ⚠️ 两边必须同源（`@shared/context-budget`）：主进程拿它判「要不要压缩」，
+   * 圆环拿它算百分比 —— 各写一份默认值的话，圆环显示还剩 20% 而实际早就压过了。
+   */
+  const contextBudget = useMemo(() => {
+    const id = effectiveConfigId ?? aiSettings.activeConfigId
+    return resolveContextBudget(aiConfigs.find((c) => c.id === id)?.contextBudget)
+  }, [aiConfigs, aiSettings.activeConfigId, effectiveConfigId])
+  /** 草稿（还没发出首条消息）与 ACP 会话都不显示：前者没有历史，后者上下文在 agent 侧 */
+  const showContextRing = !draft && !isAcp && Boolean(conversationId)
 
   /**
    * ACP 会话：**切到可见时**让 agent 回放它的历史（本地不落盘，所以每次打开都拉一次）。
@@ -1165,6 +1211,9 @@ export function AgentPage({
 
   const handleSend = () => {
     if (!input.trim() || !hasConfig || !conversationId) return
+    // 手动压缩进行中禁发：这一轮如果也带上刚落盘的检查点，语义很难解释（用户会以为
+    // 「压缩了它怎么还知道那么多」）。等这一下更清楚 —— 打字不禁，只拦发送。
+    if (contextCompressing) return
     const text = input
     // 编辑重发只在空闲时可发：它会**先删掉**这条及其之后的消息，而 `sendAgentMessage`
     // 在流式期间直接返回 —— 先删后发不出去就丢内容了（所以这里要在清输入框之前拦）
@@ -1565,9 +1614,10 @@ export function AgentPage({
                 resetKey={`${conversationId ?? '__none__'}#${scrollResetSeq}`}
               >
                 <ConversationContent>
-                  {/* 会话累计 token + 上下文已压缩：粘在消息列顶部，随消息滚动（见 ConversationUsageBar）*/}
+                  {/* 上下文已压缩：粘在消息列顶部（见 ContextNoticeBar）。
+                      会话累计 token 不在这里 —— 它在输入框的上下文圆环详情里，与 fishwork 一致 */}
                   <div className="mx-auto w-full max-w-3xl px-5">
-                    <ConversationUsageBar usage={totalUsage} notice={contextNotice} />
+                    <ContextNoticeBar notice={contextNotice} />
                   </div>
                   {messages.map((m, index) => (
                     <div
@@ -1717,6 +1767,22 @@ export function AgentPage({
                     </div>
                     <div className="flex min-w-0 items-center gap-1">
                       <McpConfigPopover />
+                      {/* 上下文用量圆环：紧挨模型选择左侧（同为「这个会话用什么」的开关）。
+                          悬停出详情与手动压缩；草稿 / ACP 会话不显示 */}
+                      {showContextRing && conversationId && (
+                        <ContextRing
+                          used={used}
+                          estimated={compressedUsed !== null}
+                          budget={contextBudget}
+                          lastUsage={lastUsage}
+                          totalUsage={totalUsage}
+                          notice={contextNotice}
+                          checkpoint={contextCheckpoint}
+                          compressing={contextCompressing}
+                          onCompress={() => compressAgentContext(conversationId)}
+                          onClear={() => clearAgentContextSummary(conversationId)}
+                        />
+                      )}
                       <Select
                         size="small"
                         variant="borderless"
@@ -1748,8 +1814,14 @@ export function AgentPage({
                         <Button
                           type="text"
                           icon={<Send className="size-4" />}
-                          disabled={!input.trim() || !hasConfig}
-                          title={streaming ? '加入待发送队列' : '发送'}
+                          disabled={!input.trim() || !hasConfig || contextCompressing}
+                          title={
+                            contextCompressing
+                              ? '正在压缩上下文，请稍候'
+                              : streaming
+                                ? '加入待发送队列'
+                                : '发送'
+                          }
                           className="shrink-0"
                           onClick={handleSend}
                         />

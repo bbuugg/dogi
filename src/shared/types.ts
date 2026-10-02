@@ -1213,6 +1213,45 @@ export interface ContextCompression {
   truncated: boolean
 }
 
+/**
+ * 会话的上下文摘要**检查点**（手动「压缩上下文」的产物）。
+ *
+ * 语义：检查点之前的消息在**发给模型的历史里**被 `text` 摘要替代（合成一条 user 消息），
+ * 之后的消息保持原文。存储与界面里的原始消息**一条不动** —— 压缩只发生在请求侧。
+ *
+ * ⚠️ 与 `ContextCompression` 的分工：那个是「压缩发生了」的**通知**（一次性、进 `agentRuns`），
+ * 这个是压缩产物的**持久状态**（挂在会话上、可清除）。自动压缩（超预算才触发）不落检查点，
+ * 仍然只在请求侧生效。
+ */
+export interface ConversationContextSummary {
+  /** 摘要正文（模型生成） */
+  text: string
+  /** 检查点截止的**最后一条**消息 id（这之后的消息保持原文） */
+  upToMessageId: string
+  /**
+   * 同上的时间兜底：`upToMessageId` 因编辑重发 / 删除而不存在时按时间切片
+   * （早于它的全部算作已摘要）。两者一起存，切片时优先 id、兜底时间。
+   */
+  upToCreatedAt: number
+  /** 摘要生成时间 */
+  createdAt: number
+  /** 压缩统计（圆环详情与顶部提示条直接展示） */
+  stats: ContextCompression
+}
+
+/**
+ * 「压缩上下文」/「清除摘要」的返回。
+ *
+ * `ok: false` = **没压缩也没改动**（如对话不足两轮），`reason` 说明原因、可以直接给用户看；
+ * 真正抛错（IPC 失败）才走 reject。
+ */
+export interface ChatCompressResult {
+  ok: boolean
+  reason?: string
+  /** ok 为 true 时带回刚落库的检查点 */
+  summary?: ConversationContextSummary
+}
+
 /** AI 聊天消息（简化版 UIMessage，主进程与渲染进程一致） */
 export interface AiChatMessage {
   id: string
@@ -1401,6 +1440,17 @@ export interface AgentConversation {
   acpAgentId?: string
   /** 仅 `kind: 'acp'`：agent 侧的会话 id（`session/new` 或导入时绑定），**不可切换** */
   acpSessionId?: string
+  /**
+   * 上下文摘要检查点（手动「压缩上下文」的产物，见 `ConversationContextSummary`）。
+   * 存在时，组装发往模型的历史 = 摘要消息 + 检查点之后的原文。
+   *
+   * 只有 `kind: 'mastra'` 会有；ACP 会话的上下文在 agent 侧，与本地无关。
+   *
+   * ⚠️ **由主进程维护**，渲染端不参与写入：清空 / 生成都走 `agent:context:*` 两个通道。
+   * 正因为它不在渲染端的落盘请求里，`saveAgentConversation` 会**原样保留**这个字段
+   * （见 services/conversation-store.ts）—— 渲染端那次保存绝不能把检查点顺手抹掉。
+   */
+  contextSummary?: ConversationContextSummary
   createdAt: number
   updatedAt: number
 }
