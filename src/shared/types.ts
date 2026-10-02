@@ -1142,11 +1142,14 @@ export interface AskFollowupRequest {
   sessionId?: string
 }
 
-/** 单题答案：选中项的 label 列表 */
+/** 单题答案：选中项的 label 列表。
+ *  `other` = 用户选了「其他」并自行输入的内容（非是/否题才有；此时 `selected` 可能为空）。 */
 export interface FollowupAnswerItem {
   id: string
   question: string
   selected: string[]
+  /** 用户通过「其他」自由填写的内容 */
+  other?: string
 }
 
 /**

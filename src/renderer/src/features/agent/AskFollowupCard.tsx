@@ -1,6 +1,6 @@
 import { Circle, CircleCheck, CircleQuestionMark, Square, SquareCheck } from 'lucide-react'
 import { useMemo, useState } from 'react'
-import { Button } from 'antd'
+import { Button, Input } from 'antd'
 import { cn } from 'cn'
 import { CollapsibleRow } from '@/features/agent/CollapsibleRow'
 import { ToolCallRow, toolRunStatus } from '@/features/agent/ToolCallRow'
@@ -13,7 +13,9 @@ import type { AskFollowupAnswer } from '@shared/types'
  *
  * 三种状态：
  * - **待回答**：一张真卡片 —— 表单标题（可选）+ 每道题一个区（单选用单选、多选用复选，选项可带说明）
- *   + 底部统一「提交 / 跳过」。用户作答后工具 resolve，**同一个回合继续往下跑**。
+ *   + 底部统一「提交 / 跳过」。非「是/否」型题目在选项末尾追加一项「其他」，选中后展开输入框，
+ *   允许用户不选预设项而是自己写内容（答案经 `other` 字段回传给模型）。用户作答后工具 resolve，
+ *   **同一个回合继续往下跑**。
  * - **已回答**：收成一条横条（复用 `CollapsibleRow`），展开看每题选了什么，不给对话流留一块大卡片。
  * - **其它**（出错 / 已中止 / 还在等工具入参）：退回普通 `ToolCallRow`，状态语义与其它工具一致。
  */
@@ -75,6 +77,21 @@ function normalize(input: unknown): { title: string; questions: NormalizedQuesti
     })
   })
   return { title, questions }
+}
+
+/** 「其他」自由输入的哨兵 label：选中它就展开一个输入框，让用户不选预设项也能自己写。 */
+const OTHER_LABEL = '其他'
+
+/** 是/否 型问题（正好两个「是 / 否」类选项）不加「其他」——这两类问题的语义封闭，
+ *  开放输入反而让答案变模糊。只对真正的「单选 / 多选」题开放自定义输入。 */
+function isYesNoQuestion(q: NormalizedQuestion): boolean {
+  if (q.options.length !== 2) return false
+  const YES = new Set(['是', '是的', '对', '好', 'yes', 'y', 'true', 'ok'])
+  const NO = new Set(['否', '不是', '不对', '不行', 'no', 'n', 'false'])
+  const norm = (s: string): string => s.trim().toLowerCase()
+  const a = norm(q.options[0].label)
+  const b = norm(q.options[1].label)
+  return (YES.has(a) && NO.has(b)) || (NO.has(a) && YES.has(b))
 }
 
 export function AskFollowupCard({
@@ -156,9 +173,21 @@ function AskFollowupBody({
 
   // 每道题选中的 label 列表（单选存一个，多选存多个）
   const [selected, setSelected] = useState<Record<string, string[]>>({})
+  /** 「其他」里用户自己写的内容，按题 id 存 */
+  const [otherText, setOtherText] = useState<Record<string, string>>({})
 
-  const canSubmit =
-    questions.length > 0 && questions.every((q) => (selected[q.id]?.length ?? 0) > 0)
+  /** 一题算「已作答」：要么真选了至少一个预设项，要么选了「其他」且填了内容。
+   *  「其他」勾了却没写字视同未答 —— 否则等于交了一个空答案给模型。 */
+  const isAnswered = (q: NormalizedQuestion): boolean => {
+    const sel = selected[q.id] ?? []
+    const real = sel.filter((x) => x !== OTHER_LABEL)
+    const otherVal = (otherText[q.id] ?? '').trim()
+    const hasOther = sel.includes(OTHER_LABEL)
+    if (hasOther && !otherVal) return false
+    return real.length > 0 || (hasOther && otherVal.length > 0)
+  }
+
+  const canSubmit = questions.length > 0 && questions.every(isAnswered)
 
   const toggle = (q: NormalizedQuestion, label: string) => {
     setSelected((prev) => {
@@ -174,11 +203,17 @@ function AskFollowupBody({
   const submit = () => {
     if (!canSubmit) return
     onSubmit({
-      answers: questions.map((q) => ({
-        id: q.id,
-        question: q.question,
-        selected: selected[q.id] ?? []
-      }))
+      answers: questions.map((q) => {
+        const sel = selected[q.id] ?? []
+        const other = (otherText[q.id] ?? '').trim()
+        return {
+          id: q.id,
+          question: q.question,
+          // 预设项里不保留「其他」这个哨兵：它是 UI 细节，不是模型给的真实选项
+          selected: sel.filter((x) => x !== OTHER_LABEL),
+          ...(other ? { other } : {})
+        }
+      })
     })
   }
 
@@ -186,44 +221,63 @@ function AskFollowupBody({
     <div className="w-fit max-w-full rounded-lg border border-primary/30 bg-primary/5 px-3 py-2.5">
       {title && <p className="mb-1.5 text-sm font-medium text-foreground">{title}</p>}
       <div className="flex flex-col gap-3">
-        {questions.map((q, qi) => (
-          <div key={q.id} className="flex flex-col gap-1">
-            <div className="flex items-center gap-1.5">
-              <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary">
-                {q.header}
-              </span>
-              <span className="min-w-0 text-sm text-foreground">{q.question}</span>
-            </div>
-            <div className="flex flex-col gap-0.5 pl-0.5">
-              {q.options.map((opt) => {
-                const checked = (selected[q.id] ?? []).includes(opt.label)
-                const Icon = q.multiSelect ? (checked ? SquareCheck : Square) : checked ? CircleCheck : Circle
-                return (
-                  <button
-                    key={opt.label}
-                    type="button"
-                    onClick={() => toggle(q, opt.label)}
-                    className={cn(
-                      'flex w-full items-start gap-2 rounded px-2 py-1.5 text-left text-sm transition-colors',
-                      checked ? 'bg-primary/10 text-foreground' : 'text-foreground/80 hover:bg-foreground/10'
-                    )}
-                  >
-                    <Icon
-                      className={cn('mt-0.5 size-4 shrink-0', checked ? 'text-primary' : 'text-muted-foreground/60')}
-                    />
-                    <span className="min-w-0">
-                      <span className="block truncate">{opt.label}</span>
-                      {opt.description && (
-                        <span className="block text-xs text-muted-foreground">{opt.description}</span>
+        {questions.map((q, qi) => {
+          // 是/否题不加「其他」；其余（单选 / 多选）在末尾追加一项
+          const shownOptions = isYesNoQuestion(q)
+            ? q.options
+            : [...q.options, { label: OTHER_LABEL, description: '自己输入' }]
+          const otherSelected = (selected[q.id] ?? []).includes(OTHER_LABEL)
+          return (
+            <div key={q.id} className="flex flex-col gap-1">
+              <div className="flex items-center gap-1.5">
+                <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary">
+                  {q.header}
+                </span>
+                <span className="min-w-0 text-sm text-foreground">{q.question}</span>
+              </div>
+              <div className="flex flex-col gap-0.5 pl-0.5">
+                {shownOptions.map((opt) => {
+                  const checked = (selected[q.id] ?? []).includes(opt.label)
+                  const Icon = q.multiSelect ? (checked ? SquareCheck : Square) : checked ? CircleCheck : Circle
+                  return (
+                    <button
+                      key={opt.label}
+                      type="button"
+                      onClick={() => toggle(q, opt.label)}
+                      className={cn(
+                        'flex w-full items-start gap-2 rounded px-2 py-1.5 text-left text-sm transition-colors',
+                        checked ? 'bg-primary/10 text-foreground' : 'text-foreground/80 hover:bg-foreground/10'
                       )}
-                    </span>
-                  </button>
-                )
-              })}
+                    >
+                      <Icon
+                        className={cn('mt-0.5 size-4 shrink-0', checked ? 'text-primary' : 'text-muted-foreground/60')}
+                      />
+                      <span className="min-w-0">
+                        <span className="block truncate">{opt.label}</span>
+                        {opt.description && (
+                          <span className="block text-xs text-muted-foreground">{opt.description}</span>
+                        )}
+                      </span>
+                    </button>
+                  )
+                })}
+                {/* 选中「其他」后展开自由输入：单选时它就是唯一答案，多选时可与预设项并存 */}
+                {otherSelected && (
+                  <Input
+                    autoFocus
+                    variant="borderless"
+                    value={otherText[q.id] ?? ''}
+                    onChange={(e) => setOtherText((prev) => ({ ...prev, [q.id]: e.target.value }))}
+                    placeholder="补充你的回答…"
+                    aria-label="其他（自由输入）"
+                    className="mt-1 h-8 text-[13px]"
+                  />
+                )}
+              </div>
+              {qi < questions.length - 1 && <div className="h-px bg-border/60" />}
             </div>
-            {qi < questions.length - 1 && <div className="h-px bg-border/60" />}
-          </div>
-        ))}
+          )
+        })}
       </div>
 
       <div className="mt-2.5 flex items-center gap-2">
@@ -256,7 +310,7 @@ function AnswerSummary({
   const obj = (output && typeof output === 'object' ? output : {}) as Record<string, unknown>
   const answered = obj.answered !== false
   const answers = Array.isArray(obj.answers)
-    ? (obj.answers as Array<{ id: string; question: string; selected: string[] }>)
+    ? (obj.answers as Array<{ id: string; question: string; selected: string[]; other?: string }>)
     : []
   const note = typeof obj.note === 'string' ? obj.note : ''
   const byId = new Map(answers.map((a) => [a.id, a]))
@@ -273,11 +327,13 @@ function AnswerSummary({
         <>
           {title && <p className="text-xs font-medium text-foreground/80">{title}</p>}
           {questions.map((q) => {
-            const sel = byId.get(q.id)?.selected ?? []
+            const answer = byId.get(q.id)
+            const sel = answer?.selected ?? []
+            const other = answer?.other?.trim() ?? ''
             return (
               <div key={q.id} className="flex flex-col gap-1">
                 <p className="text-xs text-foreground/80">{q.question}</p>
-                {sel.length > 0 ? (
+                {sel.length > 0 || other ? (
                   <div className="flex flex-wrap gap-1.5">
                     {sel.map((label, i) => (
                       <span
@@ -287,6 +343,14 @@ function AnswerSummary({
                         <span className="min-w-0 truncate">{label}</span>
                       </span>
                     ))}
+                    {/* 「其他」自由输入的内容：和预设项并排展示，模型拿到的也是同一个字段 */}
+                    {other && (
+                      <span className="inline-flex max-w-full items-center gap-1 rounded border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-xs text-foreground">
+                        <span className="min-w-0 truncate">
+                          {OTHER_LABEL}：{other}
+                        </span>
+                      </span>
+                    )}
                   </div>
                 ) : (
                   <p className="text-xs text-muted-foreground/70">{isError ? '提问失败' : '未作答'}</p>
