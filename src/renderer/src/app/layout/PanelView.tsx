@@ -22,6 +22,7 @@ import {
   Globe,
   Monitor,
   Network,
+  Pencil,
   Plus,
   Puzzle,
   ScrollText,
@@ -44,7 +45,7 @@ import { SftpPage } from '@/features/sftp/SftpPage'
 import { RdpPage } from '@/features/rdp/RdpPage'
 import { TunnelsPanel } from '@/features/tunnels/TunnelsPanel'
 import { HostLogsPanel } from '@/features/logs/HostLogsPanel'
-import { Dropdown } from 'antd'
+import { Dropdown, Input, Modal } from 'antd'
 import { useDrag, useDrop } from 'react-dnd'
 import type { PaneNode, SplitDirection, SplitDirectionInput } from '@/app/layout/pane-layout'
 import { resolveSshColor } from '@/features/hosts/ssh-color'
@@ -563,9 +564,18 @@ function PanelTabItem({
   const requestClosePanelTab = useAppStore((s) => s.requestClosePanelTab)
   const requestCloseGroup = useAppStore((s) => s.requestCloseGroup)
   const requestCloseSiblingTabs = useAppStore((s) => s.requestCloseSiblingTabs)
+  const renamePanelTab = useAppStore((s) => s.renamePanelTab)
   const reorderTabs = useAppStore((s) => s.reorderTabs)
   const moveTabToGroup = useAppStore((s) => s.moveTabToGroup)
+  /** 重命名弹窗：草稿值跟着当前标题走，save 时trim 后交给 store（空 = 恢复自动标题） */
+  const [renaming, setRenaming] = useState(false)
+  const [renameDraft, setRenameDraft] = useState('')
   const innerRef = useRef<HTMLDivElement | null>(null)
+
+  const submitRename = useCallback(() => {
+    setRenaming(false)
+    renamePanelTab(tab.id, renameDraft)
+  }, [renameDraft, renamePanelTab, tab.id])
 
   /** 标签自身是放置目标：组内重排 / 跨组插入到本标签位置 */
   const [{ isOverTab }, dropRef] = useDrop<TabDragItem, unknown, { isOverTab: boolean }>(
@@ -608,7 +618,17 @@ function PanelTabItem({
       ? s.agentConversations.find((c) => c.id === tab.agentConversationId)
       : undefined
   )
-  const label = profile?.name ?? session?.title ?? agentConversation?.title ?? tab.title
+  // 用户重命名过的标签优先显示自定义标题：自动标题那条链（主机名 / 会话标题 / 请求名 / 文件名）
+  // 照旧实时推导，只在没有 customTitle 时生效
+  const autoLabel = profile?.name ?? session?.title ?? agentConversation?.title ?? tab.title
+  const label = tab.customTitle?.trim() ? tab.customTitle.trim() : autoLabel
+
+  // ⚠️ useCallback 的依赖数组在渲染期就求值，所以 startRename 必须写在 label 声明之后
+  // （提前写会抛 "Cannot access 'label' before initialization"）
+  const startRename = useCallback(() => {
+    setRenameDraft(label)
+    setRenaming(true)
+  }, [label])
 
   const focus = useCallback(() => {
     setActiveGroup(groupId)
@@ -617,148 +637,195 @@ function PanelTabItem({
   }, [groupId, tab.id, tab.sessionId, setActiveGroup, setActiveSession, activatePanelTab])
 
   return (
-    <Dropdown
-      trigger={['contextMenu']}
-      onOpenChange={(o) => {
-        // 右键菜单打开时先聚焦，拆分/关闭才作用在正确的组与标签上
-        if (o) focus()
-      }}
-      menu={{
-        items: [
-          // 拆分只搬动标签本身（把它拎到该方向的新组）。组内只有这一个标签时没有可拆的
-          // 东西，置灰 —— 不再「顺手新建一个终端」来凑分屏，标签功能不牵连其它功能。
-          // 四个方向收进二级菜单，一级只留一项：菜单不被四行同质的方向项撑长。
-          {
-            key: 'split',
-            icon: <Split className="size-3.5" />,
-            label: '拆分',
-            disabled: tabCount === 1,
-            children: [
-              { key: 'split-up', icon: <ArrowUp className="size-3.5" />, label: '向上拆分' },
-              { key: 'split-down', icon: <ArrowDown className="size-3.5" />, label: '向下拆分' },
-              { key: 'split-left', icon: <ArrowLeft className="size-3.5" />, label: '向左拆分' },
-              { key: 'split-right', icon: <ArrowRight className="size-3.5" />, label: '向右拆分' }
-            ]
-          },
-          { type: 'divider' },
-          {
-            key: 'close-tab',
-            icon: <X className="size-3.5" />,
-            label: '关闭标签',
-            danger: true
-          },
-          // 其余关闭方式收进「关闭」二级菜单（与「拆分」同款收法），一级只留最常用的关闭标签。
-          // 组内批量关闭：都只作用于本组（跨组的标签不碰），且都保留当前这个标签，
-          // 所以各范围「无可关项」时置灰 —— 组内只剩自己 / 自己是首（末）个标签。
-          {
-            key: 'close-more',
-            icon: <X className="size-3.5" />,
-            label: '关闭',
-            children: [
-              {
-                key: 'close-others',
-                label: '关闭其他标签',
-                danger: true,
-                disabled: tabCount === 1
-              },
-              {
-                key: 'close-left',
-                icon: <ArrowLeftToLine className="size-3.5" />,
-                label: '关闭左侧标签',
-                danger: true,
-                disabled: index === 0
-              },
-              {
-                key: 'close-right',
-                icon: <ArrowRightToLine className="size-3.5" />,
-                label: '关闭右侧标签',
-                danger: true,
-                disabled: index === tabCount - 1
-              },
-              { type: 'divider' },
-              {
-                key: 'close-group',
-                label: '关闭整个组',
-                danger: true
-              }
-            ]
+    <>
+      <Dropdown
+        trigger={['contextMenu']}
+        onOpenChange={(o) => {
+          // 右键菜单打开时先聚焦，拆分/关闭才作用在正确的组与标签上
+          if (o) focus()
+        }}
+        menu={{
+          items: [
+            // 拆分只搬动标签本身（把它拎到该方向的新组）。组内只有这一个标签时没有可拆的
+            // 东西，置灰 —— 不再「顺手新建一个终端」来凑分屏，标签功能不牵连其它功能。
+            // 四个方向收进二级菜单，一级只留一项：菜单不被四行同质的方向项撑长。
+            {
+              key: 'split',
+              icon: <Split className="size-3.5" />,
+              label: '拆分',
+              disabled: tabCount === 1,
+              children: [
+                { key: 'split-up', icon: <ArrowUp className="size-3.5" />, label: '向上拆分' },
+                { key: 'split-down', icon: <ArrowDown className="size-3.5" />, label: '向下拆分' },
+                { key: 'split-left', icon: <ArrowLeft className="size-3.5" />, label: '向左拆分' },
+                { key: 'split-right', icon: <ArrowRight className="size-3.5" />, label: '向右拆分' }
+              ]
+            },
+            { type: 'divider' },
+            {
+              key: 'rename',
+              icon: <Pencil className="size-3.5" />,
+              label: '重命名标签'
+            },
+            {
+              key: 'close-tab',
+              icon: <X className="size-3.5" />,
+              label: '关闭标签',
+              danger: true
+            },
+            // 其余关闭方式收进「关闭」二级菜单（与「拆分」同款收法），一级只留最常用的关闭标签。
+            // 组内批量关闭：都只作用于本组（跨组的标签不碰），且都保留当前这个标签，
+            // 所以各范围「无可关项」时置灰 —— 组内只剩自己 / 自己是首（末）个标签。
+            {
+              key: 'close-more',
+              icon: <X className="size-3.5" />,
+              label: '关闭',
+              children: [
+                {
+                  key: 'close-others',
+                  label: '关闭其他标签',
+                  danger: true,
+                  disabled: tabCount === 1
+                },
+                {
+                  key: 'close-left',
+                  icon: <ArrowLeftToLine className="size-3.5" />,
+                  label: '关闭左侧标签',
+                  danger: true,
+                  disabled: index === 0
+                },
+                {
+                  key: 'close-right',
+                  icon: <ArrowRightToLine className="size-3.5" />,
+                  label: '关闭右侧标签',
+                  danger: true,
+                  disabled: index === tabCount - 1
+                },
+                { type: 'divider' },
+                {
+                  key: 'close-group',
+                  label: '关闭整个组',
+                  danger: true
+                }
+              ]
+            }
+          ],
+          onClick: ({ key }) => {
+            if (key.startsWith('split-')) {
+              if (tabCount === 1) return
+              splitTabToGroup(tab.id, groupId, key.slice('split-'.length) as SplitDirectionInput)
+            } else if (key === 'rename') {
+              startRename()
+            } else if (key === 'close-tab') {
+              requestClosePanelTab(tab.id)
+            } else if (key === 'close-others') {
+              requestCloseSiblingTabs(tab.id, 'others')
+            } else if (key === 'close-left') {
+              requestCloseSiblingTabs(tab.id, 'left')
+            } else if (key === 'close-right') {
+              requestCloseSiblingTabs(tab.id, 'right')
+            } else if (key === 'close-group') {
+              requestCloseGroup(groupId)
+            }
           }
-        ],
-        onClick: ({ key }) => {
-          if (key.startsWith('split-')) {
-            if (tabCount === 1) return
-            splitTabToGroup(tab.id, groupId, key.slice('split-'.length) as SplitDirectionInput)
-          } else if (key === 'close-tab') {
-            requestClosePanelTab(tab.id)
-          } else if (key === 'close-others') {
-            requestCloseSiblingTabs(tab.id, 'others')
-          } else if (key === 'close-left') {
-            requestCloseSiblingTabs(tab.id, 'left')
-          } else if (key === 'close-right') {
-            requestCloseSiblingTabs(tab.id, 'right')
-          } else if (key === 'close-group') {
-            requestCloseGroup(groupId)
-          }
-        }
-      }}
-    >
-      <div
-        ref={dragRef as (node: HTMLDivElement | null) => void}
-        // 标签条按这个属性定位激活项，好把它滚进可视区
-        data-tab-id={tab.id}
-        onClick={focus}
-        title="拖拽标签可排序、跨组移动，拖到面板边缘可分屏"
-        className={cn(
-          // 顶部 2px 主色条：激活时着色、未激活透明 —— 两者都占位，切换时不跳行高
-          'group/tab flex max-w-52 shrink-0 cursor-pointer items-center border-r border-border/60 border-t-2 transition-colors select-none',
-          isActive
-            ? 'border-t-primary bg-background text-foreground'
-            : 'border-t-transparent text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground',
-          isDragging && 'opacity-40'
-        )}
+        }}
       >
         <div
-          ref={(node) => {
-            innerRef.current = node
-            dropRef(node)
-          }}
+          ref={dragRef as (node: HTMLDivElement | null) => void}
+          // 标签条按这个属性定位激活项，好把它滚进可视区
+          data-tab-id={tab.id}
+          onClick={focus}
+          title="拖拽标签可排序、跨组移动，拖到面板边缘可分屏"
           className={cn(
-            'flex min-w-0 items-center gap-1.5 px-2.5 py-1 text-xs transition-colors',
-            isOverTab && 'bg-primary/20'
+            // 顶部 2px 主色条：激活时着色、未激活透明 —— 两者都占位，切换时不跳行高
+            'group/tab flex max-w-52 shrink-0 cursor-pointer items-center border-r border-border/60 border-t-2 transition-colors select-none',
+            isActive
+              ? 'border-t-primary bg-background text-foreground'
+              : 'border-t-transparent text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground',
+            isDragging && 'opacity-40'
           )}
         >
-          <TabIcon tab={tab} />
-          <span
-            className="truncate"
-            title={label}
-            style={tabColor ? { color: tintText(tabColor) } : undefined}
+          <div
+            ref={(node) => {
+              innerRef.current = node
+              dropRef(node)
+            }}
+            className={cn(
+              'flex min-w-0 items-center gap-1.5 px-2.5 py-1 text-xs transition-colors',
+              isOverTab && 'bg-primary/20'
+            )}
           >
-            {label}
-          </span>
-          {tab.type === 'terminal' && (
+            <TabIcon tab={tab} />
             <span
-              title={exited ? '已退出' : '已连接'}
-              className={cn(
-                'size-1.5 shrink-0 rounded-full',
-                exited ? 'bg-destructive' : 'bg-emerald-500'
-              )}
-            />
-          )}
-          {tab.closable && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation()
-                requestClosePanelTab(tab.id)
-              }}
-              className="ml-0.5 rounded p-0.5 opacity-0 transition-opacity hover:bg-foreground/10 group-hover/tab:opacity-100"
-              title="关闭标签"
+              className="truncate"
+              title={label}
+              style={tabColor ? { color: tintText(tabColor) } : undefined}
             >
-              <X className="size-3" />
-            </button>
-          )}
+              {label}
+            </span>
+            {tab.type === 'terminal' && (
+              <span
+                title={exited ? '已退出' : '已连接'}
+                className={cn(
+                  'size-1.5 shrink-0 rounded-full',
+                  exited ? 'bg-destructive' : 'bg-emerald-500'
+                )}
+              />
+            )}
+            {tab.closable && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  startRename()
+                }}
+                className="ml-0.5 rounded p-0.5 opacity-0 transition-opacity hover:bg-foreground/10 group-hover/tab:opacity-100"
+                title="重命名标签"
+                aria-label="重命名标签"
+              >
+                <Pencil className="size-3" />
+              </button>
+            )}
+            {tab.closable && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  requestClosePanelTab(tab.id)
+                }}
+                className="ml-0.5 rounded p-0.5 opacity-0 transition-opacity hover:bg-foreground/10 group-hover/tab:opacity-100"
+                title="关闭标签"
+              >
+                <X className="size-3" />
+              </button>
+            )}
+          </div>
         </div>
-      </div>
-    </Dropdown>
+      </Dropdown>
+
+      {/*
+        重命名弹窗：与 AgentPanel 的会话重命名同款（antd Modal + Input，Enter 直接保存）。
+        每个标签一份、只在重命名时挂载（destroyOnHidden），portal 到 body 所以不受标签条裁切。
+      */}
+      <Modal
+        open={renaming}
+        onCancel={() => setRenaming(false)}
+        onOk={submitRename}
+        title="重命名标签"
+        okText="保存"
+        cancelText="取消"
+        centered
+        width={400}
+        destroyOnHidden
+      >
+        <Input
+          autoFocus
+          placeholder="标签标题"
+          value={renameDraft}
+          onChange={(e) => setRenameDraft(e.target.value)}
+          onPressEnter={submitRename}
+        />
+        <div className="mt-2 text-xs text-muted-foreground">留空保存可恢复自动标题</div>
+      </Modal>
+    </>
   )
 }
 
@@ -780,6 +847,8 @@ function TabContentGuard({ tab, active }: { tab: PanelTab; active: boolean }) {
   /** 通用确认里「以后都不再提示」勾选（uncontrolled，点「关闭」时读一次） */
   const dontAskRef = useRef(false)
   const pageManagedClose = PAGE_MANAGED_CLOSE_TYPES.has(tab.type)
+  // 确认框里用标签**当前显示**的名字：用户重命名过（customTitle）时不能还报自动标题
+  const shownTitle = tab.customTitle?.trim() || tab.title
 
   // 总线所有者：标签内容挂载期间持有总线；unmount 释放（未决的确认会由
   // useInlineConfirm 的卸载结算按取消收尾，批量关闭路径不会悬挂）
@@ -797,7 +866,7 @@ function TabContentGuard({ tab, active }: { tab: PanelTab; active: boolean }) {
       dontAskRef.current = false
       return confirm({
         title: '关闭标签',
-        content: `确定关闭标签「${tab.title}」？`,
+        content: `确定关闭标签「${shownTitle}」？`,
         extra: (
           <label className="mt-3 flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
             <input type="checkbox" onChange={(e) => (dontAskRef.current = e.target.checked)} />
@@ -819,7 +888,7 @@ function TabContentGuard({ tab, active }: { tab: PanelTab; active: boolean }) {
       })
     })
     return off
-  }, [tab.id, tab.title, pageManagedClose, confirm])
+  }, [tab.id, shownTitle, pageManagedClose, confirm])
 
   return (
     <>

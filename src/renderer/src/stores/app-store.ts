@@ -1491,6 +1491,19 @@ export const useAppStore = create<AppStore>()((set, get) => {
       }))
     },
 
+    // 用户重命名：只写 customTitle（自动标题那条链照旧实时推导），空串表示恢复自动标题
+    renamePanelTab: (id, title) => {
+      const next = title.trim()
+      set((s) => ({
+        ui: {
+          ...s.ui,
+          panelTabs: s.ui.panelTabs.map((t) =>
+            t.id === id ? { ...t, customTitle: next || undefined } : t
+          )
+        }
+      }))
+    },
+
     setEditorSaveStatus: (key, state) =>
       set((s) => {
         // 状态没变就不写，避免自动保存期间的无谓重渲染

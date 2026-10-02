@@ -163,6 +163,14 @@ export interface PanelTab {
   id: string
   type: PanelTabType
   title: string
+  /**
+   * 用户自定义标题（标签条上「重命名」写进来的那份）。
+   *
+   * 多数标签的展示标题是**从业务对象实时推导**的（终端取主机名 / 会话标题、Agent 取会话
+   * 标题、接口取请求名），页面自己也会跟着对象改标题 —— 那些路径只写 `title`，压不住它。
+   * 所以用户显式重命名的值单独放这个字段：渲染时优先用它，置空（空串）即恢复自动标题。
+   */
+  customTitle?: string
   closable: boolean
   /** 所属面板组（分屏树的一个叶子） */
   groupId: string
@@ -608,8 +616,13 @@ export interface PanelSlice {
    * 无条件执行组内批量关闭。与 `closePanelTab` 一样保留为「无条件」入口，供程序化场景使用。
    */
   closeSiblingTabs: (tabId: string, mode: SiblingTabsCloseMode) => Promise<void>
-  /** 更新 PanelView 标签标题 */
+  /** 更新 PanelView 标签标题（业务对象改名时同步自动标题用，见 ApiPage / ScriptsPage） */
   updatePanelTabTitle: (id: string, title: string) => void
+  /**
+   * 重命名标签（标签条的「重命名」入口）：写 `customTitle`，压住各类型自动推导的标题。
+   * 传空串 = 清掉自定义标题，恢复自动标题。
+   */
+  renamePanelTab: (id: string, title: string) => void
   /** 上报某个编辑页（脚本 / 笔记）的保存状态（由状态栏的 EditorSaveStatus 读取，key 见 `editorSaveKey`） */
   setEditorSaveStatus: (key: string, state: EditorSaveState) => void
   /** 在 PanelView 中打开脚本标签（已存在则激活） */
