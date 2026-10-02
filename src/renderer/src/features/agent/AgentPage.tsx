@@ -338,6 +338,8 @@ function MessageBubbleImpl({
         key={i}
         toolName={unit.call.toolName}
         input={unit.call.input}
+        // 入参流式生成期攒下的半截 JSON：卡片据此显示「正在生成…」（见 stores/agent-helpers）
+        inputText={unit.call.inputText}
         title={unit.call.title}
         acpKind={unit.call.acpKind}
         output={unit.result?.output}

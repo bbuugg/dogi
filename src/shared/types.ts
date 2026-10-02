@@ -1260,6 +1260,15 @@ export type AiMessagePart =
       title?: string
       /** ACP 协议的工具种类（read / edit / execute …）：拿不到 name 时靠它翻出中文工具名 */
       acpKind?: string
+      /**
+       * **入参还在流式生成**时攒下的半截 JSON 文本（见 `AiStreamEvent` 的 `tool-call-delta`）。
+       *
+       * 只喂渲染：卡片据此显示「正在生成…」并让内容一帧帧变长（写文件这类入参数 KB 起的调用
+       * 才不至于一直只转圈）。完整 `tool-call` 到达（收口）时**必须丢掉它**（见
+       * `stores/agent-helpers.ts` 的 appendAssistantPart），渲染随之回落到参数 / diff；
+       * 它也**不落盘**（`persistConversation` 里再拦一道）。
+       */
+      inputText?: string
     }
   | {
       type: 'tool-result'
@@ -1273,6 +1282,27 @@ export type AiStreamEvent =
   | { type: 'text-delta'; delta: string }
   /** 模型思考内容增量（推理模型 / 思考型模型） */
   | { type: 'reasoning-delta'; delta: string }
+  /**
+   * 工具**入参的流式增量**（Mastra 的 `tool-call-delta` / `argsTextDelta`）。
+   *
+   * 与 `tool-call` 的关系同 `text-delta` 之于 text part：增量只喂渲染（工具卡上能看到
+   * 要写入的内容在长），收敛以完整 `tool-call` 为准。**不落盘、不进消息历史**。
+   *
+   * ⚠️ 不是所有上游都发：不发时行为与从前完全一致（只有一条完整 `tool-call`），
+   * 渲染端不能假设「调工具必然先来一串 delta」。
+   */
+  | {
+      type: 'tool-call-delta'
+      toolCallId: string
+      /** 增量帧可能不带工具名（有的上游只在完整 tool-call 里给）：给了就补上 */
+      toolName?: string
+      /**
+       * 入参文本的增量（JSON 片段，按 toolCallId 依次拼接）。
+       * **可以为空串**：上游「入参开始流式生成」那一帧只有 id + 工具名、还没有内容，
+       * 用它先把卡片建出来（标题立刻是「写入文件」而不是「工具调用」）。
+       */
+      inputTextDelta: string
+    }
   | { type: 'tool-call'; toolCallId: string; toolName: string; input: unknown; title?: string; acpKind?: string }
   | {
       type: 'tool-result'
@@ -1392,6 +1422,15 @@ export type AgentMessagePart =
       title?: string
       /** ACP 协议的工具种类（read / edit / execute …）：拿不到 name 时靠它翻出中文工具名 */
       acpKind?: string
+      /**
+       * **入参还在流式生成**时攒下的半截 JSON 文本（见 `AgentStreamEvent` 的 `tool-call-delta`）。
+       *
+       * 只喂渲染：卡片据此显示「正在生成…」并让内容一帧帧变长（写文件这类入参数 KB 起的调用
+       * 才不至于一直只转圈）。完整 `tool-call` 到达（收口）时**必须丢掉它**（见
+       * `stores/agent-helpers.ts` 的 appendAgentPart），渲染随之回落到参数 / diff；
+       * 它也**不落盘**（`persistConversation` 里再拦一道）。
+       */
+      inputText?: string
     }
   | {
       type: 'tool-result'
@@ -1430,6 +1469,27 @@ export type AgentStreamEvent =
   | { type: 'history'; messages: AgentChatMessage[] }
   | { type: 'text-delta'; delta: string }
   | { type: 'reasoning-delta'; delta: string }
+  /**
+   * 工具**入参的流式增量**（Mastra 的 `tool-call-delta` / `argsTextDelta`）。
+   *
+   * 与 `tool-call` 的关系同 `text-delta` 之于 text part：增量只喂渲染（工具卡上能看到
+   * 要写入的内容在长），收敛以完整 `tool-call` 为准。**不落盘、不进消息历史**。
+   *
+   * ⚠️ 不是所有上游都发：不发时行为与从前完全一致（只有一条完整 `tool-call`），
+   * 渲染端不能假设「调工具必然先来一串 delta」。
+   */
+  | {
+      type: 'tool-call-delta'
+      toolCallId: string
+      /** 增量帧可能不带工具名（有的上游只在完整 tool-call 里给）：给了就补上 */
+      toolName?: string
+      /**
+       * 入参文本的增量（JSON 片段，按 toolCallId 依次拼接）。
+       * **可以为空串**：上游「入参开始流式生成」那一帧只有 id + 工具名、还没有内容，
+       * 用它先把卡片建出来（标题立刻是「写入文件」而不是「工具调用」）。
+       */
+      inputTextDelta: string
+    }
   | { type: 'tool-call'; toolCallId: string; toolName: string; input: unknown; title?: string; acpKind?: string }
   | {
       type: 'tool-result'

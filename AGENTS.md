@@ -1476,6 +1476,36 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   但等于拿网关连接数去赌。别把 0 设成默认值。
 - **验证**：`scripts/verify-agent-error-parts.mjs`（跑 `agent-helpers.ts` 真源码）。
 
+**31. 工具入参也要「流式」：写文件时卡片必须能看到内容在长**
+
+- **触发信号**：让模型用 `write_file` 写一个几 KB 的文件，工具卡只有一行「写入文件 + 转圈」，
+  什么都不显示，直到整个文件写完才突然出现 diff（用户报告「看不出它在写什么」）。
+- **根因**：工具**入参**也是流式生成的，上游把写文件这种大入参拆成成百上千帧
+  （Mastra 1.x 的 `tool-call-input-streaming-start` 只有 id + 工具名，随后一串
+  `tool-call-delta` / `payload.argsTextDelta`）。`adaptMastraPart` 此前没有这两个分支，
+  整条落进 `default` 被丢掉 —— 只有完整 `tool-call` 那一刻界面才有东西可显示。
+- **正确做法（四处，缺一不可）**：
+  1. `agent-core/mastra-stream.ts` 把两个 chunk 转成 `{ type: 'tool-call-delta' }` 事件
+     （`inputTextDelta` 可以为空串：那一帧的用处是**先把卡片建出来**，标题立刻是真实工具名）；
+  2. **下发节奏**统一由 `services/ai/tool-input-throttle.ts` 节流（240 字符 / 60ms）。
+     两条路径（`ai/agent.ts`、`ai/ai.ts`）里**所有**事件都要走包好的 `send()`：
+     ⚠️ 非增量事件前必须先 `flush()`，否则同一个 `toolCallId` 的增量会排到它自己的完整
+     `tool-call` 之后，前端又用旧增量盖回去（顺序错了比不发还糟）。
+  3. 渲染端（`stores/agent-helpers.ts`）按 `toolCallId` 攒进 `part.inputText`。
+     ⚠️ **完整 `tool-call` 到达时必须按 id 收口**（把 input 覆盖上去、丢掉 inputText），
+     **不能 push 新 part** —— 否则一次调用会渲染成两张卡，一张永远停在「正在生成…」。
+     半截卡片先落 `input: null`（`buildRenderUnits` / `buildFileDiff` 都吃 null），收口才填真入参。
+  4. 卡片（`features/agent/ToolCallRow.tsx`）用 `partialJsonString` 从**半截 JSON**（`JSON.parse` 必抛）
+     里抠 path / command / content → 横条明细 + 「正在生成…」块；块**不要自己设 max-height**，
+     滚动仍归 `CollapsibleRow`（见 6.18）。
+- ⚠️ **`inputText` 只喂渲染，绝不落盘**：流式期间每 3 秒增量落盘（`persistConversationThrottled`），
+  正好卡在生成中途会把半截 JSON 写进盘里 → 重开会话那张卡永远停在「正在生成…」。
+  `persistConversation` 里的 `stripTransientParts` 是唯一守卫点，别删。
+- ACP 会话**不发**增量事件，走的是原来那条路（只有完整 tool-call）—— 这条链路允许缺失，
+  渲染端不能假设「调工具必然先来一串 delta」。
+- **验证**：让 Agent 写一个 ≥2KB 的文件，卡片应从「转圈」变成文字逐帧变长（明细先出路径）；
+  写完自动收回并显示 diff；中途「停止」后重开会话，消息里的工具卡不应残留「正在生成…」。
+
 ### 6.7 数据与文件
 
 **29. 导入 / 导出：zip 是自己实现的，凭据不导出**

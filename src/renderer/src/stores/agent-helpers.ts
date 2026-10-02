@@ -119,6 +119,26 @@ const AGENT_PERSIST_INTERVAL = 3000
 const agentPersistAt = new Map<string, number>()
 
 /**
+ * 落盘前把**只喂渲染**的字段摘掉：目前只有 `inputText`（入参流式生成期攒的半截 JSON）。
+ *
+ * 它不属于历史 —— 完整 `tool-call` 一到就该作废（见 appendAgentPart 的收口），但流式期间
+ * 每 3 秒会增量落盘一次（`persistConversationThrottled`），正好卡在生成中途时会把半截 JSON
+ * 写进盘里。重新打开会话时那张卡会永远停在「正在生成…」，所以这里再拦一道。
+ *
+ * 返回的是**新对象**（不改内存里的 part：屏幕上那份还要继续吃增量）。
+ */
+function stripTransientParts(messages: AgentChatMessage[]): AgentChatMessage[] {
+  return messages.map((message) => ({
+    ...message,
+    parts: message.parts.map((part) =>
+      part.type === 'tool-call' && part.inputText !== undefined
+        ? { ...part, inputText: undefined }
+        : part
+    )
+  }))
+}
+
+/**
  * 把会话当前内容写盘。
  *
  * 只写不读回：调用期间流式输出可能又追加了 part，用主进程的返回值覆盖本地会丢内容。
@@ -144,7 +164,7 @@ export async function persistConversation(
     // 会话形态固定，落盘时一起带上（ACP 会话的消息由 agent 自己管理，不发 messages）
     kind: conversation.kind,
     title: conversation.title,
-    ...(conversation.kind === 'acp' ? {} : { messages: conversation.messages }),
+    ...(conversation.kind === 'acp' ? {} : { messages: stripTransientParts(conversation.messages) }),
     configId: conversation.configId,
     // ⚠️ 必须一起落盘：只存 configId 的话，会话选的具体模型重启后会回退成配置默认模型
     modelId: conversation.modelId,
@@ -242,13 +262,63 @@ export function appendAgentPart(parts: AgentChatMessage['parts'], event: AgentSt
     } else {
       next.push({ type: 'reasoning', text: event.delta })
     }
+  } else if (event.type === 'tool-call-delta') {
+    // 入参还在生成：卡片先建出来（工具名可能还没给），半截 JSON 持续往里攒。
+    // 完整 tool-call 到达时用 input 覆盖并丢掉 inputText（见下面的收口）。
+    const index = next.findIndex(
+      (p) => p.type === 'tool-call' && p.toolCallId === event.toolCallId
+    )
+    if (index < 0) {
+      next.push({
+        type: 'tool-call',
+        toolCallId: event.toolCallId,
+        // 增量帧常常没带工具名（有的上游只在完整 tool-call 里给）：先落空串，
+        // 标题由 toolCardTitle 兜底成「工具调用」，后到的真名再补上
+        toolName: event.toolName ?? '',
+        input: null,
+        inputText: event.inputTextDelta
+      })
+    } else {
+      const call = next[index] as Extract<AgentChatMessage['parts'][number], { type: 'tool-call' }>
+      next[index] = {
+        ...call,
+        toolName: call.toolName || (event.toolName ?? ''),
+        inputText: (call.inputText ?? '') + event.inputTextDelta
+      }
+    }
   } else if (event.type === 'tool-call') {
-    next.push({
-      type: 'tool-call',
-      toolCallId: event.toolCallId,
-      toolName: event.toolName,
-      input: event.input
-    })
+    // 同一个 toolCallId 可能**先来过一串入参增量**（上面那张半截卡片）：按 id 收口，
+    // 别再推第二张卡 —— 否则界面上会出现两张卡，一张永远停在「正在生成…」。
+    // 收口 = 用完整 input 覆盖、并把 inputText 摘掉（它只喂渲染，不进历史）。
+    const index = next.findIndex(
+      (p) => p.type === 'tool-call' && p.toolCallId === event.toolCallId
+    )
+    const existing =
+      index < 0
+        ? undefined
+        : (next[index] as Extract<AgentChatMessage['parts'][number], { type: 'tool-call' }>)
+    if (existing) {
+      next[index] = {
+        type: 'tool-call',
+        toolCallId: existing.toolCallId,
+        // 半截卡片可能还没拿到工具名（空串）：真名到了就补上
+        toolName: existing.toolName || event.toolName,
+        input: event.input,
+        ...(event.title || existing.title ? { title: event.title ?? existing.title } : {}),
+        ...(event.acpKind || existing.acpKind
+          ? { acpKind: event.acpKind ?? existing.acpKind }
+          : {})
+      }
+    } else {
+      next.push({
+        type: 'tool-call',
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        input: event.input,
+        ...(event.title ? { title: event.title } : {}),
+        ...(event.acpKind ? { acpKind: event.acpKind } : {})
+      })
+    }
   } else if (event.type === 'tool-result') {
     next.push({
       type: 'tool-result',
@@ -289,13 +359,59 @@ export function appendAssistantPart(
     } else {
       next.push({ type: 'reasoning', text: event.delta })
     }
+  } else if (event.type === 'tool-call-delta') {
+    // 入参还在生成：卡片先建出来（工具名可能还没给），半截 JSON 持续往里攒。
+    // 完整 tool-call 到达时用 input 覆盖并丢掉 inputText（见下面的收口）。
+    const index = next.findIndex(
+      (p) => p.type === 'tool-call' && p.toolCallId === event.toolCallId
+    )
+    if (index < 0) {
+      next.push({
+        type: 'tool-call',
+        toolCallId: event.toolCallId,
+        // 增量帧常常没带工具名（有的上游只在完整 tool-call 里给）：先落空串，
+        // 标题由 toolCardTitle 兜底成「工具调用」，后到的真名再补上
+        toolName: event.toolName ?? '',
+        input: null,
+        inputText: event.inputTextDelta
+      })
+    } else {
+      const call = next[index] as Extract<AiMessagePart, { type: 'tool-call' }>
+      next[index] = {
+        ...call,
+        toolName: call.toolName || (event.toolName ?? ''),
+        inputText: (call.inputText ?? '') + event.inputTextDelta
+      }
+    }
   } else if (event.type === 'tool-call') {
-    next.push({
-      type: 'tool-call',
-      toolCallId: event.toolCallId,
-      toolName: event.toolName,
-      input: event.input
-    })
+    // 同一个 toolCallId 可能**先来过一串入参增量**（上面那张半截卡片）：按 id 收口，
+    // 别再推第二张卡（理由见 appendAgentPart 的同名分支）。
+    const index = next.findIndex(
+      (p) => p.type === 'tool-call' && p.toolCallId === event.toolCallId
+    )
+    const existing =
+      index < 0 ? undefined : (next[index] as Extract<AiMessagePart, { type: 'tool-call' }>)
+    if (existing) {
+      next[index] = {
+        type: 'tool-call',
+        toolCallId: existing.toolCallId,
+        toolName: existing.toolName || event.toolName,
+        input: event.input,
+        ...(event.title || existing.title ? { title: event.title ?? existing.title } : {}),
+        ...(event.acpKind || existing.acpKind
+          ? { acpKind: event.acpKind ?? existing.acpKind }
+          : {})
+      }
+    } else {
+      next.push({
+        type: 'tool-call',
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        input: event.input,
+        ...(event.title ? { title: event.title } : {}),
+        ...(event.acpKind ? { acpKind: event.acpKind } : {})
+      })
+    }
   } else if (event.type === 'tool-result') {
     next.push({
       type: 'tool-result',

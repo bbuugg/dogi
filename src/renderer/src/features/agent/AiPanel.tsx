@@ -285,6 +285,8 @@ function MessageBubbleImpl({
         <ToolCallRow
           toolName={unit.call.toolName}
           input={unit.call.input}
+          // 入参流式生成期攒下的半截 JSON：卡片据此显示「正在生成…」（见 stores/agent-helpers）
+          inputText={unit.call.inputText}
           output={unit.result?.output}
           isError={unit.result?.isError}
           status={toolRunStatus({

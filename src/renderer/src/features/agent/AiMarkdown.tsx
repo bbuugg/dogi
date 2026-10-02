@@ -3,7 +3,7 @@ import '@/assets/css/streamdown.css'
 import { useMemo, type ComponentProps } from 'react'
 import { cn } from 'cn'
 import { Image } from 'antd'
-import { Streamdown } from 'streamdown'
+import { Streamdown, type Components } from 'streamdown'
 import { code as codePlugin } from '@streamdown/code'
 import { math as mathPlugin } from '@streamdown/math'
 import { mermaid as mermaidPlugin } from '@streamdown/mermaid'
@@ -39,8 +39,11 @@ function AiMarkdownImage({ src, alt, className }: ComponentProps<'img'>) {
  * Mermaid 图与 CJK 标点优化，开箱带代码/表格的复制、Mermaid 下载等控件。
  */
 export function AiMarkdown({ content, className }: { content: string; className?: string }) {
-  // components.img 每次渲染新建对象会打断 Streamdown 的 memo，故用 useMemo 稳定引用
-  const components = useMemo(() => ({ img: AiMarkdownImage }), [])
+  // components.img 每次渲染新建对象会打断 Streamdown 的 memo，故用 useMemo 稳定引用。
+  // ⚠️ Streamdown 的 `Components` 索引签名把自定义组件 props 定成
+  // `Record<string, unknown> & ExtraProps`，与标准 img props 不兼容（参数逆变），
+  // 需显式桥接到 `Components`；组件内部仍按标准 img props 使用。
+  const components = useMemo(() => ({ img: AiMarkdownImage }) as unknown as Components, [])
   return (
     <Streamdown
       mode="streaming"

@@ -20,6 +20,7 @@ import { adaptMastraPart, toModelMessages } from './agent-core'
 import { armConfirmTimeout, modelRunTimeout } from './timeouts'
 import { describeError, isRetryableNetworkError } from './error-utils'
 import { retryDelayMs, sleepWithSignal } from './retry'
+import { createToolInputThrottle } from './tool-input-throttle'
 import { DEFAULT_MAX_STEPS, resolveMaxRetries } from '@shared/ai-timeouts'
 
 // 兼容旧引用路径（agent.ts 从 './ai' 取）
@@ -459,6 +460,24 @@ class AiAssistant extends EventEmitter {
     let retries = 0
     /** 本轮是否已经真实执行过工具（发出过 tool-call）：有就不再自动重试 */
     let toolExecuted = false
+
+    /**
+     * 入参增量的节流器（见 `tool-input-throttle.ts`，与工作区 Agent 共用一套）。
+     *
+     * ⚠️ 本轮**所有**事件都必须走下面这个 `send` —— 非增量事件前要先把攒着的增量冲干净，
+     * 否则同一个 toolCallId 的增量会排到它自己的完整 `tool-call` 之后，前端又用旧增量盖回去。
+     */
+    const inputDelta = createToolInputThrottle((delta) =>
+      this.emitEvent(requestId, { type: 'tool-call-delta', ...delta })
+    )
+    const send = (event: AiStreamEvent): void => {
+      if (event.type === 'tool-call-delta') {
+        inputDelta.push(event)
+        return
+      }
+      inputDelta.flush()
+      this.emitEvent(requestId, event)
+    }
     try {
       for (;;) {
         /** 首块时刻（TPS 的生成窗口起点）：每次尝试各算一份 */
@@ -488,7 +507,7 @@ class AiAssistant extends EventEmitter {
                 }
               }
               if (event.type === 'tool-call') toolExecuted = true
-              this.emitEvent(requestId, event)
+              send(event)
             }
           }
           try {
@@ -510,7 +529,7 @@ class AiAssistant extends EventEmitter {
               const inputTokens = u.promptTokens ?? u.inputTokens ?? 0
               const outputTokens = u.completionTokens ?? u.outputTokens ?? 0
               const tps = genWindowMs > 0 ? outputTokens / (genWindowMs / 1000) : 0
-              this.emitEvent(requestId, {
+              send({
                 type: 'usage',
                 usage: {
                   inputTokens,
@@ -526,7 +545,7 @@ class AiAssistant extends EventEmitter {
           } catch {
             // 用量缺失时静默跳过
           }
-          this.emitEvent(requestId, { type: 'finish', finishReason: 'done' })
+          send({ type: 'finish', finishReason: 'done' })
           return
         } catch (err) {
           // 可重试的网络中断：用户没中止、没执行过工具、也没到次数上限 → 退避后重来
@@ -537,18 +556,18 @@ class AiAssistant extends EventEmitter {
             retries < maxRetries
           ) {
             retries += 1
-            this.emitEvent(requestId, { type: 'retry', attempt: retries, maxRetries })
+            send({ type: 'retry', attempt: retries, maxRetries })
             console.warn(`[ai] 模型请求失败，第 ${retries} 次重试：${describeError(err)}`)
             const waited = await sleepWithSignal(retryDelayMs(retries), controller.signal)
             // 退避期间用户点了停止：按中止收场，不再重试
             if (!waited) {
-              this.emitEvent(requestId, { type: 'finish', finishReason: 'aborted' })
+              send({ type: 'finish', finishReason: 'aborted' })
               return
             }
             continue
           }
-          this.emitEvent(requestId, { type: 'error', message: describeError(err) })
-          this.emitEvent(requestId, { type: 'finish', finishReason: 'error' })
+          send({ type: 'error', message: describeError(err) })
+          send({ type: 'finish', finishReason: 'error' })
           return
         }
       }

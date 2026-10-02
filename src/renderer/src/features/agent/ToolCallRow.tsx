@@ -20,7 +20,7 @@ import {
   Wrench,
   type LucideIcon
 } from 'lucide-react'
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Tooltip } from 'antd'
 import { cn } from 'cn'
 import { CollapsibleRow } from '@/features/agent/CollapsibleRow'
@@ -198,6 +198,80 @@ export function toolArgPreview(input: unknown): string {
   return subject
 }
 
+/** JSON 字符串里的转义 → 真字符（只覆盖模型写文件时真会用的那几个） */
+const JSON_UNESCAPE: Record<string, string> = {
+  n: '\n',
+  t: '\t',
+  r: '\r',
+  b: '\b',
+  f: '\f',
+  '"': '"',
+  '\\': '\\',
+  '/': '/'
+}
+
+/**
+ * 从**可能截断**的入参 JSON 文本里抠一个字符串字段的值（工具入参流式生成期用）。
+ *
+ * 那时候的入参是半截 JSON（`JSON.parse` 必抛），所以不追求解析出完整对象 ——
+ * 按 `"key"` 定位后一路扫到**未转义的**收尾引号，扫到末尾仍没闭合就取到末尾。
+ * 只喂渲染：抠不出来返回 undefined（调用方据此回退），这份文本永不落盘，
+ * 收口时以完整 `tool-call` 的 `input` 为准（与 fishwork `lib/parts.ts` 同一实现）。
+ */
+function partialJsonString(text: string, key: string): string | undefined {
+  const head = text.indexOf(`"${key}"`)
+  if (head < 0) return undefined
+  let i = head + key.length + 2
+  // 跳过冒号与空白
+  while (i < text.length && /[\s:]/.test(text[i])) i += 1
+  if (text[i] !== '"') return undefined
+  let out = ''
+  for (i += 1; i < text.length; i += 1) {
+    const ch = text[i]
+    if (ch === '\\') {
+      const next = text[i + 1]
+      // 半截转义序列（文本正好停在反斜杠上）：就此收尾，别把孤立的反斜杠画出来
+      if (next === undefined) break
+      out += JSON_UNESCAPE[next] ?? next
+      i += 1
+      continue
+    }
+    if (ch === '"') break
+    out += ch
+  }
+  return out
+}
+
+/**
+ * 入参**流式生成期**的预览：从半截 JSON 里抠出「横条明细」（路径 / 命令）+「正在生成的内容」。
+ *
+ * 与 `buildFileDiff` 的分工：那个吃完整 `input`、生成前后对比；这个吃 `inputText`、
+ * 只给一坨正在变长的文本。两者不会同时命中（有 `inputText` 就说明还没收口）。
+ * 返回 null = 抠不出可看的东西，调用方按普通横条渲染（不展开空壳）。
+ */
+function streamingToolPreview(inputText: string): { detail?: string; text?: string } | null {
+  if (!inputText.trim()) return null
+  const path =
+    partialJsonString(inputText, 'path') ||
+    partialJsonString(inputText, 'file_path') ||
+    partialJsonString(inputText, 'filePath')
+  const command = partialJsonString(inputText, 'command') || partialJsonString(inputText, 'cmd')
+  // edit_file 的新内容是 newString（旧会话历史里是 newText），write_file 的是 content
+  const content =
+    partialJsonString(inputText, 'content') ||
+    partialJsonString(inputText, 'newString') ||
+    partialJsonString(inputText, 'newText')
+  // 命令类：命令本身就够看（走横条明细），没有别的可展开内容
+  if (command) return { detail: `$ ${command}` }
+  if (path || content) {
+    return {
+      ...(path ? { detail: path } : {}),
+      ...(content ? { text: content } : {})
+    }
+  }
+  return null
+}
+
 /** 超过这个长度才给预览挂 Tooltip：短值（路径 / 文件名）横条上本来就完整可见，弹提示是多余的 */
 const PREVIEW_TOOLTIP_MIN = 40
 
@@ -257,7 +331,8 @@ export function ToolCallRow({
   confirm,
   className,
   title,
-  acpKind
+  acpKind,
+  inputText
 }: {
   toolName: string
   /** 工具入参（tool-call 的 input） */
@@ -273,6 +348,14 @@ export function ToolCallRow({
   title?: string
   /** ACP 协议的工具种类（read / edit / execute …）：拿不到 name 时靠它翻出中文工具名 */
   acpKind?: string
+  /**
+   * **入参还在流式生成**时攒下的半截 JSON 文本（`AgentMessagePart` 的 `inputText`）。
+   *
+   * 传了它就切进「正在生成」形态：横条明细从半截 JSON 里抠（路径 / 命令），
+   * 展开体铺一坨随增量变长的内容 —— 写文件这类入参数 KB 起的调用从「一直转圈」
+   * 变成「肉眼可见在打字」。完整 tool-call 到达后该字段被摘掉，自动回到 diff / 参数形态。
+   */
+  inputText?: string
 }) {
   const [open, setOpen] = useState(status === 'pending')
 
@@ -284,20 +367,46 @@ export function ToolCallRow({
   const Icon = toolIcon(toolName)
   const meta = STATUS_META[status]
   const StatusIcon = meta.Icon
-  /** 改文件的工具：展开体换成前后对比，入参 / 结果就不再摆出来了 */
-  const fileDiff = buildFileDiff(toolName, input)
+  /** 入参流式生成期的预览（null = 没在流式生成，或半截 JSON 里还抠不出可看的东西） */
+  const streaming = typeof inputText === 'string' ? streamingToolPreview(inputText) : null
+  /** 正在生成的内容（要有它才自动展开 / 吸底：命令类只有横条明细，展开是一片空白） */
+  const streamingText = streaming?.text
+  /**
+   * 入参一帧帧在长，这张卡本来就是给用户看的「正在写什么」→ 有内容就展开、随内容吸底；
+   * 收口后自动收回，与思考条「思考中展开、结束收起」同一观感。
+   *
+   * ⚠️ 依赖是**布尔值**而不是那段在变的文本：流式期间用户手动收起后，后面每来一帧
+   * 都会重跑 effect 把它强行撑开。
+   * ⚠️ 也**不能用 useState 初值**，且收起要走 `autoOpenedRef`：上面那条「待批准就展开」
+   * 的 effect 在挂载时可能已经把行撑开了（确认卡先于首次渲染到达），无条件 setOpen(false)
+   * 会把确认按钮埋进收起体里 — 只收「自己撑开的那一次」。
+   */
+  const autoOpen = Boolean(streamingText)
+  const autoOpenedRef = useRef(false)
+  useEffect(() => {
+    if (autoOpen) {
+      autoOpenedRef.current = true
+      setOpen(true)
+    } else if (autoOpenedRef.current) {
+      autoOpenedRef.current = false
+      setOpen(false)
+    }
+  }, [autoOpen])
+  /** 改文件的工具：展开体换成前后对比，入参 / 结果就不再摆出来了（流式生成期还没有完整入参） */
+  const fileDiff = streaming ? null : buildFileDiff(toolName, input)
   /** 读取类（见 NO_PARAM_TOOLS）：展开体只有内容本身，连「结果」这个标题也省掉 */
   const bareOutput = NO_PARAM_TOOLS.has(toolName)
   /** 该工具的入参不值得展示（diff 版或白名单里的读取类） */
   const hideParams = Boolean(fileDiff) || bareOutput
-  const inputText = hideParams || input == null ? '' : clip(formatJson(input))
+  const paramsText = hideParams || input == null ? '' : clip(formatJson(input))
   const errorText = isError ? clip(formatJson(output)) : ''
   const outputText = fileDiff || isError || output === undefined ? '' : clip(formatJson(output))
   // 工具名后面的明细：优先取入参里最能说明「在干什么」的主参数（路径 / 命令 / 查询…），
   // ACP 工具入参偏薄（或压根没有）时回退到 agent 给的 title（路径 / 命令描述）。
+  // 入参还在生成时没有可用的 input，改从半截 JSON 里抠（抠出路径 / 命令就显示）。
   // ⚠️ title 只进这里、绝不进工具名（见 toolLabelOf）：否则脚本 / 命令类会把整段命令顶替工具名。
-  const preview = (toolArgPreview(input) || title || '').replace(/\s+/g, ' ')
-  const hasBody = Boolean(fileDiff || inputText || errorText || outputText || confirm)
+  const preview = (streaming?.detail || toolArgPreview(input) || title || '').replace(/\s+/g, ' ')
+  const hasBody = Boolean(fileDiff || streamingText || paramsText || errorText || outputText || confirm)
 
   return (
     <CollapsibleRow
@@ -308,7 +417,11 @@ export function ToolCallRow({
       // 「调用中」不画右侧展开箭头：还在跑的时候展开体里只有入参、没有结果可看，
       // 箭头纯属噪音（自转的状态图标已经把「进行中」说清楚了）；拿到结果（成功/失败）
       // 才出现箭头，提示那时才有值得展开的东西。仅隐藏箭头，可展开性不变。
-      showChevron={status !== 'running'}
+      // ⚠️ 例外是**入参流式生成期**：卡片本来就在展开着给用户看「正在写什么」，
+      // 箭头必须在 —— 否则用户手动收起后，这行看上去就不能点开了（可展开性其实没变）。
+      showChevron={status !== 'running' || autoOpen}
+      // 入参流式生成期随内容吸底（内容一直变长，不跟随就看不到最新几行）
+      stickToBottom={autoOpen}
       bodyClassName="flex flex-col gap-2"
       icon={
         <Icon
@@ -322,11 +435,12 @@ export function ToolCallRow({
       }
       body={
         <>
+          {streamingText && <StreamingInputBlock text={streamingText} />}
           {fileDiff && (
             <FileDiffView path={fileDiff.path} hunks={fileDiff.hunks} deleted={fileDiff.deleted} />
           )}
-          {inputText && (
-            <ToolSection title="参数" text={inputText} copyTitle="复制参数" />
+          {paramsText && (
+            <ToolSection title="参数" text={paramsText} copyTitle="复制参数" />
           )}
           {errorText && (
             <ToolSection title="错误" text={errorText} copyTitle="复制错误" error />
@@ -368,6 +482,33 @@ export function ToolCallRow({
         <StatusIcon aria-label={meta.label} className={cn('size-4 shrink-0', meta.cls)} />
       </Tooltip>
     </CollapsibleRow>
+  )
+}
+
+/**
+ * 入参**流式生成期**的「正在生成…」块：随增量一帧帧变长的等宽文本。
+ *
+ * 与展开体里的「参数 / 结果」段同款（`ToolSection`），只是没有小标题的复制按钮 ——
+ * 内容还在变，复制它没有意义。
+ *
+ * ⚠️ **不设自己的 max-height / overflow**：滚动统一由 CollapsibleRow 的展开体承担，
+ * 否则会出现「外层一个滚动条 + 这里一个滚动条」的套娃（见 AGENTS 6.18）。
+ */
+function StreamingInputBlock({ text }: { text: string }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-xs font-semibold tracking-wide text-muted-foreground/70">
+        正在生成…
+      </span>
+      <pre
+        className={cn(
+          'whitespace-pre-wrap break-all rounded border border-border/70 bg-muted/40 px-2 py-1.5',
+          'font-mono text-[13px] leading-relaxed text-muted-foreground'
+        )}
+      >
+        {text}
+      </pre>
+    </div>
   )
 }
 

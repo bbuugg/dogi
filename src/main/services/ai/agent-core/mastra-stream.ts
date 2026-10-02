@@ -29,6 +29,18 @@ import { describeError } from '../error-utils'
 export type MastraAdaptedEvent =
   | { type: 'text-delta'; delta: string }
   | { type: 'reasoning-delta'; delta: string }
+  /**
+   * 工具入参的流式增量（形状见 `@shared/types` 的同名事件）。
+   *
+   * ⚠️ 这里只做**形状转换**，下发节奏由调用方的节流器管（见 `../tool-input-throttle`）——
+   * 上游把写文件这类入参拆成成百上千帧，逐帧直发会把 IPC 与渲染主线程吃掉。
+   */
+  | {
+      type: 'tool-call-delta'
+      toolCallId: string
+      toolName?: string
+      inputTextDelta: string
+    }
   | { type: 'tool-call'; toolCallId: string; toolName: string; input: unknown }
   | {
       type: 'tool-result'
@@ -56,6 +68,9 @@ export function adaptMastraPart(part: {
     result?: unknown
     output?: unknown
     error?: unknown
+    /** 工具入参增量（`tool-call-delta`）：Mastra 放 argsTextDelta */
+    argsTextDelta?: unknown
+    inputTextDelta?: unknown
   }
   [k: string]: unknown
 }): MastraAdaptedEvent | null {
@@ -74,6 +89,37 @@ export function adaptMastraPart(part: {
       // 起止标记（reasoning-start / reasoning-end）没有内容，返回 null 让调用方忽略
       return delta ? { type: 'reasoning-delta', delta } : null
     }
+    /**
+     * 「入参开始流式生成」：只有 id + 工具名，还没有内容（Mastra 1.x 的
+     * `tool-call-input-streaming-start`）。转成一条**空增量** —— 卡片据此先建出来，
+     * 标题立刻是对的（否则要等完整 tool-call，卡片会先显示一会儿「工具调用」）。
+     */
+    case 'tool-call-input-streaming-start':
+      return {
+        type: 'tool-call-delta',
+        toolCallId: str(payload?.toolCallId ?? part.toolCallId),
+        ...(payload?.toolName ?? part.toolName
+          ? { toolName: str(payload?.toolName ?? part.toolName) }
+          : {}),
+        inputTextDelta: ''
+      }
+    /**
+     * 入参的流式增量（Mastra 1.x：`{ type:'tool-call-delta', payload:{ toolCallId, argsTextDelta } }`）。
+     *
+     * 字段名同其它分支一样做防御式取值：增量帧**常常不给工具名**（只在完整 tool-call 里给），
+     * 所以工具名是「有才带」而不是塞空串 —— 否则会把先到的真名盖掉。
+     */
+    case 'tool-call-delta':
+      return {
+        type: 'tool-call-delta',
+        toolCallId: str(payload?.toolCallId ?? part.toolCallId),
+        ...(payload?.toolName ?? part.toolName
+          ? { toolName: str(payload?.toolName ?? part.toolName) }
+          : {}),
+        inputTextDelta: str(
+          payload?.argsTextDelta ?? part.argsTextDelta ?? payload?.inputTextDelta ?? part.inputTextDelta
+        )
+      }
     case 'tool-call':
       return {
         type: 'tool-call',
