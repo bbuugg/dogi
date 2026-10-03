@@ -35,6 +35,10 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useDrag } from 'react-dnd'
 import { SidebarGroupRow } from '@/shared/components/SidebarGroupRow'
 import {
+  SidebarRowActions,
+  SIDEBAR_ROW_TRAIL_RESERVE
+} from '@/shared/components/SidebarRowActions'
+import {
   asRef,
   DropLine,
   mergeRefs,
@@ -843,7 +847,7 @@ function RequestRow({
           }
         }}
       >
-        <div className="flex min-w-0 flex-1 items-center gap-2">
+        <div className={cn('flex min-w-0 flex-1 items-center gap-2', SIDEBAR_ROW_TRAIL_RESERVE.one)}>
           {isWs ? (
             <Cable className="size-3.5 shrink-0 opacity-70" />
           ) : (
@@ -864,17 +868,23 @@ function RequestRow({
           </div>
         </div>
       </Dropdown>
-      <Button
-        type="text"
-        size="small"
-        icon={<Trash2 className="size-3.5 text-destructive" />}
-        className="invisible h-5 w-5 shrink-0 p-0 group-hover/req:visible"
-        title="删除请求"
-        onClick={(e) => {
-          e.stopPropagation()
-          onDelete()
-        }}
-      />
+      {/*
+        「删除」绝对定位在行右侧、hover 整行才浮现。原来用 `invisible` 占位 ——
+        它照常吃布局宽度，请求名全程被提前截断。
+      */}
+      <SidebarRowActions hoverClass="group-hover/req:pointer-events-auto group-hover/req:opacity-100">
+        <Button
+          type="text"
+          size="small"
+          icon={<Trash2 className="size-3.5 text-destructive" />}
+          className="h-5 w-5 shrink-0 p-0 opacity-0 transition-opacity group-hover/req:opacity-100"
+          title="删除请求"
+          onClick={(e) => {
+            e.stopPropagation()
+            onDelete()
+          }}
+        />
+      </SidebarRowActions>
     </div>
   )
 }

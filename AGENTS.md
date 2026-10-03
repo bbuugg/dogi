@@ -1461,6 +1461,25 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   —— WASM 会话里跑着 Rust 事件循环。
 - 判据：这类 effect 的清理必须**幂等且可归属**（是谁建的谁清）—— 与 4.2「流式事件自带归属」同一思想。
 
+**28. 侧栏列表行的行尾按钮必须绝对定位浮层，不能留在 flex 流里**
+
+- 参考实现是 fishwork 的 `components/Sidebar.tsx`（本仓搬家到
+  `shared/components/SidebarRowActions.tsx`）。**问题**：把按钮留在 flex 行里只加
+  `opacity-0 group-hover:opacity-100`（或 `invisible` / `hidden`）**照样占一整格宽度** ——
+  侧栏本来就窄，悬停才出现的按钮却全程在吃名字的宽度，长名字被提前截成几个字。
+  主机 / 脚本 / 接口 / 笔记 / 面板都犯过，插件面板连 `Switch` 右侧那列都被两个按钮撑宽过 16px。
+- 正确做法：`SidebarRowActions` 绝对定位在行右侧（`pointer-events-none`，
+  hover 时 `group-hover:pointer-events-auto group-hover:opacity-100`，窄屏常显），
+  底衬 `bg-gradient-to-l from-sidebar` 渐隐；名字平时吃满整行，只用
+  `SIDEBAR_ROW_NAME.{one,two,three}`（`min-w-0 flex-1 truncate group-hover:pe-*`）在 hover 时让位。
+  ⚠️ 按钮数与 `pe-*` **必须匹配**（每个按钮 = 18px + 2px 间隙 + 浮层 16px 内边距）：
+  少让位文字会压在按钮下，多让位等于没修好。
+- 顺带一条：**名称后紧跟的小元素（折叠箭头 / 取色点 / 数量）不能跟着 `flex-1`** ——
+  否则它被顶到行尾、正好钻进浮层按钮底下（都是 hover 才显形，撞上看不出来）。
+  这类行把让位类用在**外层容器**（`SIDEBAR_ROW_TRAIL_RESERVE`），名称只给 `truncate` 不给 `flex-1`。
+- AI Agent 侧里「**新建会话**」从「更多」下拉里提出来常驻行尾、放在 more 左边（最高频动作）；
+  探针定位走 `button[title$="中新建会话"]`，见 `scripts/verify-agent-acp-import.mjs`。
+
 **31. `Form.useWatch` 只看得见「已注册字段」—— 别把 Form.Item 拆掉**
 
 - **现场**：新建主机对话框的主机类型分段（Segmented）用 `Form.useWatch('kind')` 驱动分支字段区。

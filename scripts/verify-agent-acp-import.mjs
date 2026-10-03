@@ -3,7 +3,7 @@
  * （隔离实例 + CDP，见 AGENTS 5.1 / 4.3 / 4.18）。
  *
  * 没有真实的 ACP CLI 也能把两侧契约钉住：
- *   - 工作区行尾只有一个「更多操作」下拉，里面有 导入会话 / 新建会话 / 重命名 / 删除；
+ *   - 工作区行尾是悬浮操作区：「在 X 中新建会话」常驻 +「更多操作」下拉（导入 / 重命名 / 删除）；
  *   - 设置 → ACP agent 里能手工登记 agent（会话页的模型来源就是它勾选的模型）；
  *   - **新建的会话形态待定**：选了内置模型 → 标识变成内置；预置/选中 ACP agent → 标识是该 agent；
  *   - 主进程下发的 `history` 事件能渲染成消息流，且 ACP 会话不提供「编辑重发 / 从这里重新开始」；
@@ -135,16 +135,18 @@ try {
     `JSON.stringify(Array.from(document.querySelectorAll('button[title]')).map((b) => b.getAttribute('title')))`
   )
   check(
-    '行尾不再平铺「导入会话 / 新建会话」等按钮',
-    !/导入会话|新建会话|重命名工作区|删除工作区/.test(staleButtons),
+    '行尾不再平铺「导入会话 / 重命名工作区 / 删除工作区」按钮（「新建会话」常驻行尾）',
+    !/导入会话|重命名工作区|删除工作区/.test(staleButtons) &&
+      /中新建会话/.test(staleButtons),
     staleButtons
   )
   await cdp.eval(openWorkspaceMenu)
   await waitFor(cdp, `document.querySelectorAll('.ant-dropdown-menu-item').length > 0`, 5000, '下拉没展开')
   const items = await cdp.eval(menuTexts)
   check(
-    '「更多」下拉里有 导入 / 新建会话 / 重命名 / 删除 四项',
-    ['导入会话', '新建会话', '重命名工作区', '删除工作区'].every((t) => items.includes(t)),
+    '「更多」下拉里有 导入 / 重命名 / 删除 三项（「新建会话」已常驻行尾）',
+    ['导入会话', '重命名工作区', '删除工作区'].every((t) => items.includes(t)) &&
+      !items.includes('新建会话'),
     JSON.stringify(items)
   )
   await cdp.eval(`document.body.click()`)
@@ -154,9 +156,14 @@ try {
   /** 侧边栏里的会话行（草稿不进列表，所以它才是「列表里到底有几条会话」的真值） */
   const convRows = `Array.from(document.querySelectorAll('[data-conversation-id]'))`
   const rowsBefore = await cdp.eval(`${convRows}.length`)
-  await cdp.eval(openWorkspaceMenu)
-  await waitFor(cdp, `document.querySelectorAll('.ant-dropdown-menu-item').length > 0`, 5000, '下拉没展开')
-  await cdp.eval(clickByText('.ant-dropdown-menu-item', '新建会话'))
+  // 「新建会话」现在常驻行尾（在「更多」左边），不必展开下拉
+  await cdp.eval(
+    `(function () {
+       const btn = document.querySelector('button[title$="中新建会话"]')
+       if (!btn) throw new Error('找不到行尾「新建会话」按钮')
+       btn.click()
+     })()`
+  )
   await sleep(700)
 
   const fresh = await cdp.eval(
@@ -177,9 +184,13 @@ try {
   )
 
   // 连点两次「新建会话」应当还是同一个空页（不攒看不见的草稿）
-  await cdp.eval(openWorkspaceMenu)
-  await waitFor(cdp, `document.querySelectorAll('.ant-dropdown-menu-item').length > 0`, 5000, '下拉没展开')
-  await cdp.eval(clickByText('.ant-dropdown-menu-item', '新建会话'))
+  await cdp.eval(
+    `(function () {
+       const btn = document.querySelector('button[title$="中新建会话"]')
+       if (!btn) throw new Error('找不到行尾「新建会话」按钮')
+       btn.click()
+     })()`
+  )
   await sleep(600)
   const draftCount = await cdp.eval(
     `window.__store.getState().agentConversations.filter((c) => c.kind === undefined).length`

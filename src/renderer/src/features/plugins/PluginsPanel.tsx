@@ -4,6 +4,7 @@ import type { PluginInfo } from '@shared/plugin'
 import { Button, Input, Modal, Switch, message } from 'antd'
 import { AlertCircle, ExternalLink, Trash2 } from 'lucide-react'
 import { useMemo, useState } from 'react'
+import { SidebarRowActions } from '@/shared/components/SidebarRowActions'
 
 /** 统一把异常转成可提示的文本 */
 function errText(e: unknown): string {
@@ -116,7 +117,8 @@ export function PluginsPanel() {
                     openPluginsTab()
                   }}
                   className={cn(
-                    'group flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5',
+                    // relative：右下角「打开 / 卸载」浮层要定位在本行内
+                    'group relative flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5',
                     active
                       ? 'bg-primary/10 text-foreground'
                       : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
@@ -142,8 +144,9 @@ export function PluginsPanel() {
                   </div>
 
                   {/*
-                    右侧一列：上排是常驻的启停开关，下排（开关正下方）是「打开 / 卸载」。
-                    下排用 invisible 占位而不是不渲染 —— 位置始终留着，悬浮显形时行高、列宽都不变。
+                    右侧一列：常驻的启停开关。「打开 / 卸载」原来排在开关正下方，
+                    现在改成绝对定位浮层（见下）—— 它留在列里会把右列撑得比开关宽，
+                    而这一列全程吃名字的宽度。
                   */}
                   <div className="mt-0.5 flex shrink-0 flex-col items-end gap-0.5">
                     <span className="flex h-5 items-center">
@@ -155,32 +158,43 @@ export function PluginsPanel() {
                         aria-label="启用/禁用"
                       />
                     </span>
-                    <div className="invisible flex h-5 items-center gap-0.5 group-hover:visible">
-                      <Button
-                        type="text"
-                        size="small"
-                        icon={<ExternalLink className="size-3.5" />}
-                        className="h-5 w-5 p-0"
-                        title="打开插件界面"
-                        disabled={!p.enabled || !view}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          openPlugin(p)
-                        }}
-                      />
-                      <Button
-                        type="text"
-                        size="small"
-                        icon={<Trash2 className="size-3.5 text-destructive" />}
-                        className="h-5 w-5 p-0"
-                        title="卸载插件"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setPendingUninstall(p)
-                        }}
-                      />
-                    </div>
                   </div>
+
+                  {/*
+                    「打开 / 卸载」绝对定位在右下角、hover 整行才浮现。
+                    右列宽度原本取「开关 / 按钮排」的较大者：两个 20px 按钮把列撑到 44px，
+                    比开关宽出 16px，名字全程被这 16px 提前截断。
+                    改成浮层后右列只剩开关宽度，名字平时吃满、hover 时才让位。
+                    这一行有三行文字，浮层只盖住最下面一行的右端（版本 / 已禁用那行）。
+                  */}
+                  <SidebarRowActions
+                    align="bottom"
+                    hoverClass="group-hover:pointer-events-auto group-hover:opacity-100"
+                  >
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={<ExternalLink className="size-3.5" />}
+                      className="h-5 w-5 p-0 opacity-0 transition-opacity group-hover:opacity-100"
+                      title="打开插件界面"
+                      disabled={!p.enabled || !view}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        openPlugin(p)
+                      }}
+                    />
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={<Trash2 className="size-3.5 text-destructive" />}
+                      className="h-5 w-5 p-0 opacity-0 transition-opacity group-hover:opacity-100"
+                      title="卸载插件"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setPendingUninstall(p)
+                      }}
+                    />
+                  </SidebarRowActions>
                 </div>
               )
             })}

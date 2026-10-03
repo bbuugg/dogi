@@ -34,6 +34,10 @@ import { resolveSshColor } from '@/features/hosts/ssh-color'
 import { ScriptsPanel } from '@/features/scripts/ScriptsPanel'
 import { SidebarGroupRow } from '@/shared/components/SidebarGroupRow'
 import {
+  SidebarRowActions,
+  SIDEBAR_ROW_NAME
+} from '@/shared/components/SidebarRowActions'
+import {
   asRef,
   DropLine,
   mergeRefs,
@@ -771,8 +775,12 @@ function ProfileRow({
                 style={color ? { color } : undefined}
               />
             )}
+            {/*
+              名称 flex-1 吃掉余量（取色点平时不占位，仍是行尾居右的观感）；
+              hover 时才用 `pe-9` 让出取色点那一段。
+            */}
             <div
-              className="min-w-0 flex-1 truncate text-sm font-medium"
+              className={cn(SIDEBAR_ROW_NAME.one, 'text-sm font-medium')}
               style={color ? { color: tintText(color) } : undefined}
             >
               {profile.name}
@@ -780,16 +788,26 @@ function ProfileRow({
           </div>
         </Tooltip>
       </Dropdown>
-      <ColorDot
-        value={profile.color}
-        fallback={color}
-        title={
-          profile.color ? '连接颜色' : color ? '继承分组颜色（点击可单独设置）' : '设置连接颜色'
-        }
-        hoverGroupClass="group-hover/prof:opacity-100"
-        onChange={(next) => onColor(next)}
-        onClear={() => onColor(null)}
-      />
+      {/*
+        取色点绝对定位在行右侧、hover 整行才浮现。留在 flex 流里的话，
+        即便 `opacity-0` 也照样占一格 —— 连接名全程被提前截断。
+      */}
+      <SidebarRowActions hoverClass="group-hover/prof:pointer-events-auto group-hover/prof:opacity-100">
+        <ColorDot
+          value={profile.color}
+          fallback={color}
+          title={
+            profile.color
+              ? '连接颜色'
+              : color
+                ? '继承分组颜色（点击可单独设置）'
+                : '设置连接颜色'
+          }
+          hoverGroupClass="group-hover/prof:opacity-100"
+          onChange={(next) => onColor(next)}
+          onClear={() => onColor(null)}
+        />
+      </SidebarRowActions>
     </div>
   )
 }

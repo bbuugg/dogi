@@ -7,6 +7,10 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useDrag } from 'react-dnd'
 import { SidebarGroupRow } from '@/shared/components/SidebarGroupRow'
 import {
+  SidebarRowActions,
+  SIDEBAR_ROW_NAME
+} from '@/shared/components/SidebarRowActions'
+import {
   asRef,
   DropLine,
   mergeRefs,
@@ -571,17 +575,25 @@ function ScriptRow({
         }}
       >
         <div className="flex min-w-0 flex-1 items-center gap-2">
-          <div className="min-w-0 flex-1 truncate text-[13px] font-medium leading-none">
+          {/* flex-1 吃掉余量；hover 时才让出右侧两格给「运行 / 删除」 */}
+          <div className={cn(SIDEBAR_ROW_NAME.two, 'text-[13px] font-medium leading-none')}>
             {script.name}
           </div>
         </div>
       </Dropdown>
-      <div className="invisible flex shrink-0 items-center gap-0.5 group-hover/scri:visible">
+      {/*
+        「运行 / 删除」绝对定位在行右侧、hover 整行才浮现。
+        原来靠 `invisible` 占位 —— 它和 opacity-0 一样照常吃布局宽度，
+        脚本名全程被提前截断；这里改成浮层，宽度只在需要时借。
+      */}
+      <SidebarRowActions
+        hoverClass="group-hover/scri:pointer-events-auto group-hover/scri:opacity-100"
+      >
         <Button
           type="text"
           size="small"
           icon={<Play className="size-3.5" />}
-          className="h-5 w-5 p-0"
+          className="h-5 w-5 p-0 opacity-0 transition-opacity group-hover/scri:opacity-100"
           title="运行脚本"
           onClick={(e) => {
             e.stopPropagation()
@@ -592,14 +604,14 @@ function ScriptRow({
           type="text"
           size="small"
           icon={<Trash2 className="size-3.5 text-destructive" />}
-          className="h-5 w-5 p-0"
+          className="h-5 w-5 p-0 opacity-0 transition-opacity group-hover/scri:opacity-100"
           title="删除脚本"
           onClick={(e) => {
             e.stopPropagation()
             onDelete()
           }}
         />
-      </div>
+      </SidebarRowActions>
     </div>
   )
 }

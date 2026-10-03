@@ -5,6 +5,11 @@ import { Button, Checkbox, Dropdown, Input, Modal, message } from 'antd'
 import type { MenuProps } from 'antd'
 import { cn } from 'cn'
 import {
+  SIDEBAR_ROW_ACTION,
+  SIDEBAR_ROW_NAME,
+  SidebarRowActions
+} from '@/shared/components/SidebarRowActions'
+import {
   ChevronRight,
   CirclePause,
   FolderPlus,
@@ -200,17 +205,16 @@ export function AgentPanel() {
   }
 
   /** 行尾小按钮统一样式：平时隐形，hover 所在行才浮现；没有 hover 的窄屏（<768px）常显 */
-  const rowAction =
-    'rounded p-0.5 opacity-0 transition-opacity hover:bg-foreground/10 group-hover:opacity-100 max-md:opacity-100'
+  const rowAction = SIDEBAR_ROW_ACTION
 
   /**
    * 工作区行的操作菜单。
    *
-   * 原先 4 个按钮平铺在行尾（导入 / 新建会话 / 重命名 / 删除），行一窄就把工作区名挤没了；
-   * 现在收进一个「更多」下拉，行尾只留一个图标。
+   * 「新建会话」**不在**这里 —— 它是本工作区最高频的动作，每次都要展开「更多」才碰得到，
+   * 所以提到行尾常驻（见下面的悬浮操作区）。这里只留低频项：
+   * 导入会话 / 重命名 / 删除（原先连重命名、删除也是平铺按钮，行一窄就把工作区名挤没了）。
    */
-  const workspaceMenuItems = (w: AgentWorkspace): MenuProps['items'] => [
-    { key: 'new', label: '新建会话', icon: <MessageSquarePlus className="size-3.5" /> },
+  const workspaceMenuItems = (): MenuProps['items'] => [
     { key: 'import', label: '导入会话', icon: <Import className="size-3.5" /> },
     { type: 'divider' },
     { key: 'rename', label: '重命名工作区', icon: <Pencil className="size-3.5" /> },
@@ -222,15 +226,13 @@ export function AgentPanel() {
     }
   ]
 
-  const handleWorkspaceMenu = (w: AgentWorkspace, isExpanded: boolean): MenuProps['onClick'] =>
+  /** 「更多」下拉的点击分发（不再有「新建会话」—— 它已常驻行尾） */
+  const handleWorkspaceMenu = (w: AgentWorkspace): MenuProps['onClick'] =>
     ({ key, domEvent }) => {
       // 菜单挂在会切换展开状态的行上：不拦住冒泡的话，点「重命名」会顺手把列表收起
       domEvent.stopPropagation()
       if (key === 'import') setImportTarget(w)
-      else if (key === 'new') {
-        createAgentConversation(w.id)
-        if (!isExpanded) toggleExpand(w.id)
-      } else if (key === 'rename') setEdit({ id: w.id, name: w.name, path: w.path })
+      else if (key === 'rename') setEdit({ id: w.id, name: w.name, path: w.path })
       else if (key === 'delete') setPendingDelete(w)
     }
 
@@ -278,7 +280,8 @@ export function AgentPanel() {
                       toggleExpand(w.id)
                     }}
                     className={cn(
-                      'group flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1.5 text-sm transition-colors',
+                      // relative：行尾两个按钮要绝对定位在行右侧（见 SidebarRowActions）
+                      'group relative flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1.5 text-sm transition-colors',
                       isActiveWs
                         ? 'bg-primary/15 text-foreground'
                         : 'text-muted-foreground hover:bg-foreground/5 hover:text-foreground'
@@ -299,35 +302,53 @@ export function AgentPanel() {
                       />
                     </button>
                     {/*
-                      名称与展开箭头必须是这一行的**同级 flex 子项**：
-                      - 名称**不要**给 `flex-1`：它按自身宽度占位，箭头才会随名称长度往右走，
-                        最长只能顶到右侧那排按钮（「新建会话」…）之前，再长就截断成省略号；
-                      - 两者都在 flex 行里，由 `items-center` 按**中线**对齐（不会走基线错位）；
-                      - `min-w-0 truncate` 保证长名字不出省略号以外的溢出，
-                        也不会把箭头挤出可视区（看起来像「没有展开图标」）。
+                      名称 `flex-1` 吃掉余量，`min-w-0 truncate` 保证长名字不出省略号以外的溢出。
+                      行尾按钮改成**绝对定位浮层**后，名称平时能吃满整行；只有 hover 时
+                      `group-hover:pe-14` 才让出按钮那一段 —— 之前按钮留在 flex 流里，
+                      即便 `opacity-0` 也照样占一格，工作区名全程被提前截断。
                     */}
-                    <span className="min-w-0 truncate">{w.name}</span>
+                    <span className={SIDEBAR_ROW_NAME.two}>{w.name}</span>
 
-                    {/* 弹性空隙：吃掉「名称 + 箭头」到行尾按钮之间的余量，名称再长也止步于按钮左侧 */}
-                    <span className="flex-1" aria-hidden="true" />
-                    {/* 行尾操作全部收进「更多」下拉（导入 / 新建会话 / 重命名 / 删除） */}
-                    <Dropdown
-                      trigger={['click']}
-                      placement="bottomRight"
-                      menu={{
-                        items: workspaceMenuItems(w),
-                        onClick: handleWorkspaceMenu(w, isExpanded)
-                      }}
+                    {/*
+                      行尾悬浮操作区（与 fishwork 侧栏同一套做法）：
+                      「新建会话」常驻「更多」左边 —— 它是最高频动作，不该每次都展开菜单；
+                      「更多」收低频项：导入会话 / 重命名 / 删除。
+                    */}
+                    <SidebarRowActions
+                      hoverClass="group-hover:pointer-events-auto group-hover:opacity-100 max-md:pointer-events-auto max-md:opacity-100"
                     >
                       <button
                         type="button"
-                        title="更多操作"
-                        onClick={(e) => e.stopPropagation()}
+                        title={`在 ${w.name} 中新建会话`}
+                        aria-label={`在 ${w.name} 中新建会话`}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          createAgentConversation(w.id)
+                          if (!isExpanded) toggleExpand(w.id)
+                        }}
                         className={rowAction}
                       >
-                        <MoreHorizontal className="size-3.5" />
+                        <MessageSquarePlus className="size-3.5" />
                       </button>
-                    </Dropdown>
+                      <Dropdown
+                        trigger={['click']}
+                        placement="bottomRight"
+                        menu={{
+                          items: workspaceMenuItems(),
+                          onClick: handleWorkspaceMenu(w)
+                        }}
+                      >
+                        <button
+                          type="button"
+                          title="更多操作"
+                          aria-label={`${w.name} 的更多操作`}
+                          onClick={(e) => e.stopPropagation()}
+                          className={rowAction}
+                        >
+                          <MoreHorizontal className="size-3.5" />
+                        </button>
+                      </Dropdown>
+                    </SidebarRowActions>
                   </div>
 
                   {/* 会话列表：嵌在工作区下方，**只用缩进表示从属**（与 fishwork 侧栏一致，不画竖线/分隔符） */}
@@ -356,7 +377,8 @@ export function AgentPanel() {
                             }}
                             className={cn(
                               // 缩进交给下面那个「图标槽」占位（不再写 pl-*），标题才能和工作区名称同列
-                              'group flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1.5 text-sm transition-colors',
+                              // relative：行尾「重命名 / 删除」要绝对定位在行右侧
+                              'group relative flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1.5 text-sm transition-colors',
                               isActiveConv
                                 ? 'bg-primary/15 text-foreground'
                                 : 'text-muted-foreground hover:bg-foreground/5 hover:text-foreground'
@@ -391,29 +413,36 @@ export function AgentPanel() {
                                 <Loader2 className="size-4 animate-spin text-primary" />
                               ) : null}
                             </span>
-                            <span className="min-w-0 flex-1 truncate">{c.title}</span>
-                            <button
-                              type="button"
-                              title="重命名会话"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                setConvRename({ id: c.id, title: c.title })
-                              }}
-                              className={rowAction}
+                            {/* hover 时才把右侧两格让给「重命名 / 删除」浮层 */}
+                            <span className={SIDEBAR_ROW_NAME.two}>{c.title}</span>
+                            <SidebarRowActions
+                              hoverClass="group-hover:pointer-events-auto group-hover:opacity-100 max-md:pointer-events-auto max-md:opacity-100"
                             >
-                              <Pencil className="size-3.5" />
-                            </button>
-                            <button
-                              type="button"
-                              title="删除会话"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                setPendingConvDelete(c)
-                              }}
-                              className={cn(rowAction, 'hover:bg-destructive/10 hover:text-destructive')}
-                            >
-                              <Trash2 className="size-3.5" />
-                            </button>
+                              <button
+                                type="button"
+                                title="重命名会话"
+                                aria-label={`重命名会话 ${c.title}`}
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  setConvRename({ id: c.id, title: c.title })
+                                }}
+                                className={rowAction}
+                              >
+                                <Pencil className="size-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                title="删除会话"
+                                aria-label={`删除会话 ${c.title}`}
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  setPendingConvDelete(c)
+                                }}
+                                className={cn(rowAction, 'hover:bg-destructive/10 hover:text-destructive')}
+                              >
+                                <Trash2 className="size-3.5" />
+                              </button>
+                            </SidebarRowActions>
                           </div>
                         )
                       })}

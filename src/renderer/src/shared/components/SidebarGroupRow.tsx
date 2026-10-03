@@ -5,6 +5,10 @@ import { useMemo, type ReactNode } from 'react'
 import { useDrag } from 'react-dnd'
 import { cn } from 'cn'
 import { asRef, DropLine, mergeRefs, useRowDrop, type RowDragItem } from '@/shared/components/SidebarRowDnd'
+import {
+  SidebarRowActions,
+  SIDEBAR_ROW_TRAIL_RESERVE
+} from '@/shared/components/SidebarRowActions'
 import { tintText } from '@/shared/lib/color'
 
 /**
@@ -110,7 +114,13 @@ export function SidebarGroupRow({
           onClick: ({ key }) => onMenuClick(key)
         }}
       >
-        <div className="flex min-w-0 flex-1 items-center gap-1.5">
+        <div
+          className={cn(
+            'flex min-w-0 flex-1 items-center gap-1.5',
+            // hover 时把行尾一格让给悬浮的「新建」按钮
+            SIDEBAR_ROW_TRAIL_RESERVE.one
+          )}
+        >
           {/* 文件夹图标对齐 AI 侧栏的工作区行 */}
           <button
             type="button"
@@ -126,7 +136,10 @@ export function SidebarGroupRow({
               style={color ? { color } : undefined}
             />
           </button>
-          {/* 名称不加 flex-1：箭头才紧随名称往右走（同 AI 侧栏的工作区行） */}
+          {/*
+            名称**不给 flex-1**：按自身宽度占位，箭头与 afterCount（取色点）才紧随其后，
+            最长顶到行尾按钮之前截断。给了 flex-1 会把取色点顶到行尾、钻进浮层底下。
+          */}
           <span
             className="truncate text-sm font-medium text-muted-foreground"
             style={color ? { color: tintText(color) } : undefined}
@@ -134,19 +147,25 @@ export function SidebarGroupRow({
             {name}
           </span>
           {afterCount}
-          <Button
-            type="text"
-            size="small"
-            className="ml-auto px-1 opacity-0 transition-opacity group-hover/grp:opacity-100"
-            title={newTitle}
-            icon={<Plus className="size-3.5" />}
-            onClick={(e) => {
-              e.stopPropagation()
-              onNew()
-            }}
-          />
         </div>
       </Dropdown>
+      {/*
+        「新建」绝对定位在行右侧、hover 整行才浮现（与 AI 侧栏的工作区行同一套做法）。
+        放在 flex 流里的话，即便 `opacity-0` 也照样占一格 —— 分组名全程被提前截断。
+      */}
+      <SidebarRowActions hoverClass="group-hover/grp:pointer-events-auto group-hover/grp:opacity-100">
+        <Button
+          type="text"
+          size="small"
+          className="h-5 w-5 shrink-0 p-0 opacity-0 transition-opacity group-hover/grp:opacity-100"
+          title={newTitle}
+          icon={<Plus className="size-3.5" />}
+          onClick={(e) => {
+            e.stopPropagation()
+            onNew()
+          }}
+        />
+      </SidebarRowActions>
     </div>
   )
 }

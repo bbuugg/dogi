@@ -4,6 +4,10 @@ import type { NoteFileItem } from '@shared/types'
 import { Button, Dropdown, Input, Modal, Tree, message, type MenuProps, type TreeDataNode } from 'antd'
 import { cn } from 'cn'
 import {
+  SidebarRowActions,
+  SIDEBAR_ROW_NAME
+} from '@/shared/components/SidebarRowActions'
+import {
   ExternalLink,
   FilePlus,
   FileText,
@@ -496,22 +500,25 @@ function FileRow({
         }}
       >
         <div className="flex min-w-0 flex-1 items-center gap-2">
-          <span className="min-w-0 flex-1 truncate text-[13px] font-medium leading-none">
+          <span className={cn(SIDEBAR_ROW_NAME.one, 'text-[13px] font-medium leading-none')}>
             {item.name}
           </span>
         </div>
       </Dropdown>
-      <Button
-        type="text"
-        size="small"
-        icon={<Trash2 className="size-3.5 text-destructive" />}
-        className="invisible h-5 w-5 shrink-0 p-0 group-hover/note:visible"
-        title="删除文件"
-        onClick={(e) => {
-          e.stopPropagation()
-          onDelete()
-        }}
-      />
+      {/* 「删除」绝对定位在行右侧、hover 才浮现（原来 `invisible` 占位，全程吃文件名宽度） */}
+      <SidebarRowActions hoverClass="group-hover/note:pointer-events-auto group-hover/note:opacity-100">
+        <Button
+          type="text"
+          size="small"
+          icon={<Trash2 className="size-3.5 text-destructive" />}
+          className="h-5 w-5 shrink-0 p-0 opacity-0 transition-opacity group-hover/note:opacity-100"
+          title="删除文件"
+          onClick={(e) => {
+            e.stopPropagation()
+            onDelete()
+          }}
+        />
+      </SidebarRowActions>
     </div>
   )
 }
