@@ -58,6 +58,12 @@
   目录递归上传为同名子目录）。目标目录每次拖入弹确认条（默认远端家目录，会话内记住上次的选择）——
   终端当前工作目录拿不到（Shell 默认不发 OSC 7、解析提示符不可靠），所以不猜。rz/sz 传输中不接管。
 - 终端配色方案、字号缩放、选中即复制、右键粘贴、命令预测（历史补全）等偏好。
+- **命令历史**：预测用的历史是全局的 —— 用户按回车执行的命令（本地 / SSH 都算）经 `history:add`
+  记进主进程 `userData/command-history.json`（去重置顶、上限 1000、跨会话共享、跨重启保留），
+  渲染端在 store 里持有镜像（bootstrap 灌入，管理界面与预测共用）。记录开关是偏好 `commandHistory`
+  （默认开；关闭只停记录，已有历史照常可用）；管理与清空入口在 设置 → 终端 的「命令历史」卡片。
+  AI / 脚本写入的命令**不进**这里（那是主机日志 `terminal` 作用域的事，见 4.13）。
+  服务层在 `services/terminal/history.ts`（落盘路径由 init 注入，不 import electron，探针可纯 Node 直跑）。
 - 执行的命令与输出自动记进主机日志（`terminal` 作用域，来源带 [AI] / [脚本] 标记），每会话另有逐字节原始输出文件（见 4.13）。
 
 **主机与运维**
@@ -853,6 +859,8 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 | `scripts/verify-port-killer.mjs` | 端口占用插件全链路：插件播种/视图注册 → 探针 spawn 的 node 子进程真占随机端口 → 查询命中（PID / 进程名 / 监听中）→ 行内复制命令（`killCommand` 平台格式）→ **Popconfirm 真杀**（子进程退出 + 端口连接被拒 + 自动复查为空）→ 保护/校验分支（kill PID 1 / 非法 / 不存在、search 70000）→ **UDP 占用**（netstat UDP 行没有状态列）→ 重新查询 |
 | `scripts/verify-terminal-logging.mjs` | 终端命令 + 输出记录：命令装配（普通 / 退格 / Ctrl+C / 不可还原行不记 / bracketed paste）、`[脚本]` 来源标记、输出增量回填同一条目、原始会话文件（含未记录命令的裸输出）、关闭条目、JSONL 同 seq 多行、面板终端过滤、清空连 `sessions/` 归零。⚠️ bracketed paste 用例必须放最后：部分 PowerShell（如本机 5.1）未启用 `?2004h`，合成标记会吞掉后续回显 |
 | `scripts/verify-terminal-prediction.mjs` | 终端命令预测：CDP 真键盘注入（先点终端给 xterm 焦点）——未输入无下拉、「键入 git → 'git status' 行渲染宽度带空格」、「前缀以空格结尾 → 仍带空格」、`→` 接受 → 下拉收起 + PTY 回显补全后的 `git log`、备用屏幕（tmux / vim）里按 `d` 不弹（见 6.5 第 25 条）。⚠️ 防的是 flex 子项边界空格被裁的坑（见 6.5 第 24 条）：断言必须量渲染宽度，`textContent` 测不出来 |
+| `scripts/verify-command-history.ts` | 终端命令历史的服务层（`services/terminal/history.ts` 真源码，`node --experimental-strip-types`，不需要 Electron）—— 空启动、add 落盘、去重置顶（重复执行刷新时间）、trim / 空串拒绝、超长截断、上限 1000 丢最旧、「重启」再 init 读回一致、单条删除（不存在静默）、清空归零、损坏 / 非数组 / 坏条目文件逐条校验降级。⚠️ 落盘是异步链，断言文件内容前必须 `flush()` |
+| `scripts/verify-command-history-ui.mjs` | 命令历史的界面链路（隔离实例 + CDP，先 `npm run build`）：真实键盘在终端执行命令 → 回车记入全局 store → **第二个终端标签**的预测下拉出现跨标签历史 → 设置 → 终端管理卡片（条数 / 搜索过滤 / 最新在前 / 行内删除 / Popconfirm 清空）→ 再真实记录一条 → 杀进程重启 → bootstrap 灌回且已删除条目不再出现。⚠️ Modal 底部的版本号 `v0.0.12` 也是 `font-mono`，行断言要选 `span.font-mono[title]`（管理行才有 title）；antd 两字按钮按去空白 textContent 匹配 |
 | `tmp/verify-terminal-drop-upload.mjs` | 终端拖拽上传（SFTP）：进程内假 sshd（pty + shell + SFTP 子系统，REALPATH 固定回家目录）+ 隔离实例，`Input.dispatchDragEvent` 注入**真实原生拖拽**（`data.files` 传绝对路径 → `webUtils.getPathForFile` 拿得到）——拖入文件 + 子目录 → 确认条默认 = 家目录 → 改目录上传 → 远端逐层 MKDIR + 每文件 WRITE 内容逐字节一致、终端「已上传 N 项到 …」、传输托盘 2 笔 done → 再次拖入默认目录被记住 → 本地会话拖入被拒且不建连不传文件。⚠️ CDP 对终端 DOM 刚挂载后的**首次** drop 可能整串被忽略（非代码问题），探针带最多 3 次真实重试 |
 | `tmp/verify-tab-close-confirm.mjs` | 标签关闭确认（页面内确认 + emit 关闭，机制见 6.5 第 32 条）：隔离实例 + CDP，`createLocalSession` 开真实本地终端 + `openNoteTab` 开真实笔记（Milkdown 编辑器 `execCommand('insertText')` 输入变脏）—— 通用防手滑确认出现在**可见标签面板内**（`[role=dialog]` 且 `offsetParent` 非空、根节点挂在 `relative` 容器、遮罩非全窗宽）→ 取消不动 / 关闭生效 → 勾「以后都不再提示」落盘 `confirmCloseTab` → 偏好关闭后直接关 → `requestCloseGroup` 逐个确认（自动激活下一个标签）、取消即中止整批 → 笔记**开关开**弹「未保存三选一」（不保存 = 丢弃且文件不动）、**开关关**不问直接丢弃关闭。⚠️ **`cdp.eval` 是 `awaitPromise:true`：`requestClosePanelTab` / `requestCloseGroup` / `createLocalSession` 这类返回 Promise 的动作必须 `void` 掉再 eval，否则 eval 会等到用户点按钮才返回（探针第一次跑就是这样死锁超时的）**；⚠️ antd 给两个汉字按钮插空格，「取消 / 关闭」要按去空白后的 `textContent` 匹配（同 6.5 第 20 条） |
 | `scripts/verify-git-changes.ts` | 源代码管理「更改」列表的数据层：**直接跑 `services/git.ts` 真源码**（`node --experimental-strip-types`，不需要打包 / 不起 Electron）—— 临时仓库里验证未跟踪目录被 `-uall` 摊平成目录下的每个文件、列表里没有「以 `/` 结尾的折叠目录」条目、未跟踪文件用 `--no-index` 拿到「整份新增」的 diff、已跟踪文件的 diff 不受影响、未跟踪的**嵌套仓库**输出成带尾斜杠的目录条目（`nested/`，取 diff 返回空）、回退能**递归**删掉整个目录、`listGitDir` 能列出目录条目里的文件（跳过 `.git`，只读展示）且**预览上限 20 项** |
@@ -1273,7 +1281,6 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 - **验证**：`scripts/verify-terminal-prediction.mjs` 按**渲染宽度**断言（range 联合包围盒 vs 同字体「带空格 / 粘连」两个基准）；
   **结构断言测不出来** —— 两种结构渲染出的文本内容一致，只有宽度 / 截图能看出差别。
 
-<<<<<<< HEAD
 **25. 全屏程序里「组合键之后的可打印键」被当成命令行输入（tmux 的 `Ctrl+B d` 误弹命令预测）**
 
 - **现场**：tmux 里按 `Ctrl+B` 再按 `d`（detach），终端里没有任何输入回显，却弹出了命令预测面板 ——
@@ -1290,9 +1297,7 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   想要「tmux 内也能预测」需要 shell 集成（OSC 133 之类）给出命令行边界，目前没做。
 - **验证**：`scripts/verify-terminal-prediction.mjs` 用例 5 —— 先确认普通提示符下按 `d` 确实会弹
   （否则「不弹」说明不了问题），再用 shell 打印 `?1049h` 真进备用屏幕，断言按 `d` 不弹，最后 `?1049l` 回主屏。
-=======
-**25. 面板组里所有标签常驻挂载：隐藏标签的 ResizeObserver 要防「尺寸塌缩」**
-
+**26. 面板组里所有标签常驻挂载：隐藏标签的 ResizeObserver 要防「尺寸塌缩」**
 - `PanelView` 的标签不是按需挂载：切走的标签留在 DOM 里（加 `hidden` 类），RDP / 终端这类**有连接状态的页面
   切回来不用重连** —— 代价是**隐藏时观察者回调照样触发**。
 - `RdpPage` 的尺寸守卫（`phase === 'connected'` 的 ResizeObserver）：回调里先防抖 400ms（拖拽分屏一秒几十次），
@@ -1300,7 +1305,7 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   发给远端会让桌面缩成一团；切回可见时观察者会再触发一次，不用手动补。
 - 「标签是否可见」不要自己加 prop 透传：量 rect 就够，任何显示层变化都自动覆盖。
 
-**26. React StrictMode 下「异步建连接」的 effect 不能用 cleanup 无脑拆**
+**27. React StrictMode 下「异步建连接」的 effect 不能用 cleanup 无脑拆**
 
 - **现场**：dev 下 StrictMode 让 effect「建立 → 清理 → 再建立」跑两遍。天真写法（cleanup 里直接
   `rdp.close(connId)`）：第一次的 cleanup 若晚于第二次 run 的 `rdp.open` 落地，会把新 run 正在用的桥关掉
@@ -1324,7 +1329,6 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   子控件 `onChange` 只放「切换时的副作用」（如端口从 22 换成 3389），不要再手写
   `setFieldValue('kind', ...)` —— Field 先派发 store 更新、再调子组件 onChange，顺序安全。
 - **验证**：`scripts/verify-rdp-host-ui.mjs`（切「远程桌面」→ rdp 字段齐备、端口自动 3389）。
->>>>>>> feature/rdp
 
 ### 6.6 AI / Agent 专项
 

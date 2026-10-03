@@ -57,6 +57,8 @@ export interface Preferences {
   rightClickPaste: boolean
   /** 命令预测（历史 / 常见命令补全下拉），缺省开启 */
   commandPrediction: boolean
+  /** 记录终端命令历史（跨会话共享 + 持久化，供命令预测与管理），缺省开启 */
+  commandHistory: boolean
   /** 终端字号（Ctrl+滚轮 / Ctrl +/- 缩放），缺省 13 */
   terminalFontSize: number
   /**
@@ -342,6 +344,18 @@ export interface HostLogEntry {
   message: string
   /** 补充细节（可选，多行；界面折叠展示） */
   detail?: string
+}
+
+/**
+ * 终端里的一条命令历史（用户按回车提交的那一行）。
+ * 主进程统一存储（userData/command-history.json），所有终端会话共享、跨重启保留；
+ * 渲染端在 store 里持有镜像，命令预测与管理界面都读它。
+ */
+export interface CommandHistoryEntry {
+  /** 命令文本（trim 后；去重键 —— 重复执行会把同一条顶到最前并刷新时间） */
+  cmd: string
+  /** 最近一次执行时间（毫秒时间戳） */
+  ts: number
 }
 
 // ---------- SFTP（远程文件管理，复用 SSH 主机配置的凭据） ----------

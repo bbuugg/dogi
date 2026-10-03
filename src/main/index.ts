@@ -6,6 +6,7 @@ import { browserSessions } from './services/browser/session'
 import { pluginHost } from './services/plugins/host'
 import { storage } from './services/storage'
 import { hostLogger } from './services/log/logger'
+import { commandHistory } from './services/terminal/history'
 import { acpAgentService } from './services/ai/acp-agent'
 import {
   registerWorkspaceMediaScheme,
@@ -283,6 +284,8 @@ app.whenReady().then(async () => {
   serveWorkspaceMedia()
   // 主机日志：早于 IPC 注册初始化，隧道自启（注册期同步触发）等早期事件的日志同样要落盘
   await hostLogger.init()
+  // 终端命令历史：同样早于 IPC 注册（渲染端 bootstrap 的 history:list 直接读内存）
+  await commandHistory.init(join(app.getPath('userData'), 'command-history.json'))
   registerIpc(() => mainWindow)
   createWindow()
   // 插件需在 IPC 注册后加载，使插件主进程 handler 可被路由

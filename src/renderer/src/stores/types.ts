@@ -34,6 +34,7 @@ import type {
   AskFollowupAnswer,
   AskFollowupRequest,
   ColorThemeName,
+  CommandHistoryEntry,
   HostLogEntry,
   MonitorUnsupportedReason,
   NoteFileContent,
@@ -128,6 +129,8 @@ export const editorSaveKey = (kind: 'script' | 'note' | 'api' | 'ws', id: string
 
 /** 渲染端主机日志条数上限（与主进程内存环形缓冲一致，超出丢最旧的） */
 export const HOST_LOG_LIMIT = 1000
+/** 终端命令历史条数上限（与主进程 services/terminal/history.ts 的 COMMAND_HISTORY_MAX 同值） */
+export const COMMAND_HISTORY_LIMIT = 1000
 
 /**
  * 组内批量关闭（标签右键菜单的「关闭其他 / 关闭左侧 / 关闭右侧标签」）的范围。
@@ -521,6 +524,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   copyOnSelect: true,
   rightClickPaste: true,
   commandPrediction: true,
+  commandHistory: true,
   terminalFontSize: 13,
   localShell: 'default',
   minimizeToTray: true,
@@ -550,6 +554,7 @@ export interface AppStore
     TerminalSlice,
     SshSlice,
     HostLogsSlice,
+    CommandHistorySlice,
     ScriptsSlice,
     NotesSlice,
     ApiSlice,
@@ -726,6 +731,24 @@ export interface HostLogsSlice {
   clearHostLogs: () => Promise<void>
 }
 
+export interface CommandHistorySlice {
+  /**
+   * 终端命令历史镜像（最新在前；上限 COMMAND_HISTORY_LIMIT）。
+   * 真源在主进程（userData/command-history.json），所有终端会话共享、跨重启保留；
+   * 命令预测与管理界面读这里。
+   */
+  commandHistory: CommandHistoryEntry[]
+  /**
+   * 记录一条命令（回车提交时由 TerminalView 调）：镜像去重置顶 + fire-and-forget 上报主进程。
+   * 偏好 commandHistory 关闭时只不记录，已有历史照常可用（预测 / 管理）。
+   */
+  pushCommandHistory: (cmd: string) => void
+  /** 删除单条（按命令文本定位，主进程与镜像同步删） */
+  removeCommandHistory: (cmd: string) => Promise<void>
+  /** 清空历史（内存 + 落盘文件） */
+  clearCommandHistory: () => Promise<void>
+}
+
 export interface ScriptsSlice {
   scripts: ScriptEntry[]
   /** 脚本分组（侧边栏里的分组节点，数组顺序即显示顺序） */
@@ -834,6 +857,8 @@ export interface PreferencesSlice {
   setCopyOnSelect: (enabled: boolean) => Promise<void>
   setRightClickPaste: (enabled: boolean) => Promise<void>
   setCommandPrediction: (enabled: boolean) => Promise<void>
+  /** 是否记录终端命令历史（持久化到偏好设置；关闭后不再记录，已有历史仍可预测/管理） */
+  setCommandHistory: (enabled: boolean) => Promise<void>
   /** 关闭窗口时是否最小化到系统托盘（持久化到偏好设置） */
   setMinimizeToTray: (enabled: boolean) => Promise<void>
   /** 关闭标签页前是否二次确认（持久化到偏好设置；确认框里勾「以后都不再提示」会把它关掉） */

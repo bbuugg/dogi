@@ -3,6 +3,7 @@ import type { TerminalThemeName } from '@shared/types'
 import { useAppStore } from '@/stores/app-store'
 import { useIsDarkTheme } from '@/shared/lib/theme'
 import { TERMINAL_THEMES, resolveTerminalTheme } from '@/features/terminal/terminal-themes'
+import { CommandHistorySettings } from '@/features/terminal/CommandHistorySettings'
 import { Select, Switch } from 'antd'
 import { cn } from 'cn'
 
@@ -15,6 +16,8 @@ export function TerminalSettings() {
   const setRightClickPaste = useAppStore((s) => s.setRightClickPaste)
   const commandPrediction = useAppStore((s) => s.preferences.commandPrediction)
   const setCommandPrediction = useAppStore((s) => s.setCommandPrediction)
+  const commandHistoryEnabled = useAppStore((s) => s.preferences.commandHistory)
+  const setCommandHistory = useAppStore((s) => s.setCommandHistory)
   const localShell = useAppStore((s) => s.preferences.localShell)
   const setLocalShell = useAppStore((s) => s.setLocalShell)
   const shells = useAppStore((s) => s.shells)
@@ -137,6 +140,24 @@ export function TerminalSettings() {
           onChange={(v) => void setCommandPrediction(v)}
         />
       </div>
+
+      <div className="flex items-start justify-between gap-4 rounded-md">
+        <div>
+          <label htmlFor="command-history" className="text-sm font-medium text-foreground">
+            记录命令历史
+          </label>
+          <p className="mt-1 text-xs leading-4 text-muted-foreground">
+            把按回车执行的命令记入跨会话共享的历史（重启保留）。关闭后不再记录，已有历史仍可用于预测与管理。
+          </p>
+        </div>
+        <Switch
+          id="command-history"
+          checked={commandHistoryEnabled}
+          onChange={(v) => void setCommandHistory(v)}
+        />
+      </div>
+
+      <CommandHistorySettings />
     </div>
   )
 }

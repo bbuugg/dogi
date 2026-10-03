@@ -76,6 +76,7 @@ const DEFAULT_PREFERENCES: Preferences = {
   copyOnSelect: true,
   rightClickPaste: true,
   commandPrediction: true,
+  commandHistory: true,
   terminalFontSize: 13,
   localShell: 'default',
   minimizeToTray: true,

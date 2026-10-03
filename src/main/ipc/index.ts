@@ -4,6 +4,7 @@ import { registerAiIpc } from './ai'
 import { registerApiIpc } from './api'
 import { registerFollowupIpc } from './ask-followup'
 import { registerGitIpc } from './git'
+import { registerHistoryIpc } from './history'
 import { registerBrowserIpc } from './browser'
 import { registerHostsIpc } from './hosts'
 import { registerLogsIpc } from './logs'
@@ -39,6 +40,8 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   // 主机日志最先注册：隧道自启（registerTunnelsIpc 内同步触发）等早期事件也要能推给渲染端
   registerLogsIpc(ctx)
   registerTerminalIpc(ctx)
+  // 终端命令历史：纯请求-响应 + 一个 fire-and-forget 的 add，不需要 ctx
+  registerHistoryIpc()
   registerMonitorIpc(ctx)
   registerHostsIpc()
   registerScriptsIpc()

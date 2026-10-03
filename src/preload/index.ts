@@ -34,6 +34,7 @@ import type {
   BrowserInputEvent,
   BrowserSessionState,
   BrowserViewportMode,
+  CommandHistoryEntry,
   DetectedAcpAgent,
   GitAction,
   GitBranchesResult,
@@ -253,9 +254,19 @@ const api = {
     /** 新日志实时推送（初始全量走 list，之后按此补增量） */
     onEntry: (cb: (entry: HostLogEntry) => void) => subscribe('logs:entry', cb)
   },
+  /** 终端命令历史：跨会话共享、持久化在主进程（所有终端会话共用一个池） */
+  history: {
+    /** 全量读取（最新在前） */
+    list: (): Promise<CommandHistoryEntry[]> => ipcRenderer.invoke('history:list'),
+    /** 记录一条（主进程去重置顶；不等回执，渲染端 store 乐观更新） */
+    add: (cmd: string): void => ipcRenderer.send('history:add', cmd),
+    /** 删除单条（按命令文本定位） */
+    remove: (cmd: string): Promise<void> => ipcRenderer.invoke('history:remove', cmd),
+    /** 清空（内存 + 落盘文件） */
+    clear: (): Promise<void> => ipcRenderer.invoke('history:clear')
+  },
   /** SFTP 文件管理：凭据复用 SSH 主机配置（主进程解密，渲染端不接触密码） */
-  sftp: {
-    /** connId 由渲染端生成（一个「文件管理」标签一个连接）；resolve 即连接就绪 */
+  sftp: {    /** connId 由渲染端生成（一个「文件管理」标签一个连接）；resolve 即连接就绪 */
     open: (connId: string, profileId: string): Promise<void> =>
       ipcRenderer.invoke('sftp:open', connId, profileId),
     list: (connId: string, path: string): Promise<SftpEntry[]> =>

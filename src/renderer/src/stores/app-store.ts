@@ -34,6 +34,7 @@ export {
   normalizeSettingsTab,
   editorSaveKey,
   HOST_LOG_LIMIT,
+  COMMAND_HISTORY_LIMIT,
   NEW_API_REQUEST_ID,
   NEW_WS_REQUEST_ID,
   API_HISTORY_LIMIT,
@@ -67,6 +68,7 @@ import {
   API_HISTORY_LIMIT,
   DEFAULT_PREFERENCES,
   HOST_LOG_LIMIT,
+  COMMAND_HISTORY_LIMIT,
   NEW_API_REQUEST_ID,
   NEW_WS_REQUEST_ID,
   type AppStore,
@@ -86,6 +88,7 @@ import type {
   AgentConversation,
   AgentStreamEvent,
   AiChatMessage,
+  CommandHistoryEntry,
   NoteFileItem,
   Preferences,
   SessionInfo
@@ -371,9 +374,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     monitors: {},
     monitorUnsupported: {},
+    commandHistory: [],
 
     bootstrap: async () => {
-      const [profiles, sshGroups, knownHosts, tunnelInit, configs, settings, preferences, shells, scripts, scriptGroups, apiRequests, apiGroups, apiHistory, shortcuts, agentWorkspaces, agentConversations, hostLogs] = await Promise.all([
+      const [profiles, sshGroups, knownHosts, tunnelInit, configs, settings, preferences, shells, scripts, scriptGroups, apiRequests, apiGroups, apiHistory, shortcuts, agentWorkspaces, agentConversations, hostLogs, commandHistory] = await Promise.all([
         window.api.ssh.list(),
         window.api.ssh.listGroups(),
         window.api.ssh.knownHostsList(),
@@ -390,7 +394,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
         window.api.shortcuts.get(),
         window.api.agent.listWorkspaces(),
         window.api.agent.listConversations(),
-        window.api.logs.list()
+        window.api.logs.list(),
+        window.api.history.list()
       ])
       // 配色必须在偏好写进 store 之前落到 html 上：antd 的 token 是在 store 更新引发的那次
       // 重渲染里从 CSS 变量读出来的，晚一步就会永远停在默认中性配色（直到用户手动切换）
@@ -407,6 +412,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         tunnels: tunnelInit.tunnels,
         tunnelRuntime: Object.fromEntries(tunnelInit.runtime.map((r) => [r.id, r])),
         hostLogs,
+        commandHistory,
         aiConfigs: configs,
         aiSettings: settings,
         preferences: safePreferences,
@@ -1404,6 +1410,29 @@ export const useAppStore = create<AppStore>()((set, get) => {
       set({ hostLogs: [] })
     },
 
+    pushCommandHistory: (cmd) => {
+      const trimmed = cmd.trim()
+      // 偏好关闭时不记录；已有历史照常可用（预测 / 管理不依赖这个开关）
+      if (!trimmed || !get().preferences.commandHistory) return
+      const entry: CommandHistoryEntry = { cmd: trimmed, ts: Date.now() }
+      // 去重置顶（重复执行刷新时间并移到最前），超限从尾部丢弃 —— 与主进程 add 同一套语义
+      const rest = get().commandHistory.filter((e) => e.cmd !== trimmed)
+      const commandHistory = [entry, ...rest]
+      if (commandHistory.length > COMMAND_HISTORY_LIMIT) commandHistory.length = COMMAND_HISTORY_LIMIT
+      set({ commandHistory })
+      window.api.history.add(trimmed)
+    },
+
+    removeCommandHistory: async (cmd) => {
+      set((s) => ({ commandHistory: s.commandHistory.filter((e) => e.cmd !== cmd) }))
+      await window.api.history.remove(cmd)
+    },
+
+    clearCommandHistory: async () => {
+      await window.api.history.clear()
+      set({ commandHistory: [] })
+    },
+
     openPluginsTab: () => {
       set((s) =>
         addOrFocusTab(s, {
@@ -1595,6 +1624,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
     setCommandPrediction: async (enabled) => {
       set((s) => ({ preferences: { ...s.preferences, commandPrediction: enabled } }))
       const preferences = await window.api.prefs.save({ commandPrediction: enabled })
+      set({ preferences })
+    },
+
+    setCommandHistory: async (enabled) => {
+      set((s) => ({ preferences: { ...s.preferences, commandHistory: enabled } }))
+      const preferences = await window.api.prefs.save({ commandHistory: enabled })
       set({ preferences })
     },
 

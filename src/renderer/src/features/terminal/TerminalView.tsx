@@ -263,7 +263,10 @@ export function TerminalView({
   const commandPrediction = useAppStore((s) => s.preferences.commandPrediction)
   const commandPredictionRef = useRef(commandPrediction)
   commandPredictionRef.current = commandPrediction
-  const historyRef = useRef<string[]>([])
+  // 全局命令历史（跨会话共享、持久化）；ref 镜像供 term.onData 的挂载期闭包读到最新值
+  const commandHistory = useAppStore((s) => s.commandHistory)
+  const commandHistoryListRef = useRef(commandHistory)
+  commandHistoryListRef.current = commandHistory
   const inputBufferRef = useRef('')
   const suggestionsRef = useRef<string[]>([])
   const activeIndexRef = useRef(0)
@@ -613,11 +616,13 @@ export function TerminalView({
       const buf = inputBufferRef.current
       const trimmed = buf.trimEnd()
       const items: string[] = []
+      // 历史来自全局 store（跨会话共享、持久化，bootstrap 时灌入），本标签页与其他终端共用一个池
+      const historyCmds = commandHistoryListRef.current.map((e) => e.cmd)
       if (trimmed) {
         const tokens = trimmed.split(/\s+/)
         const firstTokenOnly = tokens.length === 1
         const seen = new Set<string>()
-        const pool = [...historyRef.current, ...COMMON_COMMANDS]
+        const pool = [...historyCmds, ...COMMON_COMMANDS]
         for (const cmd of pool) {
           if (!cmd || cmd.length <= trimmed.length) continue
           // 整行前缀匹配（含子命令补全，来自历史或常见命令）
@@ -644,8 +649,8 @@ export function TerminalView({
       }
       // 排序：历史更近的优先，其次按长度升序
       items.sort((a, b) => {
-        const ia = historyRef.current.indexOf(a)
-        const ib = historyRef.current.indexOf(b)
+        const ia = historyCmds.indexOf(a)
+        const ib = historyCmds.indexOf(b)
         if (ia !== -1 && ib !== -1) return ia - ib
         if (ia !== -1) return -1
         if (ib !== -1) return 1
@@ -655,13 +660,6 @@ export function TerminalView({
       suggestionsRef.current = top
       activeIndexRef.current = 0
       setSuggestions(top.length ? { items: top, index: 0 } : null)
-    }
-    const pushHistory = (cmd: string) => {
-      const h = historyRef.current
-      const i = h.indexOf(cmd)
-      if (i !== -1) h.splice(i, 1)
-      h.unshift(cmd)
-      if (h.length > 200) h.length = 200
     }
     const moveActive = (dir: number) => {
       const n = suggestionsRef.current.length
@@ -681,7 +679,8 @@ export function TerminalView({
     const updateInputBuffer = (data: string) => {
       if (data === '\r' || data === '\n') {
         const cmd = inputBufferRef.current.trim()
-        if (cmd) pushHistory(cmd)
+        // 记进全局历史（去重置顶 + 持久化；是否记录由偏好 commandHistory 决定）
+        if (cmd) useAppStore.getState().pushCommandHistory(cmd)
         inputBufferRef.current = ''
         clearSuggestions()
         return
