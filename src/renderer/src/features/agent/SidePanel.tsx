@@ -38,13 +38,13 @@ export interface SidePanelTab {
 }
 
 /**
- * 面板尺寸约束：默认占容器 40%（对话区略宽）。
+ * 面板尺寸约束：默认占容器 50%（对话区与面板各半）。
  *
  * ⚠️ `MIN_CONVERSATION_WIDTH` 同时是**面板拖拽的上限**（`maxWidth = 容器 - 它`）——
  * 它只用来兜住「别把对话区挤没」，所以调小它 = 面板能拖得更宽、对话区能被压得更窄。
  * 340 是「气泡还能正常折行」的实用下限，别再无脑往下调。
  */
-const SIDE_PANEL_RATIO = 0.4
+const SIDE_PANEL_RATIO = 0.5
 const SIDE_PANEL_MIN_WIDTH = 340
 const MIN_CONVERSATION_WIDTH = 340
 
@@ -71,24 +71,18 @@ export function SidePanel({
   containerWidth,
   className
 }: SidePanelProps): React.ReactElement {
-  /** 用户拖过的宽度；null = 还没拖过，按容器比例算（60/40，对话区略宽） */
+  /** 用户拖过的宽度；null = 还没拖过，按容器比例算（50/50，对话区与面板各半） */
   const [userWidth, setUserWidth] = useState<number | null>(null)
   /** 正在拖动：拖动期间关掉宽度过渡（见文件头约束 3） */
   const [dragging, setDragging] = useState(false)
   /**
-   * 撑满模式：**每次展开都先撑到上限**（= 把左侧对话区压到最小宽度）。
+   * 撑满模式：用户把面板拖到上限后进入，把左侧对话区压到最小宽度。
    *
-   * 面板是「看内容」的地方，展开时先给足宽度才不憋屈；一旦用户拖过就交回他，
-   * 不再自动撑满（拖窄了再收起展开，也尊重他拖出来的宽度）。用布尔而不是
+   * 默认**不主动撑满**（展开按 `SIDE_PANEL_RATIO` = 容器 50% 给宽度），面板是「看内容」
+   * 的地方，但默认各半更均衡；一旦用户拖过就交回他，不再自动撑满。用布尔而不是
    * 一次性把 `userWidth` 设成 maxWidth：这样窗口变大时宽度跟着长，不会卡在旧上限。
    */
   const [maximized, setMaximized] = useState(false)
-  const wasOpenRef = useRef(open)
-
-  useEffect(() => {
-    if (open && !wasOpenRef.current) setMaximized(true)
-    wasOpenRef.current = open
-  }, [open])
 
   /**
    * 上一次渲染时的容器宽度。ref **只在 effect 里推进**（渲染期不写 ref —— 那样在
