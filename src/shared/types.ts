@@ -1386,6 +1386,16 @@ export interface AgentConversation {
    * （见 services/conversation-store.ts）—— 渲染端那次保存绝不能把检查点顺手抹掉。
    */
   contextSummary?: ConversationContextSummary
+  /**
+   * **已归档**：默认从侧边栏的会话列表里收起来，放进工作区下的「已归档」分组。
+   *
+   * 归档**不动消息、不动形态、不动绑定**，只是「列表里放在哪」—— 所以它随时可逆
+   * （恢复即 `archived: false`），也和删除完全无关：归档的会话照常能打开、照常能接着聊
+   * （发消息会自动取消归档，见 `sendAgentMessage`）。
+   *
+   * 缺省 / `false` = 未归档。旧存档没有这个字段，按未归档读。
+   */
+  archived?: boolean
   createdAt: number
   updatedAt: number
 }

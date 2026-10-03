@@ -38,6 +38,8 @@ export interface ConversationListMeta {
   title: string
   /** 组内排序键（最近更新在最前） */
   updatedAt: number
+  /** 已归档（列表把它收进工作区下的「已归档」分组，见 AgentPanel） */
+  archived?: boolean
   /** 删除确认框要读 ACP 绑定（见 AgentPanel 的删除弹窗） */
   acpAgentId?: string
   acpSessionId?: string
@@ -48,6 +50,7 @@ function sameListMeta(a: ConversationListMeta, b: ConversationListMeta): boolean
     a.id === b.id &&
     a.title === b.title &&
     a.updatedAt === b.updatedAt &&
+    a.archived === b.archived &&
     a.kind === b.kind &&
     a.workspaceId === b.workspaceId &&
     a.acpAgentId === b.acpAgentId &&
@@ -87,6 +90,7 @@ export function selectConversationListMeta(
       kind: c.kind,
       title: c.title,
       updatedAt: c.updatedAt,
+      archived: c.archived,
       acpAgentId: c.acpAgentId,
       acpSessionId: c.acpSessionId
     }

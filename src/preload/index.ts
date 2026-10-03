@@ -383,6 +383,8 @@ const api = {
       modelId?: string
       acpAgentId?: string
       acpSessionId?: string
+      /** 归档态：true 收进「已归档」分组，false / undefined 取消归档 */
+      archived?: boolean
     }): Promise<AgentConversation> => ipcRenderer.invoke('agent:conversations:save', input),
     deleteConversation: (id: string): Promise<void> =>
       ipcRenderer.invoke('agent:conversations:delete', id),

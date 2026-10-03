@@ -120,6 +120,8 @@ export function registerAgentIpc(ctx: IpcContext): void {
         modelId?: string
         acpAgentId?: string
         acpSessionId?: string
+        /** 归档态；不传 / undefined = 取消归档（`'x' in input` 语义，见 conversation-store） */
+        archived?: boolean
       }
     ) => storage.saveAgentConversation(input)
   )

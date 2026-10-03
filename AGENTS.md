@@ -40,7 +40,7 @@
 | 功能区 | 侧边栏 | 主区域 |
 | --- | --- | --- |
 | **主机** | 主机列表（分组 / 拖拽 / 颜色）+ 下半区「脚本」分区（可折叠、可拖高） | 终端标签、SFTP 文件管理标签、远程桌面标签 |
-| **AI Agent** | 工作区 → 会话两层树，会话行带状态图标（等回答 / 运行中 / 静止） | Agent 会话页（对话流 + 内嵌终端 + 工作区文件树/预览 + 快捷功能） |
+| **AI Agent** | 工作区 → 会话两层树；**工作区行的图标随其下会话状态变**（有会话进行中 = 转圈 / 等待，否则文件夹），会话行带状态图标（等回答 / 运行中 / 静止），底部有「已归档」分组 | Agent 会话页（对话流 + 内嵌终端 + 工作区文件树/预览 + 快捷功能） |
 | **笔记** | 笔记列表（分组 / 拖拽 / 搜索） | Monaco 编辑器标签，语言可选 |
 | **接口请求** | 保存的请求列表（分组 / 拖拽 / 历史） | HTTP 调试页 / WebSocket 调试页 |
 | **插件管理** | 已安装插件列表 | 插件视图（以标签页打开）；内置：Redis 客户端（🔴）、端口占用（🔌） |
@@ -739,6 +739,11 @@ ACP 是「别人的 agent 在别人的进程里管自己的会话」。本应用
     ⚠️ 别把这条降级挪到「打开会话」的路径上：那会让「看一眼历史」把绑定悄悄换掉。
 - **模型切换**：`session/set_config_option`（optionId 取自 `session/new | session/load` 响应的
   `configOptions` 里 `category=model` 那一项），**不重建会话** —— 重建会丢 agent 侧上下文。
+- ⚠️ **输入框工具行里 ACP 会话不显示「权限模式」与「MCP」开关**（`AgentPage` 里用
+  `conversationKind(conversation)` 判，即 `isAcp`）：这两项只管**内置 agent 的工具**，
+  ACP 会话的工具、审批、MCP 全归外部 agent 自己管 —— 给开关只会让人以为改了有用。
+  **未定形态的新建会话会跟着模型选择即时出现 / 消失**：`setAcpConversationModel` 写 `acpAgentId`、
+  `setAgentConversationModel` 清 `acpAgentId`（见 4.3），所以 `isAcp` 两个方向都会翻。
 - **删除**：默认只删本地绑定（agent 侧会话留着，下次还能导入回来）；删除确认框里可勾选
   「同时删除 agent 侧会话」（走 `session/delete`，agent 没声明该能力就只提示、本地照删）。
 - **消息的本地镜像** `agentAcpMessages: Record<conversationId, AgentChatMessage[]>` 只在内存里：
@@ -996,6 +1001,68 @@ inputSchema, scope: 'workspace'|'terminal'|'both', available?, execute(input, ca
   ⚠️ 顶层 `files` 白名单仍是唯一 matcher（见 6.2 第 9 条），**别在任何平台段加 `files`**。
 - **验证**：开发态下探针断言 `updater:status` 通且 `supported: false`、点版本号给明确提示
   （不报错）；打包后真机验证要看 GitHub Release 是否产出 `latest.yml`。
+
+### 4.27 Agent 侧面板的终端标签：**标签身份与会话是两回事**（重连必须就地换会话）
+
+`AgentPage` 的右侧面板（`features/agent/SidePanel.tsx`）里，终端是面板的一种标签，
+一个会话一个标签。`TerminalTab.id` 是**标签身份**（`sideTabs` 的 key、选中态、关闭都用它），
+**新建时等于会话 id，但此后不再随会话变**。
+
+会话退出后按 Enter 的重连走 `reconnectTerminal`：只 `setTerms` 把 `session` 换掉，
+标签身份 / 标签名 / 位次 / 面板展开态全不变。
+
+- ⚠️ **别再写成「`closeTerminalTab` + `openEmbeddedTerminal`」**（旧实现，用户报「滚动跳变」）：
+  标签 key 变了 → `TerminalView` 整个重建；更要命的是面板里只有这一个终端标签时
+  `fallbackSideTab` 返回 `null` → **面板先收起（宽度动画到 0）再展开**，容器宽度与 xterm 尺寸
+  一路重排（TerminalView 的 ResizeObserver → `fit()`），用户看到的就是内容/滚动跳变。
+  顺带两个更难看的副作用：标签名从「终端」变成「终端 2」、标签跳到末尾。
+- 换会话后 `TerminalView` 的 `session.id` 依赖照样会重建 xterm 并回放新会话环形缓冲 ——
+  这是对的（会话是新的），但它发生在**同一个容器、同一块面板宽度**里，没有尺寸动画。
+- 建会话与挂标签因此拆成两个函数：`spawnTerminalSession(shellId, cwd)` 只建会话，
+  `openEmbeddedTerminal` 才动 `terms` / `sideTab` / 序号。重连要用 `tab.path`（标签自己记的目录，
+  可能不是当前工作区）与 `tab.shellId`。
+- **同一纪律对 AI 助手状态不成立**：`activeTerminalConv` / `ui.aiOpenSessions` 按**会话 id** 存，
+  换会话后不会跟着迁移（旧的已退出，不值得迁移）。
+- PanelView 里的终端标签**仍按会话 id 推导 tab id**（`stores/types.ts`），
+  `reconnectSession` 原地换 tab id；那边不会收起面板（`reconnectingIds` 屏蔽了 closed），
+  所以没有这个跳变，别拿它当反例也别顺手一起改。
+
+### 4.28 侧边栏状态图标：工作区行 = 其下会话的「汇总」，别只标会话
+
+`AgentPanel` 里每个工作区行有一枚**固定宽度（size-4）的图标槽**（展开箭头右边、名字左边）：
+
+- 该工作区下**只要有一条会话还在进行中**，就换成会话用的那枚图标（`running` → 转圈，
+  `ask` / `confirm` → 琥珀色暂停）；一条都没有才是安静的 `Folder`。
+- 优先级与会话行**完全一致**（等待处理 > 运行中 > 静止，见 4.3 的 `statusByConversation`）：
+  等用户回答/确认的那一轮其实已经停下来了，只转圈会让人以为还在跑。
+- 折叠状态里也要算：**折叠 / 收起时看不到会话行**，工作区图标是唯一的信号；
+  归档会话也一并算（它只是折起来了，仍在跑就该亮着）。
+- 槽**始终占位**（静止时渲染一个图标而不是不渲染），否则标题会在「有状态 / 无状态」之间左右跳。
+
+⚠️ 状态判定复用 `statusByConversation`（父组件一次遍历算成的 `Map<id, RowStatus>`），
+别在工作区行里再写一遍 `Object.values(agentRuns).some(...)` —— 那是当初会话行卡顿的同款成因。
+
+### 4.29 会话归档：**只改列表归属**，不是「禁用」也不是「删除」
+
+`AgentConversation.archived?: boolean`（缺省 = 未归档，旧存档按未归档读），
+落盘走既有 `agent:conversations:save`，用**与 `kind` / `modelId` 同一套 `'x' in input` 语义**
+（渲染端 `persistConversation` 每次显式带上，`undefined` 即取消归档）——
+照 `conversation-store.ts` 里那条纪律办，别用 `??` 合并，否则「取消归档」永远存不下去。
+`normalizeConversation` **必须**列出这个字段（它是显式重建对象，漏掉 → 读回来丢 →
+下次发消息触发 save 就把归档状态永久抹掉，与 `contextSummary` 同款事故）。
+
+- **界面**：工作区下的会话列表底部是默认收起的「已归档 (N)」分组，展开态 `archivesExpanded`
+  与工作区展开态分开存；行尾浮层第一颗按钮是归档 / 恢复（`SIDEBAR_ROW_NAME.three` 对应三颗按钮，
+  见 6.5 第 28 条的换算）。
+- ⚠️ **归档不动 `updatedAt`**（同 `setAgentConversationModel`）：归档是展示态，
+  让它在两个分组里的相对次序跳来跳去没意义；排序仍按 `updatedAt` 降序。
+- ⚠️ **归档 ≠ 禁用**：归档的会话照常能打开、接着聊；`sendAgentMessage` 顺手 `archived: false`
+  （又聊起来了的会话不该还躺在归档区），并且 `latestConversation` **跳过**归档会话 ——
+  切工作区 / 删掉当前会话后要落到的那一条不该是用户自己收起来的那条。
+- 列表投影 `conversation-list-meta.ts` 的 `ConversationListMeta` 带 `archived`（并进
+  `sameListMeta` 比较），否则归档切换不换引用、侧边栏不刷新（结构共享纪律见 4.25）。
+- **未覆盖自动化**：目前只有手工验证（归档 → 行进「已归档」分组 → 恢复 → 重启后状态仍在 →
+  归档中的会话发消息后自动回到未归档列表）。
 
 ---
 

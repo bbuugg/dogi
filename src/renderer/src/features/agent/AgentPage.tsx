@@ -433,7 +433,12 @@ function tabRank(order: string[], key: string): number {
 
 /** 一个终端标签：会话 + 打开时的工作区目录 + 用的哪个 shell */
 interface TerminalTab {
-  /** 标签 key 用（= 会话 id，稳定且唯一） */
+  /**
+   * 标签身份（`sideTabs` 的 key 用的就是它）：**新建时等于会话 id，此后不再变**。
+   *
+   * ⚠️ 重连（会话退出后按 Enter）**就地换会话**而不是新建标签，所以它与 `session.id`
+   * 在重连后不再相等 —— 一律按「标签身份」用它（key / 选中 / 关闭），要杀会话请用 `session.id`。
+   */
   id: string
   session: SessionInfo
   /** 打开时的目录（「执行命令」按它复用终端） */
@@ -990,6 +995,25 @@ export function AgentPage({
     !preferredShellId || preferredShellId === 'default' ? defaultShellId : preferredShellId
 
   /**
+   * 只**建会话**、不碰标签状态（开新标签与就地重连共用这一份）。
+   *
+   * 抽出来是因为重连要的是「换个会话」，标签身份必须留在原地（见 `reconnectTerminal`）。
+   */
+  const spawnTerminalSession = useCallback(
+    async (shellId?: string, cwd?: string): Promise<SessionInfo | null> => {
+      const dir = cwd ?? active?.path
+      if (!dir) return null
+      try {
+        return await window.api.terminal.createLocal(undefined, undefined, shellId, dir)
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : '终端打开失败')
+        return null
+      }
+    },
+    [active]
+  )
+
+  /**
    * 新建一个终端标签（在当前工作区目录启动），返回新会话（失败 null）。
    *
    * **多开**：每调一次开一个会话、挂一个标签（终端已经是面板里的一种标签，见 sideTabs），
@@ -997,44 +1021,52 @@ export function AgentPage({
    */
   const openEmbeddedTerminal = useCallback(
     async (shellId?: string): Promise<SessionInfo | null> => {
-      if (!active) return null
-      try {
-        const session = await window.api.terminal.createLocal(
-          undefined,
-          undefined,
-          shellId,
-          active.path
-        )
-        termSeqRef.current += 1
-        const seq = termSeqRef.current
-        setTerms((cur) => [
-          ...cur,
-          {
-            id: session.id,
-            session,
-            path: active.path,
-            shellId: shellId ?? effectiveShellId,
-            label: seq === 1 ? '终端' : `终端 ${seq}`
-          }
-        ])
-        // 新开的终端立刻切到它的标签（面板随之展开）
-        setSideTab(`terminal:${session.id}`)
-        return session
-      } catch (err) {
-        message.error(err instanceof Error ? err.message : '终端打开失败')
-        return null
-      }
+      const session = await spawnTerminalSession(shellId)
+      if (!session || !active) return null
+      termSeqRef.current += 1
+      const seq = termSeqRef.current
+      setTerms((cur) => [
+        ...cur,
+        {
+          id: session.id,
+          session,
+          path: active.path,
+          shellId: shellId ?? effectiveShellId,
+          label: seq === 1 ? '终端' : `终端 ${seq}`
+        }
+      ])
+      // 新开的终端立刻切到它的标签（面板随之展开）
+      setSideTab(`terminal:${session.id}`)
+      return session
     },
-    [active, effectiveShellId]
+    [active, effectiveShellId, spawnTerminalSession]
   )
 
-  /** 会话结束后按 Enter 重连：摘掉死掉的标签，照它原来用的 shell 再开一个 */
+  /**
+   * 会话结束后按 Enter 重连：**就地重开** —— 标签身份（key / 标签名 / 位次）与面板展开态
+   * 全部保留，只把会话换掉。
+   *
+   * ⚠️ **别再写成「关掉旧标签 + 新开一个」**（旧实现）：那样标签 key 变了 →
+   * TerminalView 整个重建（xterm 重放），而面板里只有这一个终端标签时 `fallbackSideTab`
+   * 会返回 `null` → **面板先收起（宽度动画到 0）再展开**，容器宽度与 xterm 尺寸一路重排 ——
+   * 用户看到的就是「滚动跳变」（标签名还会莫名从「终端」变成「终端 2」并跳到末尾）。
+   *
+   * 换会话后 `TerminalView` 的 `session.id` 依赖照样会重建 xterm 并回放新会话的环形缓冲，
+   * 但那是在**同一个容器、同一块面板宽度**里发生的，不再有面板尺寸的动画与重排。
+   */
   const reconnectTerminal = useCallback(
     (tab: TerminalTab) => {
-      closeTerminalTab(tab.id)
-      void openEmbeddedTerminal(tab.shellId)
+      void (async () => {
+        // 目录用标签自己记的那个（可能不是当前工作区），shell 沿用原来的
+        const session = await spawnTerminalSession(tab.shellId, tab.path)
+        if (!session) return
+        // 死掉的会话顺手 kill 掉（已经退出，通常是空操作；失败也不该打扰用户）
+        void window.api.terminal.kill(tab.session.id).catch(() => undefined)
+        // 只换会话，标签身份 / 名字 / 位次都不动
+        setTerms((cur) => cur.map((t) => (t.id === tab.id ? { ...t, session } : t)))
+      })()
     },
-    [closeTerminalTab, openEmbeddedTerminal]
+    [spawnTerminalSession]
   )
 
   /**
@@ -1728,47 +1760,53 @@ export function AgentPage({
                     className="agent-input max-h-52 w-full border-none bg-transparent px-3 py-2.5 text-[13px] shadow-none"
                   />
                   {/* 工具行：权限在左，模型选择紧贴发送按钮（模型 + 发送/停止 一组靠右）。
-                      左侧权限按钮固定不挤，右侧整组可压缩（模型选择吸收挤压、按钮 shrink-0 保持原样） */}
+                      左侧权限按钮固定不挤，右侧整组可压缩（模型选择吸收挤压、按钮 shrink-0 保持原样）。
+                      ⚠️ **ACP 会话不显示权限与 MCP**：这两个开关只管**内置 agent** 的工具 ——
+                      ACP 会话的工具、权限模式、MCP 全归外部 agent 自己管，在这里给开关
+                      只会让人以为改了有用（见 4.18）。未定形态的新建会话按**当前选中的模型**
+                      即时切换（选 ACP 模型 → 立刻消失，选内置模型 → 立刻出现）。 */}
                   <div className="flex items-center justify-between gap-2 px-2 py-1.5">
                     <div className="flex shrink-0 items-center gap-0.5">
-                      <Dropdown
-                        trigger={['click']}
-                        placement="topLeft"
-                        autoAdjustOverflow={false}
-                        menu={{
-                          selectable: true,
-                          selectedKeys: [permissionMode],
-                          items: AGENT_PERMISSION_MODES.map((m) => ({
-                            key: m.value,
-                            icon: <m.icon className="size-3.5" />,
-                            label: (
-                              <span>
-                                {m.label}
-                                <span className="block text-xs text-muted-foreground">
-                                  {m.hint}
+                      {!isAcp && (
+                        <Dropdown
+                          trigger={['click']}
+                          placement="topLeft"
+                          autoAdjustOverflow={false}
+                          menu={{
+                            selectable: true,
+                            selectedKeys: [permissionMode],
+                            items: AGENT_PERMISSION_MODES.map((m) => ({
+                              key: m.value,
+                              icon: <m.icon className="size-3.5" />,
+                              label: (
+                                <span>
+                                  {m.label}
+                                  <span className="block text-xs text-muted-foreground">
+                                    {m.hint}
+                                  </span>
                                 </span>
-                              </span>
-                            )
-                          })),
-                          onClick: ({ key }) => void setAiPermissionMode(key as AiPermissionMode)
-                        }}
-                      >
-                        {/* 横条上**只显示图标**（文案在下拉项里，省下的宽度留给输入框）；
-                            「全部访问」用警示色 —— 它意味着不再询问 */}
-                        <Button
-                          type="text"
-                          size="small"
-                          icon={<PermissionIcon className="size-4" />}
-                          title={`${permissionMeta.label}：${permissionMeta.hint}（点击切换）`}
-                          className={cn(
-                            'px-1.5',
-                            permissionMode === 'full' ? 'text-amber-500!' : 'text-muted-foreground'
-                          )}
-                        />
-                      </Dropdown>
+                              )
+                            })),
+                            onClick: ({ key }) => void setAiPermissionMode(key as AiPermissionMode)
+                          }}
+                        >
+                          {/* 横条上**只显示图标**（文案在下拉项里，省下的宽度留给输入框）；
+                              「全部访问」用警示色 —— 它意味着不再询问 */}
+                          <Button
+                            type="text"
+                            size="small"
+                            icon={<PermissionIcon className="size-4" />}
+                            title={`${permissionMeta.label}：${permissionMeta.hint}（点击切换）`}
+                            className={cn(
+                              'px-1.5',
+                              permissionMode === 'full' ? 'text-amber-500!' : 'text-muted-foreground'
+                            )}
+                          />
+                        </Dropdown>
+                        )}
                     </div>
                     <div className="flex min-w-0 items-center gap-1">
-                      <McpConfigPopover />
+                      {!isAcp && <McpConfigPopover />}
                       {/* 上下文用量圆环：紧挨模型选择左侧（同为「这个会话用什么」的开关）。
                           悬停出详情与手动压缩；草稿 / ACP 会话不显示 */}
                       {showContextRing && conversationId && (

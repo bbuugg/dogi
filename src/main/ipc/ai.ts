@@ -37,7 +37,7 @@ export function registerAiIpc(): void {
       const body = (await res.json()) as unknown
       const list = Array.isArray(body) ? body : (body as { data?: unknown }).data
       const ids = (Array.isArray(list) ? list : [])
-        .map((m) => (typeof m === 'string' ? (m as { id?: unknown }).id : undefined))
+        .map((m) => (typeof m === 'string' ? m : (m as { id?: unknown })?.id))
         .filter((v): v is string => typeof v === 'string' && v.length > 0)
       return [...new Set(ids)]
     }
