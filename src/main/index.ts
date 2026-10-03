@@ -14,6 +14,7 @@ import {
   serveWorkspaceMedia
 } from './services/ai/workspace-media'
 import { resolveIconPath } from './services/system/icon'
+import { scheduleSilentCheck } from './services/updater'
 
 // 工作区文件预览用的自定义协议必须在 app ready 之前登记（见 services/ai/workspace-media.ts）
 registerWorkspaceMediaScheme()
@@ -293,7 +294,10 @@ app.whenReady().then(async () => {
   createWindow()
   // 插件需在 IPC 注册后加载，使插件主进程 handler 可被路由
   await pluginHost.init()
-  createTray()
+createTray()
+  // 自动更新：注册完 IPC 之后启动一次**静默检查**（延迟几秒，不抢窗口首屏的网络）
+  // 开发态（`electron .`）内部自动跳过 —— 没有 app-update.yml
+  scheduleSilentCheck()
 
   app.on('activate', () => {
     // 窗口已存在（仅隐藏到托盘）时恢复显示；否则重新创建

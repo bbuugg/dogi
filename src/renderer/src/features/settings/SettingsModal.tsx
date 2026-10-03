@@ -2,6 +2,7 @@ import {
   Bot,
   Cpu,
   Keyboard,
+  Loader2,
   MessageSquareText,
   Palette,
   Plug,
@@ -11,8 +12,9 @@ import {
   type LucideIcon
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { Modal } from 'antd'
+import { Modal, message } from 'antd'
 import { cn } from 'cn'
+import type { AppUpdateStatus } from '@shared/types'
 import { normalizeSettingsTab, useAppStore, type SettingsTab } from '@/stores/app-store'
 import { PrefSettings } from './PrefSettings'
 import { TerminalSettings } from './TerminalSettings'
@@ -85,12 +87,52 @@ export function SettingsModal() {
     if (open) setTab(normalizeSettingsTab(settingsTab))
   }, [open, settingsTab])
 
-  // 左下角版本号（来自 app.getVersion）
+  // 左下角版本号（来自 app.getVersion）+ 自动更新状态
   const [version, setVersion] = useState('')
+  const [update, setUpdate] = useState<AppUpdateStatus | null>(null)
+  const [checking, setChecking] = useState(false)
   useEffect(() => {
     if (!open) return
     void window.api.app.info().then((info) => setVersion(`v${info.version}`))
+    void window.api.updater.status().then(setUpdate)
+    return window.api.updater.onStatus(setUpdate)
   }, [open])
+
+  /**
+   * 手动检查更新。**结果一律如实说**：已是最新 / 新版本已在下载 / 下载完成可安装 /
+   * 开发态不支持 —— 检查失败由主进程静默吞掉（断网是常态，不该弹红条）。
+   */
+  const checkUpdate = async (): Promise<void> => {
+    if (!update?.supported) {
+      message.info('当前是开发版本，检查更新只在打包后的应用里可用')
+      return
+    }
+    // 已经下好了：这一步是「装」，不是「查」——装 = 重启，弹窗问一句
+    if (update.state === 'downloaded') {
+      Modal.confirm({
+        title: `安装 ${update.latest ?? ''}？`,
+        content: '应用会重启完成安装，正在进行的会话会先落盘再退出。',
+        okText: '重启安装',
+        cancelText: '稍后',
+        centered: true,
+        onOk: async () => {
+          await window.api.updater.install()
+        }
+      })
+      return
+    }
+    setChecking(true)
+    try {
+      const next = await window.api.updater.check()
+      setUpdate(next)
+      if (next.state === 'up-to-date') message.success('已是最新版本')
+      else if (next.state === 'downloading') message.info(`正在后台下载 ${next.latest ?? ''}`)
+      else if (next.state === 'downloaded')
+        message.success(`${next.latest ?? ''} 已就绪，重启即可安装`)
+    } finally {
+      setChecking(false)
+    }
+  }
 
   return (
     <Modal
@@ -146,11 +188,28 @@ export function SettingsModal() {
             </div>
           ))}
 
-          {/* 左下角：版本号 + 仓库链接 */}
+          {/* 左下角：版本号（点它 = 检查更新）+ 仓库链接 */}
           <div className="mt-auto flex items-center justify-between px-1 pt-4">
-            <span className="font-mono text-[11px] text-muted-foreground/70">
+            <button
+              type="button"
+              onClick={() => void checkUpdate()}
+              disabled={checking}
+              title={
+                update?.supported === false
+                  ? '开发版本不支持检查更新'
+                  : update?.state === 'downloaded'
+                    ? `点击安装 ${update.latest ?? ''}`
+                    : '点击检查更新'
+              }
+              className="flex items-center gap-1 rounded px-0.5 font-mono text-[11px] text-muted-foreground/70 transition-colors hover:bg-primary/10 hover:text-foreground disabled:opacity-60"
+            >
               {version || '—'}
-            </span>
+              {update?.state === 'downloaded' ? (
+                <span className="size-1.5 rounded-full bg-emerald-500" aria-label="有可用更新" />
+              ) : update?.state === 'downloading' ? (
+                <Loader2 className="size-3 animate-spin" />
+              ) : null}
+            </button>
             <a
               href="https://github.com/bbuugg/dogi"
               target="_blank"

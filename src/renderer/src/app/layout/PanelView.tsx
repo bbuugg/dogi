@@ -612,15 +612,18 @@ function PanelTabItem({
     : undefined
   const tabColor = profile ? resolveSshColor(profile, sshGroups) : undefined
   // Agent 标签的标题实时取会话自己的 title：会话重命名 / 首条消息自动定标题都会跟着走，
-  // 不用再维护「标签标题 ↔ 会话标题」的同步（与终端标签取 session.title 同一套路）
-  const agentConversation = useAppStore((s) =>
+  // 不用再维护「标签标题 ↔ 会话标题」的同步（与终端标签取 session.title 同一套路）。
+  // ⚠️ 只取 **title 字符串**：这个 selector 以前返回会话**对象**，而流式输出每个 token
+  // 都会换掉它 —— 标签是常驻挂载的（见 AGENTS.md 6.5 第 26 条），于是每个 Agent 标签的
+  // 标签条都跟着每个 token 重渲染一次。取原始值后 Object.is 比较才拦得住。
+  const agentConversationTitle = useAppStore((s) =>
     tab.agentConversationId
-      ? s.agentConversations.find((c) => c.id === tab.agentConversationId)
+      ? s.agentConversations.find((c) => c.id === tab.agentConversationId)?.title
       : undefined
   )
   // 用户重命名过的标签优先显示自定义标题：自动标题那条链（主机名 / 会话标题 / 请求名 / 文件名）
   // 照旧实时推导，只在没有 customTitle 时生效
-  const autoLabel = profile?.name ?? session?.title ?? agentConversation?.title ?? tab.title
+  const autoLabel = profile?.name ?? session?.title ?? agentConversationTitle ?? tab.title
   const label = tab.customTitle?.trim() ? tab.customTitle.trim() : autoLabel
 
   // ⚠️ useCallback 的依赖数组在渲染期就求值，所以 startRename 必须写在 label 声明之后

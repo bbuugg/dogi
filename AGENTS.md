@@ -934,6 +934,69 @@ inputSchema, scope: 'workspace'|'terminal'|'both', available?, execute(input, ca
 - **验证**：`scripts/verify-output-artifact.mjs`（纯 Node，44 条）+ `scripts/verify-terminal-chat.mjs`
   第 3b 节（真界面端到端）。
 
+### 4.25 会话多了会卡：列表与消息流都不许「订阅整个 conversations」
+
+**症状**：会话列表起初不卡、消息一多就卡；主区域消息流滚动同样随消息数变卡。
+**根因不是数据量本身，而是「每个 token 换掉整张表 → 订阅方整棵子树重渲染」**：
+流式输出每个 delta 都会 `appendToLast`（换 `messages` 数组）→ `patchConversation`
+（换会话对象 + 换**整个** `agentConversations` 数组）。凡是 `useAppStore((s) => s.agentConversations)`
+或返回其中**某个对象**的 selector，都会被每个 token 带着重渲染。
+
+**三条已落地的修法**（都是「订阅投影 + 结构共享」，别退回直接订阅）：
+
+| 位置 | 修法 |
+| --- | --- |
+| 侧边栏会话列表（`features/agent/AgentPanel.tsx`） | 订阅 `selectConversationListMeta(s.agentConversations)`（`features/agent/conversation-list-meta.ts`）：只投影列表可见字段（id / 归属 / 形态 / 标题 / 排序键 / ACP 绑定），可见字段没变就**交出上一次的数组与条目对象**；行再 `memo` 化成 `ConversationRow`，只接原始值 + 固定引用回调。状态图标（等提问 / 等确认 / 运行中）由父组件**一次遍历**算成 `Map` 传给行，别在行里 `Object.values(x).some()`。 |
+| 面板标签条（`app/layout/PanelView.tsx`） | Agent 标签的自动标题**只取 `title` 字符串**，别返回会话对象 —— 标签是常驻挂载的（见 6.5 第 26 条），返回对象等于每个 token 重渲染每个 Agent 标签条。 |
+| 消息目录（`features/agent/MessageOutline.tsx`） | ① `items` 只依赖「用户提问」投影（`selectUserMessages`，按**引用**比对复用 —— 流式期间用户消息对象不动，只有 assistant 在长），不再每个 token 重算「过滤全部消息 + 抽每条提问的纯文本」；② scroll-spy **缓存消息元素 + 二分查找**（DOM 顺序 = 时间顺序、`rect.top` 单调，二分成立），每帧 O(log n) 次布局读取；③ 重算的 effect 依赖 **`items.length` 而不是 `messages`** —— assistant 正文增长时所有提问的位置纹丝不动，没必要每帧重算（滚动中的位置变化由 scroll 监听覆盖，另外补了 `window.resize`）。 |
+
+⚠️ **别用 `useShallow` 顶替结构共享**：条目对象每帧都是新的，浅比较照样失败；
+也别在组件里 `useMemo(..., [s.agentConversations])` —— 依赖项本身就是每帧换的数组。
+
+⚠️ **`use-stick-to-bottom` 别给每个折叠横条都建实例**（`CollapsibleRow` 原先无条件建）：
+一个实例 = 一个 ResizeObserver + 一套 scroll / wheel 监听器（每次滚动都读 `scrollHeight`），
+一条会话里几十个工具 / 思考横条就是几十份，而**只有真需要吸底的那一行**（流式中的思考面板 /
+正在生成的工具行，`stickToBottom` 为真）需要它。现在拆成 `StickyBody`（带 hook）与不吸底的
+纯 DOM 两个分支按 `stickToBottom` 二选一渲染 —— hook 仍在 `StickyBody` **内部无条件**挂载
+（`contentRef` 是 callback ref，条件挂载会把观察起点拖到开关翻转那一帧，见原注释）。
+
+- **仍然存在的结构成本（刻意没做）**：消息流**没有虚拟化**，所有消息常驻 DOM
+  （`AgentPage.tsx` 里明写「非虚拟列表下每条消息都在 DOM 里」）。滚动长会话的剩余开销就在这里；
+  真要治只能上窗口化（react-window / @tanstack/react-virtual），会牵动 Ctrl+F、
+  滚动锚定、消息目录跳转与吸底跟随，属独立一轮改造。
+- **验证**：`scripts/verify-agent-list-projection.ts`（纯 Node：500 次流式增量后投影引用不变、
+  改名 / 转正 / 增删才换引用）+ `scripts/verify-agent-outline-scroll-cost.mjs`（真界面**计数**
+  `getBoundingClientRect` / `querySelector`：提问 50 → 300（6 倍）时每帧布局读取比值 1.34，
+  修复前那段线性扫在 1200 个消息元素上是每帧 621 次）。
+
+### 4.26 自动更新：GitHub Releases + 静默检查（正式通道）
+
+`services/updater.ts`（`electron-updater` 封装，单例）+ `ipc/updater.ts`（转发）
++ preload `updater` 命名空间 + 渲染端 `app/UpdateNotifier.tsx`（唯一提示出口）
+与设置页左下角的版本号（点它 = 检查更新 / 已下好时点它 = 安装）。
+
+- **产品约定**：启动后延迟 8s **静默检查**（`scheduleSilentCheck`）→ 发现新版**后台自动下载**
+  （`autoDownload = true`）→ 下完由 `UpdateNotifier` 弹**一次**通知问要不要重启安装。
+  `allowPrerelease = false`（**不推 beta**）、`allowDowngrade = false`、`autoInstallOnAppQuit = false`
+  （装 = 重启，必须用户点头）。
+- ⚠️ **必须 `app.isPackaged` 守卫**：开发态没有 `app-update.yml`，`checkForUpdates()` 只会抛
+  「Skip checkForUpdates because application is not packed」。非打包态 `supported: false`，
+  界面据此把入口说明成「开发版本不支持检查更新」。
+- ⚠️ **`electron-updater` 是 CJS，本项目主进程产物是 ESM**：一律
+  `import updaterPkg from 'electron-updater'` 再解构，**别写具名导入**（依赖 cjs-module-lexer 的
+  静态分析，不保证解析得出 `exports.autoUpdater`）。
+- ⚠️ **`autoUpdater` 是全局单例，事件只能订阅一份** —— 状态机与广播出口都在 `services/updater.ts`，
+  `ipc/updater.ts` 只转发，别在别处再 `autoUpdater.on`。
+- **失败只记日志、不弹窗**：断网 / GitHub 限流 / 没发布过都是常态，记进主机日志的**新作用域 `app`**
+  （`HostLogScope` 加了 `'app'`，面板过滤项同步加了「应用」）。
+- **装更新前先冲刷渲染端**：`updater:install` 走 `requestRendererFlush` 再 `quitAndInstall`，
+  顺序反了会丢最后一次会话产出（与 `main/index.ts` 的 `before-quit` 同一套纪律）。
+- **发版**：`package.json` 里 `repository` + `build.publish: [{ provider: 'github', owner, repo }]`；
+  `electron-builder --publish always`（或带 `GH_TOKEN`）会把安装包与 `latest.yml` 挂到 Release。
+  ⚠️ 顶层 `files` 白名单仍是唯一 matcher（见 6.2 第 9 条），**别在任何平台段加 `files`**。
+- **验证**：开发态下探针断言 `updater:status` 通且 `supported: false`、点版本号给明确提示
+  （不报错）；打包后真机验证要看 GitHub Release 是否产出 `latest.yml`。
+
 ---
 
 ## 五、验证工具链
@@ -992,6 +1055,8 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 | `scripts/verify-agent-edit-match.ts` | edit_file 匹配引擎（`agent-core/edit-match.ts`，`node --experimental-strip-types` 直接跑）—— 精确替换、找不到 / 多处 / oldString===newString 的报错、replaceAll、9 级模糊匹配链逐个触发（行 trim / 块锚点 Levenshtein / 空白归一 / 缩进弹性 / 转义归一 / 边界 trim / 上下文感知）、转义还原撑大匹配被拒、CRLF 辅助函数（换行符归一是 Windows 下编辑 CRLF 文件的前提） |
 | `scripts/verify-agent-file-tools.mjs` | Agent 文件工具行为（`tools.ts` 真源码 + 真临时工作区，包装机制同 posix-command）—— read_file 大文件分段读取（旧实现 >20 万字符连 offset/limit 都抛错的回归）、单行截断、续读 offset 提示、相似文件建议、目录 / 二进制指引；**先读后改**（edit / 覆盖写前必须本会话 read_file 过，外部改动后要求重读，写入也记快照）；edit_file 多处命中不猜 / replaceAll / **CRLF 文件用 LF 的 oldString 编辑且保留 CRLF** / 缩进不一致仍命中；确认模式 guardWrite 拒绝与放行。⚠️ 复制清单里同样有 `output-artifact.ts`（见上一行） |
 | `scripts/verify-agent-file-preview.mjs` | `dogi-ws://` 图片解码、SVG 预览↔编辑、`<video>` 的 206 Range、压缩包提示、`../` 越界 |
+| `scripts/verify-agent-list-projection.ts` | 会话列表投影的结构共享（`features/agent/conversation-list-meta.ts` 真源码，`node --experimental-strip-types`，**不需要 Electron**）—— 500 次流式增量后投影数组与条目对象**引用不变**（= 不重渲染）、会话内容确实在变（防「修成不更新」）、改名 / `updatedAt` 变化 / 草稿转正 / ACP 绑定回填 / 删除 / 顺序变化才换引用 |
+| `scripts/verify-agent-outline-scroll-cost.mjs` | 消息流滚动的每帧开销（隔离实例 + CDP，先 `npm run build`）：页内**打桩计数** `getBoundingClientRect` / `querySelector`，造 50 / 300 轮提问各滚 30 帧 —— 每帧布局读取必须是**对数级**（实测比值 1.34，线性会是 6）、`querySelector` 不再逐条（每帧 1 次而不是几百次）。修复前那段线性扫在 1200 个消息元素上是**每帧 621 次** |
 | `scripts/verify-agent-error-parts.mjs` | 错误文案 part 的追加语义（`stores/agent-helpers.ts` 真源码，只桩掉 `app-store` / `types` 两条 import）—— 同一轮连着多个 `error` 事件（模型级重试每次尝试失败都发一个）**只留最后一条**、错误文案之后的正文增量另起一段、正文不会被接在 `⚠️ …` 后面；Agent 会话与终端 AI 助手两条路径都验 |
 | `scripts/verify-quick-actions.mjs` | `.dogi/workspace.json` 自动建目录、脏数据降级、下拉入口与顶栏同排、执行命令开终端、弹窗开关 |
 | `scripts/verify-host-logs.mjs` | 主机日志全链路：隔离实例 + 进程内 ssh2 测试服务器 —— SSH 四类来源标签与实时推送（`logs:entry`）、TOFU 指纹、隧道强断（error 级）/ 改名重启 / 停止、SFTP 失败路径、JSONL 落盘与清空归零、面板单例标签 / 过滤 / 搜索 |

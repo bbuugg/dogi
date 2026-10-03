@@ -1,6 +1,10 @@
-import { isDraftConversation, useAppStore } from '@/stores/app-store'
+import { useAppStore } from '@/stores/app-store'
+import {
+  selectConversationListMeta,
+  type ConversationListMeta
+} from '@/features/agent/conversation-list-meta'
 import { AcpImportDialog } from '@/features/agent/AcpImportDialog'
-import type { AgentConversation, AgentWorkspace } from '@shared/types'
+import type { AgentWorkspace } from '@shared/types'
 import { Button, Checkbox, Dropdown, Input, Modal, message } from 'antd'
 import type { MenuProps } from 'antd'
 import { cn } from 'cn'
@@ -21,7 +25,116 @@ import {
   Plus,
   Trash2
 } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+
+/** 会话行图标槽的三种状态（静止时为 null，槽仍然占位以对齐两列） */
+type RowStatus = 'ask' | 'confirm' | 'running' | null
+
+/**
+ * 会话行（`memo` 化的独立组件）。
+ *
+ * ⚠️ **必须抽出来并 memo 化**：它以前是 `AgentPanel` 里的一段内联 JSX，
+ * 于是父组件每次重渲染都会重建整列行 —— 而流式输出每个 token 都会让父组件重渲染
+ * （会话对象整个被换掉），表现就是「侧边栏消息一多就卡」。
+ * 现在父组件只订阅**展示投影**（流式期间引用不变），这里再兜一层：
+ * 状态图标变化只重渲染那一行，不牵连同列其它行。
+ */
+const ConversationRow = memo(function ConversationRow({
+  meta,
+  workspaceId,
+  status,
+  isActive,
+  onOpen,
+  onRename,
+  onDelete
+}: {
+  /** 列表投影条目（结构共享：只有列表可见字段变了才会换引用，见 selectConversationListMeta） */
+  meta: ConversationListMeta
+  workspaceId: string
+  status: RowStatus
+  isActive: boolean
+  onOpen: (workspaceId: string, id: string) => void
+  onRename: (meta: ConversationListMeta) => void
+  onDelete: (meta: ConversationListMeta) => void
+}) {
+  const { id, title } = meta
+  return (
+    <div
+      /* data-conversation-id：探针用来数「列表里到底有几条会话」
+         （草稿不进列表，光看 store 里的条数是看不出来的） */
+      data-conversation-id={id}
+      onClick={() => onOpen(workspaceId, id)}
+      className={cn(
+        // 缩进交给下面那个「图标槽」占位（不再写 pl-*），标题才能和工作区名称同列
+        // relative：行尾「重命名 / 删除」要绝对定位在行右侧
+        'group relative flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1.5 text-sm transition-colors',
+        isActive
+          ? 'bg-primary/15 text-foreground'
+          : 'text-muted-foreground hover:bg-foreground/5 hover:text-foreground'
+      )}
+      title={title}
+    >
+      {/*
+        状态图标槽：**始终占位**（静止时是空的）—— 等待处理 > 运行中。
+        占位而不是「有图标才渲染」是为了两列对齐：
+        槽左边 = 行的 px-1.5、宽度 size-4，于是
+          ① 运行中的转圈 / 等待图标与工作区的**文件夹图标同列**；
+          ② 标题从 px-1.5 + 16 + gap-1.5 = 28px（pl-7）起，
+            与工作区**名称同列**，也不会因为当前有没有图标而左右跳。
+      */}
+      <span
+        className="flex size-4 shrink-0 items-center justify-center"
+        title={
+          status === 'ask'
+            ? '等待你回答提问'
+            : status === 'confirm'
+              ? '等待你确认操作'
+              : status === 'running'
+                ? '正在运行'
+                : undefined
+        }
+      >
+        {status === 'ask' || status === 'confirm' ? (
+          // 暂停（不是转圈）：这一轮已经停下来了，等的是你 —— 两个竖条比问号
+          // 更贴「暂停中」，也顺手把审批卡（原来没有任何提示）覆盖了
+          <CirclePause className="size-4 text-amber-500" />
+        ) : status === 'running' ? (
+          <Loader2 className="size-4 animate-spin text-primary" />
+        ) : null}
+      </span>
+      {/* hover 时才把右侧两格让给「重命名 / 删除」浮层 */}
+      <span className={SIDEBAR_ROW_NAME.two}>{title}</span>
+      <SidebarRowActions
+        hoverClass="group-hover:pointer-events-auto group-hover:opacity-100 max-md:pointer-events-auto max-md:opacity-100"
+      >
+        <button
+          type="button"
+          title="重命名会话"
+          aria-label={`重命名会话 ${title}`}
+          onClick={(e) => {
+            e.stopPropagation()
+            onRename(meta)
+          }}
+          className={SIDEBAR_ROW_ACTION}
+        >
+          <Pencil className="size-3.5" />
+        </button>
+        <button
+          type="button"
+          title="删除会话"
+          aria-label={`删除会话 ${title}`}
+          onClick={(e) => {
+            e.stopPropagation()
+            onDelete(meta)
+          }}
+          className={cn(SIDEBAR_ROW_ACTION, 'hover:bg-destructive/10 hover:text-destructive')}
+        >
+          <Trash2 className="size-3.5" />
+        </button>
+      </SidebarRowActions>
+    </div>
+  )
+})
 
 /** 新建 / 重命名工作区表单 */
 interface WorkspaceEdit {
@@ -48,7 +161,12 @@ function defaultName(path: string): string {
  */
 export function AgentPanel() {
   const workspaces = useAppStore((s) => s.agentWorkspaces)
-  const conversations = useAppStore((s) => s.agentConversations)
+  /**
+   * ⚠️ 这里订阅的是**展示投影**而不是 `s.agentConversations`（见 selectConversationListMeta）：
+   * 流式输出每个 token 都会换掉会话对象与整个数组，直接订阅会让**整列会话行每帧重渲染**
+   * —— 「侧边栏消息一多就卡」的根因。投影做结构共享，只有增删 / 改名 / 排序键变化才换引用。
+   */
+  const conversations = useAppStore((s) => selectConversationListMeta(s.agentConversations))
   const activeWorkspaceId = useAppStore((s) => s.activeAgentWorkspaceId)
   const activeConversationId = useAppStore((s) => s.activeAgentConversationId)
   // 会话行的状态图标：这两张表都是「引用变了才变」，直接取整表再按行推导，
@@ -70,7 +188,7 @@ export function AgentPanel() {
   const [pendingDelete, setPendingDelete] = useState<AgentWorkspace | null>(null)
   /** 待重命名的会话（id 为空表示不处于重命名中） */
   const [convRename, setConvRename] = useState<{ id: string; title: string } | null>(null)
-  const [pendingConvDelete, setPendingConvDelete] = useState<AgentConversation | null>(null)
+  const [pendingConvDelete, setPendingConvDelete] = useState<ConversationListMeta | null>(null)
   /** 删除 ACP 会话时是否连 agent 侧的会话一起删（默认不删，避免误删用户数据） */
   const [deleteRemoteSession, setDeleteRemoteSession] = useState(false)
   /** 正在为哪个工作区导入会话（null = 弹窗关闭） */
@@ -99,9 +217,9 @@ export function AgentPanel() {
    * （见 `isDraftConversation`）。
    */
   const byWorkspace = useMemo(() => {
-    const map = new Map<string, AgentConversation[]>()
+    const map = new Map<string, ConversationListMeta[]>()
     for (const c of conversations) {
-      if (isDraftConversation(c)) continue
+      if (!c.kind) continue // 草稿（还没发出首条消息）不进列表，见 isDraftConversation
       if (!c.workspaceId) continue
       const list = map.get(c.workspaceId) ?? []
       list.push(c)
@@ -112,20 +230,44 @@ export function AgentPanel() {
   }, [conversations])
 
   /**
-   * 该会话是不是**卡在等用户动手**，以及卡在哪一种：
-   * - `'ask'`：`ask_followup_question` 的提问卡（按 toolCallId 索引，靠 requestId 反查会话）；
-   * - `'confirm'`：确认模式下的审批卡（执行命令 / 写入 / 编辑 / 删除前等你点「允许」）。
+   * 每行的状态图标（等待提问 / 等待确认 / 运行中 / 静止），**一次遍历算完整张表**。
    *
-   * 两种卡片都挂在**这一轮的请求 id** 上，而一个会话同时只有一个请求在跑，
-   * 所以 requestId 就足以对上号，不需要额外的映射表。
+   * 以前是每行调一次 `pendingKindOf`，里面对两张表各做一次 `Object.values().some()`
+   * —— 成本是「行数 × 表长」。这里改成先按 requestId 收成两张 Set、再单次遍历会话。
+   *
+   * 三态优先级：**等待处理 > 运行中 > 静止**。等用户动手的那一轮已经停下来了，
+   * 光转圈会让人以为还在跑（见 verify-agent-status.mjs）。
    */
-  const pendingKindOf = (conversationId: string): 'ask' | 'confirm' | null => {
-    const requestId = agentRuns[conversationId]?.requestId
-    if (!requestId) return null
-    if (Object.values(followupRequests).some((f) => f.requestId === requestId)) return 'ask'
-    if (Object.values(pendingConfirms).some((c) => c.requestId === requestId)) return 'confirm'
-    return null
-  }
+  const statusByConversation = useMemo(() => {
+    const askRequests = new Set(Object.values(followupRequests).map((f) => f.requestId))
+    const confirmRequests = new Set(Object.values(pendingConfirms).map((c) => c.requestId))
+    const map = new Map<string, RowStatus>()
+    for (const c of conversations) {
+      const run = agentRuns[c.id]
+      if (!run) continue
+      if (run.requestId && askRequests.has(run.requestId)) map.set(c.id, 'ask')
+      else if (run.requestId && confirmRequests.has(run.requestId)) map.set(c.id, 'confirm')
+      else if (run.streaming) map.set(c.id, 'running')
+    }
+    return map
+  }, [agentRuns, followupRequests, pendingConfirms, conversations])
+
+  /** 行内回调：引用固定，否则 memo 化的行每次都会因 props 变化而重渲染 */
+  const openConversation = useCallback(
+    (workspaceId: string, id: string) => {
+      selectAgentWorkspace(workspaceId)
+      selectAgentConversation(id)
+    },
+    [selectAgentWorkspace, selectAgentConversation]
+  )
+  const startConvRename = useCallback(
+    (meta: ConversationListMeta) => setConvRename({ id: meta.id, title: meta.title }),
+    []
+  )
+  const startConvDelete = useCallback(
+    (meta: ConversationListMeta) => setPendingConvDelete(meta),
+    []
+  )
 
   const toggleExpand = (id: string) =>
     setExpanded((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
@@ -359,93 +501,19 @@ export function AgentPanel() {
                           还没有会话：选好模型、发出第一条消息后，它会出现在这里
                         </div>
                       )}
-                      {list.map((c) => {
-                        // 会话行高亮只看「是不是当前激活会话」（它所在的分组头已让位不高亮）
-                        const isActiveConv = c.id === activeConversationId && isWsSelected
-                        // 等待处理优先于运行中：它已经停下来等你了，光转圈会让人以为还在跑
-                        const pending = pendingKindOf(c.id)
-                        const running = !pending && agentRuns[c.id]?.streaming === true
-                        return (
-                          <div
-                            key={c.id}
-                            /* data-conversation-id：探针用来数「列表里到底有几条会话」
-                               （草稿不进列表，光看 store 里的条数是看不出来的） */
-                            data-conversation-id={c.id}
-                            onClick={() => {
-                              selectAgentWorkspace(w.id)
-                              selectAgentConversation(c.id)
-                            }}
-                            className={cn(
-                              // 缩进交给下面那个「图标槽」占位（不再写 pl-*），标题才能和工作区名称同列
-                              // relative：行尾「重命名 / 删除」要绝对定位在行右侧
-                              'group relative flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1.5 text-sm transition-colors',
-                              isActiveConv
-                                ? 'bg-primary/15 text-foreground'
-                                : 'text-muted-foreground hover:bg-foreground/5 hover:text-foreground'
-                            )}
-                            title={c.title}
-                          >
-                            {/*
-                              状态图标槽：**始终占位**（静止时是空的）—— 等待处理 > 运行中。
-                              占位而不是「有图标才渲染」是为了两列对齐：
-                              槽左边 = 行的 px-1.5、宽度 size-4，于是
-                                ① 运行中的转圈 / 等待图标与工作区的**文件夹图标同列**；
-                                ② 标题从 px-1.5 + 16 + gap-1.5 = 28px（pl-7）起，
-                                  与工作区**名称同列**，也不会因为当前有没有图标而左右跳。
-                            */}
-                            <span
-                              className="flex size-4 shrink-0 items-center justify-center"
-                              title={
-                                pending === 'ask'
-                                  ? '等待你回答提问'
-                                  : pending === 'confirm'
-                                    ? '等待你确认操作'
-                                    : running
-                                      ? '正在运行'
-                                      : undefined
-                              }
-                            >
-                              {pending ? (
-                                // 暂停（不是转圈）：这一轮已经停下来了，等的是你 —— 两个竖条比问号
-                                // 更贴「暂停中」，也顺手把审批卡（原来没有任何提示）覆盖了
-                                <CirclePause className="size-4 text-amber-500" />
-                              ) : running ? (
-                                <Loader2 className="size-4 animate-spin text-primary" />
-                              ) : null}
-                            </span>
-                            {/* hover 时才把右侧两格让给「重命名 / 删除」浮层 */}
-                            <span className={SIDEBAR_ROW_NAME.two}>{c.title}</span>
-                            <SidebarRowActions
-                              hoverClass="group-hover:pointer-events-auto group-hover:opacity-100 max-md:pointer-events-auto max-md:opacity-100"
-                            >
-                              <button
-                                type="button"
-                                title="重命名会话"
-                                aria-label={`重命名会话 ${c.title}`}
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  setConvRename({ id: c.id, title: c.title })
-                                }}
-                                className={rowAction}
-                              >
-                                <Pencil className="size-3.5" />
-                              </button>
-                              <button
-                                type="button"
-                                title="删除会话"
-                                aria-label={`删除会话 ${c.title}`}
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  setPendingConvDelete(c)
-                                }}
-                                className={cn(rowAction, 'hover:bg-destructive/10 hover:text-destructive')}
-                              >
-                                <Trash2 className="size-3.5" />
-                              </button>
-                            </SidebarRowActions>
-                          </div>
-                        )
-                      })}
+                      {list.map((c) => (
+                        <ConversationRow
+                          key={c.id}
+                          meta={c}
+                          workspaceId={w.id}
+                          status={statusByConversation.get(c.id) ?? null}
+                          // 会话行高亮只看「是不是当前激活会话」（它所在的工作区行已让位不高亮）
+                          isActive={c.id === activeConversationId && isWsSelected}
+                          onOpen={openConversation}
+                          onRename={startConvRename}
+                          onDelete={startConvDelete}
+                        />
+                      ))}
                     </div>
                   )}
                 </div>

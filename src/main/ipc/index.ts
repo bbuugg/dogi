@@ -22,6 +22,7 @@ import { registerSftpIpc } from './sftp'
 import { registerSystemIpc } from './system'
 import { registerTerminalIpc } from './terminal'
 import { registerTransferIpc } from './transfer'
+import { registerUpdaterIpc } from './updater'
 import { registerTunnelsIpc } from './tunnels'
 
 export { openExternalSafe } from './shared'
@@ -66,6 +67,8 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   registerSystemIpc(ctx)
   registerTransferIpc(ctx)
   registerGitIpc()
+  // 自动更新（静默检查在主进程启动后自跑；这里只是给渲染端「查状态 / 手动查 / 装更新」）
+  registerUpdaterIpc(ctx)
   // 浏览器会话（Agent 的 browser_* 工具与内嵌面板）：帧 / 状态事件经 ctx.broadcast 推给渲染端
   registerBrowserIpc(ctx)
 }

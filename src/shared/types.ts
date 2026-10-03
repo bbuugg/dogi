@@ -325,7 +325,7 @@ export interface SshKnownHost {
 export type HostLogLevel = 'info' | 'warn' | 'error'
 
 /** 日志分类：按产生日志的子系统划分，界面按它过滤 */
-export type HostLogScope = 'ssh' | 'terminal' | 'tunnel' | 'sftp' | 'rdp'
+export type HostLogScope = 'ssh' | 'terminal' | 'tunnel' | 'sftp' | 'rdp' | 'app'
 
 /**
  * 一条主机日志（主进程的 hostLogger 追加；渲染端只读展示）。
@@ -1541,6 +1541,36 @@ export interface AppInfo {
   electron: string
   node: string
   platform: string
+}
+
+/**
+ * 自动更新的状态机（`services/updater.ts` 持有，渲染端只读）。
+ *
+ * - `idle`：没在动（启动初始态，或上次检查失败 —— 失败是常态，不单独占一个状态）；
+ * - `checking` / `downloading` / `up-to-date` / `downloaded`：检查与下载的常规阶段；
+ * - `available`：理论上不会出现（`autoDownload` 为真，发现即进入 downloading），
+ *   留着是为了将来改成「询问后再下载」时不必改类型。
+ *
+ * ⚠️ **只给正式通道**：`allowPrerelease = false`，beta / nightly 不会推给用户
+ * （见 updater 的产品约定）。
+ */
+export type AppUpdateState =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'downloading'
+  | 'up-to-date'
+  | 'downloaded'
+
+/** 自动更新状态快照：`updater:status` 的返回值 / `updater:status` 事件的载荷 */
+export interface AppUpdateStatus {
+  state: AppUpdateState
+  /** 当前运行中的版本 */
+  current: string
+  /** 发现的新版本号（还没发现时为 null） */
+  latest: string | null
+  /** 是否可用：只有打包态才有 `app-update.yml`（开发态为 false，界面据此置灰） */
+  supported: boolean
 }
 
 /** 系统已安装 IDE 的启动信息（由主进程按平台探测：Windows/macOS/Linux 路径与 PATH 命令） */

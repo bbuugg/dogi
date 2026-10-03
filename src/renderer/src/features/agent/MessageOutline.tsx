@@ -139,6 +139,51 @@ function textOfMessage(message: AgentChatMessage): string {
   )
 }
 
+/* ------------------------------------------------------------------ *
+ * 只收用户消息（带结构共享）
+ *
+ * 目录只画**用户提问**，而流式输出期间变化的只有 assistant 消息 ——
+ * 用户消息对象是引用稳定的。于是逐个按**引用**比对就能复用上次的数组，
+ * 让下面 items / clusters 的 memo 不被每个 token 打掉。
+ *
+ * ⚠️ 之前 `items` 的依赖是整个 `messages` 数组，而它每个 token 都换 ——
+ * 于是每来一个 token 就重算一遍「过滤全部消息 + 抽每条用户消息的纯文本」，
+ * 外加一次 O(用户消息数) 的 DOM 查询与 `getBoundingClientRect`（强制同步布局）。
+ * 两者都随会话变长而线性变差，正是「消息一多就卡」的形状。
+ * ------------------------------------------------------------------ */
+let userMessagesCache: {
+  src: AgentChatMessage[]
+  out: AgentChatMessage[]
+} | null = null
+
+export function selectUserMessages(messages: AgentChatMessage[]): AgentChatMessage[] {
+  const cached = userMessagesCache
+  if (cached && cached.src === messages) return cached.out
+  const prev = cached?.out
+  let allReused = prev !== undefined
+  const out: AgentChatMessage[] = []
+  let cursor = 0
+  for (const m of messages) {
+    if (m.role !== 'user') continue
+    // 按顺序复用上一份里字段相同的那条（引用相同即可 —— 流式不改用户消息）
+    const old = prev?.[cursor]
+    if (old && old === m) {
+      out.push(old)
+    } else {
+      allReused = false
+      out.push(m)
+    }
+    cursor++
+  }
+  // 上一份比这次多（用户消息被删）时也算「没能整体复用」
+  if (allReused && prev && prev.length === out.length) {
+    userMessagesCache = { src: messages, out: prev }
+    return prev
+  }
+  userMessagesCache = { src: messages, out }
+  return out
+}
+
 /** 簇点直径（px） */
 function clusterDotSize(count: number): number {
   if (count <= 1) return DOT_SIZE
@@ -241,8 +286,14 @@ export function MessageOutline({
     setTailTop(Math.min(Math.max(dotPx - top + cardH / 2, TAIL_INSET), cardH - TAIL_INSET))
   }, [activeId, dotPx])
 
+  /**
+   * 只收用户提问（结构共享，见 selectUserMessages 的注释）。
+   * 依赖是 `users` 而不是 `messages` —— 流式期间 `users` 引用不变，
+   * 于是下面整条 `items` / `clusters` 链不会被每个 token 重算。
+   */
+  const users = useMemo(() => selectUserMessages(messages), [messages])
+
   const items = useMemo(() => {
-    const users = messages.filter((message) => message.role === 'user')
     const n = users.length
     // 时间戳：缺省 / 非数字 / 非有限 一律视为「坏值」（后续这条按序号补位，不再拖垮整条）
     const stamps = users.map((m) =>
@@ -279,7 +330,7 @@ export function MessageOutline({
         frac
       }
     })
-  }, [messages])
+  }, [users])
 
   /*
     点区高度实测（ResizeObserver）：聚簇阈值要按像素判。依赖 items.length —— 点数
@@ -333,34 +384,96 @@ export function MessageOutline({
 
   /** 当前「读到」的提问：最后一条起始位置越过读线（容器底缘）的用户消息 */
   const [scrolledId, setScrolledId] = useState<string | null>(null)
-  /** computeSpy 经 ref 读最新 items：滚动监听只挂一次，不随消息数组重建。
-      （ref 不能在渲染期写 —— 在布局 effect 里同步，它先于下面的被动 effect 执行） */
-  const itemsRef = useRef(items)
-  useLayoutEffect(() => {
-    itemsRef.current = items
-  }, [items])
+  /** 消息元素缓存：id → DOM 元素。滚动每帧都要量消息位置，querySelector 每帧重查是主要开销 */
+  const elCacheRef = useRef<Map<string, HTMLElement>>(new Map())
+  /** elCache 对应的是哪一批 items（引用比较即可 —— 见 selectUserMessages） */
+  const itemsCacheRef = useRef<OutlineItem[]>(items)
+  /** 滚动容器缓存：向上找可滚动祖先要 getComputedStyle，逐帧找纯属浪费 */
+  const scrollerRef = useRef<HTMLElement | null>(null)
   /** 壳元素：parentElement 就是 AgentPage 里包着对话流的那层 `relative` 根，
       消息元素与滚动容器都在它里面 */
   const shellRef = useRef<HTMLDivElement>(null)
   /** 滚动 → 计算的 rAF 合帧：滚动再密，一帧最多算一次 */
   const spyRafRef = useRef<number | null>(null)
+  /** computeSpy 经 ref 读最新 items：滚动监听只挂一次，不随消息数组重建。
+      （ref 不能在渲染期写 —— 在布局 effect 里同步，它先于下面的被动 effect 执行） */
+  const itemsRef = useRef(items)
+  useLayoutEffect(() => {
+    itemsRef.current = items
+    // 点数变了（发新提问 / 切会话 / 回放）→ 缓存的消息元素作废，重建
+    elCacheRef.current.clear()
+    itemsCacheRef.current = items
+  }, [items])
+
+  /** 取消息元素：命中缓存就直接用（DOM 顺序 = items 顺序，元素不会凭空换人） */
+  const messageEl = (panel: HTMLElement, id: string): HTMLElement | null => {
+    const cache = elCacheRef.current
+    if (itemsCacheRef.current !== itemsRef.current) {
+      // items 换了一批而布局 effect 还没跑（同一帧内先算了 spy）：宁可不命中
+      return null
+    }
+    const hit = cache.get(id)
+    if (hit && hit.isConnected) return hit
+    const found = panel.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(id)}"]`)
+    if (found) cache.set(id, found)
+    return found
+  }
 
   const computeSpy = useCallback((): void => {
     const panel = shellRef.current?.parentElement
     if (!panel) return
     // 读线 = 容器底缘：最后一条起始位置已过线的提问 = 当前读到的。
     // 停在底部点亮最后一个点；往上翻时提问逐个「沉」出底缘，高亮跟着前移。
-    const readingLine =
-      (findScroller(panel) ?? panel).getBoundingClientRect().bottom - SPY_LINE_INSET
-    let current: string | null = null
-    for (const item of itemsRef.current) {
-      const el = panel.querySelector(`[data-message-id="${CSS.escape(item.id)}"]`)
-      if (!el) continue
-      // DOM 顺序 = 时间顺序：第一条落在线下的，后面必然都在线下，直接收
-      if (el.getBoundingClientRect().top > readingLine) break
-      current = item.id
+    let scroller = scrollerRef.current
+    if (!scroller || !scroller.isConnected) {
+      scroller = findScroller(panel)
+      scrollerRef.current = scroller
     }
-    setScrolledId(current)
+    const readingLine = (scroller ?? panel).getBoundingClientRect().bottom - SPY_LINE_INSET
+    const list = itemsRef.current
+
+    /**
+     * 找「最后一条 top 已过读线」的提问。
+     *
+     * ⚠️ 用**二分**而不是从前往后扫：扫是 O(条数) 次 `getBoundingClientRect`，
+     * 每帧都做的话，滚动在长会话里就是实打实的掉帧（读 rect 会触发强制同步布局）。
+     * 二分成立的前提是「DOM 顺序 = 时间顺序、rect.top 单调」，这正是下面的注释所述。
+     * 命中不了元素（切会话途中 / 消息还没渲染）时退回线性扫 —— 扫的是缓存，
+     * 没有 querySelector 的开销，可以接受。
+     */
+    const topAt = (index: number): number | null => {
+      const el = messageEl(panel, list[index].id)
+      return el ? el.getBoundingClientRect().top : null
+    }
+    let current: string | null = null
+    let lo = 0
+    let hi = list.length - 1
+    let bail = false
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1
+      const top = topAt(mid)
+      if (top === null) {
+        bail = true
+        break
+      }
+      if (top <= readingLine) {
+        current = list[mid].id
+        lo = mid + 1
+      } else {
+        hi = mid - 1
+      }
+    }
+    if (bail) {
+      current = null
+      for (let i = 0; i < list.length; i++) {
+        const top = topAt(i)
+        if (top === null) continue
+        if (top > readingLine) break
+        current = list[i].id
+      }
+    }
+    // 同值不 set：每个 token / 每帧都会算一次，别把重渲染打满
+    setScrolledId((prev) => (prev === current ? prev : current))
   }, [])
 
   // 滚动容器上挂监听（rAF 合帧）。消息还没渲染（装载骨架）时找不到容器，挂不上 ——
@@ -370,6 +483,7 @@ export function MessageOutline({
     if (!panel) return
     const scroller = findScroller(panel)
     if (!scroller) return
+    scrollerRef.current = scroller
     const onScroll = (): void => {
       if (spyRafRef.current !== null) return
       spyRafRef.current = requestAnimationFrame(() => {
@@ -378,19 +492,31 @@ export function MessageOutline({
       })
     }
     scroller.addEventListener('scroll', onScroll, { passive: true })
+    // 窗口尺寸变了（分屏拖拽、窗口缩放）读线位置也变：补算一次
+    window.addEventListener('resize', onScroll)
     return () => {
       scroller.removeEventListener('scroll', onScroll)
+      window.removeEventListener('resize', onScroll)
       if (spyRafRef.current !== null) {
         cancelAnimationFrame(spyRafRef.current)
         spyRafRef.current = null
       }
     }
-  }, [computeSpy, messages.length])
+  }, [computeSpy, items.length])
 
-  // 消息数组任何变化（装载 / 切会话 / 流式增量）都重算一次 —— 布局变了，但未必有滚动事件
+  /*
+    提问集合变化（装载 / 切会话 / 回放 / 用户新发一条）后重算一次 ——
+    布局变了，但未必有滚动事件。
+
+    ⚠️ **依赖是 `items.length` 而不是 `messages`**：assistant 正文在流式增长时，
+    所有用户提问的位置**纹丝不动**（新内容只长在它们下面），所以没必要每个 token
+    算一次；而这项计算会读消息元素的 rect（强制同步布局），每个 token 一次就是长会话里
+    实打实的掉帧。用户提问增减由 `items.length` 覆盖，滚动中的位置变化由上面的
+    scroll 监听覆盖，两条合起来就够了。
+  */
   useEffect(() => {
     computeSpy()
-  }, [computeSpy, messages])
+  }, [computeSpy, items.length, users])
 
   // 只有一个点时没什么可跳的，整条不出现
   if (items.length < 2) return null

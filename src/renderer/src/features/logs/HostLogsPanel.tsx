@@ -18,7 +18,8 @@ const SCOPE_META: Record<HostLogScope, { label: string; color: string }> = {
   terminal: { label: '终端', color: 'green' },
   tunnel: { label: '隧道', color: 'purple' },
   sftp: { label: 'SFTP', color: 'cyan' },
-  rdp: { label: 'RDP', color: 'orange' }
+  rdp: { label: 'RDP', color: 'orange' },
+  app: { label: '应用', color: 'geekblue' }
 }
 
 type ScopeFilter = 'all' | HostLogScope
@@ -29,7 +30,8 @@ const SCOPE_OPTIONS: Array<{ label: string; value: ScopeFilter }> = [
   { label: '终端', value: 'terminal' },
   { label: '隧道', value: 'tunnel' },
   { label: 'SFTP', value: 'sftp' },
-  { label: 'RDP', value: 'rdp' }
+  { label: 'RDP', value: 'rdp' },
+  { label: '应用', value: 'app' }
 ]
 
 /** 单条日志：时间（悬停看完整日期）+ 级别点 + 作用域标签 + 正文；有 detail 时补一行等宽详情 */
