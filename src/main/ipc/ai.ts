@@ -35,9 +35,19 @@ export function registerAiIpc(): void {
       })
       if (!res.ok) throw new Error(`拉取失败（HTTP ${res.status}）`)
       const body = (await res.json()) as unknown
-      const list = Array.isArray(body) ? body : (body as { data?: unknown }).data
+      const list = Array.isArray(body)
+        ? body
+        : body !== null && typeof body === 'object'
+          ? (body as { data?: unknown }).data
+          : undefined
       const ids = (Array.isArray(list) ? list : [])
-        .map((m) => (typeof m === 'string' ? m : (m as { id?: unknown })?.id))
+        .map((m) =>
+          typeof m === 'string'
+            ? m
+            : m !== null && typeof m === 'object'
+              ? (m as { id?: unknown }).id
+              : undefined
+        )
         .filter((v): v is string => typeof v === 'string' && v.length > 0)
       return [...new Set(ids)]
     }
