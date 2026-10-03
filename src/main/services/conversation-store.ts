@@ -11,8 +11,6 @@ import type {
 /** 会话默认标题（渲染端也有一份同值常量） */
 const DEFAULT_CONVERSATION_TITLE = '新会话'
 
-/** 会话文件目录名（位于 userData 下） */
-const CONVERSATION_DIR = 'agent-conversations'
 
 /**
  * 旧存档里的会话形态（0.0.6 及以前）。
@@ -22,7 +20,7 @@ const CONVERSATION_DIR = 'agent-conversations'
  */
 type LegacyConversation = Partial<AgentConversation> & {
   id: string
-  workspaceId: string
+  workspaceId?: string
   backend?: 'ai-sdk' | 'acp' | 'mastra'
   /** 旧字段：`ai-sdk` 下是 AiModelConfig.id，`acp` 下是 AcpAgentConfig.id */
   configId?: string
@@ -44,6 +42,9 @@ function normalizeConversation(raw: LegacyConversation): AgentConversation {
   const base = {
     id: raw.id,
     workspaceId: raw.workspaceId,
+    // 作用域缺省 = workspace（兼容旧存档）；目录本身就是作用域的物理边界，
+    // 这里照抄存档值，防止手改文件把终端会话混进工作区列表
+    scope: raw.scope,
     title: raw.title ?? DEFAULT_CONVERSATION_TITLE,
     // ⚠️ 这个函数是**显式重建对象**（不 spread raw），所以每个要保留的字段都必须在这里列出。
     // 漏掉 contextSummary 的后果不是「读出来少个字段」，而是：读回来丢 → 缓存里没了 →
@@ -75,7 +76,10 @@ function normalizeConversation(raw: LegacyConversation): AgentConversation {
 /** 保存会话的入参（与渲染端 `agent:conversations:save` 的请求体一致） */
 export interface SaveConversationInput {
   id?: string
-  workspaceId: string
+  /** 仅 workspace 作用域：所属工作区。terminal 会话不绑工作区 */
+  workspaceId?: string
+  /** 会话作用域；缺省 = workspace。terminal 会话强制 mastra、不落 acp 字段 */
+  scope?: AgentConversation['scope']
   /** 会话形态；不传沿用旧值（新会话按 mastra） */
   kind?: AgentBackend
   title?: string
@@ -115,9 +119,11 @@ export class ConversationStore {
   private loaded = false
   private dir: string | null = null
 
+  constructor(private readonly dirName = 'agent-conversations') {}
+
   /** 会话目录（懒解析：`app.getPath` 在模块加载期不一定可用，首次用时才算） */
   private get dirPath(): string {
-    this.dir ??= join(app.getPath('userData'), CONVERSATION_DIR)
+    this.dir ??= join(app.getPath('userData'), this.dirName)
     return this.dir
   }
 
@@ -193,14 +199,18 @@ export class ConversationStore {
     this.ensureLoaded()
     const now = Date.now()
     const prev = input.id ? this.cache.get(input.id) : undefined
-    const kind: AgentBackend = input.kind ?? prev?.kind ?? 'mastra'
+    // terminal 会话只有 mastra 形态（ACP 绑定工作区目录，与终端无关）
+    const isTerminal = (input.scope ?? prev?.scope) === 'terminal'
+    const kind: AgentBackend = isTerminal ? 'mastra' : (input.kind ?? prev?.kind ?? 'mastra')
     const isAcp = kind === 'acp'
     // 各字段一律用 `'x' in input` 判断而不是 `??`：渲染端落盘时**每次都显式带上**这些字段，
     // 其中 `undefined` 表示「这个字段要清掉（没选 / 走默认）」—— 必须能覆盖旧值，
     // 否则把会话从某个模型切回默认就永远切不回来（见 AGENTS.md 4.3）。
     const conversation: AgentConversation = {
       id: input.id || crypto.randomUUID(),
-      workspaceId: input.workspaceId,
+      // terminal 会话不绑工作区：workspaceId 显式清掉（undefined 落盘时字段被丢弃）
+      workspaceId: isTerminal ? undefined : input.workspaceId,
+      scope: isTerminal ? 'terminal' : undefined,
       kind,
       title: input.title ?? prev?.title ?? DEFAULT_CONVERSATION_TITLE,
       // ACP 会话的消息归 agent 管：本地不保存任何消息
@@ -285,4 +295,11 @@ export class ConversationStore {
   }
 }
 
-export const conversationStore = new ConversationStore()
+export const conversationStore = new ConversationStore('agent-conversations')
+
+/**
+ * 终端 AI 助手的会话存储：与工作区会话**同一个类、不同的目录**
+ * （`<userData>/terminal-conversations/`）。物理隔离是刻意的 —— 「终端会话绝不进
+ * AI Agent 的侧边栏」靠目录边界保证，不靠每个消费方记得过滤。
+ */
+export const terminalConversationStore = new ConversationStore('terminal-conversations')

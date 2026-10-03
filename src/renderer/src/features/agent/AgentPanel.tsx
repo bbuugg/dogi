@@ -50,7 +50,7 @@ export function AgentPanel() {
   // 不要用返回新对象 / 新 Set 的 selector（zustand 用 Object.is 比较，会无限重渲染）
   const agentRuns = useAppStore((s) => s.agentRuns)
   const followupRequests = useAppStore((s) => s.followupRequests)
-  const agentPendingConfirms = useAppStore((s) => s.agentPendingConfirms)
+  const pendingConfirms = useAppStore((s) => s.pendingConfirms)
   const selectAgentWorkspace = useAppStore((s) => s.selectAgentWorkspace)
   const selectAgentConversation = useAppStore((s) => s.selectAgentConversation)
   const createAgentConversation = useAppStore((s) => s.createAgentConversation)
@@ -97,6 +97,7 @@ export function AgentPanel() {
     const map = new Map<string, AgentConversation[]>()
     for (const c of conversations) {
       if (isDraftConversation(c)) continue
+      if (!c.workspaceId) continue
       const list = map.get(c.workspaceId) ?? []
       list.push(c)
       map.set(c.workspaceId, list)
@@ -117,7 +118,7 @@ export function AgentPanel() {
     const requestId = agentRuns[conversationId]?.requestId
     if (!requestId) return null
     if (Object.values(followupRequests).some((f) => f.requestId === requestId)) return 'ask'
-    if (Object.values(agentPendingConfirms).some((c) => c.requestId === requestId)) return 'confirm'
+    if (Object.values(pendingConfirms).some((c) => c.requestId === requestId)) return 'confirm'
     return null
   }
 

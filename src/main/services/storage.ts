@@ -26,7 +26,11 @@ import type {
 } from '@shared/types'
 import { DEFAULT_MAX_RETRIES } from '@shared/ai-timeouts'
 import { DEFAULT_SHORTCUTS } from '@shared/shortcuts'
-import { conversationStore, type SaveConversationInput } from './conversation-store'
+import {
+  conversationStore,
+  terminalConversationStore,
+  type SaveConversationInput
+} from './conversation-store'
 
 interface StoreSchema {
   sshProfiles: SshProfile[]
@@ -1108,6 +1112,27 @@ class StorageService {
     summary: ConversationContextSummary | null
   ): AgentConversation | undefined {
     return conversationStore.setContextSummary(id, summary)
+  }
+
+  // ---------- 终端 AI 助手会话（独立文件目录，见 conversation-store.ts 的 terminalConversationStore） ----------
+  /**
+   * 终端助手的会话与工作区会话**物理分目录**（`terminal-conversations/`）：
+   * 「终端会话不入 AI Agent 列表」由存储边界保证，不依赖每个消费方记得过滤。
+   */
+  listTerminalConversations(): AgentConversation[] {
+    return terminalConversationStore.list()
+  }
+
+  getTerminalConversation(id: string): AgentConversation | undefined {
+    return terminalConversationStore.get(id)
+  }
+
+  saveTerminalConversation(input: SaveConversationInput): AgentConversation {
+    return terminalConversationStore.save({ ...input, scope: 'terminal' })
+  }
+
+  deleteTerminalConversation(id: string): void {
+    terminalConversationStore.delete(id)
   }
 
   // ---------- MCP servers ----------

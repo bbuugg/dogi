@@ -36,6 +36,15 @@ export class HistoryAssembler {
   private messages: AgentChatMessage[] = []
   private current: AgentChatMessage | null = null
   private currentMessageId: string | null = null
+  /**
+   * 单调递增时钟：回放里每次开新消息 +1。
+   * ACP 协议**不携带每条消息的时间戳**，`session/load` 回放又是毫秒级批量跑完，
+   * 若直接 `Date.now()`，所有消息时间戳会撞在同一瞬间 → `MessageOutline` 算出的
+   * 时间跨度 span≈0，竖线点退化成等距（看着像「固定长度」）。这里用「基准时刻 + 序号」
+   * 给每条消息一个互不相同、按出现顺序排列的时间戳：至少顺序正确、不会全重合，
+   * 真实时长虽无法还原（协议没有），但比「全部撞一起」更诚实。
+   */
+  private clock = 0
 
   /** 开一条新消息（用户 / 助手），后续 chunk 追加到它上 */
   private start(role: 'user' | 'assistant', messageId: string | null): AgentChatMessage {
@@ -43,7 +52,7 @@ export class HistoryAssembler {
       id: `acp-h-${this.messages.length}-${randomUUID().slice(0, 8)}`,
       role,
       parts: [],
-      createdAt: Date.now()
+      createdAt: Date.now() + this.clock++
     }
     this.messages.push(message)
     this.current = message

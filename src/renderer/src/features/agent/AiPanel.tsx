@@ -16,31 +16,35 @@ import {
   ConversationScrollButton
 } from '@/features/agent/Conversation'
 import { configModels, hasUsableConfig, modelNameOnly } from '@/features/agent/model-options'
-import { Button, Dropdown, Input, Select } from 'antd'
+import { Button, Dropdown, Input, Popconfirm, Select } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'
 import { ASK_FOLLOWUP_TOOL } from '@shared/ask-followup'
 import type {
-  AiChatMessage,
-  AiConfirmRequest,
-  AiMessagePart,
+  AgentChatMessage,
+  AgentConfirmRequest,
+  AgentMessagePart,
+  AgentConversation,
   AiPermissionMode,
   TurnUsage
 } from '@shared/types'
 import {
   ChevronDown,
   ChevronUp,
-  Eraser,
   GripVertical,
   Loader2,
   Pencil,
+  Plus,
   Send,
   Settings2,
   ShieldAlert,
   ShieldCheck,
   Sparkles,
   Square,
-  X
+  Trash2,
+  X,
+  PanelLeftClose,
+  PanelLeftOpen
 } from 'lucide-react'
 import {
   memo,
@@ -80,8 +84,8 @@ const PERMISSION_MODES: Array<{
     }
   ]
 
-type ToolCallPart = Extract<AiMessagePart, { type: 'tool-call' }>
-type ToolResultPart = Extract<AiMessagePart, { type: 'tool-result' }>
+type ToolCallPart = Extract<AgentMessagePart, { type: 'tool-call' }>
+type ToolResultPart = Extract<AgentMessagePart, { type: 'tool-result' }>
 
 /** 工具渲染单元：一次调用及其结果合为一处展示 */
 interface ToolUnit {
@@ -96,7 +100,7 @@ type RenderUnit =
   | { kind: 'reasoning'; text: string }
 
 /** 把消息 parts 整理为渲染单元：文本独立成块；reasoning 连续合并为一块；tool-call 与对应 tool-result 按 toolCallId 合并 */
-function buildRenderUnits(parts: AiMessagePart[]): RenderUnit[] {
+function buildRenderUnits(parts: AgentMessagePart[]): RenderUnit[] {
   const units: RenderUnit[] = []
   const toolsById = new Map<string, ToolUnit>()
   for (const part of parts) {
@@ -139,7 +143,7 @@ function buildRenderUnits(parts: AiMessagePart[]): RenderUnit[] {
 }
 
 /** 待批准的确认区（插在工具横条的展开体里）：终端命令必须先过这一关 */
-function AiConfirmActions({ confirm }: { confirm: AiConfirmRequest }) {
+function AiConfirmActions({ confirm }: { confirm: AgentConfirmRequest }) {
   const resolveAiConfirm = useAppStore((s) => s.resolveAiConfirm)
   return (
     <div className="flex gap-2 pt-0.5">
@@ -177,7 +181,7 @@ function MessageBubbleImpl({
   retrying
 }: {
   role: 'user' | 'assistant'
-  parts: AiMessagePart[]
+  parts: AgentMessagePart[]
   streaming?: boolean
   /** 整轮对话是否已结束（生成中不允许改，否则会把正在流式的消息一起截掉） */
   canEdit: boolean
@@ -189,7 +193,7 @@ function MessageBubbleImpl({
   /** 含本条在内、会被一起删掉的消息条数 */
   tailCount: number
   onDelete: () => void
-  pendingConfirm: AiConfirmRequest | null
+  pendingConfirm: AgentConfirmRequest | null
   /** 这一轮的用量统计（仅助手消息、一轮跑完后才有） */
   usage?: TurnUsage
   /** 模型请求正在重试（第 N 次）：把「正在生成」的三点替换成单条「第 N 次重试」 */
@@ -209,7 +213,7 @@ function MessageBubbleImpl({
         {/* 选中态用半透明白：主色底 + 白字下，浏览器的默认蓝色选区会把字压得看不清 */}
         <div
           className={cn(
-            'max-w-[85%] selection:bg-white/25 whitespace-pre-wrap rounded-lg rounded-br-sm bg-primary px-3 py-2 text-xs text-white',
+            'max-w-[85%] selection:bg-white/25 whitespace-pre-wrap rounded-lg rounded-br-sm bg-primary px-3 py-2 text-sm text-white',
             // 正在编辑：压暗 + 描边，一眼能看出「改的是这条」
             editing && 'opacity-50 ring-2 ring-border ring-offset-2 ring-offset-background'
           )}
@@ -334,7 +338,7 @@ function MessageBubbleImpl({
 
 /** 记忆化：流式期间只重渲染正在生成的那条（parts / usage 引用不变的历史消息直接跳过）。
  *  onEdit / onDelete 是渲染期为当前 msg 新建的闭包，行为恒定，不参与比较 ——
- *  换终端会话时列表整体重挂（listKey 变化），不存在闭包串台。 */
+ *  换会话时列表整体重挂（listKey 变化），不存在闭包串台。 */
 const MessageBubble = memo(
   MessageBubbleImpl,
   (a, b) =>
@@ -368,14 +372,14 @@ function ScrollLine({ text }: { text: string }) {
 }
 
 /** 稳定的空消息数组：避免每次渲染新引用导致滚动 effect 误触发 */
-const NO_MESSAGES: AiChatMessage[] = []
+const NO_MESSAGES: AgentChatMessage[] = []
 
 /**
  * 折叠态流式日志的完整文本：保留换行（工具调用 / 错误各占一行），
  * 供「逐行向上滚动」展示 —— 只在出现新行（换行）时整体上移一次，
  * 正在输入的当前行原地更新、不重挂载、不淡入，避免逐 token 替换造成的闪烁。
  */
-function buildCollapsedText(messages: AiChatMessage[]): string {
+function buildCollapsedText(messages: AgentChatMessage[]): string {
   const last = messages[messages.length - 1]
   if (!last) return ''
   // 最后一条还是用户消息（助手还没开口）：对齐 Codex 的「思考中」文案
@@ -392,6 +396,20 @@ function buildCollapsedText(messages: AiChatMessage[]): string {
   // 助手已开始流式但还没吐出任何内容（含工具执行中、纯思考未落字）：保持「思考中」
   if (!text.trim()) return '思考中…'
   return text
+}
+
+/** 会话列表条目的时间标签：今天给时刻，更早给日期 */
+function convTimeLabel(ts: number): string {
+  const d = new Date(ts)
+  const now = new Date()
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return sameDay
+    ? `${pad(d.getHours())}:${pad(d.getMinutes())}`
+    : `${d.getMonth() + 1}/${d.getDate()}`
 }
 
 /** 浮窗容器与面板组内容区的边距下限（px） */
@@ -413,6 +431,9 @@ const MIN_PANEL_HEIGHT = 180
 /** 浮窗最小宽度（px）：卡片头部一排控件挤得下即可 */
 const MIN_PANEL_WIDTH = 320
 
+/** 左侧会话列表的宽度（px） */
+const CONV_LIST_WIDTH = 190
+
 /**
  * 浮窗缩放方向：n/s 上下边、e/w 左右边、四角为两两组合。
  * 语义是「窗口边」——拖动哪条边，哪条边动，对边保持不动。
@@ -432,29 +453,41 @@ const RESIZE_HANDLES: Array<{ dir: ResizeDir; cls: string; indicator: string }> 
 ]
 
 /**
- * 浮在终端之上的 AI 助手浮窗：展示并驱动 sessionId 所属会话的独立对话。
+ * 浮在终端之上的 AI 助手浮窗：展示并驱动这个终端页面的 AI 会话。
  *
  * 平时只是终端底部居中的一条横式输入栏（拖拽手柄 + 权限模式图标 + 输入框 + 发送）；
  * 发送后向上展开消息列表卡片，卡片头部可最小化 —— 最小化后只留一行状态条，
  * 最新对话内容像 Codex「思考中」那样逐行替换闪过。整体可拖拽移动（位置存 store，各终端共享）。
  *
  * AI 助手属于**终端页面**（终端标签 = 一个会话）：每个终端页面一个实例，
- * 对话（`aiChats`）、开关（`ui.aiOpenSessions`）与最小化（`ui.aiMinimizedSessions`）
- * 都按会话隔离，互不影响。
+ * 开关（`ui.aiOpenSessions`）、最小化（`ui.aiMinimizedSessions`）与当前打开的
+ * AI 会话（`activeTerminalConv`）都按页面隔离。
+ *
+ * 会话模型与工作区 Agent 同构（统一的 agent:chat 引擎）：左侧可展开会话列表
+ * （跨终端页面共享，持久化），「新开会话」开的是草稿 —— 首条消息发出那一刻才转正落盘。
+ * 工具绑定按请求计算：在哪条会话里发消息，工具就作用于那个终端页面的会话。
  */
 export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const aiConfigs = useAppStore((s) => s.aiConfigs)
   const aiSettings = useAppStore((s) => s.aiSettings)
   const sessions = useAppStore((s) => s.sessions)
   const activeSession = sessions.find((s) => s.id === sessionId)
-  // 每个终端会话一个独立的 AI 对话：面板展示所属会话的上下文
-  const chat = useAppStore((s) => (sessionId ? s.aiChats[sessionId] : undefined))
-  const messages = chat?.messages ?? NO_MESSAGES
-  /** 最近一次上下文压缩通知（终端助手没有上下文圆环，累计 token 不在这里展示） */
-  const contextNotice = chat?.contextNotice
-  const aiStreaming = chat?.streaming ?? false
-  const aiError = chat?.error ?? null
-  const deleteAiMessagesFrom = useAppStore((s) => s.deleteAiMessagesFrom)
+  // 当前页面打开的 AI 会话：可能是草稿（新建还没发过消息），也可能是池里的历史会话
+  const activeId = useAppStore((s) => (sessionId ? s.activeTerminalConv[sessionId] : undefined))
+  const draft = useAppStore((s) => (sessionId ? s.terminalDrafts[sessionId] : undefined))
+  const conversation: AgentConversation | undefined = useAppStore((s) => {
+    if (!sessionId) return undefined
+    if (draft && draft.id === activeId) return draft
+    return s.terminalConversations.find((c) => c.id === activeId)
+  })
+  const terminalConversations = useAppStore((s) => s.terminalConversations)
+  // 运行态（流式 / 重试 / 压缩通知）在 agentRuns 上，按会话 id 取 —— 与工作区 Agent 同一份
+  const run = useAppStore((s) => (conversation ? s.agentRuns[conversation.id] : undefined))
+  const messages = conversation?.messages ?? NO_MESSAGES
+  const cid = conversation?.id ?? null
+  const aiStreaming = run?.streaming ?? false
+  const aiError = run?.error ?? null
+  const deleteTerminalMessagesFrom = useAppStore((s) => s.deleteTerminalMessagesFrom)
   // 本会话待批准的确认请求：多实例下各会话独立，显示在对应工具卡内
   const pendingConfirm = useAppStore((s) => {
     for (const c of Object.values(s.pendingConfirms)) {
@@ -462,11 +495,13 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     }
     return null
   })
-  const sendAiMessage = useAppStore((s) => s.sendAiMessage)
-  const resendAiMessage = useAppStore((s) => s.resendAiMessage)
-  const abortAi = useAppStore((s) => s.abortAi)
-  const clearAiMessages = useAppStore((s) => s.clearAiMessages)
-  const setAiChatConfig = useAppStore((s) => s.setAiChatConfig)
+  const sendTerminalMessage = useAppStore((s) => s.sendTerminalMessage)
+  const resendTerminalMessage = useAppStore((s) => s.resendTerminalMessage)
+  const abortTerminal = useAppStore((s) => s.abortTerminal)
+  const newTerminalConversation = useAppStore((s) => s.newTerminalConversation)
+  const selectTerminalConversation = useAppStore((s) => s.selectTerminalConversation)
+  const deleteTerminalConversation = useAppStore((s) => s.deleteTerminalConversation)
+  const setTerminalConversationModel = useAppStore((s) => s.setTerminalConversationModel)
   const setAiPermissionMode = useAppStore((s) => s.setAiPermissionMode)
   const resolveAiConfirm = useAppStore((s) => s.resolveAiConfirm)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
@@ -486,6 +521,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const [input, setInput] = useState('')
   /** 正在编辑的用户消息（内容已灌进横条输入框；发送时先删这条及其之后，再重发） */
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(null)
+  /** 左侧会话列表是否展开（面板本地的 UI 态，不进 store） */
+  const [listOpen, setListOpen] = useState(false)
   const inputRef = useRef<ComponentRef<typeof Input> | null>(null)
   // 弹层展开状态受控：antd 的下拉 portal 在 body 上，拖浮窗时不会跟随，
   // 会在原地悬空错位 —— 拖拽开始就把它们收起
@@ -525,12 +562,18 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     if (hasFollowupForSession && sessionId) setAiMinimized(sessionId, false)
   }, [hasFollowupForSession, sessionId, setAiMinimized])
 
-  // 模型**按终端会话独立**：这个会话选过就用自己的，没选过才回退到设置页的默认模型。
+  // 面板还没有任何会话（首次打开 / 跨重启的新终端页面）时现开一个草稿，
+  // 保证「点开就能输入」；已有草稿时 newTerminalConversation 会复用它
+  useEffect(() => {
+    if (sessionId && !activeId) newTerminalConversation(sessionId)
+  }, [sessionId, activeId, newTerminalConversation])
+
+  // 模型按**会话**独立：这条会话选过就用自己的，没选过才回退到设置页的默认模型。
   // 参与回退的配置必须**有可用模型**（models 被删空的配置跳过，否则下拉会出 undefined 项、
   // 请求也解析不出模型）
   const usable = (id?: string | null): string | undefined =>
     hasUsableConfig(aiConfigs, id) ? (id ?? undefined) : undefined
-  const effectiveConfigId = usable(chat?.configId) ?? usable(aiSettings.activeConfigId)
+  const effectiveConfigId = usable(conversation?.configId) ?? usable(aiSettings.activeConfigId)
   const hasConfig = Boolean(effectiveConfigId)
 
   // ---------- 模型下拉：按「模型配置 / 模型 id」两级分组（结构同 Agent 页） ----------
@@ -541,8 +584,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     if (!config) return undefined
     const models = configModels(config)
     if (models.length === 0) return undefined
-    if (chat?.modelId && models.includes(chat.modelId)) {
-      return `cfg:${config.id}:${chat.modelId}`
+    if (conversation?.modelId && models.includes(conversation.modelId)) {
+      return `cfg:${config.id}:${conversation.modelId}`
     }
     return `cfg:${config.id}:${models[0]}`
   })()
@@ -567,10 +610,10 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
       : [])
   ]
   const handleModelSelect = (value?: string): void => {
-    if (!sessionId || !value) return
+    if (!cid || !value) return
     if (value.startsWith('cfg:')) {
       const [, cfgId, cfgModel] = value.split(':')
-      setAiChatConfig(sessionId, cfgId, cfgModel)
+      void setTerminalConversationModel(cid, { configId: cfgId, modelId: cfgModel })
     }
   }
   const permissionMode: AiPermissionMode =
@@ -671,7 +714,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     // 当成拖拽——既把弹层关掉，又 preventDefault 掉后续 mousedown/click，
     // 选项永远选不中（表现就是「模型切换切不过去」）。所以只认浮窗自己的 DOM。
     if (!el || !el.contains(target)) return
-    if (target.closest('button, input, textarea, .ant-select')) return
+    if (target.closest('button, input, textarea, .ant-select, .ant-popover')) return
     setModelSelectOpen(false)
     setPermMenuOpen(false)
     e.preventDefault()
@@ -791,7 +834,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   }
 
   /** 点「编辑」：把这条的内容灌进横条输入框并进入编辑态（发送时走重发，先删这条及其之后） */
-  const startEdit = (target: AiChatMessage) => {
+  const startEdit = (target: AgentChatMessage) => {
     const text = target.parts
       .filter((p) => p.type === 'text')
       .map((p) => (p.type === 'text' ? p.text : ''))
@@ -810,7 +853,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   }
 
   const handleSend = () => {
-    if (!input.trim() || aiStreaming || !sessionId) return
+    if (!input.trim() || aiStreaming || !sessionId || !cid) return
     const text = input
     setInput('')
     // 自己发消息 / 编辑重发：让消息区瞬时落底（用户翻在上方也要回到底部）
@@ -818,17 +861,20 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     if (editing) {
       const id = editing.id
       setEditing(null)
-      void resendAiMessage(sessionId, id, text)
+      void resendTerminalMessage(cid, id, text)
     } else {
-      void sendAiMessage(text, sessionId)
+      void sendTerminalMessage(text, sessionId)
     }
   }
 
-  // 换了会话就清掉编辑态，避免把上一条会话的编辑目标带过去
+  // 换了会话 / 换了终端页面就清掉编辑态，避免把上一处的编辑目标带过去
   useEffect(() => {
     setEditing(null)
     setInput('')
-  }, [sessionId])
+  }, [sessionId, cid])
+
+  // 会话列表（最新在前）：历史会话跨终端页面共享，草稿不进列表
+  const convList = [...terminalConversations].sort((a, b) => b.updatedAt - a.updatedAt)
 
   return (
     <aside
@@ -853,9 +899,9 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
         )}
         style={{ height: showList ? cardHeight : 0 }}
       >
-        {/* 卡片内容：撑满折叠容器，头 + 消息区 + 横条自上而下排布 */}
+        {/* 卡片内容：撑满折叠容器，头 + 主体（左会话列表 + 消息区）自上而下排布 */}
         <div className="flex h-full min-h-0 flex-col">
-          {/* 卡片头部：拖拽手柄 + 模型选择 + 操作（整行可拖动） */}
+          {/* 卡片头部：拖拽手柄 + 模型选择 + 会话列表开关 + 操作（整行可拖动） */}
           <div
             onPointerDown={startDrag}
             className="flex h-10 shrink-0 cursor-move touch-none items-center gap-1 border-b border-border/70 bg-sidebar/40 px-2"
@@ -879,10 +925,10 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             />
             <Button
               type="text"
-              icon={<Eraser className="size-3.5" />}
-              className="h-7 w-7 shrink-0 p-0 text-muted-foreground"
-              title="清空对话"
-              onClick={() => sessionId && clearAiMessages(sessionId)}
+              icon={listOpen ? <PanelLeftClose className="size-3.5" /> : <PanelLeftOpen className="size-3.5" />}
+              className={cn('h-7 w-7 shrink-0 p-0', listOpen ? 'text-primary' : 'text-muted-foreground')}
+              title={listOpen ? '收起会话列表' : '会话列表'}
+              onClick={() => setListOpen((v) => !v)}
             />
             <Button
               type="text"
@@ -929,70 +975,134 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             </div>
           )}
 
-          {/* 消息区：占满卡片剩余高度并在内部滚动（高度固定，不随消息多少伸缩），
-              AI 回复属于「内容」，保持可选中复制 */}
-          <div className="relative min-h-0 flex-1 px-2">
-            {messages.length === 0 ? (
-              <div className="flex h-full flex-col p-3">
-                <div className="flex flex-1 flex-col items-center justify-center gap-3 py-6 text-center text-muted-foreground">
-                  <Sparkles className="size-8 text-primary/40" />
-                  {activeSession ? (
-                    <div className="space-y-1 text-xs leading-5">
-                      <p>试试：查看当前目录下占用空间最大的文件</p>
-                      <p>试试：诊断 nginx 为什么启动失败</p>
-                    </div>
-                  ) : (
-                    <div className="space-y-1 text-xs leading-5">
-                      <p>打开一个终端会话后开始对话</p>
-                      <p>每个终端都有独立、互不影响的 AI 上下文</p>
-                    </div>
+          {/* 主体：左侧会话列表（可收起）+ 消息区 */}
+          <div className="relative flex min-h-0 flex-1">
+            {listOpen && (
+              <div className="flex w-[var(--conv-w)] shrink-0 flex-col border-r border-border/70 bg-sidebar/30" style={{ ['--conv-w' as string]: `${CONV_LIST_WIDTH}px` }}>
+                <button
+                  type="button"
+                  className="flex h-8 shrink-0 items-center gap-1.5 border-b border-border/60 px-2 text-[12px] text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+                  title="新开会话"
+                  onClick={() => sessionId && newTerminalConversation(sessionId)}
+                >
+                  <Plus className="size-3.5" />
+                  <span>新开会话</span>
+                </button>
+                <div className="min-h-0 flex-1 overflow-y-auto p-1">
+                  {convList.length === 0 && (
+                    <p className="px-2 py-3 text-[11px] leading-4 text-muted-foreground/70">
+                      还没有历史会话。发送第一条消息后，这里会列出这个终端助手的全部会话。
+                    </p>
                   )}
-                  {!hasConfig && (
-                    <Button
-                      size="small"
-                      variant="filled"
-                      className="mt-2"
-                      onClick={() => setSettingsOpen(true, 'models')}
-                    >
-                      先去配置模型
-                    </Button>
-                  )}
+                  {convList.map((c) => {
+                    const active = c.id === cid
+                    return (
+                      <div
+                        key={c.id}
+                        className={cn(
+                          'group/item flex w-full cursor-pointer items-center gap-1 rounded-md px-2 py-1.5 text-left text-xs',
+                          active
+                            ? 'bg-primary/10 text-foreground'
+                            : 'text-muted-foreground hover:bg-secondary/60 hover:text-foreground'
+                        )}
+                        onClick={() => sessionId && selectTerminalConversation(sessionId, c.id)}
+                      >
+                        <span className="min-w-0 flex-1 truncate">{c.title || '新会话'}</span>
+                        <span className="shrink-0 text-[10px] text-muted-foreground/60">
+                          {convTimeLabel(c.updatedAt)}
+                        </span>
+                        <Popconfirm
+                          title="删除这条会话？"
+                          description="消息历史将从磁盘一并删除。"
+                          okText="删除"
+                          cancelText="取消"
+                          onConfirm={(e) => {
+                            e?.stopPropagation()
+                            if (sessionId) void deleteTerminalConversation(sessionId, c.id)
+                          }}
+                          onCancel={(e) => e?.stopPropagation()}
+                        >
+                          <span
+                            role="button"
+                            aria-label="删除会话"
+                            className="hidden shrink-0 rounded p-0.5 text-muted-foreground/60 transition-colors hover:bg-destructive/10 hover:text-destructive group-hover/item:block"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <Trash2 className="size-3" />
+                          </span>
+                        </Popconfirm>
+                      </div>
+                    )
+                  })}
                 </div>
-                {aiError && <p className="text-xs text-destructive px-3">{aiError}</p>}
               </div>
-            ) : (
-              <Conversation
-                className="h-full pt-3"
-                resetKey={`${sessionId ?? '__no_session__'}#${scrollResetSeq}`}
-              >
-                <ConversationContent>
-                  {/* 上下文已压缩（与工作区 Agent 同款；累计 token 已收进工作区 Agent 的上下文圆环）*/}
-                  <ContextNoticeBar notice={contextNotice} className="px-3" />
-                  {messages.map((msg, index) => (
-                    <div key={msg.id} data-message-id={msg.id} className="pb-3">
-                      <MessageBubble
-                        role={msg.role}
-                        parts={msg.parts}
-                        streaming={
-                          aiStreaming && index === messages.length - 1 && msg.role === 'assistant'
-                        }
-                        canEdit={!aiStreaming && msg.role === 'user'}
-                        editing={editing?.id === msg.id}
-                        onEdit={() => startEdit(msg)}
-                        canDelete={!aiStreaming}
-                        tailCount={messages.length - index}
-                        onDelete={() => deleteAiMessagesFrom(sessionId ?? '', msg.id)}
-                        pendingConfirm={pendingConfirm}
-                        usage={msg.usage}
-                        retrying={chat?.retrying ?? null}
-                      />
-                    </div>
-                  ))}
-                  {aiError && <p className="text-xs text-destructive px-3">{aiError}</p>}
-                </ConversationContent>
-                <ConversationScrollButton />
-              </Conversation>
             )}
+
+            {/* 消息区：占满剩余宽度并在内部滚动（高度固定，不随消息多少伸缩），
+                AI 回复属于「内容」，保持可选中复制 */}
+            <div className="relative min-h-0 min-w-0 flex-1 px-2">
+              {messages.length === 0 ? (
+                <div className="flex h-full flex-col p-3">
+                  <div className="flex flex-1 flex-col items-center justify-center gap-3 py-6 text-center text-muted-foreground">
+                    <Sparkles className="size-8 text-primary/40" />
+                    {activeSession ? (
+                      <div className="space-y-1 text-xs leading-5">
+                        <p>试试：查看当前目录下占用空间最大的文件</p>
+                        <p>试试：诊断 nginx 为什么启动失败</p>
+                      </div>
+                    ) : (
+                      <div className="space-y-1 text-xs leading-5">
+                        <p>打开一个终端会话后开始对话</p>
+                        <p>每个终端页面有独立的 AI 上下文与会话列表</p>
+                      </div>
+                    )}
+                    {!hasConfig && (
+                      <Button
+                        size="small"
+                        variant="filled"
+                        className="mt-2"
+                        onClick={() => setSettingsOpen(true, 'models')}
+                      >
+                        先去配置模型
+                      </Button>
+                    )}
+                  </div>
+                  {aiError && <p className="text-xs text-destructive px-3">{aiError}</p>}
+                </div>
+              ) : (
+                <Conversation
+                  className="h-full pt-3"
+                  resetKey={`${cid ?? '__no_conversation__'}#${scrollResetSeq}`}
+                >
+                  <ConversationContent>
+                    {/* 上下文已压缩（与工作区 Agent 同款；累计 token 已收进工作区 Agent 的上下文圆环）*/}
+                    <ContextNoticeBar notice={run?.contextNotice} className="px-3" />
+                    {messages.map((msg, index) => (
+                      <div key={msg.id} data-message-id={msg.id} className="pb-3">
+                        <MessageBubble
+                          role={msg.role}
+                          parts={msg.parts}
+                          streaming={
+                            aiStreaming && index === messages.length - 1 && msg.role === 'assistant'
+                          }
+                          canEdit={!aiStreaming && msg.role === 'user'}
+                          editing={editing?.id === msg.id}
+                          onEdit={() => startEdit(msg)}
+                          canDelete={!aiStreaming}
+                          tailCount={messages.length - index}
+                          onDelete={() => cid && void deleteTerminalMessagesFrom(cid, msg.id)}
+                          pendingConfirm={pendingConfirm}
+                          usage={msg.usage}
+                          retrying={run?.retrying ?? null}
+                        />
+                      </div>
+                    ))}
+                    {aiError && <p className="text-xs text-destructive px-3">{aiError}</p>}
+                  </ConversationContent>
+                  <ConversationScrollButton />
+                </Conversation>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -1175,14 +1285,14 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             icon={<Square className="size-4" />}
             title="停止"
             className="shrink-0"
-            onClick={() => sessionId && void abortAi(sessionId)}
+            onClick={() => sessionId && void abortTerminal(sessionId)}
           />
         ) : (
           <Button
             type="text"
             size="small"
             icon={<Send className="size-4" />}
-            disabled={!input.trim() || !hasConfig || !sessionId}
+            disabled={!input.trim() || !hasConfig || !sessionId || !cid}
             title="发送"
             className="shrink-0"
             onClick={handleSend}

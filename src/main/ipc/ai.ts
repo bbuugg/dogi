@@ -1,17 +1,15 @@
 import { ipcMain } from 'electron'
-import { aiService } from '../services/ai/ai'
-import { sessionManager } from '../services/terminal/sessions'
 import { storage } from '../services/storage'
-import type { AiChatRequest, AiModelConfig, AiSettings, AiStreamEvent } from '@shared/types'
-import type { IpcContext } from './shared'
+import type { AiModelConfig, AiSettings } from '@shared/types'
 
 /**
- * 终端 AI 助手 IPC：模型配置、助手设置、对话流与命令执行确认。
+ * AI 模型配置与设置 IPC（两条 AI 线共用：设置页的模型配置、权限模式、超时等）。
  *
- * 与「工作区 Agent」（agent.ts）是两套并列的能力：这里的助手绑定终端会话，
- * 工具是终端操作；agent.ts 绑定工作区，工具是文件与命令。
+ * 对话流已经统一到 `agent:chat`（见 ipc/agent.ts）——终端 AI 助手与工作区 Agent
+ * 走同一组通道（`agent:chat` / `agent:chat-event` / `agent:confirm`）。
+ * 这里只剩模型配置的 CRUD 与设置读写，不再有任何对话状态。
  */
-export function registerAiIpc(ctx: IpcContext): void {
+export function registerAiIpc(): void {
   // ---------- AI 模型配置 ----------
   ipcMain.handle('ai:config:list', () => storage.listAiConfigs())
   ipcMain.handle('ai:config:save', (_e, config: AiModelConfig) => storage.saveAiConfig(config))
@@ -39,29 +37,9 @@ export function registerAiIpc(ctx: IpcContext): void {
       const body = (await res.json()) as unknown
       const list = Array.isArray(body) ? body : (body as { data?: unknown }).data
       const ids = (Array.isArray(list) ? list : [])
-        .map((m) => (typeof m === 'string' ? m : (m as { id?: unknown }).id))
+        .map((m) => (typeof m === 'string' ? (m as { id?: unknown }).id : undefined))
         .filter((v): v is string => typeof v === 'string' && v.length > 0)
       return [...new Set(ids)]
     }
-  )
-  // ---------- 对话流与中止 ----------
-  ipcMain.handle('ai:chat', async (_e, req: AiChatRequest) => aiService.chat(req))
-  ipcMain.handle('ai:abort', (_e, requestId: string) => aiService.abort(requestId))
-  aiService.on('chat-event', (requestId: string, event: AiStreamEvent) =>
-    ctx.broadcast('ai:chat-event', { requestId, event })
-  )
-
-  // ---------- 命令执行确认（确认模式） ----------
-  aiService.setConfirmSink({
-    request: (req) => ctx.broadcast('ai:confirm', req),
-    // 确认已有结论（中止等非用户路径），渲染端据此移除卡片
-    resolved: (id) => ctx.broadcast('ai:confirm-resolved', { id })
-  })
-  ipcMain.handle('ai:confirm:resolve', (_e, payload: { id: string; approved: boolean }) =>
-    aiService.resolveConfirm(payload.id, payload.approved)
-  )
-  // 会话关闭：销毁其 AI 助手实例（每个终端会话一个独立实例）
-  sessionManager.on('closed', ({ sessionId }: { sessionId: string }) =>
-    aiService.disposeSession(sessionId)
   )
 }

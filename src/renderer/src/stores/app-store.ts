@@ -24,7 +24,6 @@ export {
   type SiblingTabsCloseMode,
   type PanelTab,
   type PanelGroup,
-  type AiChatState,
   type AgentRunState,
   type QueuedAgentMessage,
   type TransferItem,
@@ -46,11 +45,11 @@ export {
   groupTerminalSessionId,
   conversationKind,
   isDraftConversation,
-  emptyAiChat,
   emptyAgentRun,
   withPluginList,
   DEFAULT_PREFERENCES
 } from './types'
+export { registerClientTool, unregisterClientTool } from './client-tools'
 
 // ---- 导入实现所需的类型与纯函数 ----
 // ⚠️ 顶部的 `export { … } from './types'` **不会**把符号带进本地作用域，
@@ -60,7 +59,6 @@ import {
   apiTabId,
   apiTabTitle,
   emptyAgentRun,
-  emptyAiChat,
   isDraftConversation,
   normalizeSettingsTab,
   terminalTabId,
@@ -87,7 +85,6 @@ import type {
   AgentChatMessage,
   AgentConversation,
   AgentStreamEvent,
-  AiChatMessage,
   CommandHistoryEntry,
   NoteFileItem,
   Preferences,
@@ -109,19 +106,26 @@ import {
   addOrFocusTab
 } from './pane-helpers'
 import {
-  aiRequestSessions,
   agentRequestConversations,
   DEFAULT_CONVERSATION_TITLE,
   titleFromMessage,
   newConversation,
+  newTerminalDraft,
   ensureConversation,
   patchConversation,
   persistConversation,
   persistConversationThrottled,
+  persistTerminalConversation,
+  persistTerminalConversationThrottled,
   notifyAgentFinished,
-  appendAgentPart,
-  appendAssistantPart
+  appendAgentPart
 } from './agent-helpers'
+import {
+  handleClientToolInvoke,
+  listClientToolDefs,
+  registerClientTool,
+  unregisterClientTool
+} from './client-tools'
 
 /** 终端字号持久化写入的防抖句柄（Ctrl+滚轮会触发连续调整） */
 let fontSizeSaveTimer: number | undefined
@@ -182,23 +186,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       if (reconnectingIds.has(sessionId)) return
       set((s) => applyTabClose(s, sessionId))
     })
-    window.api.ai.onChatEvent(({ requestId, event }) => {
-      get().handleAiEvent(requestId, event)
-    })
-    window.api.ai.onConfirmRequest((req) => {
-      // 每个会话的助手实例独立弹卡（同一实例内已由主进程串行化）
-      set((s) => ({ pendingConfirms: { ...s.pendingConfirms, [req.id]: req } }))
-    })
-    // 确认已有结论（中止等非用户路径）：移除对应卡片
-    window.api.ai.onConfirmResolved(({ id }) => {
-      set((s) => {
-        if (!(id in s.pendingConfirms)) return {}
-        const next = { ...s.pendingConfirms }
-        delete next[id]
-        return { pendingConfirms: next }
-      })
-    })
-    // ---------- AI Agent 事件 ----------
+    // ---------- AI Agent 事件（终端助手与工作区 Agent 共用这一组通道） ----------
     window.api.agent.onChatEvent(({ requestId, conversationId, event }) => {
       // ⚠️ 事件可能**早于** `agent:chat` 的返回值到达（主进程无配置的失败分支用
       // setTimeout(0) 发事件，比 invoke 回包更快），此时本地这张表里还没有这个 requestId，
@@ -206,6 +194,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
       // 直接带上 conversationId，这里优先用它补登记。
       if (conversationId) agentRequestConversations.set(requestId, conversationId)
       get().handleAgentEvent(requestId, event)
+    })
+    // ---------- 客户端工具（渲染端执行、渲染端确认；定义随 agent:chat 请求携带） ----------
+    window.api.clientTools.onInvoke((payload) => {
+      void handleClientToolInvoke(payload)
     })
     /**
      * ACP 会话就绪（`session/new` 或 `session/load` 完成）后的状态推送：
@@ -244,15 +236,15 @@ export const useAppStore = create<AppStore>()((set, get) => {
       }
     })
     window.api.agent.onConfirmRequest((req) => {
-      set((s) => ({ agentPendingConfirms: { ...s.agentPendingConfirms, [req.id]: req } }))
+      set((s) => ({ pendingConfirms: { ...s.pendingConfirms, [req.id]: req } }))
     })
     // 确认已有结论（中止等非用户路径）：移除对应卡片
     window.api.agent.onConfirmResolved(({ id }) => {
       set((s) => {
-        if (!(id in s.agentPendingConfirms)) return {}
-        const next = { ...s.agentPendingConfirms }
+        if (!(id in s.pendingConfirms)) return {}
+        const next = { ...s.pendingConfirms }
         delete next[id]
-        return { agentPendingConfirms: next }
+        return { pendingConfirms: next }
       })
     })
     // ---------- ask_followup_question 提问卡（Agent 页与终端 AI 助手共用一组通道） ----------
@@ -320,7 +312,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
     aiConfigs: [],
     aiSettings: { permissionMode: 'full', maxRetries: DEFAULT_MAX_RETRIES },
-    aiChats: {},
+    // 终端 AI 助手：会话池（bootstrap 灌入）+ 各页面的当前指针与新建草稿（仅内存）
+    terminalConversations: [],
+    activeTerminalConv: {},
+    terminalDrafts: {},
     pendingConfirms: {},
 
     agentWorkspaces: [],
@@ -332,7 +327,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
     agentAcpMessages: {},
     acpStates: {},
     acpLoading: {},
-    agentPendingConfirms: {},
     followupRequests: {},
     // 待发送队列：会话进行中继续发的消息排在这里（只存内存，见 QueuedAgentMessage）
     agentQueues: {},
@@ -377,7 +371,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
     commandHistory: [],
 
     bootstrap: async () => {
-      const [profiles, sshGroups, knownHosts, tunnelInit, configs, settings, preferences, shells, scripts, scriptGroups, apiRequests, apiGroups, apiHistory, shortcuts, agentWorkspaces, agentConversations, hostLogs, commandHistory] = await Promise.all([
+      const [profiles, sshGroups, knownHosts, tunnelInit, configs, settings, preferences, shells, scripts, scriptGroups, apiRequests, apiGroups, apiHistory, shortcuts, agentWorkspaces, agentConversations, terminalConversations, hostLogs, commandHistory] = await Promise.all([
         window.api.ssh.list(),
         window.api.ssh.listGroups(),
         window.api.ssh.knownHostsList(),
@@ -394,6 +388,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         window.api.shortcuts.get(),
         window.api.agent.listWorkspaces(),
         window.api.agent.listConversations(),
+        window.api.agent.terminalConvs.list(),
         window.api.logs.list(),
         window.api.history.list()
       ])
@@ -426,7 +421,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
         agentWorkspaces,
         agentConversations: initial.conversations,
         activeAgentWorkspaceId: agentWorkspaces[0]?.id ?? null,
-        activeAgentConversationId: initial.activeId
+        activeAgentConversationId: initial.activeId,
+        terminalConversations
       })
       // 退出前的落盘请求（主进程 before-quit 时发来）：把进行中的 Agent 会话立刻写盘。
       // 平时落盘是节流的（最多丢几秒），这一下把「最后几秒」也补上。
@@ -437,7 +433,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
             .filter(([, run]) => run.streaming)
             .map(([cid]) => cid)
           void Promise.all(
-            streaming.map((cid) => persistConversation(get().agentConversations, cid))
+            streaming.map((cid) =>
+              // 终端助手的会话在独立的池里，按会话所在池挑落盘通道
+              get().terminalConversations.some((c) => c.id === cid)
+                ? persistTerminalConversation(get().terminalConversations, cid)
+                : persistConversation(get().agentConversations, cid)
+            )
           )
             .catch(() => { })
             .finally(() => void window.api.app.flushDone())
@@ -619,11 +620,17 @@ export const useAppStore = create<AppStore>()((set, get) => {
           // 旧会话的「不支持监控」标记同样作废（新会话会重新探测平台）
           const monitorUnsupported = { ...s.monitorUnsupported }
           delete monitorUnsupported[id]
-          // 该会话的 AI 对话随重连迁移到新会话 ID（上下文保留）
-          const aiChats = { ...s.aiChats }
-          if (aiChats[id]) {
-            aiChats[info.id] = aiChats[id]
-            delete aiChats[id]
+          // 会话池是全局的，随重连迁移的只是「这个终端页面打开的是哪条会话」的指针
+          //（上下文在会话记录上，不跟终端会话走）
+          const activeTerminalConv = { ...s.activeTerminalConv }
+          if (activeTerminalConv[id]) {
+            activeTerminalConv[info.id] = activeTerminalConv[id]
+            delete activeTerminalConv[id]
+          }
+          const terminalDrafts = { ...s.terminalDrafts }
+          if (terminalDrafts[id]) {
+            terminalDrafts[info.id] = terminalDrafts[id]
+            delete terminalDrafts[id]
           }
           return {
             sessions,
@@ -634,7 +641,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
             exitedSessions: exited,
             monitors,
             monitorUnsupported,
-            aiChats
+            activeTerminalConv,
+            terminalDrafts
           }
         })
       } catch (e) {
@@ -1555,14 +1563,27 @@ export const useAppStore = create<AppStore>()((set, get) => {
       set({ aiSettings: settings })
     },
 
-    setAiChatConfig: (sid, configId, modelId) => {
-      if (!sid) return
+    setTerminalConversationModel: async (conversationId, patch) => {
+      const cid = conversationId
+      if (!cid) return
+      // 草稿只写内存（转正时随首条消息一起落盘）；真会话就地更新并落盘。
+      // 不动 updatedAt：模型选择是配置变更，不该让会话在列表里跳到最前。
+      const draft = Object.values(get().terminalDrafts).find((c) => c.id === cid)
+      if (draft) {
+        set((s) => ({
+          terminalDrafts: {
+            ...s.terminalDrafts,
+            [cid]: { ...draft, configId: patch.configId, modelId: patch.modelId }
+          }
+        }))
+        return
+      }
       set((s) => ({
-        aiChats: {
-          ...s.aiChats,
-          [sid]: { ...(s.aiChats[sid] ?? emptyAiChat()), configId, modelId }
-        }
+        terminalConversations: s.terminalConversations.map((c) =>
+          c.id === cid ? { ...c, configId: patch.configId, modelId: patch.modelId } : c
+        )
       }))
+      await persistTerminalConversation(get().terminalConversations, cid)
     },
 
     saveAiSettings: async (patch) => {
@@ -1578,14 +1599,14 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
 
     resolveAiConfirm: async (id, approved) => {
-      // 用户直接回复：本地先移除卡片，再通知主进程对应实例
+      // 用户直接回复：本地先移除卡片，再通知主进程（通道与工作区 Agent 共用）
       set((s) => {
         if (!(id in s.pendingConfirms)) return {}
         const next = { ...s.pendingConfirms }
         delete next[id]
         return { pendingConfirms: next }
       })
-      await window.api.ai.resolveConfirm(id, approved)
+      await window.api.agent.resolveConfirm(id, approved)
     },
 
     setTheme: async (mode) => {
@@ -1768,265 +1789,245 @@ export const useAppStore = create<AppStore>()((set, get) => {
       set({ shortcuts: next })
     },
 
-    sendAiMessage: async (text, targetSessionId) => {
+    // ---------- 终端 AI 助手（统一走 agent:chat 引擎，scope = 'terminal'） ----------
+
+    selectTerminalConversation: (sessionId, conversationId) => {
+      if (!sessionId) return
+      set((s) => ({ activeTerminalConv: { ...s.activeTerminalConv, [sessionId]: conversationId } }))
+    },
+
+    newTerminalConversation: (sessionId) => {
+      if (!sessionId) return
+      const state = get()
+      // 已有草稿就复用：连点两次「新开会话」还是同一个空页（与工作区草稿一致）
+      const existing = state.terminalDrafts[sessionId]
+      if (existing) {
+        set((s) => ({ activeTerminalConv: { ...s.activeTerminalConv, [sessionId]: existing.id } }))
+        return
+      }
+      // 模型选择继承该页面上一条会话，少一次重新选
+      const prevId = state.activeTerminalConv[sessionId]
+      const prev =
+        state.terminalConversations.find((c) => c.id === prevId) ??
+        Object.values(state.terminalDrafts).find((c) => c.id === prevId)
+      const draft = newTerminalDraft({ configId: prev?.configId, modelId: prev?.modelId })
+      set((s) => ({
+        terminalDrafts: { ...s.terminalDrafts, [sessionId]: draft },
+        activeTerminalConv: { ...s.activeTerminalConv, [sessionId]: draft.id }
+      }))
+    },
+
+    deleteTerminalConversation: async (sessionId, conversationId) => {
+      const cid = conversationId
+      if (!cid) return
+      // 正在跑的那条先中止（与 deleteAgentConversation 同纪律：不留孤儿请求）
+      await get().abortAgent(cid)
+      await window.api.agent.terminalConvs.delete(cid)
+      set((s) => {
+        const remaining = s.terminalConversations.filter((c) => c.id !== cid)
+        const pointers = { ...s.activeTerminalConv }
+        // 删的是当前打开的那条：切到最近一条；一条不剩就现开一个草稿
+        if (sessionId && pointers[sessionId] === cid) {
+          const latest = [...remaining].sort((a, b) => b.updatedAt - a.updatedAt)[0]
+          if (latest) {
+            pointers[sessionId] = latest.id
+          } else {
+            const draft = newTerminalDraft()
+            return {
+              terminalConversations: remaining,
+              activeTerminalConv: { ...pointers, [sessionId]: draft.id },
+              terminalDrafts: { ...s.terminalDrafts, [sessionId]: draft }
+            }
+          }
+        }
+        return { terminalConversations: remaining, activeTerminalConv: pointers }
+      })
+    },
+
+    sendTerminalMessage: async (text, sessionId) => {
       const trimmed = text.trim()
-      // 对话归属于一个终端会话（默认当前激活的），各会话的助手上下文互相独立
-      const sid = targetSessionId ?? get().activeSessionId
-      if (!sid) return
-      const chat = get().aiChats[sid] ?? emptyAiChat()
-      if (!trimmed || chat.streaming) return
+      if (!sessionId || !trimmed) return
+      const state = get()
+      const activeId = state.activeTerminalConv[sessionId]
+      const draft = state.terminalDrafts[sessionId]
+      const isDraftConv = !!draft && draft.id === activeId
+      const conversation = isDraftConv
+        ? draft
+        : state.terminalConversations.find((c) => c.id === activeId)
+      if (!conversation) return
+      if ((get().agentRuns[conversation.id] ?? emptyAgentRun()).streaming) return
+
       const now = Date.now()
-      const userMsg: AiChatMessage = {
+      const userMsg: AgentChatMessage = {
         id: `u-${now}`,
-        role: 'user',
-        parts: [{ type: 'text', text: trimmed }],
+        role: "user",
+        parts: [{ type: "text", text: trimmed }],
         createdAt: now
       }
-      const assistantMsg: AiChatMessage = {
+      const assistantMsg: AgentChatMessage = {
         id: `a-${now}`,
-        role: 'assistant',
+        role: "assistant",
         parts: [],
         createdAt: now + 1
       }
-      const history = [...chat.messages, userMsg]
+      const history = [...conversation.messages, userMsg]
+      // 首条消息顺手定标题，省得用户手动命名（之后可在列表里改）
+      const title =
+        conversation.messages.length === 0 ? titleFromMessage(trimmed) : conversation.title
+      const cid = conversation.id
+      const promoted: AgentConversation = {
+        ...conversation,
+        title,
+        messages: [...history, assistantMsg],
+        updatedAt: now
+      }
+      set((s) =>
+        isDraftConv
+          ? {
+              // 草稿转正：进会话列表、清掉草稿槽、指针指向自己（**这一刻才落盘**）
+              terminalConversations: [...s.terminalConversations, promoted],
+              terminalDrafts: Object.fromEntries(
+                Object.entries(s.terminalDrafts).filter(([sid]) => sid !== sessionId)
+              ),
+              agentRuns: {
+                ...s.agentRuns,
+                [cid]: {
+                  streaming: true,
+                  requestId: null,
+                  error: null,
+                  retryable: false,
+                  retrying: null
+                }
+              }
+            }
+          : {
+              terminalConversations: s.terminalConversations.map((c) =>
+                c.id === cid ? promoted : c
+              ),
+              agentRuns: {
+                ...s.agentRuns,
+                [cid]: {
+                  ...(s.agentRuns[cid] ?? emptyAgentRun()),
+                  streaming: true,
+                  requestId: null,
+                  error: null,
+                  retryable: false,
+                  retrying: null
+                }
+              }
+            }
+      )
+      // 会话元信息与用户消息立刻落盘：这一轮即便失败 / 应用被关，输入也不会丢
+      void persistTerminalConversation(get().terminalConversations, cid)
+
+      try {
+        const { requestId } = await window.api.agent.chat({
+          // 工具绑定按请求计算：面板属于哪个终端就用哪个，切激活终端不影响这轮的作用目标
+          scope: "terminal",
+          kind: "mastra",
+          conversationId: cid,
+          targetSessionId: sessionId,
+          history,
+          configId: conversation.configId,
+          modelId: conversation.modelId,
+          // 客户端工具定义随请求携带（渲染端注册的都带上；执行与确认都在渲染端）
+          ...(listClientToolDefs().length ? { clientTools: listClientToolDefs() } : {})
+        })
+        agentRequestConversations.set(requestId, cid)
+        set((s) => ({
+          agentRuns: {
+            ...s.agentRuns,
+            [cid]: { ...(s.agentRuns[cid] ?? emptyAgentRun()), requestId }
+          }
+        }))
+      } catch (err) {
+        set((s) => ({
+          agentRuns: {
+            ...s.agentRuns,
+            [cid]: {
+              ...(s.agentRuns[cid] ?? emptyAgentRun()),
+              streaming: false,
+              requestId: null,
+              error: err instanceof Error ? err.message : String(err)
+            }
+          }
+        }))
+      }
+    },
+
+    abortTerminal: async (sessionId) => {
+      if (!sessionId) return
+      const cid = get().activeTerminalConv[sessionId]
+      if (!cid) return
+      const requestId = (get().agentRuns[cid] ?? emptyAgentRun()).requestId
+      if (!requestId) return
+      agentRequestConversations.delete(requestId)
+      // 只清属于本次请求的确认卡
+      for (const c of Object.values(get().pendingConfirms)) {
+        if (c.requestId === requestId) void get().resolveAiConfirm(c.id, false)
+      }
+      await window.api.agent.abort(requestId)
       set((s) => ({
-        aiChats: {
-          ...s.aiChats,
-          [sid]: {
-            ...chat,
-            messages: [...history, assistantMsg],
-            streaming: true,
-            error: null,
+        agentRuns: {
+          ...s.agentRuns,
+          [cid]: {
+            ...(s.agentRuns[cid] ?? emptyAgentRun()),
+            streaming: false,
+            requestId: null,
+            retryable: false,
             retrying: null
           }
         }
       }))
-
-      try {
-        // 主进程把工具绑定到该会话：切换激活终端不影响这段对话的作用目标；
-        // configId/modelId 也按会话带过去（未选则主进程回退到默认模型/配置默认模型）
-        const { requestId } = await window.api.ai.chat({
-          history,
-          targetSessionId: sid,
-          configId: chat.configId,
-          modelId: chat.modelId
-        })
-        aiRequestSessions.set(requestId, sid)
-        set((s) => {
-          const c = s.aiChats[sid]
-          if (!c) return {}
-          return { aiChats: { ...s.aiChats, [sid]: { ...c, requestId } } }
-        })
-      } catch (err) {
-        set((s) => {
-          const c = s.aiChats[sid]
-          if (!c) return {}
-          return {
-            aiChats: {
-              ...s.aiChats,
-              [sid]: {
-                ...c,
-                streaming: false,
-                requestId: null,
-                error: err instanceof Error ? err.message : String(err)
-              }
-            }
-          }
-        })
-      }
     },
 
-    abortAi: async (sid) => {
-      if (!sid) return
-      const chat = get().aiChats[sid]
-      const requestId = chat?.requestId ?? null
-      if (!requestId) return
-      aiRequestSessions.delete(requestId)
-      // 只清属于本次请求的确认卡，不影响其他会话实例的对话
-      for (const c of Object.values(get().pendingConfirms)) {
-        if (c.requestId === requestId) void get().resolveAiConfirm(c.id, false)
-      }
-      await window.api.ai.abort(requestId)
-      set((s) => ({
-        aiChats: s.aiChats[sid]
-          ? {
-              ...s.aiChats,
-              [sid]: { ...s.aiChats[sid], streaming: false, requestId: null, retrying: null }
-            }
-          : s.aiChats
-      }))
-    },
-
-    clearAiMessages: (sid) => {
-      if (!sid) return
-      const chat = get().aiChats[sid]
-      if (chat?.requestId) aiRequestSessions.delete(chat.requestId)
-      // 清空的是消息，不是这个会话选的模型 —— 保留 configId / modelId
-      set((s) => ({
-        aiChats: {
-          ...s.aiChats,
-          [sid]: { ...emptyAiChat(), configId: chat?.configId, modelId: chat?.modelId }
-        }
-      }))
-    },
-
-    /** 删除某条消息及其之后的全部消息（终端 AI 助手的「从这里重新开始」） */
-    deleteAiMessagesFrom: (sid, messageId) => {
-      if (!sid) return
-      set((s) => {
-        const chat = s.aiChats[sid]
-        if (!chat) return {}
-        const index = chat.messages.findIndex((m) => m.id === messageId)
-        if (index < 0) return {}
-        return {
-          aiChats: {
-            ...s.aiChats,
-            [sid]: { ...chat, messages: chat.messages.slice(0, index), error: null }
-          }
-        }
-      })
-    },
-
-    resendAiMessage: async (sid, messageId, text) => {
-      const trimmed = text.trim()
-      if (!sid || !trimmed) return
-      const chat = get().aiChats[sid]
-      if (!chat || chat.streaming) return
-      const index = chat.messages.findIndex((m) => m.id === messageId)
+    deleteTerminalMessagesFrom: async (conversationId, messageId) => {
+      const cid = conversationId
+      if (!cid) return
+      const conversation = get().terminalConversations.find((c) => c.id === cid)
+      if (!conversation) return
+      const index = conversation.messages.findIndex((m) => m.id === messageId)
       if (index < 0) return
-      // 先同步截断（set 是同步的），再交给 sendAiMessage —— 它读的是 store 里的历史
       set((s) => ({
-        aiChats: {
-          ...s.aiChats,
-          [sid]: { ...chat, messages: chat.messages.slice(0, index), error: null }
+        terminalConversations: patchConversation(s.terminalConversations, cid, {
+          messages: conversation.messages.slice(0, index)
+        }),
+        // 顺带清掉上一轮留下的报错条：消息都删了还挂着旧错误会很怪
+        agentRuns: {
+          ...s.agentRuns,
+          [cid]: { ...(s.agentRuns[cid] ?? emptyAgentRun()), error: null }
         }
       }))
-      await get().sendAiMessage(trimmed, sid)
+      await persistTerminalConversation(get().terminalConversations, cid)
     },
 
-    handleAiEvent: (requestId, event) => {
-      // 路由到发起该对话的会话（不依赖当前激活终端）
-      const sid = aiRequestSessions.get(requestId)
-      if (!sid) return
-      if (event.type === 'usage') {
-        set((s) => {
-          const chat = s.aiChats[sid]
-          if (!chat) return {}
-          const messages = [...chat.messages]
-          const last = messages[messages.length - 1]
-          if (last?.role === 'assistant') {
-            messages[messages.length - 1] = { ...last, usage: event.usage }
-          }
-          return { aiChats: { ...s.aiChats, [sid]: { ...chat, messages } } }
-        })
-        return
-      }
-
-      // 上下文压缩：只记一条通知供顶部提示，**不改历史**（屏幕上的原文始终保留）
-      if (event.type === 'context-compressed') {
-        set((s) => {
-          const chat = s.aiChats[sid]
-          if (!chat) return {}
-          return { aiChats: { ...s.aiChats, [sid]: { ...chat, contextNotice: event.info } } }
-        })
-        return
-      }
-
-      // 模型请求正在重试：清掉这一次尝试已渲染的半截输出，并记下「第 N 次重试」供界面提示
-      // （丢弃半截输出是刻意的 —— 重试 = 从头再跑这一轮，留着会和重试后的正文重复）
-      if (event.type === 'retry') {
-        set((s) => {
-          const chat = s.aiChats[sid]
-          if (!chat) return {}
-          const messages = [...chat.messages]
-          const last = messages[messages.length - 1]
-          if (last?.role === 'assistant') messages[messages.length - 1] = { ...last, parts: [] }
-          return {
-            aiChats: {
-              ...s.aiChats,
-              [sid]: {
-                ...chat,
-                messages,
-                retrying: { attempt: event.attempt, maxRetries: event.maxRetries }
-              }
-            }
-          }
-        })
-        return
-      }
-
-      if (event.type === 'finish') {
-        aiRequestSessions.delete(requestId)
-        set((s) => {
-          const chat = s.aiChats[sid]
-          if (!chat) return {}
-          return {
-            aiChats: {
-              ...s.aiChats,
-              [sid]: { ...chat, streaming: false, requestId: null, retrying: null }
-            }
-          }
-        })
-        // 兜底：该对话已结束但仍有其挂起确认时按取消处理，避免主进程工具悬挂
-        for (const c of Object.values(get().pendingConfirms)) {
-          if (c.requestId === requestId) void get().resolveAiConfirm(c.id, false)
+    resendTerminalMessage: async (conversationId, messageId, text) => {
+      const trimmed = text.trim()
+      const cid = conversationId
+      if (!cid || !trimmed) return
+      if ((get().agentRuns[cid] ?? emptyAgentRun()).streaming) return
+      const conversation = get().terminalConversations.find((c) => c.id === cid)
+      if (!conversation) return
+      const index = conversation.messages.findIndex((m) => m.id === messageId)
+      if (index < 0) return
+      // 先同步截断（set 是同步的），再交给 sendTerminalMessage —— 它读的是 store 里的历史，
+      // 顺序反了就会把旧消息一起带进去，模型会看到「编辑前 + 编辑后」两条
+      set((s) => ({
+        terminalConversations: patchConversation(s.terminalConversations, cid, {
+          messages: conversation.messages.slice(0, index)
+        }),
+        agentRuns: {
+          ...s.agentRuns,
+          [cid]: { ...(s.agentRuns[cid] ?? emptyAgentRun()), error: null }
         }
-        return
-      }
-      if (event.type === 'error') {
-        // 报错即视为本轮对话结束：立刻复位 streaming，不依赖后续 finish 事件。
-        // 否则遇到快速失败（如额度不足）且 finish 因竞态丢失时，输入会永久卡在生成中。
-        aiRequestSessions.delete(requestId)
-        set((s) => {
-          const chat = s.aiChats[sid]
-          if (!chat) return {}
-          const messages = [...chat.messages]
-          const last = messages[messages.length - 1]
-          if (last?.role === 'assistant') {
-            messages[messages.length - 1] = {
-              ...last,
-              parts: appendAssistantPart(last.parts, event)
-            }
-          }
-          return {
-            aiChats: {
-              ...s.aiChats,
-              [sid]: {
-                ...chat,
-                messages,
-                streaming: false,
-                requestId: null,
-                // 错误已内联到该条助手消息（⚠️），不再另设横幅，避免重复显示
-                error: null,
-                retrying: null
-              }
-            }
-          }
-        })
-        for (const c of Object.values(get().pendingConfirms)) {
-          if (c.requestId === requestId) void get().resolveAiConfirm(c.id, false)
-        }
-        return
-      }
-      set((s) => {
-        const chat = s.aiChats[sid]
-        if (!chat) return {}
-        const messages = [...chat.messages]
-        const last = messages[messages.length - 1]
-        if (last?.role === 'assistant') {
-          messages[messages.length - 1] = {
-            ...last,
-            parts: appendAssistantPart(last.parts, event)
-          }
-        }
-        return {
-          aiChats: {
-            ...s.aiChats,
-            // 重试后的新尝试一旦开始产出内容，就把重试提示撤掉
-            [sid]: { ...chat, messages, ...(chat.retrying ? { retrying: null } : {}) }
-          }
-        }
-      })
+      }))
+      // 编辑重发必须发回「发起对话的那个终端页面」：同一会话可能被多个面板打开过，
+      // 指针在 activeTerminalConv 里，找到指向它的终端页面即可
+      const ownerSessionId = Object.entries(get().activeTerminalConv).find(
+        ([, id]) => id === cid
+      )?.[0]
+      if (!ownerSessionId) return
+      await get().sendTerminalMessage(trimmed, ownerSessionId)
     },
 
     // ---------- AI Agent ----------
@@ -2288,6 +2289,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       if (get().acpLoading[conversationId]) return
       // 还没在 agent 侧建过会话（新建后还没发过消息）：没有历史可回放
       if (!conversation.acpSessionId) return
+      if (!conversation.workspaceId) return
       if ((get().agentRuns[conversationId] ?? emptyAgentRun()).streaming) return
       set((s) => ({ acpLoading: { ...s.acpLoading, [conversationId]: true } }))
       try {
@@ -2457,7 +2459,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
           configId: conversation.configId,
           modelId: conversation.modelId,
           acpAgentId: conversation.acpAgentId,
-          acpSessionId: conversation.acpSessionId
+          acpSessionId: conversation.acpSessionId,
+          // 客户端工具定义随请求携带（渲染端注册的都带上；执行与确认都在渲染端）
+          ...(listClientToolDefs().length ? { clientTools: listClientToolDefs() } : {})
         })
         agentRequestConversations.set(requestId, cid)
         set((s) => ({
@@ -2556,7 +2560,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       if (!requestId) return
       agentRequestConversations.delete(requestId)
       // 只清属于本次请求的确认卡
-      for (const c of Object.values(get().agentPendingConfirms)) {
+      for (const c of Object.values(get().pendingConfirms)) {
         if (c.requestId === requestId) void get().resolveAgentConfirm(c.id, false)
       }
       await window.api.agent.abort(requestId)
@@ -2733,6 +2737,17 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const cid = agentRequestConversations.get(requestId)
       if (!cid) return
       /**
+       * 会话在哪个池里：工作区会话（agentConversations）或终端助手的会话
+       * （terminalConversations）。两条线统一走这一个 reducer —— 事件形状与
+       * 渲染完全一致，只有存放位置（和终端错误文案的前缀）不同。
+       */
+      const pool = get().agentConversations.some((c) => c.id === cid)
+        ? ('agent' as const)
+        : get().terminalConversations.some((c) => c.id === cid)
+          ? ('terminal' as const)
+          : null
+      if (!pool) return
+      /**
        * ACP 会话的消息落在**本地镜像**（`agentAcpMessages`，不落盘）；
        * mastra 会话落在自己的 `messages` 上。两者只有存放位置不同，渲染完全一致。
        */
@@ -2741,24 +2756,48 @@ export const useAppStore = create<AppStore>()((set, get) => {
       /** 把事件追加到最后一条 assistant 消息上 */
       const appendToLast = (
         messages: AgentChatMessage[],
-        ev: AgentStreamEvent
+        ev: AgentStreamEvent,
+        errorPrefix?: string
       ): AgentChatMessage[] => {
         const next = [...messages]
         const last = next[next.length - 1]
         if (last?.role === 'assistant') {
-          next[next.length - 1] = { ...last, parts: appendAgentPart(last.parts, ev) }
+          next[next.length - 1] = {
+            ...last,
+            parts: appendAgentPart(last.parts, ev, errorPrefix ? { errorPrefix } : undefined)
+          }
         }
         return next
       }
 
-      /** 就地更新「这个会话的消息列表」（按形态落到镜像或会话上） */
+      /**
+       * 就地更新「这个会话的消息列表」（按作用域 / 形态落到镜像或各自的池上）。
+       * `errorPrefix` 只被错误文案的 transform 用到（终端助手的气泡是单行
+       * markdown，要多两个换行才不与正文糊在一起），其余 transform 忽略它。
+       */
       const updateMessages = (
-        transform: (messages: AgentChatMessage[]) => AgentChatMessage[]
+        transform: (messages: AgentChatMessage[], errorPrefix?: string) => AgentChatMessage[]
       ): void => {
         set((s) => {
           if (isAcp) {
             const current = s.agentAcpMessages[cid] ?? []
-            return { agentAcpMessages: { ...s.agentAcpMessages, [cid]: transform(current) } }
+            return {
+              agentAcpMessages: { ...s.agentAcpMessages, [cid]: transform(current, errorPrefix) }
+            }
+          }
+          if (pool === 'terminal') {
+            const conversation = s.terminalConversations.find((c) => c.id === cid)
+            if (!conversation) return {}
+            return {
+              terminalConversations: patchConversation(
+                s.terminalConversations,
+                cid,
+                { messages: transform(conversation.messages, errorPrefix) },
+                // 流式 token（text/reasoning/tool-call/tool-result）高频追加：不 bump updatedAt，
+                // 否则会话列表（按 updatedAt 降序）会被持续重排、闪烁
+                false
+              )
+            }
           }
           const conversation = s.agentConversations.find((c) => c.id === cid)
           if (!conversation) return {}
@@ -2766,14 +2805,14 @@ export const useAppStore = create<AppStore>()((set, get) => {
             agentConversations: patchConversation(
               s.agentConversations,
               cid,
-              { messages: transform(conversation.messages) },
-              // 流式 token（text/reasoning/tool-call/tool-result）高频追加：不 bump updatedAt，
-              // 否则会话列表（按 updatedAt 降序）会被持续重排、闪烁
+              { messages: transform(conversation.messages, errorPrefix) },
               false
             )
           }
         })
       }
+      /** 错误文案的追加前缀：终端气泡需要，工作区会话不需要 */
+      let errorPrefix: string | undefined
 
       /** 清掉该会话的「历史回放中」标记（回放结束 / 失败时） */
       const clearLoading = (): void => {
@@ -2856,9 +2895,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
         if (!wasReplay) notifyAgentFinished(cid, event.finishReason)
         // 整轮结束才落盘：中途每个 part 都写盘会让长回复反复序列化同一段历史。
         // ACP 会话没有消息要落盘（标题 / updatedAt 也只在发消息时写）。
-        if (!isAcp) void persistConversation(get().agentConversations, cid)
+        if (pool === 'terminal') void persistTerminalConversation(get().terminalConversations, cid)
+        else if (!isAcp) void persistConversation(get().agentConversations, cid)
         // 兜底：该对话已结束但仍有其挂起确认时按取消处理，避免主进程工具悬挂
-        for (const c of Object.values(get().agentPendingConfirms)) {
+        for (const c of Object.values(get().pendingConfirms)) {
           if (c.requestId === requestId) void get().resolveAgentConfirm(c.id, false)
         }
         // 自然收尾：把队列里的下一条顶上来接着跑（被中止 / 报错的那条不会走到这里，
@@ -2887,7 +2927,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
             }
           }))
         } else {
-          updateMessages((messages) => appendToLast(messages, event))
+          // 终端助手的气泡是单行 markdown，错误文案要多两个换行才不与正文糊在一起
+          errorPrefix = pool === 'terminal' ? '\n\n' : undefined
+          updateMessages((messages, prefix) => appendToLast(messages, event, prefix))
           set((s) => ({
             agentRuns: {
               ...s.agentRuns,
@@ -2901,15 +2943,16 @@ export const useAppStore = create<AppStore>()((set, get) => {
               }
             }
           }))
-          void persistConversation(get().agentConversations, cid)
+          if (pool === 'terminal') void persistTerminalConversation(get().terminalConversations, cid)
+          else void persistConversation(get().agentConversations, cid)
         }
-        for (const c of Object.values(get().agentPendingConfirms)) {
+        for (const c of Object.values(get().pendingConfirms)) {
           if (c.requestId === requestId) void get().resolveAgentConfirm(c.id, false)
         }
         return
       }
 
-      updateMessages((messages) => appendToLast(messages, event))
+      updateMessages((messages, prefix) => appendToLast(messages, event, prefix))
       // 重试后的新尝试一旦开始产出内容，就把重试提示撤掉
       // （先用 get 判断，避免每个流式帧都多一次 set）
       if (get().agentRuns[cid]?.retrying) {
@@ -2922,16 +2965,17 @@ export const useAppStore = create<AppStore>()((set, get) => {
       }
       // 流式期间增量落盘：中途关掉应用也不至于丢掉这一轮已有的产出
       // （ACP 会话没有消息要落盘，跳过）
-      if (!isAcp) persistConversationThrottled(cid)
+      if (pool === 'agent') persistConversationThrottled(cid)
+      else if (pool === 'terminal') persistTerminalConversationThrottled(cid)
     },
 
     resolveAgentConfirm: async (id, approved) => {
       // 本地立即移除卡片（主进程也会广播 resolved，幂等无害）
       set((s) => {
-        if (!(id in s.agentPendingConfirms)) return {}
-        const next = { ...s.agentPendingConfirms }
+        if (!(id in s.pendingConfirms)) return {}
+        const next = { ...s.pendingConfirms }
         delete next[id]
-        return { agentPendingConfirms: next }
+        return { pendingConfirms: next }
       })
       await window.api.agent.resolveConfirm(id, approved)
     },
@@ -3003,4 +3047,12 @@ if (typeof window !== 'undefined' && window.api?.notes?.saveSession) {
 // CDP 调试暴露（模块初始化完成后赋值，避免 TDZ）
 if (typeof window !== 'undefined') {
   ; (window as unknown as Record<string, unknown>).__store = useAppStore
+  // 客户端工具的注册表**不在 store 里**（纯模块级内存态，见 stores/client-tools.ts），
+  // 探针要造一个客户端工具走完整回路时得有入口 —— 与 __store 同一个约定：
+  // 只在渲染端暴露，不进 preload 白名单。
+  ; (window as unknown as Record<string, unknown>).__clientTools = {
+    register: registerClientTool,
+    unregister: unregisterClientTool,
+    list: listClientToolDefs
+  }
 }

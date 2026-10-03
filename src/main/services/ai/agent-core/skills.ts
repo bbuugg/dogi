@@ -14,9 +14,9 @@
  */
 import { promises as fs } from 'node:fs'
 import { basename } from 'node:path'
-import { tool, type ToolSet } from 'ai'
 import { z } from 'zod'
 import { resolveInside } from './workspace'
+import type { AiToolDef, ToolRunContext } from '../tool-registry'
 
 /** 技能清单文件名（与主进程的扫描约定一致） */
 export const SKILL_FILE = 'SKILL.md'
@@ -76,53 +76,59 @@ function findSkill(skills: AgentSkill[], name: string): AgentSkill {
 }
 
 /**
- * `read_skill`：读取某个技能的说明（默认 SKILL.md 本身）。
+ * `read_skill`：读取某个技能的完整说明（默认 SKILL.md 本身）。
  *
  * 技能目录通常在工作区之外（用户级 / Claude 兼容目录），工作区的 read_file 够不着，
  * 所以单独给一个工具 —— 它的读写范围被限制在**已发现的技能目录**内。
+ *
+ * 可用技能是**每次对话现扫**的（磁盘即真源），挂在 `ctx.skills` 上；
+ * 没有技能时这个定义不进工具集（见 available），免得模型拿着空清单乱试。
  */
-export function buildReadSkillTool(skills: AgentSkill[]): ToolSet {
+export function buildReadSkillDef(): AiToolDef {
   return {
-    read_skill: tool({
-      description:
-        '读取某个技能的完整说明（SKILL.md 正文）。系统提示词里列出了可用技能与它们的用途；判断任务与某个技能相关时，先调用本工具读说明，再按说明里的步骤执行。也可以用 file 参数读技能目录内的其它文件（如 references/xxx.md、scripts/xxx.mjs）。',
-      inputSchema: z.object({
-        name: z.string().describe('技能名称（系统提示词里列出的名字）'),
-        file: z
-          .string()
-          .optional()
-          .describe('技能目录内的相对路径；缺省读 SKILL.md 本身')
-      }),
-      execute: async ({ name, file }) => {
-        const skill = findSkill(skills, name)
-        const abs = file ? resolveInside(skill.dir, file) : skill.file
-        let content: string
-        try {
-          content = await readSkillText(abs)
-        } catch (err) {
-          if (file) {
-            throw new Error(
-              `读取技能内文件失败（${file}）：${err instanceof Error ? err.message : String(err)}`
-            )
-          }
-          throw err
+    name: 'read_skill',
+    scope: 'workspace',
+    available: ({ ctx }) => (ctx.skills?.length ?? 0) > 0,
+    description:
+      '读取某个技能的完整说明（SKILL.md 正文）。系统提示词里列出了可用技能与它们的用途；判断任务与某个技能相关时，先调用本工具读说明，再按说明里的步骤执行。也可以用 file 参数读技能目录内的其它文件（如 references/xxx.md、scripts/xxx.mjs）。',
+    inputSchema: z.object({
+      name: z.string().describe('技能名称（系统提示词里列出的名字）'),
+      file: z
+        .string()
+        .optional()
+        .describe('技能目录内的相对路径；缺省读 SKILL.md 本身')
+    }),
+    execute: async (rawInput, _call, ctx: ToolRunContext) => {
+      const { name, file } = rawInput as { name: string; file?: string }
+      const skills = ctx.skills ?? []
+      const skill = findSkill(skills, name)
+      const abs = file ? resolveInside(skill.dir, file) : skill.file
+      let content: string
+      try {
+        content = await readSkillText(abs)
+      } catch (err) {
+        if (file) {
+          throw new Error(
+            `读取技能内文件失败（${file}）：${err instanceof Error ? err.message : String(err)}`
+          )
         }
-
-        const entries = await listSkillEntries(skill.dir)
-        const header = [
-          `技能：${skill.name}`,
-          `用途：${skill.description}`,
-          `目录：${skill.dir}`,
-          entries.length ? `目录内容：${entries.join('、')}` : '',
-          file
-            ? `（以下为技能内文件 ${file} 的内容）`
-            : '（以下为 SKILL.md 全文，请按其中的步骤执行）'
-        ]
-          .filter(Boolean)
-          .join('\n')
-        return `${header}\n\n${content}`
+        throw err
       }
-    })
+
+      const entries = await listSkillEntries(skill.dir)
+      const header = [
+        `技能：${skill.name}`,
+        `用途：${skill.description}`,
+        `目录：${skill.dir}`,
+        entries.length ? `目录内容：${entries.join('、')}` : '',
+        file
+          ? `（以下为技能内文件 ${file} 的内容）`
+          : '（以下为 SKILL.md 全文，请按其中的步骤执行）'
+      ]
+        .filter(Boolean)
+        .join('\n')
+      return `${header}\n\n${content}`
+    }
   }
 }
 

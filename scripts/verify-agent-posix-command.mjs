@@ -2,12 +2,12 @@
  * Agent `execute_command` 的 Windows POSIX（Git Bash）执行环境验证 —— 跑 agent-core 真源码。
  *
  * 背景：Windows 上模型常按 Linux 习惯发命令（ls / grep / 管道 / $VAR），
- * PowerShell 解析这些会直接报错。修复是注入 Git Bash 的 bash.exe（`AgentToolOptions.bashPath`）。
+ * PowerShell 解析这些会直接报错。修复是注入 Git Bash 的 bash.exe（`ToolRunContext.bashPath`）。
  *
  * 覆盖：
  *   1. 注入 bashPath 后 POSIX 工具链可用（ls / grep / 管道 / $VAR / pwd 都是 POSIX 语义）；
  *   2. 不注入时回退 PowerShell（且 Windows 盘符路径仍可 cd，说明环境没退化成坏的）；
- *   3. 真源码里 buildAgentTools 暴露的 execute_command 描述会如实声明执行环境。
+ *   3. 真源码里 execute_command 的描述会如实声明执行环境（描述是按 ctx 现算的函数）。
  *
  * 包装机制同 verify-agent-browser-tools.mjs：复制真源码到临时目录、改写 import
  * 说明符（补 .ts / 换 @shared 别名）再执行 —— agent-core 与 Electron 解耦，能在纯 Node 下跑。
@@ -23,22 +23,25 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const TMP = join(ROOT, '.cmdtest')
 
 const CORE = 'src/main/services/ai/agent-core'
+const AI = 'src/main/services/ai'
 const FILES = [
   [`${CORE}/tools.ts`, 'core/tools.ts'],
   [`${CORE}/edit-match.ts`, 'core/edit-match.ts'],
-  [`${CORE}/skills.ts`, 'core/skills.ts'],
-  [`${CORE}/workspace.ts`, 'core/workspace.ts']
+  [`${CORE}/workspace.ts`, 'core/workspace.ts'],
+  // tools.ts 现在要 import 产物写入器：execute_command 的长输出走「落盘 + 按段读回」
+  // 而不是旧的静默截断（见 services/ai/output-artifact.ts）
+  [`${AI}/output-artifact.ts`, 'output-artifact.ts']
 ]
 
 const REWRITES = {
   'core/tools.ts': [
-    ["from './skills'", "from './skills.ts'"],
     ["from './workspace'", "from './workspace.ts'"],
-    ["from './edit-match'", "from './edit-match.ts'"]
+    ["from './edit-match'", "from './edit-match.ts'"],
+    ["from '../output-artifact'", "from '../output-artifact.ts'"]
   ],
-  'core/skills.ts': [["from './workspace'", "from './workspace.ts'"]],
   'core/edit-match.ts': [],
-  'core/workspace.ts': []
+  'core/workspace.ts': [],
+  'output-artifact.ts': []
 }
 
 rmSync(TMP, { recursive: true, force: true })
@@ -56,14 +59,14 @@ for (const [from, to] of FILES) {
   writeFileSync(dst, code)
 }
 
-// 探针主体：直接调 buildAgentTools 的 execute_command
+// 探针主体：直接调 buildWorkspaceToolDefs 里 execute_command 定义的 execute
 // ⚠️ 用数组 join 拼字符串而不是模板字面量：下面全是 shell 命令与正则，
 // 反斜杠 / ${} 在模板字面量里会被外层脚本吃掉一层（AGENTS.md 6.5 第 20 条同款坑）
 const PROBE = [
   "import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'",
   "import { tmpdir } from 'node:os'",
   "import { join } from 'node:path'",
-  "import { buildAgentTools } from './core/tools.ts'",
+  "import { buildWorkspaceToolDefs, createAgentFileState } from './core/tools.ts'",
   '',
   'let pass = 0',
   'let fail = 0',
@@ -77,6 +80,31 @@ const PROBE = [
   "writeFileSync(join(root, 'a.txt'), 'hello world\\nsecond line\\n')",
   "writeFileSync(join(root, 'b.md'), '# title\\n')",
   '',
+  '// ── 把静态工具定义包成可直接 execute 的形状（会话状态经 ToolRunContext 注入） ──',
+  "const workspace = { id: 'w', name: 'probe', path: root, createdAt: 0, updatedAt: 0 }",
+  'function makeTools(opts = {}) {',
+  '  const ctx = {',
+  "    requestId: 'r1',",
+  "    conversationId: 'c1',",
+  "    scope: 'workspace',",
+  '    workspace,',
+  '    signal: new AbortController().signal,',
+  "    permissionMode: 'full',",
+  '    requestConfirm: async () => false,',
+  '    fileState: createAgentFileState(),',
+  '    skills: [],',
+  "    bashPath: opts.bashPath ?? null,",
+  '  }',
+  '  const tools = {}',
+  '  for (const def of buildWorkspaceToolDefs()) {',
+  '    tools[def.name] = {',
+  "      description: typeof def.description === 'function' ? def.description(ctx) : def.description,",
+  "      execute: (input, options) => def.execute(input, { toolCallId: options?.toolCallId ?? 't1' }, ctx),",
+  '    }',
+  '  }',
+  '  return tools',
+  '}',
+  '',
   'async function run(toolset, command) {',
   "  const res = await toolset.execute_command.execute({ command }, { toolCallId: 't1', messages: [] })",
   '  return String(res)',
@@ -88,7 +116,7 @@ const PROBE = [
   '',
   '// ── 1. 注入 Git Bash：POSIX 工具链与语法 ──',
   '{',
-  "  const tools = buildAgentTools(root, { permissionMode: 'full', bashPath })",
+  "  const tools = makeTools({ bashPath })",
   "  const ls = await run(tools, 'ls')",
   "  check('ls 可用（POSIX 工具链在）', /a\\.txt/.test(ls), ls)",
   "  const pipe = await run(tools, 'ls *.txt | wc -l')",
@@ -103,7 +131,7 @@ const PROBE = [
   '',
   '// ── 2. 不注入：回退 PowerShell，且不崩 ──',
   '{',
-  "  const tools = buildAgentTools(root, { permissionMode: 'full', bashPath: null })",
+  "  const tools = makeTools({ bashPath: null })",
   "  const pwd = await run(tools, 'pwd')",
   "  check('回退路径仍可执行命令', /退出码 0/.test(pwd), pwd)",
   "  check(isWin ? '回退到 PowerShell（pwd 输出 Windows 盘符路径）' : 'POSIX 下恒 bash', isWin ? /[A-Za-z]:\\\\/.test(pwd) : /退出码 0/.test(pwd), pwd)",
@@ -111,7 +139,7 @@ const PROBE = [
   '',
   '// ── 3. 描述如实声明环境 ──',
   '{',
-  "  const tools = buildAgentTools(root, { permissionMode: 'full', bashPath })",
+  "  const tools = makeTools({ bashPath })",
   "  const desc = tools.execute_command.description ?? ''",
   "  check('工具描述声明执行环境', isWin ? /Git Bash|POSIX/.test(desc) : /bash/.test(desc), desc.slice(0, 160))",
   '}',

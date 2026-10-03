@@ -17,11 +17,8 @@ import type {
   AgentFsFile,
   AgentStreamEvent,
   AgentWorkspace,
-  AiChatRequest,
-  AiConfirmRequest,
   AiModelConfig,
   AiSettings,
-  AiStreamEvent,
   ApiGroup,
   ChatCompressResult,
   ApiHistoryEntry,
@@ -341,6 +338,10 @@ const api = {
     /** 读取 WASM 字节（打包后 file:// 下 fetch 不可用，靠它加载 ironrdp-wasm） */
     wasm: (): Promise<Uint8Array> => ipcRenderer.invoke('rdp:wasm')
   },
+  /**
+   * AI 模型配置与设置（两条 AI 线共用：设置页的模型配置 / 权限模式 / 超时）。
+   * 对话流在 `agent` 命名空间（两条线统一走 `agent:chat`）。
+   */
   ai: {
     listConfigs: (): Promise<AiModelConfig[]> => ipcRenderer.invoke('ai:config:list'),
     saveConfig: (config: AiModelConfig): Promise<AiModelConfig[]> =>
@@ -353,20 +354,6 @@ const api = {
     /** 拉取 OpenAI 兼容接口的模型列表（GET {baseURL}/models）；编辑已有配置时传 configId 以复用存储的 key */
     listRemoteModels: (input: { baseURL: string; apiKey?: string; configId?: string }): Promise<string[]> =>
       ipcRenderer.invoke('ai:listRemoteModels', input),
-    chat: (req: AiChatRequest): Promise<{ requestId: string }> =>
-      ipcRenderer.invoke('ai:chat', req),
-    abort: (requestId: string): Promise<void> =>
-      ipcRenderer.invoke('ai:abort', requestId),
-    onChatEvent: (cb: (payload: { requestId: string; event: AiStreamEvent }) => void) =>
-      subscribe('ai:chat-event', cb),
-    /** 确认模式下收到命令执行确认请求 */
-    onConfirmRequest: (cb: (req: AiConfirmRequest) => void) => subscribe('ai:confirm', cb),
-    /** 确认已有结论（用户回复走本地移除；中止 / 回合结束由主进程通知移除卡片） */
-    onConfirmResolved: (cb: (payload: { id: string }) => void) =>
-      subscribe('ai:confirm-resolved', cb),
-    /** 回复确认请求：approved=true 执行，false 取消 */
-    resolveConfirm: (id: string, approved: boolean): Promise<void> =>
-      ipcRenderer.invoke('ai:confirm:resolve', { id, approved })
   },
   /** AI Agent（工作区编程/运维助手）：对话绑定一个本地工作区，工具在其内读写/执行命令 */
   agent: {
@@ -398,6 +385,23 @@ const api = {
     }): Promise<AgentConversation> => ipcRenderer.invoke('agent:conversations:save', input),
     deleteConversation: (id: string): Promise<void> =>
       ipcRenderer.invoke('agent:conversations:delete', id),
+    /**
+     * 终端 AI 助手的会话（独立目录存储，**绝不进工作区会话列表**）。
+     * 与工作区会话同构（AgentConversation），但不带 workspaceId / ACP 绑定。
+     */
+    terminalConvs: {
+      list: (): Promise<AgentConversation[]> =>
+        ipcRenderer.invoke('agent:terminal-convs:list'),
+      save: (input: {
+        id?: string
+        kind?: AgentBackend
+        title?: string
+        messages?: AgentChatMessage[]
+        configId?: string
+        modelId?: string
+      }): Promise<AgentConversation> => ipcRenderer.invoke('agent:terminal-convs:save', input),
+      delete: (id: string): Promise<void> => ipcRenderer.invoke('agent:terminal-convs:delete', id)
+    },
     /**
      * 手动压缩当前会话的上下文：把「最后一轮之外」的旧轮摘要成一段，落成检查点。
      * 原始消息一条不动 —— 之后每轮发往模型的历史 = 摘要 + 检查点之后的原文。
@@ -451,7 +455,7 @@ const api = {
     onChatEvent: (
       cb: (payload: { requestId: string; conversationId?: string; event: AgentStreamEvent }) => void
     ) => subscribe('agent:chat-event', cb),
-    /** 确认模式下收到改动类工具的确认请求（执行命令 / 写入 / 编辑 / 删除） */
+    /** 确认模式下收到改动类工具的确认请求（终端命令 / 写入 / 编辑 / 删除；两条线共用） */
     onConfirmRequest: (cb: (req: AgentConfirmRequest) => void) => subscribe('agent:confirm', cb),
     /** 确认已有结论（中止 / 回合结束由主进程通知移除卡片） */
     onConfirmResolved: (cb: (payload: { id: string }) => void) =>
@@ -517,6 +521,26 @@ const api = {
     /** 提交回答；传 null 表示跳过 */
     resolve: (id: string, answer: AskFollowupAnswer | null): Promise<void> =>
       ipcRenderer.invoke('followup:resolve', { id, answer })
+  },
+  /**
+   * 客户端工具：**在渲染进程执行**的 AI 工具（UI 能力、插件注入的能力）。
+   * 定义随 `agent:chat` 请求携带（页面发消息时带上自己那组，主进程不设注册表）；
+   * 模型调用时这里收到 invoke，由渲染端按 `permissionMode` 自行处理权限后执行、回填。
+   */
+  clientTools: {
+    /**
+     * 订阅工具调用（App 启动时装一次，分发逻辑在渲染端 store 的辅助模块里：
+     * 按权限策略决定执行 / 弹卡 / 拒绝，处理完必须回填 resolve，否则模型循环悬挂）。
+     */
+    onInvoke: (cb: (payload: { callId: string; name: string; input: unknown }) => void) =>
+      subscribe('clientTools:invoke', cb),
+    /** 回填执行结果。拒绝也是 ok=true + 文案（正常工具结果）；ok=false 表示执行器本身失败 */
+    resolve: (payload: {
+      callId: string
+      ok: boolean
+      result?: unknown
+      error?: string
+    }): Promise<void> => ipcRenderer.invoke('clientTools:result', payload)
   },
   mcp: {
     list: (): Promise<McpServerConfig[]> => ipcRenderer.invoke('mcp:list'),

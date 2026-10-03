@@ -1,19 +1,21 @@
 import { promises as fs } from 'node:fs'
 import { dirname } from 'node:path'
-import { tool, type ToolSet } from 'ai'
 import { z } from 'zod'
 import type { Page } from 'playwright'
 import type { BrowserChannel } from '@shared/types'
+import { agentBrowserSessionId } from '@shared/browser'
 import { resolveInside } from '../ai/agent-core/workspace'
+import type { AiToolDef, ToolRunContext } from '../ai/tool-registry'
 import { createBrowserSessionHandlers } from './handlers'
 import { browserSessions, type BrowserSession } from './session'
 
 /**
- * 给工作区 Agent 用的浏览器工具集。
+ * 给工作区 Agent 用的浏览器工具定义（注册进 tool-registry，scope = 'workspace'）。
  *
  * 用**自己的会话 id**（`agent-browser:<conversationId>`，见 @shared/browser）：
  * 一个 Agent 会话一份浏览器，互不串台；会话池与渲染端面板共用，
- * 事件按 sessionId 各回各家。
+ * 事件按 sessionId 各回各家。会话 id 在**执行时**由 ctx.conversationId 推导 ——
+ * 定义是静态注册的，不捕获任何一次对话的绑定。
  *
  * 定位方式用 **ref**（`aria-ref=eN`）而不是让模型拼 CSS 选择器：
  * `locator.ariaSnapshot({ mode: 'ai' })` 会为每个可交互元素生成 `[ref=eN]`
@@ -29,17 +31,14 @@ const DEFAULT_ACTION_TIMEOUT = 15_000
 /** browser_evaluate 返回值的字符上限 */
 const MAX_EVAL_CHARS = 6000
 
-export interface BrowserAgentOptions {
-  /** 会话 id（用 @shared/browser 的 agentBrowserSessionId 推导） */
-  sessionId: string
+export interface BrowserToolRegistration {
   /**
    * 浏览器来源偏好。**由调用方注入而不是这里读 storage** ——
    * 读 storage 会把 electron 拖进这个模块，它就没法脱离 Electron 单跑了
    * （`scripts/verify-agent-browser-tools.mjs` 直接跑的就是这份源码）。
+   * 用函数而不是值：注册只在启动时发生一次，偏好随时可改，执行时现取。
    */
-  channel: BrowserChannel
-  /** 截图落盘的工作区根目录；缺省落到系统临时目录 */
-  workspaceRoot?: string
+  channel: () => BrowserChannel
 }
 
 /** 模型给的定位参数：ref 优先，selector 作兜底（CSS / role= / text= / data-testid=） */
@@ -84,53 +83,72 @@ async function afterAction(page: Page, what: string): Promise<string> {
   return `${what}\n\n${await snapshot(page)}`
 }
 
-export function buildBrowserAgentTools(opts: BrowserAgentOptions): ToolSet {
+export function buildBrowserToolDefs(opts: BrowserToolRegistration): AiToolDef[] {
+  /** 会话 id 由本轮对话的 conversationId 推导（一个会话一份浏览器，与面板共用） */
+  const sessionIdOf = (ctx: ToolRunContext): string => agentBrowserSessionId(ctx.conversationId)
+  const channelOf = (): BrowserChannel => opts.channel()
+
   /**
    * 取会话，没有就懒启动。
    * 已经死掉的会话（浏览器进程退出 / 页面被关）在池里是 `closed` 终态、重启不了，
    * 必须先摘掉再建一个新的。
    */
-  async function ensureSession(): Promise<BrowserSession> {
-    let session = browserSessions.get(opts.sessionId)
+  async function ensureSession(ctx: ToolRunContext): Promise<BrowserSession> {
+    const sessionId = sessionIdOf(ctx)
+    let session = browserSessions.get(sessionId)
     if (session && !session.isAlive()) {
-      await browserSessions.close(opts.sessionId, '会话已失效，重建')
+      await browserSessions.close(sessionId, '会话已失效，重建')
       session = undefined
     }
-    if (!session) session = browserSessions.create(opts.sessionId, createBrowserSessionHandlers())
+    if (!session) session = browserSessions.create(sessionId, createBrowserSessionHandlers())
     if (!session.isAlive()) {
       // 不传视口预设 = 用默认的 PC 屏（见 @shared/browser）：
       // 模型在 PC 布局下取到的快照，与用户自己打开这个网址看到的一致
-      await session.start(opts.channel)
+      await session.start(channelOf())
     }
     return session
   }
 
-  return {
-    browser_navigate: tool({
+  /** MCP 带了同名 browser_* 工具时整组让位（两套同名会静默互相覆盖，见 agent.ts 的历史注释） */
+  const yieldToMcp = ({ mcpToolNames }: { mcpToolNames: string[] }): boolean =>
+    mcpToolNames.some((n) => n.startsWith('browser_'))
+
+  return [
+    {
+      name: 'browser_navigate',
+      scope: 'workspace',
+      available: yieldToMcp,
       description:
         '在浏览器中打开一个网址并返回页面快照。浏览器是真实运行的（无窗口），操作会真的作用在网页上。',
       inputSchema: z.object({
         url: z.string().describe('要打开的网址，如 https://example.com')
       }),
-      execute: async ({ url }) => {
-        const session = await ensureSession()
+      execute: async (rawInput, _call, ctx) => {
+        const { url } = rawInput as { url: string }
+        const session = await ensureSession(ctx)
         await session.navigate(url)
         const page = session.getPage()
         return afterAction(page, `已打开 ${page.url()}`)
       }
-    }),
+    },
 
-    browser_snapshot: tool({
+    {
+      name: 'browser_snapshot',
+      scope: 'workspace',
+      available: yieldToMcp,
       description:
         '获取当前页面的可访问性快照（YAML）：每个元素带 role、可访问名称与 [ref=eN] 引用，可点击元素还带 [cursor=pointer]。点击 / 输入前先看它拿到 ref。页面一旦变化（导航、重渲染），旧的 ref 会失效，需要重新获取。',
       inputSchema: z.object({}),
-      execute: async () => {
-        const session = await ensureSession()
+      execute: async (_rawInput, _call, ctx) => {
+        const session = await ensureSession(ctx)
         return snapshot(session.getPage())
       }
-    }),
+    },
 
-    browser_click: tool({
+    {
+      name: 'browser_click',
+      scope: 'workspace',
+      available: yieldToMcp,
       description:
         '点击页面元素。优先用 browser_snapshot 里的 ref（如 e5）；也可传 selector（CSS、role=button[name="登录"]、text=提交、data-testid=go）。',
       inputSchema: z.object({
@@ -141,16 +159,20 @@ export function buildBrowserAgentTools(opts: BrowserAgentOptions): ToolSet {
           .describe('Playwright 选择器，ref 不可用时的兜底，如 "#submit"、\'role=button[name="登录"]\'、text=提交'),
         timeoutMs: z.number().optional().describe('超时毫秒数，默认 15000')
       }),
-      execute: async (args) => {
-        const session = await ensureSession()
+      execute: async (rawInput, _call, ctx) => {
+        const args = rawInput as Target & { timeoutMs?: number }
+        const session = await ensureSession(ctx)
         const page = session.getPage()
         const loc = locate(page, args).first()
         await loc.click({ timeout: args.timeoutMs ?? DEFAULT_ACTION_TIMEOUT })
         return afterAction(page, `已点击 ${args.ref ?? args.selector}`)
       }
-    }),
+    },
 
-    browser_type: tool({
+    {
+      name: 'browser_type',
+      scope: 'workspace',
+      available: yieldToMcp,
       description:
         '在输入框中填入文本（会先清空原内容）。用 ref 或 selector 定位输入框；submit=true 时填完按回车（适合搜索框 / 登录表单）。',
       inputSchema: z.object({
@@ -160,8 +182,9 @@ export function buildBrowserAgentTools(opts: BrowserAgentOptions): ToolSet {
         submit: z.boolean().optional().describe('填完后按回车，默认 false'),
         timeoutMs: z.number().optional().describe('超时毫秒数，默认 15000')
       }),
-      execute: async (args) => {
-        const session = await ensureSession()
+      execute: async (rawInput, _call, ctx) => {
+        const args = rawInput as Target & { text: string; submit?: boolean; timeoutMs?: number }
+        const session = await ensureSession(ctx)
         const page = session.getPage()
         const loc = locate(page, args).first()
         const timeout = args.timeoutMs ?? DEFAULT_ACTION_TIMEOUT
@@ -169,22 +192,29 @@ export function buildBrowserAgentTools(opts: BrowserAgentOptions): ToolSet {
         if (args.submit) await loc.press('Enter', { timeout })
         return afterAction(page, `已输入「${args.text}」到 ${args.ref ?? args.selector}${args.submit ? ' 并回车' : ''}`)
       }
-    }),
+    },
 
-    browser_press: tool({
+    {
+      name: 'browser_press',
+      scope: 'workspace',
+      available: yieldToMcp,
       description: '按下一个键（如 Enter、Escape、Tab、ArrowDown、Control+A）。作用于页面当前焦点。',
       inputSchema: z.object({
         key: z.string().describe('键名，如 Enter / Escape / Tab / Control+A')
       }),
-      execute: async ({ key }) => {
-        const session = await ensureSession()
+      execute: async (rawInput, _call, ctx) => {
+        const { key } = rawInput as { key: string }
+        const session = await ensureSession(ctx)
         const page = session.getPage()
         await page.keyboard.press(key)
         return afterAction(page, `已按下 ${key}`)
       }
-    }),
+    },
 
-    browser_wait_for: tool({
+    {
+      name: 'browser_wait_for',
+      scope: 'workspace',
+      available: yieldToMcp,
       description:
         '等待条件满足：给 text 等文本出现，给 selector 等元素可见，都不给则等网络空闲（页面加载完成）。用于等异步内容渲染出来。',
       inputSchema: z.object({
@@ -192,8 +222,9 @@ export function buildBrowserAgentTools(opts: BrowserAgentOptions): ToolSet {
         selector: z.string().optional().describe('等待该选择器匹配的元素可见'),
         timeoutMs: z.number().optional().describe('超时毫秒数，默认 15000')
       }),
-      execute: async (args) => {
-        const session = await ensureSession()
+      execute: async (rawInput, _call, ctx) => {
+        const args = rawInput as { text?: string; selector?: string; timeoutMs?: number }
+        const session = await ensureSession(ctx)
         const page = session.getPage()
         const timeout = args.timeoutMs ?? DEFAULT_ACTION_TIMEOUT
         if (args.selector) {
@@ -207,16 +238,20 @@ export function buildBrowserAgentTools(opts: BrowserAgentOptions): ToolSet {
         await page.waitForLoadState('networkidle', { timeout })
         return '网络已空闲（页面加载完成）'
       }
-    }),
+    },
 
-    browser_evaluate: tool({
+    {
+      name: 'browser_evaluate',
+      scope: 'workspace',
+      available: yieldToMcp,
       description:
         '在页面里执行一段 JavaScript 并返回结果（自动 JSON 序列化）。适合提取数据、读取元素文本、做断言。表达式形如 "document.title" 或 "() => [...document.querySelectorAll(\'a\')].map(a => a.href)"。',
       inputSchema: z.object({
         expression: z.string().describe('要执行的 JS 表达式或函数体')
       }),
-      execute: async ({ expression }) => {
-        const session = await ensureSession()
+      execute: async (rawInput, _call, ctx) => {
+        const { expression } = rawInput as { expression: string }
+        const session = await ensureSession(ctx)
         const page = session.getPage()
         let value: unknown
         try {
@@ -227,39 +262,45 @@ export function buildBrowserAgentTools(opts: BrowserAgentOptions): ToolSet {
         const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
         return truncate(text ?? String(value), MAX_EVAL_CHARS)
       }
-    }),
+    },
 
-    browser_screenshot: tool({
+    {
+      name: 'browser_screenshot',
+      scope: 'workspace',
+      available: yieldToMcp,
       description:
         '给当前页面截图并保存成 PNG 文件（默认存到工作区的 .dogi/screenshots/ 下），返回文件路径。用于留证或让用户查看当时的页面。注意：返回的是路径，不是图片内容。',
       inputSchema: z.object({
         path: z.string().optional().describe('保存路径（相对工作区），缺省自动命名'),
         fullPage: z.boolean().optional().describe('截整页（含滚动区域），默认 false 只截可视区')
       }),
-      execute: async ({ path, fullPage = false }) => {
-        const session = await ensureSession()
+      execute: async (rawInput, _call, ctx) => {
+        const { path, fullPage = false } = rawInput as { path?: string; fullPage?: boolean }
+        const session = await ensureSession(ctx)
         const page = session.getPage()
         const buf = await page.screenshot({ fullPage, type: 'png' })
         const rel = path?.trim() || `.dogi/screenshots/shot-${Date.now()}.png`
-        const abs = opts.workspaceRoot
-          ? resolveInside(opts.workspaceRoot, rel)
-          : rel
+        const abs = ctx.workspace?.path ? resolveInside(ctx.workspace.path, rel) : rel
         await fs.mkdir(dirname(abs), { recursive: true })
         await fs.writeFile(abs, buf)
         return `截图已保存：${rel}（${(buf.length / 1024).toFixed(1)} KB）`
       }
-    }),
+    },
 
-    browser_close: tool({
+    {
+      name: 'browser_close',
+      scope: 'workspace',
+      available: yieldToMcp,
       description: '关闭 Agent 的浏览器会话，释放浏览器进程。任务完成、不再需要浏览器时调用。',
       inputSchema: z.object({}),
-      execute: async () => {
-        if (!browserSessions.has(opts.sessionId)) return '浏览器本来就没打开'
-        await browserSessions.close(opts.sessionId, 'AI 已关闭')
+      execute: async (_rawInput, _call, ctx) => {
+        const sessionId = sessionIdOf(ctx)
+        if (!browserSessions.has(sessionId)) return '浏览器本来就没打开'
+        await browserSessions.close(sessionId, 'AI 已关闭')
         return '浏览器已关闭'
       }
-    })
-  }
+    }
+  ]
 }
 
 /** 系统提示词里的浏览器段落：只在挂了浏览器工具时追加 */

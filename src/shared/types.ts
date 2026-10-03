@@ -1098,7 +1098,13 @@ export interface AiSettings {
   acpAgents?: AcpAgentConfig[]
 }
 
-/** 主进程向渲染进程发起的命令执行确认请求 */
+/**
+ * 主进程向渲染进程发起的**改动类工具**执行确认请求。
+ *
+ * 工作区 Agent 与终端 AI 助手共用一条通道（`agent:confirm`）与同一种请求：
+ * 两类来源的上下文字段都是可选的 —— 工作区来源带 `workspaceName`，
+ * 终端来源带 `sessionId` / `sessionTitle`，渲染端按各自界面取用。
+ */
 export interface AiConfirmRequest {
   /** 确认请求 id，回复时原样带回 */
   id: string
@@ -1106,12 +1112,21 @@ export interface AiConfirmRequest {
   requestId: string
   toolCallId: string
   toolName: string
-  /** 待执行的命令 */
+  /** 待执行的命令（或动作说明：写入文件 xxx / 编辑文件 xxx …） */
   command: string
-  /** 目标终端会话 */
+  /** 工作区来源：所属工作区 */
+  workspaceId?: string
+  workspaceName?: string
+  /** 终端来源：目标终端会话 */
   sessionId?: string
   sessionTitle?: string
 }
+
+/**
+ * 终端 AI 助手与工作区 Agent 统一后的确认请求（历史上两者各有一个类型，
+ * 字段合并后 `AiConfirmRequest` 是它的别名，旧引用逐步迁移）。
+ */
+export type AgentConfirmRequest = AiConfirmRequest
 
 // ---------- ask_followup_question：AI 向用户提结构化选择题 ----------
 
@@ -1266,119 +1281,6 @@ export interface ChatCompressResult {
   summary?: ConversationContextSummary
 }
 
-/** AI 聊天消息（简化版 UIMessage，主进程与渲染进程一致） */
-export interface AiChatMessage {
-  id: string
-  role: 'user' | 'assistant'
-  parts: AiMessagePart[]
-  createdAt: number
-  /** 这一轮的用量统计（仅助手消息、一轮跑完后才有） */
-  usage?: TurnUsage
-}
-
-/** 发起 AI 对话的请求体：可绑定一个终端会话（该会话拥有独立的助手上下文） */
-export interface AiChatRequest {
-  history: AiChatMessage[]
-  /** 对话绑定的终端会话：工具默认作用于此会话，不随当前激活终端变化 */
-  targetSessionId?: string | null
-  /**
-   * 本次对话使用的模型配置 id（**每个终端会话各自独立**）。
-   * 缺省时回退到设置里的默认模型（`aiSettings.activeConfigId`）。
-   */
-  configId?: string
-  /** 配置下的具体模型 id（配置挂了多个模型时按会话选择）；缺省用配置的 `model` */
-  modelId?: string
-}
-
-export type AiMessagePart =
-  | {
-      type: 'text'
-      text: string
-      /**
-       * 该段是一次流式失败落下的错误文案（`⚠️` 前缀）。
-       *
-       * 模型级重试**每次尝试失败都会发一个 error 事件**，追加会堆成一长串重复文案，
-       * 所以靠这个标记让「后到的错误替换前一个」，且后续正文增量不再合并进这段文本
-       * （否则重试成功后正文会被接在错误文案后面）。
-       */
-      error?: true
-    }
-  | { type: 'reasoning'; text: string }
-  | {
-      type: 'tool-call'
-      toolCallId: string
-      toolName: string
-      input: unknown
-      /** ACP 工具的人类可读描述（路径 / 命令等），只作「工具名后面的明细」展示，绝不进工具名 */
-      title?: string
-      /** ACP 协议的工具种类（read / edit / execute …）：拿不到 name 时靠它翻出中文工具名 */
-      acpKind?: string
-      /**
-       * **入参还在流式生成**时攒下的半截 JSON 文本（见 `AiStreamEvent` 的 `tool-call-delta`）。
-       *
-       * 只喂渲染：卡片据此显示「正在生成…」并让内容一帧帧变长（写文件这类入参数 KB 起的调用
-       * 才不至于一直只转圈）。完整 `tool-call` 到达（收口）时**必须丢掉它**（见
-       * `stores/agent-helpers.ts` 的 appendAssistantPart），渲染随之回落到参数 / diff；
-       * 它也**不落盘**（`persistConversation` 里再拦一道）。
-       */
-      inputText?: string
-    }
-  | {
-      type: 'tool-result'
-      toolCallId: string
-      toolName: string
-      output: unknown
-      isError?: boolean
-    }
-
-export type AiStreamEvent =
-  | { type: 'text-delta'; delta: string }
-  /** 模型思考内容增量（推理模型 / 思考型模型） */
-  | { type: 'reasoning-delta'; delta: string }
-  /**
-   * 工具**入参的流式增量**（Mastra 的 `tool-call-delta` / `argsTextDelta`）。
-   *
-   * 与 `tool-call` 的关系同 `text-delta` 之于 text part：增量只喂渲染（工具卡上能看到
-   * 要写入的内容在长），收敛以完整 `tool-call` 为准。**不落盘、不进消息历史**。
-   *
-   * ⚠️ 不是所有上游都发：不发时行为与从前完全一致（只有一条完整 `tool-call`），
-   * 渲染端不能假设「调工具必然先来一串 delta」。
-   */
-  | {
-      type: 'tool-call-delta'
-      toolCallId: string
-      /** 增量帧可能不带工具名（有的上游只在完整 tool-call 里给）：给了就补上 */
-      toolName?: string
-      /**
-       * 入参文本的增量（JSON 片段，按 toolCallId 依次拼接）。
-       * **可以为空串**：上游「入参开始流式生成」那一帧只有 id + 工具名、还没有内容，
-       * 用它先把卡片建出来（标题立刻是「写入文件」而不是「工具调用」）。
-       */
-      inputTextDelta: string
-    }
-  | { type: 'tool-call'; toolCallId: string; toolName: string; input: unknown; title?: string; acpKind?: string }
-  | {
-      type: 'tool-result'
-      toolCallId: string
-      toolName: string
-      output: unknown
-      isError?: boolean
-    }
-  /** 一轮结束时的用量统计（input/output/total tokens、tps、耗时等） */
-  | { type: 'usage'; usage: TurnUsage }
-  /** 本轮请求发出前触发了上下文压缩（只是通知，不进消息历史） */
-  | { type: 'context-compressed'; info: ContextCompression }
-  | { type: 'finish'; finishReason: string }
-  | { type: 'error'; message: string; retryable?: boolean }
-  /**
-   * 模型请求因可重试的网络错误失败，正在重试（第 `attempt` 次）。
-   *
-   * 是「通知」不是内容增量：**不落盘**、也不代表本轮结束 —— 渲染端据此清掉这一次尝试
-   * 已渲染的部分输出，并显示一条**自替换**的「第 N 次重试」提示（屏幕上只留最新一次）。
-   * `maxRetries` = 生效的重试上限（设置里 `0` = 不重试，此时不会有这条事件）。
-   */
-  | { type: 'retry'; attempt: number; maxRetries: number }
-
 // ---------- AI Agent（工作区编程/运维助手） ----------
 
 /** Agent 工作区：绑定的本地目录，工具只能在工作区内读写与执行命令 */
@@ -1392,7 +1294,7 @@ export interface AgentWorkspace {
   updatedAt: number
 }
 
-/** Agent 聊天消息（与 AiChatMessage 同构，part 形状一致） */
+/** Agent 聊天消息（简化版 UIMessage，主进程与渲染进程一致；终端助手与工作区 Agent 共用这一种） */
 export interface AgentChatMessage {
   id: string
   role: 'user' | 'assistant'
@@ -1418,17 +1320,36 @@ export interface AgentFsFile {
 }
 
 /**
+ * Agent 会话的作用域。
+ *
+ * - `'workspace'`（**缺省**，兼容旧数据）：工作区会话，工具作用于绑定的本地目录；
+ * - `'terminal'`：终端 AI 助手的会话，工具作用于发起对话的那个终端会话。
+ *   两类会话**分开存储、分开列表**（终端会话绝不进 AI Agent 的侧边栏），
+ *   消息都随会话落盘（均为 mastra 形态；ACP 绑定的是工作区目录，与终端无关）。
+ */
+export type AgentConversationScope = 'workspace' | 'terminal'
+
+/**
  * Agent 会话：一个工作区下可以有多个独立会话，**每个会话固定一种形态**。
  *
  * - `kind: 'mastra'`：应用自带的 Mastra agent，`messages` 随会话落盘（能随时切回来接着聊）；
  * - `kind: 'acp'`：绑定的外部 ACP agent（`acpAgentId`）**不可切换**，
  *   `acpSessionId` 是 agent 侧的会话 id（导入时绑定 / 新建后回填）。
  *   **消息由 agent 自己管理** —— 本地不保存任何消息，打开会话时用 `session/load` 让 agent 回放。
+ *
+ * `scope: 'terminal'` 的会话只有 mastra 形态（工具是终端操作，绑不到外部 agent）。
  */
 export interface AgentConversation {
   id: string
-  /** 所属工作区 id */
-  workspaceId: string
+  /**
+   * 所属工作区 id。**仅 workspace 作用域有值**：terminal 会话不绑工作区
+   * （工具跟着发起对话的终端会话走），落盘时省略该字段。
+   */
+  workspaceId?: string
+  /**
+   * 会话作用域（见 `AgentConversationScope`）。**缺省 = workspace**（兼容旧存档）。
+   */
+  scope?: AgentConversationScope
   /**
    * 会话形态：内置 Mastra agent 或某个固定的外部 ACP agent（**定下来之后不可互切**）。
    *
@@ -1473,7 +1394,7 @@ export type AgentMessagePart =
   | {
       type: 'text'
       text: string
-      /** 该段是一次流式失败落下的错误文案（`⚠️` 前缀），语义见 `AiMessagePart` 的同名字段 */
+      /** 该段是一次流式失败落下的错误文案（`⚠️` 前缀），由 appendAgentPart 的 error 分支产出 */
       error?: true
     }
   | { type: 'reasoning'; text: string }
@@ -1506,7 +1427,16 @@ export type AgentMessagePart =
 
 /** 发起 Agent 对话的请求体：绑定一个工作区（工具全部作用于该目录）+ 一个会话 */
 export interface AgentChatRequest {
-  workspaceId: string
+  /** 所属工作区 id。**仅 workspace 作用域必填**；terminal 会话不绑工作区 */
+  workspaceId?: string
+  /** 会话作用域；缺省 = workspace。terminal 会话的工具作用于 `targetSessionId` 指向的终端 */
+  scope?: AgentConversationScope
+  /**
+   * terminal 作用域：本轮对话发起所在的**终端会话 id** —— 终端工具（run_in_terminal /
+   * send_keys / read_terminal_output）默认作用于此会话，不随激活终端漂移。
+   * 绑定按请求计算（面板属于哪个终端就用哪个），所以历史会话在新终端里也能接着聊。
+   */
+  targetSessionId?: string | null
   /** 会话 id：ACP 后端据此定位 / 新建独立的 agent session（不同会话不共享上下文） */
   conversationId: string
   /** 会话形态；缺省回退到会话记录（缺记录时按 mastra） */
@@ -1521,9 +1451,32 @@ export interface AgentChatRequest {
   acpAgentId?: string
   /** 仅 `acp`：agent 侧的会话 id；为空表示「这个会话还没在 agent 侧建过」，由主进程 session/new 补上 */
   acpSessionId?: string
+  /**
+   * 随本轮请求携带的**客户端工具**（定义在渲染端、执行也在渲染端，见 `ClientToolInfo`）。
+   * 由发起对话的页面决定带哪一组 —— 工具天然是页面作用域的，主进程不设全局注册表。
+   * 仅 mastra 路径生效；ACP 的工具归外部 agent 自己管。
+   */
+  clientTools?: ClientToolInfo[]
 }
 
-/** Agent 流事件（形状与 AiStreamEvent 一致；reasoning-delta 为思考内容增量） */
+/**
+ * 客户端工具定义：**在渲染进程执行**的 AI 工具（UI 能力、插件注入的能力）。
+ *
+ * 页面发送消息时把定义随 `agent:chat` 传上来，主进程组装进工具集（模型可见）；
+ * 模型调用时经 `clientTools:invoke` 广播回渲染端，由渲染端按 `permissionMode`
+ * 自行处理权限（直接执行 / 自己弹卡 / 拒绝）后执行，结果经 `clientTools:result`
+ * 回填 —— 当前请求的模型循环随即继续。**确认不经服务端**：拒绝时把
+ * 「用户拒绝了这次调用…」作为**正常工具结果**回传（不是 tool error）。
+ */
+export interface ClientToolInfo {
+  /** 工具名（模型按它调用）；与内置工具重名会被忽略（内置优先） */
+  name: string
+  description: string
+  /** 参数 JSON Schema（draft-07 即可）；缺省 = 无参数 */
+  inputSchema?: Record<string, unknown>
+}
+
+/** Agent 流事件（终端助手与工作区 Agent 共用；reasoning-delta 为思考内容增量） */
 export type AgentStreamEvent =
   /**
    * ACP 会话的历史回放：打开一个导入的 ACP 会话时，`session/load` 让 agent 把整段历史
@@ -1576,20 +1529,6 @@ export type AgentStreamEvent =
    * `maxRetries` = 生效的重试上限（设置里 `0` = 不重试，此时不会有这条事件）。
    */
   | { type: 'retry'; attempt: number; maxRetries: number }
-
-/** Agent 确认模式下**改动类工具**（执行命令 / 写入 / 编辑 / 删除）执行前的主进程请示 */
-export interface AgentConfirmRequest {
-  /** 确认请求 id，回复时原样带回 */
-  id: string
-  /** 所属 Agent 对话请求 id */
-  requestId: string
-  toolCallId: string
-  toolName: string
-  /** 待执行的动作：命令原文，或「写入文件 xxx（n 字符）」这类说明 */
-  command: string
-  workspaceId?: string
-  workspaceName?: string
-}
 
 export interface McpToolInfo {
   serverName: string

@@ -37,7 +37,9 @@ const REWRITES = {
   'browser/agent.ts': [
     ["from './handlers'", "from './handlers.ts'"],
     ["from './session'", "from './session.ts'"],
-    ["from '../ai/agent-core/workspace'", "from '../ai/agent-core/workspace.ts'"]
+    ["from '../ai/agent-core/workspace'", "from '../ai/agent-core/workspace.ts'"],
+    // 会话 id 推导（agentBrowserSessionId）是运行时 import，一并指向副本
+    ["from '@shared/browser'", "from '../shared/browser.ts'"]
   ],
   'browser/session.ts': [
     ["from './input'", "from './input.ts'"],

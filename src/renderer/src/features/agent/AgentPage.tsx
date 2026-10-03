@@ -623,7 +623,7 @@ export function AgentPage({
 
   const pendingConfirm = useAppStore((s) => {
     if (!activeId) return null
-    for (const c of Object.values(s.agentPendingConfirms)) {
+    for (const c of Object.values(s.pendingConfirms)) {
       if (c.workspaceId === undefined || c.workspaceId === activeId) return c
     }
     return null
@@ -1652,7 +1652,9 @@ export function AgentPage({
                 <ConversationScrollButton />
               </Conversation>
             )}
-            {/* 右侧「消息目录」：用户消息各占一段，悬停预览、点击跳转 */}
+            {/* 右侧「消息目录」：用户消息按真实时间轴排成一条竖线上的点（挨得太近的并成
+                簇点、预览气泡里是清单），悬停预览、点击跳转；滚动到哪条提问，对应点也放大
+                （scroll-spy 由本组件自己监听滚动容器，见 MessageOutline 文件头） */}
             <MessageOutline messages={messages} onJump={jumpToMessage} />
           </div>
 

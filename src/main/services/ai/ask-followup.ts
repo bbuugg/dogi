@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import { tool, type ToolSet } from 'ai'
 import { z } from 'zod'
 import type { AskFollowupAnswer, AskFollowupRequest } from '@shared/types'
 import { ASK_FOLLOWUP_TIMEOUT_MS, ASK_FOLLOWUP_TOOL } from '@shared/ask-followup'
+import type { AiToolDef } from './tool-registry'
 
 /**
  * `ask_followup_question` 工具：**让 AI 在回合中途向用户收集结构化选择题答案，拿到后继续往下跑**。
@@ -87,105 +87,110 @@ class AskFollowupBroker {
 export const askFollowupBroker = new AskFollowupBroker()
 
 /**
- * 组装 `ask_followup_question` 工具。
+ * `ask_followup_question` 工具定义（scope = 'both'：两个 AI 界面共用）。
  *
  * ⚠️ 刻意**不走确认流程**：提问本身就是让用户在卡片上做决定，
  * 再套一层「是否允许执行该工具？」只会多一次没意义的点击。
+ * 终端助手的提问带 `sessionId`（本轮绑定的终端会话）—— 渲染端靠它
+ * 在面板折叠时把卡片撑开（`hasFollowupForSession`）。
  */
-export function buildAskFollowupTool(requestId: string, sessionId?: string | null): ToolSet {
+export function buildAskFollowupDef(): AiToolDef {
   return {
-    [ASK_FOLLOWUP_TOOL]: tool({
-      description:
-        'Collect structured multiple-choice answers from the user. Provide one or more questions with ' +
-        'options, and set multiSelect when multi-select is appropriate. MUST be invoked via the native ' +
-        'tool_calls protocol; NEVER emit it as inline XML or pseudo-XML in assistant text (e.g. ' +
-        '"<ask_followup_question>..."). Only use this tool when you are highly uncertain and must clarify ' +
-        'the issue with the user. You should prefer resolving the problem through reasoning and other tools ' +
-        'whenever possible.',
-      inputSchema: z.object({
-        title: z
-          .string()
-          .optional()
-          .describe('Optional title for the questions form'),
-        questions: z
-          .array(
-            z.object({
-              question: z
-                .string()
-                .min(1)
-                .describe('The complete question to ask the user. Should be clear and specific.'),
-              header: z
-                .string()
-                .max(12)
-                .describe(
-                  'Very short label displayed as a chip/tag (max 12 chars). Examples: "Auth method", "Library".'
-                ),
-              options: z
-                .array(
-                  z.union([
-                    z.string(),
-                    z.object({ label: z.string(), description: z.string().optional() })
-                  ])
-                )
-                .min(1)
-                .describe(
-                  'The available choices for this question. 2-4 options. Each option can be a string or an ' +
-                    'object with "label" and optional "description".'
-                ),
-              multiSelect: z
-                .boolean()
-                .optional()
-                .describe(
-                  'Set to true to allow the user to select multiple options instead of just one. Default false.'
-                ),
-              id: z
-                .string()
-                .optional()
-                .describe('Optional unique identifier for the question. Auto-generated if absent.')
-            })
-          )
-          .min(1)
-          .describe(
-            '1 to 4 questions as an array filled with JSON objects. Example: ' +
-              '[{"question":"Which framework?","options":[{"label":"React"},{"label":"Vue"}]}]'
-          )
-      }),
-      execute: async (
-        input: {
-          title?: string
-          questions: Array<{
-            question: string
-            header: string
-            options: Array<string | { label: string; description?: string }>
-            multiSelect?: boolean
-            id?: string
-          }>
-        },
-        opts: { toolCallId: string }
-      ) => {
-        const answer = await askFollowupBroker.ask({
-          requestId,
-          toolCallId: opts.toolCallId,
-          title: input.title,
-          questions: input.questions.map((q, i) => ({
-            id: q.id?.trim() || `q${i + 1}`,
-            question: q.question,
-            header: q.header,
-            options: q.options.map((o) =>
-              typeof o === 'string' ? { label: o } : { label: o.label, description: o.description }
-            ),
-            multiSelect: !!q.multiSelect
-          })),
-          sessionId: sessionId ?? undefined
-        })
-        if (!answer) {
-          return {
-            answered: false,
-            note: '用户没有作答（已跳过）。请按你自己的判断继续，不要再追问同一个问题。'
-          }
-        }
-        return { answered: true, answers: answer.answers }
+    name: ASK_FOLLOWUP_TOOL,
+    scope: 'both',
+    description:
+      'Collect structured multiple-choice answers from the user. Provide one or more questions with ' +
+      'options, and set multiSelect when multi-select is appropriate. MUST be invoked via the native ' +
+      'tool_calls protocol; NEVER emit it as inline XML or pseudo-XML in assistant text (e.g. ' +
+      '"<ask_followup_question>..."). Only use this tool when you are highly uncertain and must clarify ' +
+      'the issue with the user. You should prefer resolving the problem through reasoning and other tools ' +
+      'whenever possible.',
+    inputSchema: z.object({
+      title: z
+        .string()
+        .optional()
+        .describe('Optional title for the questions form'),
+      questions: z
+        .array(
+          z.object({
+            question: z
+              .string()
+              .min(1)
+              .describe('The complete question to ask the user. Should be clear and specific.'),
+            header: z
+              .string()
+              .max(12)
+              .describe(
+                'Very short label displayed as a chip/tag (max 12 chars). Examples: "Auth method", "Library".'
+              ),
+            options: z
+              .array(
+                z.union([
+                  z.string(),
+                  z.object({ label: z.string(), description: z.string().optional() })
+                ])
+              )
+              .min(1)
+              .describe(
+                'The available choices for this question. 2-4 options. Each option can be a string or an ' +
+                  'object with "label" and optional "description".'
+              ),
+            multiSelect: z
+              .boolean()
+              .optional()
+              .describe(
+                'Set to true to allow the user to select multiple options instead of just one. Default false.'
+              ),
+            id: z
+              .string()
+              .optional()
+              .describe('Optional unique identifier for the question. Auto-generated if absent.')
+          })
+        )
+        .min(1)
+        .describe(
+          '1 to 4 questions as an array filled with JSON objects. Example: ' +
+            '[{"question":"Which framework?","options":[{"label":"React"},{"label":"Vue"}]}]'
+        )
+    }),
+    execute: async (
+      rawInput: unknown,
+      opts: { toolCallId: string },
+      ctx: { requestId: string; scope: string; targetSessionId?: string | null }
+    ) => {
+      const input = rawInput as {
+        title?: string
+        questions: Array<{
+          question: string
+          header: string
+          options: Array<string | { label: string; description?: string }>
+          multiSelect?: boolean
+          id?: string
+        }>
       }
-    })
+      const answer = await askFollowupBroker.ask({
+        requestId: ctx.requestId,
+        toolCallId: opts.toolCallId,
+        title: input.title,
+        questions: input.questions.map((q, i) => ({
+          id: q.id?.trim() || `q${i + 1}`,
+          question: q.question,
+          header: q.header,
+          options: q.options.map((o) =>
+            typeof o === 'string' ? { label: o } : { label: o.label, description: o.description }
+          ),
+          multiSelect: !!q.multiSelect
+        })),
+        // 只有终端作用域才带会话归属：工作区 Agent 没有可撑开的面板
+        sessionId: ctx.scope === 'terminal' ? (ctx.targetSessionId ?? undefined) : undefined
+      })
+      if (!answer) {
+        return {
+          answered: false,
+          note: '用户没有作答（已跳过）。请按你自己的判断继续，不要再追问同一个问题。'
+        }
+      }
+      return { answered: true, answers: answer.answers }
+    }
   }
 }

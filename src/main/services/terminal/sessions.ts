@@ -35,12 +35,14 @@ interface InternalSession {
   write(data: string | Uint8Array): boolean
   resize(cols: number, rows: number): void
   kill(): void
-  /** 读取最近输出（AI 工具用） */
+  /** 读取最近输出（AI 工具看「终端现在什么状态」用） */
   recentOutput(maxChars: number): string
-  /** 当前输出缓冲区长度（AI 工具用于增量读取） */
-  outputLength(): number
-  /** 读取从指定偏移开始的新增输出（AI 工具用于增量读取） */
-  outputFrom(start: number): string
+  /**
+   * ⚠️ 这里**刻意没有**「按偏移取新增输出」的接口。
+   * 环形缓冲上限 MAX_OUTPUT_BUFFER 会裁掉头部，所以「先记长度、事后取增量」在
+   * 输出刷过量之后会拿到空串（终端工具因此改为等待期内订阅 data 事件边收边攒，
+   * 见 services/ai/terminal-tools.ts 的 captureDuring）。别再加回来。
+   */
   /** 在远端/本地执行一次性命令并返回完整输出（监控采集用） */
   exec(command: string): Promise<string>
   /** 连接是否已就绪（本地 shell 已启动 / SSH 握手已完成），监控采集前应判读 */
@@ -174,14 +176,6 @@ class LocalSession implements InternalSession {
 
   recentOutput(maxChars: number): string {
     return this.output.slice(-maxChars)
-  }
-
-  outputLength(): number {
-    return this.output.length
-  }
-
-  outputFrom(start: number): string {
-    return this.output.slice(Math.max(0, start))
   }
 
   exec(command: string): Promise<string> {
@@ -450,14 +444,6 @@ class SshSession implements InternalSession {
 
   recentOutput(maxChars: number): string {
     return this.output.slice(-maxChars)
-  }
-
-  outputLength(): number {
-    return this.output.length
-  }
-
-  outputFrom(start: number): string {
-    return this.output.slice(Math.max(0, start))
   }
 
   isReady(): boolean {
@@ -887,14 +873,6 @@ class MoshSession implements InternalSession {
     return this.output.slice(-maxChars)
   }
 
-  outputLength(): number {
-    return this.output.length
-  }
-
-  outputFrom(start: number): string {
-    return this.output.slice(Math.max(0, start))
-  }
-
   isReady(): boolean {
     return this.ready && !this.killed
   }
@@ -1094,16 +1072,8 @@ class SessionManager extends EventEmitter {
   recentOutput(id: string, maxChars = 8000): string | null {
     return this.sessions.get(id)?.recentOutput(maxChars) ?? null
   }
-
-  /** 当前输出缓冲区长度（AI 工具增量读取用） */
-  outputLength(id: string): number {
-    return this.sessions.get(id)?.outputLength() ?? 0
-  }
-
-  /** 读取从指定偏移开始的新增输出（AI 工具增量读取用） */
-  outputFrom(id: string, start: number): string | null {
-    return this.sessions.get(id)?.outputFrom(start) ?? null
-  }
+  // ⚠️ 刻意不提供「按偏移取新增输出」：环形缓冲有损，事后增量读会拿到空串。
+  // 需要完整输出走 ai/output-artifact.ts 的产物机制（等待期内实时捕获 + 落盘）。
 }
 
 export const sessionManager = new SessionManager()

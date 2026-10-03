@@ -6,6 +6,7 @@ import { registerFollowupIpc } from './ask-followup'
 import { registerGitIpc } from './git'
 import { registerHistoryIpc } from './history'
 import { registerBrowserIpc } from './browser'
+import { registerClientToolsIpc } from './client-tools'
 import { registerHostsIpc } from './hosts'
 import { registerLogsIpc } from './logs'
 import { registerMcpIpc } from './mcp'
@@ -47,8 +48,10 @@ export function registerIpc(win: () => BrowserWindow | null): void {
   registerScriptsIpc()
   registerNotesIpc(ctx)
   registerApiIpc(ctx)
-  registerAiIpc(ctx)
+  registerAiIpc()
   registerAgentIpc(ctx)
+  // 客户端工具（渲染端注册、渲染端执行）：broker 广播依赖 ctx
+  registerClientToolsIpc(ctx)
   // ask_followup_question 提问卡：两个 AI 界面共用一组通道，得在它们之后注册（共用一个 broker）
   registerFollowupIpc(ctx)
   registerMcpIpc()

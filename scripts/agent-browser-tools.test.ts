@@ -16,7 +16,7 @@
 import { createServer } from 'node:http'
 import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { buildBrowserAgentTools } from './browser/agent.ts'
+import { buildBrowserToolDefs } from './browser/agent.ts'
 
 const FIX = join(process.env.TEMP ?? process.env.TMP ?? '.', 'dogi-agent-browser-test')
 rmSync(FIX, { recursive: true, force: true })
@@ -61,12 +61,27 @@ console.log('假站点:', base)
 // ---------------------------------------------------------------------------
 // 工具集
 // ---------------------------------------------------------------------------
-const tools = buildBrowserAgentTools({
-  sessionId: 'agent-browser:selftest',
-  channel: 'auto',
-  workspaceRoot: FIX
-})
-// ai 的 tool() 结果直接暴露 execute；这里不需要 AI 运行时，给个最小 options
+// 新 API：buildBrowserToolDefs 返回**静态定义**，会话绑定（sessionId 由
+// conversationId 推导 / 截图落盘根目录 / 渠道偏好）全部经 ToolRunContext 注入。
+// 这里不需要 AI 运行时，手工把定义包成可直接 execute 的形状。
+const ctx = {
+  requestId: 'r1',
+  conversationId: 'selftest',
+  scope: 'workspace' as const,
+  workspace: { id: 'w', name: 'w', path: FIX, createdAt: 0, updatedAt: 0 },
+  signal: new AbortController().signal,
+  permissionMode: 'full' as const,
+  requestConfirm: async () => true
+}
+const tools = Object.fromEntries(
+  buildBrowserToolDefs({ channel: () => 'auto' }).map((d) => [
+    d.name,
+    {
+      execute: (input: unknown, options: { toolCallId: string }): Promise<unknown> =>
+        d.execute(input, { toolCallId: options.toolCallId }, ctx)
+    }
+  ])
+)
 const call = (t: { execute?: unknown }, args: unknown): Promise<unknown> =>
   (t.execute as (a: unknown, o: unknown) => Promise<unknown>)(args, {
     toolCallId: 'test',

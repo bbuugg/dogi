@@ -84,7 +84,8 @@ export function applyTabClose(
     | 'exitedSessions'
     | 'monitors'
     | 'monitorUnsupported'
-    | 'aiChats'
+    | 'activeTerminalConv'
+    | 'terminalDrafts'
     | 'connectStages'
     | 'ui'
   >,
@@ -111,9 +112,12 @@ export function applyTabClose(
   // 「不支持监控」标记随会话关闭一并清理
   const monitorUnsupported = { ...s.monitorUnsupported }
   delete monitorUnsupported[id]
-  // 会话关闭，其独立的 AI 对话与 AI 面板开关随之清理
-  const aiChats = { ...s.aiChats }
-  delete aiChats[id]
+  // 会话关闭，其打开的终端助手会话指针 / 草稿与 AI 面板开关随之清理
+  //（会话记录本身在独立的池里持久化，不随某个终端会话消失）
+  const activeTerminalConv = { ...s.activeTerminalConv }
+  delete activeTerminalConv[id]
+  const terminalDrafts = { ...s.terminalDrafts }
+  delete terminalDrafts[id]
   const aiOpenSessions = { ...s.ui.aiOpenSessions }
   delete aiOpenSessions[id]
   const aiMinimizedSessions = { ...s.ui.aiMinimizedSessions }
@@ -130,7 +134,8 @@ export function applyTabClose(
     exitedSessions: exited,
     monitors,
     monitorUnsupported,
-    aiChats,
+    activeTerminalConv,
+    terminalDrafts,
     connectStages,
     ui: { ...s.ui, panelTabs: tabs, aiOpenSessions, aiMinimizedSessions }
   }

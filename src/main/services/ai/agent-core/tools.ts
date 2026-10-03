@@ -1,28 +1,30 @@
 /**
- * 工作区 Agent 工具集：文件读取 / 查找 / 写入 / 编辑 / 删除 / 执行命令。
+ * 工作区 Agent 工具定义（注册进 tool-registry，scope = 'workspace'）。
  *
- * 所有工具都绑定一个工作区根目录（root），文件路径一律相对工作区，
+ * 所有工具都作用于**本轮绑定的工作区**（`ctx.workspace.path`），文件路径一律相对工作区，
  * 经 resolveInside 越界校验后落盘，防止 Agent 逃出工作区。
  *
  * 权限：**会改动东西的工具**（execute_command / delete_file / write_file / edit_file）
  * 统一走 `guardWrite` 一道闸 —— 确认模式下弹卡片等用户点「允许」，被拒绝就当次调用放弃；
- * 只读类工具（list_files / read_file / search_files / find_files / read_skill）任何模式下都不拦。
+ * 只读类工具（list_files / read_file / search_files / find_files）任何模式下都不拦。
+ * （read_skill 在 skills.ts 里定义；浏览器工具在 services/browser/agent.ts。）
+ *
+ * ⚠️ 定义是静态的、跨会话复用：**不得**在注册期或定义体里捕获任何一次对话的状态 ——
+ * 工作区、确认入口、先读后改状态、abortSignal 全部从 `ToolRunContext` 现取。
  */
 import { spawn } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
-import { tool, type ToolSet } from 'ai'
 import { z } from 'zod'
+import type { AiToolDef, ToolRunContext } from '../tool-registry'
+import { OutputArtifactWriter } from '../output-artifact'
 import {
   convertToLineEnding,
   detectLineEnding,
   normalizeLineEndings,
   replaceContent
 } from './edit-match'
-import { buildReadSkillTool, type AgentSkill } from './skills'
 import { createIgnoreChecker, relPathOf, resolveInside } from './workspace'
-
-export type AgentPermissionMode = 'full' | 'confirm'
 
 /**
  * read_file 单次输出的字符上限。超了就停在这一行，给出「用 offset=N 继续」的指引
@@ -51,8 +53,8 @@ export interface AgentFileSnapshot {
 /**
  * 会话级的「已读文件」状态（先读后改的依据）。
  *
- * 工具集每轮对话都会重建（见 services/ai/agent.ts），这个状态必须由调用方持有并跨轮
- * 传入 —— 与 Claude Code 的 ReadState 同一语义：read_file 记录快照，write_file /
+ * 工具定义是静态的，这个状态由调用方（agentService，按会话持有）跨轮传入 ——
+ * 与 Claude Code 的 ReadState 同一语义：read_file 记录快照，write_file /
  * edit_file 校验快照（没读过 / 读后被外部改动都不放行）。
  */
 export interface AgentFileState {
@@ -64,32 +66,15 @@ export function createAgentFileState(): AgentFileState {
   return { reads: new Map() }
 }
 
-export interface AgentToolOptions {
-  /** 确认模式下**会改动东西的工具**（执行命令 / 写 / 编辑 / 删除）执行前需用户批准 */
-  permissionMode: AgentPermissionMode
-  requestConfirm?: (req: {
-    toolCallId: string
-    toolName: string
-    command: string
-  }) => Promise<boolean>
-  /** 可用技能（见 skills.ts）；有值时额外暴露 read_skill 工具，空值不暴露 */
-  skills?: AgentSkill[]
-  /**
-   * Windows 上 execute_command 的 POSIX shell（Git Bash 的 bash.exe 绝对路径），由调用方注入
-   * （见 services/ai/agent.ts）。有值：命令经由 `<bash> -lc` 执行，模型拿到的是 Linux 工具链
-   * （ls / grep / sed / 管道……）；空值：回退 PowerShell。POSIX 平台不走这个字段（始终 bash）。
-   */
-  bashPath?: string | null
-  /**
-   * 「先读后改」状态（见 AgentFileState）。不传时跳过校验（探针 / 轻量调用方），
-   * 正常 Agent 路径必须传，否则模型可以不看文件就覆盖内容。
-   */
-  fileState?: AgentFileState
-}
-
 function clampInt(v: number | undefined, min: number, max: number, fallback: number): number {
   if (v === undefined) return fallback
   return Math.max(min, Math.min(max, Math.trunc(v)))
+}
+
+/** 工作区根目录；定义只会被 workspace 作用域组装，没有就是调用方漏了校验 */
+function rootOf(ctx: ToolRunContext): string {
+  if (!ctx.workspace?.path) throw new Error('工具调用缺少工作区绑定')
+  return ctx.workspace.path
 }
 
 /**
@@ -320,13 +305,6 @@ function formatSearchHits(acc: SearchAcc, context: number): string {
 
 // ---------- 命令执行 ----------
 
-function truncateOutput(s: string, max = MAX_CMD_OUT): string {
-  if (s.length <= max) return s
-  const head = 4000
-  const tail = s.slice(-(max - head))
-  return `${s.slice(0, head)}\n…（输出过长，已截断，共 ${s.length} 字符）…\n${tail}`
-}
-
 function killChild(child: ReturnType<typeof spawn>, isWin: boolean): void {
   if (child.exitCode !== null || child.killed) return
   if (isWin) {
@@ -356,10 +334,15 @@ function killChild(child: ReturnType<typeof spawn>, isWin: boolean): void {
 }
 
 /**
- * 在工作区目录下执行 shell 命令：输出 stdout + stderr（截断），
+ * 在工作区目录下执行 shell 命令：输出 stdout + stderr，
  * 超时 / abortSignal 触发时终止整个进程树（POSIX 用进程组，Windows 用 taskkill /T）。
  *
- * shell 选择：POSIX 恒为 bash；Windows 优先用注入的 Git Bash（`bashPath`）——
+ * ⚠️ 流式累积**不做 slice 截断**（旧实现边收边 `slice(-MAX_CMD_OUT)`，头被丢了一次，
+ * 紧跟着 `truncateOutput` 又截一次 —— 两处都在丢同一批字节）。现在全量喂给
+ * `OutputArtifactWriter`：短输出原样内联（绝大多数情况，且不产生文件），
+ * 长输出落成产物文件、中段可按 offset 读回来。
+ *
+ * shell 选择：POSIX 恒为 bash；Windows 优先用 ctx.bashPath（Git Bash）——
  * 模型拿到的是 POSIX 工具链（ls / grep / 管道…），与主流编码代理一致；
  * 没有 Git Bash 时回退 PowerShell（强制 UTF-8 输出，cmd 的 GBK 会乱码）。
  */
@@ -367,9 +350,11 @@ async function runCommand(
   command: string,
   cwd: string,
   timeoutMs: number,
-  signal?: AbortSignal,
-  bashPath?: string | null
+  ctx: ToolRunContext,
+  call: { toolCallId: string }
 ): Promise<string> {
+  const signal = ctx.signal
+  const bashPath = ctx.bashPath
   const isWin = process.platform === 'win32'
   const useBash = !isWin || Boolean(bashPath)
   const shellCmd = isWin ? (bashPath ?? 'powershell.exe') : '/bin/bash'
@@ -398,8 +383,16 @@ async function runCommand(
     windowsHide: true,
     ...(isWin ? {} : { detached: true })
   })
-  let stdout = ''
-  let stderr = ''
+  // stdout / stderr 各一个产物写入器：内联上限仍是 MAX_CMD_OUT（别顺手调大小，
+  // 那是既有调优），超出的部分进产物文件而不是被丢掉
+  const writerOpts = {
+    conversationId: ctx.conversationId,
+    toolCallId: call.toolCallId,
+    inlineMax: MAX_CMD_OUT,
+    headChars: 4000
+  }
+  const out = new OutputArtifactWriter(writerOpts)
+  const err = new OutputArtifactWriter(writerOpts)
 
   return new Promise<string>((resolve) => {
     let settled = false
@@ -414,9 +407,14 @@ async function runCommand(
           : reason === 'timeout'
             ? `（超时 ${timeoutMs}ms，已终止进程树）`
             : '（已中止）'
-      const err = stderr.trim()
-      const body = truncateOutput(stdout.trim())
-      resolve(`$ ${command}\n${info}\n${body}${err ? `\n${err}` : ''}`)
+      void (async () => {
+        const outR = await out.finish()
+        const errR = await err.finish()
+        const e = errR.text.trim()
+        resolve(
+          `$ ${command}\n${info}\n${outR.text.trim()}${e ? `\n${e}` : ''}`
+        )
+      })()
     }
     const onAbort = () => {
       killChild(child, isWin)
@@ -434,14 +432,8 @@ async function runCommand(
       }
     }
 
-    child.stdout.on('data', (d: Buffer) => {
-      stdout += d.toString('utf8')
-      if (stdout.length > MAX_CMD_OUT) stdout = stdout.slice(-MAX_CMD_OUT)
-    })
-    child.stderr.on('data', (d: Buffer) => {
-      stderr += d.toString('utf8')
-      if (stderr.length > MAX_CMD_OUT) stderr = stderr.slice(-MAX_CMD_OUT)
-    })
+    child.stdout.on('data', (d: Buffer) => out.append(d.toString('utf8')))
+    child.stderr.on('data', (d: Buffer) => err.append(d.toString('utf8')))
     child.on('error', (err) => {
       if (settled) return
       settled = true
@@ -453,93 +445,105 @@ async function runCommand(
   })
 }
 
-// ---------- 工具集 ----------
+// ---------- 会话级守卫（先读后改 + 确认闸，全部挂在 ctx 上） ----------
 
-/** 构建工作区 Agent 工具集（绑定 root 目录；确认模式下改动类工具先请示用户） */
-export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
-  const confirm = opts.requestConfirm
-  const needConfirm = opts.permissionMode === 'confirm' && !!confirm
-  const isWin = process.platform === 'win32'
-  const bashPath = opts.bashPath ?? null
-  const fileState = opts.fileState
-  // 工具描述必须如实描述执行环境，模型才会放心用对应风格的命令
-  const shellNote = isWin
-    ? bashPath
-      ? '命令运行在 Git Bash（POSIX）环境：可以用 ls / grep / sed / find / cat / 管道等 Unix 工具与语法；Windows 路径建议写成 C:/xxx 或 /c/xxx 形式。'
-      : '命令运行在 PowerShell 环境（未检测到 Git Bash）。'
-    : '命令运行在 bash 环境。'
+/**
+ * 改动类工具的**统一闸门**（与 fishwork 的 `guardWrite` 同一套语义）。
+ *
+ * 返回 `null` = 放行；返回字符串 = 这串就是**工具结果**（回绝说明），直接 `return` 回去 ——
+ * 刻意不抛错：回绝是「预期内的结果」，让模型看到原因后能向用户解释，
+ * 而不是变成一个工具报错把整轮打断。
+ *
+ * 必须过闸的是**会动磁盘 / 动进程**的工具：execute_command、delete_file、
+ * write_file、edit_file。新增工具时想清楚它会不会改动东西 —— 会，就得走这里。
+ */
+async function guardWrite(
+  ctx: ToolRunContext,
+  denied: string,
+  req: { toolCallId: string; toolName: string; command: string }
+): Promise<string | null> {
+  if (ctx.permissionMode !== 'confirm' || !ctx.requestConfirm) return null
+  const approved = await ctx.requestConfirm(req)
+  return approved
+    ? null
+    : `用户拒绝了这次调用（${denied}）。请询问用户接下来希望怎么做，不要擅自重试同一步。`
+}
 
-  /**
-   * 改动类工具的**统一闸门**（与 fishwork 的 `guardWrite` 同一套语义）。
-   *
-   * 返回 `null` = 放行；返回字符串 = 这串就是**工具结果**（回绝说明），直接 `return` 回去 ——
-   * 刻意不抛错：回绝是「预期内的结果」，让模型看到原因后能向用户解释，
-   * 而不是变成一个工具报错把整轮打断。
-   *
-   * 必须过闸的是**会动磁盘 / 动进程**的工具：execute_command、delete_file、
-   * write_file、edit_file。新增工具时想清楚它会不会改动东西 —— 会，就得走这里。
-   */
-  const guardWrite = async (
-    /** 回绝时的短句，拼进工具结果（如「文件未写入：src/a.ts」） */
-    denied: string,
-    req: { toolCallId: string; toolName: string; command: string }
-  ): Promise<string | null> => {
-    if (!needConfirm || !confirm) return null
-    const approved = await confirm(req)
-    return approved
-      ? null
-      : `用户拒绝了这次调用（${denied}）。请询问用户接下来希望怎么做，不要擅自重试同一步。`
+/**
+ * 「先读后改」：成功读到文件后记录快照（write / edit 成功后也记录 —— 写完的内容
+ * 模型自然是知道的，后续编辑不必强制重读）。
+ */
+async function noteRead(ctx: ToolRunContext, abs: string): Promise<void> {
+  const fileState = ctx.fileState
+  if (!fileState) return
+  try {
+    const st = await fs.stat(abs)
+    fileState.reads.set(abs, { mtimeMs: st.mtimeMs, size: st.size })
+  } catch {
+    // 文件刚被删等情况：不记快照，后续写 / 编辑自然会拿到「不存在」的明确报错
+  }
+}
+
+/**
+ * 写 / 编辑前的「先读后改」校验。返回 null = 放行；返回字符串 = 拒绝说明
+ * （同 guardWrite 的约定：这是预期内的回绝，让模型自行纠正，不当作工具报错打断整轮）。
+ *
+ * 校验两件事：本会话读过该文件（模型必须基于真实内容修改，不许凭想象覆盖）；
+ * 读取之后文件没被外部改动（模型手里的内容还作数）。
+ */
+async function assertReadForModify(
+  ctx: ToolRunContext,
+  root: string,
+  abs: string,
+  action: string
+): Promise<string | null> {
+  const fileState = ctx.fileState
+  if (!fileState) return null
+  const rel = relPathOf(root, abs)
+  const snap = fileState.reads.get(abs)
+  if (!snap) {
+    return `${action}失败：本次会话还没有读过 ${rel}。请先 read_file 查看文件内容，再基于真实内容做修改（不要凭记忆或猜测覆盖文件）。`
+  }
+  let stat: Awaited<ReturnType<typeof fs.stat>>
+  try {
+    stat = await fs.stat(abs)
+  } catch {
+    return `${action}失败：${rel} 在读取之后已不存在（可能被外部删除）。请先确认文件状态。`
+  }
+  if (stat.mtimeMs !== snap.mtimeMs || stat.size !== snap.size) {
+    return `${action}失败：${rel} 在读取之后又被修改过（可能是用户或其它程序改的）。请重新 read_file 确认最新内容后再试。`
+  }
+  return null
+}
+
+// ---------- 工具定义 ----------
+
+/** 工作区工具的静态定义（注册进 tool-registry；scope = 'workspace'） */
+export function buildWorkspaceToolDefs(): AiToolDef[] {
+  // 工具描述必须如实描述执行环境，模型才会放心用对应风格的命令（描述按 ctx.bashPath 现算）
+  const shellNote = (ctx: ToolRunContext): string => {
+    const isWin = process.platform === 'win32'
+    const bashPath = ctx.bashPath ?? null
+    return isWin
+      ? bashPath
+        ? '命令运行在 Git Bash（POSIX）环境：可以用 ls / grep / sed / find / cat / 管道等 Unix 工具与语法；Windows 路径建议写成 C:/xxx 或 /c/xxx 形式。'
+        : '命令运行在 PowerShell 环境（未检测到 Git Bash）。'
+      : '命令运行在 bash 环境。'
   }
 
-  /**
-   * 「先读后改」：成功读到文件后记录快照（write / edit 成功后也记录 —— 写完的内容
-   * 模型自然是知道的，后续编辑不必强制重读）。
-   */
-  const noteRead = async (abs: string): Promise<void> => {
-    if (!fileState) return
-    try {
-      const st = await fs.stat(abs)
-      fileState.reads.set(abs, { mtimeMs: st.mtimeMs, size: st.size })
-    } catch {
-      // 文件刚被删等情况：不记快照，后续写 / 编辑自然会拿到「不存在」的明确报错
-    }
-  }
-
-  /**
-   * 写 / 编辑前的「先读后改」校验。返回 null = 放行；返回字符串 = 拒绝说明
-   * （同 guardWrite 的约定：这是预期内的回绝，让模型自行纠正，不当作工具报错打断整轮）。
-   *
-   * 校验两件事：本会话读过该文件（模型必须基于真实内容修改，不许凭想象覆盖）；
-   * 读取之后文件没被外部改动（模型手里的内容还作数）。
-   */
-  const assertReadForModify = async (abs: string, action: string): Promise<string | null> => {
-    if (!fileState) return null
-    const rel = relPathOf(root, abs)
-    const snap = fileState.reads.get(abs)
-    if (!snap) {
-      return `${action}失败：本次会话还没有读过 ${rel}。请先 read_file 查看文件内容，再基于真实内容做修改（不要凭记忆或猜测覆盖文件）。`
-    }
-    let stat: Awaited<ReturnType<typeof fs.stat>>
-    try {
-      stat = await fs.stat(abs)
-    } catch {
-      return `${action}失败：${rel} 在读取之后已不存在（可能被外部删除）。请先确认文件状态。`
-    }
-    if (stat.mtimeMs !== snap.mtimeMs || stat.size !== snap.size) {
-      return `${action}失败：${rel} 在读取之后又被修改过（可能是用户或其它程序改的）。请重新 read_file 确认最新内容后再试。`
-    }
-    return null
-  }
-
-  return {
-    list_files: tool({
+  return [
+    {
+      name: 'list_files',
+      scope: 'workspace',
       description:
         '列出工作区目录内容（自动忽略 .git、node_modules、构建产物与 .gitignore 规则）。返回每个条目的相对路径，目录带 / 后缀，文件附大小。适合先了解项目结构。',
       inputSchema: z.object({
         path: z.string().optional().describe('相对工作区的目录路径，缺省为工作区根目录'),
         depth: z.number().optional().describe('递归深度，默认 0（仅当前目录），最大 4')
       }),
-      execute: async ({ path = '', depth = 0 }) => {
+      execute: async (rawInput, _call, ctx) => {
+        const { path = '', depth = 0 } = rawInput as { path?: string; depth?: number }
+        const root = rootOf(ctx)
         const absDir = resolveInside(root, path)
         const stat = await fs.stat(absDir)
         if (!stat.isDirectory()) throw new Error(`不是目录：${path || '.'}`)
@@ -548,9 +552,11 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
         await listDir(absDir, root, clampInt(depth, 0, 4, 0), ignored, lines)
         return lines.length ? lines.join('\n') : '（空目录）'
       }
-    }),
+    },
 
-    read_file: tool({
+    {
+      name: 'read_file',
+      scope: 'workspace',
       description:
         '读取文件内容。输出每行带「行号: 内容」前缀（构造 edit_file 的 oldString 时只要冒号后面的原文，绝不要把行号前缀带进去）。' +
         '默认最多 2000 行；大文件按结尾提示的 offset 继续读取，不要反复读 30 行级别的小窗口。' +
@@ -560,7 +566,13 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
         offset: z.number().optional().describe('起始行号（1 起），缺省 1'),
         limit: z.number().optional().describe('返回行数上限，默认 2000，最大 2000')
       }),
-      execute: async ({ path, offset = 1, limit }) => {
+      execute: async (rawInput, _call, ctx) => {
+        const { path, offset = 1, limit } = rawInput as {
+          path: string
+          offset?: number
+          limit?: number
+        }
+        const root = rootOf(ctx)
         const abs = resolveInside(root, path)
         let stat: Awaited<ReturnType<typeof fs.stat>>
         try {
@@ -619,12 +631,14 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
           footer = `\n\n（文件结尾，共 ${lines.length} 行）`
         }
         const body = taken.map((l, i) => `${start + i + 1}: ${l}`).join('\n')
-        await noteRead(abs)
+        await noteRead(ctx, abs)
         return `${relPathOf(root, abs)}（共 ${lines.length} 行）\n${body}${footer}`
       }
-    }),
+    },
 
-    write_file: tool({
+    {
+      name: 'write_file',
+      scope: 'workspace',
       description:
         '创建新文件，或对已有文件做**有意的整体重写**（自动创建父目录）。' +
         '优先用 edit_file 做局部修改，不要动不动整文件重写；也不要主动创建文档类文件（README / *.md）除非用户明确要求。' +
@@ -633,7 +647,9 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
         path: z.string().describe('相对工作区的文件路径'),
         content: z.string().describe('完整文件内容')
       }),
-      execute: async ({ path, content }, options) => {
+      execute: async (rawInput, call, ctx) => {
+        const { path, content } = rawInput as { path: string; content: string }
+        const root = rootOf(ctx)
         const abs = resolveInside(root, path)
         const rel = relPathOf(root, abs)
         // 已存在的文件必须先读过：防止模型凭想象把用户文件整个覆盖掉
@@ -642,24 +658,26 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
           .then(() => true)
           .catch(() => false)
         if (exists) {
-          const stale = await assertReadForModify(abs, '覆盖写入')
+          const stale = await assertReadForModify(ctx, root, abs, '覆盖写入')
           if (stale) return stale
         }
         // 会覆盖已有内容、且无法撤销：与执行命令同一道闸
-        const refused = await guardWrite(`文件未写入：${rel}`, {
-          toolCallId: options.toolCallId,
+        const refused = await guardWrite(ctx, `文件未写入：${rel}`, {
+          toolCallId: call.toolCallId,
           toolName: 'write_file',
           command: `写入文件 ${rel}（${content.length} 字符，${exists ? '覆盖' : '新建'}）`
         })
         if (refused) return refused
         await fs.mkdir(dirname(abs), { recursive: true })
         await fs.writeFile(abs, content, 'utf8')
-        await noteRead(abs)
+        await noteRead(ctx, abs)
         return `${exists ? '已覆盖写入' : '已创建'} ${rel}（${content.length} 字符）`
       }
-    }),
+    },
 
-    edit_file: tool({
+    {
+      name: 'edit_file',
+      scope: 'workspace',
       description:
         '对文件做精确的字符串替换（只改局部，不整体重写）。必须先用 read_file 读过目标文件（本会话内），oldString 从读取输出中复制（不要带「行号: 」前缀）。' +
         'oldString 必须唯一命中：多处出现时报错 —— 请扩大上下文使其唯一，或传 replaceAll: true 全部替换（重命名变量等场景）。' +
@@ -673,7 +691,14 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
           .optional()
           .describe('替换 oldString 的全部出现（默认 false，此时多处出现会报错）')
       }),
-      execute: async ({ path, oldString, newString, replaceAll = false }, options) => {
+      execute: async (rawInput, call, ctx) => {
+        const { path, oldString, newString, replaceAll = false } = rawInput as {
+          path: string
+          oldString: string
+          newString: string
+          replaceAll?: boolean
+        }
+        const root = rootOf(ctx)
         const abs = resolveInside(root, path)
         const rel = relPathOf(root, abs)
         if (!oldString.trim()) {
@@ -687,7 +712,7 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
           .then(() => true)
           .catch(() => false)
         if (!exists) throw new Error(`文件不存在：${path}。新建文件请用 write_file。`)
-        const stale = await assertReadForModify(abs, '编辑')
+        const stale = await assertReadForModify(ctx, root, abs, '编辑')
         if (stale) return stale
         const buf = await fs.readFile(abs)
         if (looksBinary(buf)) throw new Error('二进制文件，无法编辑')
@@ -700,19 +725,21 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
         // 匹配 + 试算都在内存里完成（找不到 / 多处 / 抓错块在这里抛错），
         // 确认卡为「真的会落盘」而弹，注定失败的编辑不值得打扰用户。
         const applied = replaceContent(contentOld, old, replacement, replaceAll)
-        const refused = await guardWrite(`文件未被编辑：${rel}`, {
-          toolCallId: options.toolCallId,
+        const refused = await guardWrite(ctx, `文件未被编辑：${rel}`, {
+          toolCallId: call.toolCallId,
           toolName: 'edit_file',
           command: `编辑文件 ${rel}（精确替换${replaceAll ? '，全部出现' : ''}）`
         })
         if (refused) return refused
         await fs.writeFile(abs, applied.text, 'utf8')
-        await noteRead(abs)
+        await noteRead(ctx, abs)
         return `已编辑 ${rel}（替换 ${applied.count} 处）`
       }
-    }),
+    },
 
-    search_files: tool({
+    {
+      name: 'search_files',
+      scope: 'workspace',
       description:
         '在工作区中按正则搜索文件内容（自动跳过忽略目录、二进制与大文件）。返回命中文件的相对路径、行号与行内容。用于定位符号、关键配置与错误来源。结果很多时用 filesOnly 只拿「文件:命中数」省上下文；要看代码上下文用 context。',
       inputSchema: z.object({
@@ -733,15 +760,25 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
           .describe('每条命中附带的前后上下文行数（0–5），默认 0。适合需要看清代码结构的场景'),
         maxResults: z.number().optional().describe('最大命中行数，默认 200，最大 1000')
       }),
-      execute: async ({
-        pattern,
-        path = '',
-        filePattern,
-        caseInsensitive = false,
-        filesOnly = false,
-        context = 0,
-        maxResults = 200
-      }) => {
+      execute: async (rawInput, _call, ctx) => {
+        const {
+          pattern,
+          path = '',
+          filePattern,
+          caseInsensitive = false,
+          filesOnly = false,
+          context = 0,
+          maxResults = 200
+        } = rawInput as {
+          pattern: string
+          path?: string
+          filePattern?: string
+          caseInsensitive?: boolean
+          filesOnly?: boolean
+          context?: number
+          maxResults?: number
+        }
+        const root = rootOf(ctx)
         const flags = caseInsensitive ? 'i' : ''
         let re: RegExp
         try {
@@ -760,11 +797,11 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
         const absDir = resolveInside(root, path)
         const stat = await fs.stat(absDir)
         const ignored = await createIgnoreChecker(root)
-        const ctx = clampInt(context, 0, 5, 0)
+        const ctxLines = clampInt(context, 0, 5, 0)
         const max = clampInt(maxResults, 1, 1000, 200)
         const acc: SearchAcc = { files: [], hits: 0, max }
         if (stat.isDirectory()) {
-          await searchDir(absDir, root, re, fileRe, ignored, acc, ctx > 0)
+          await searchDir(absDir, root, re, fileRe, ignored, acc, ctxLines > 0)
         } else {
           // path 指向单个文件：直接在文件内搜索（仍受 filePattern / ignore 约束）
           const rel = relPathOf(root, absDir)
@@ -772,7 +809,7 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
           if (fileRe && !fileRe.test(basename(absDir))) {
             return '（文件名不匹配 filePattern）'
           }
-          await searchFile(absDir, root, re, ctx > 0, acc)
+          await searchFile(absDir, root, re, ctxLines > 0, acc)
         }
         if (!acc.files.length) return '（未找到匹配）'
         if (filesOnly) {
@@ -780,11 +817,13 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
           return `${rows.join('\n')}\n（${acc.files.length} 个文件，共 ${acc.hits} 处匹配）`
         }
         const more = acc.hits >= max ? `\n…（已达上限 ${max} 行，可能有更多）` : ''
-        return formatSearchHits(acc, ctx) + more
+        return formatSearchHits(acc, ctxLines) + more
       }
-    }),
+    },
 
-    find_files: tool({
+    {
+      name: 'find_files',
+      scope: 'workspace',
       description:
         '按文件名 / 通配符查找文件（如 "*.ts"、"**/*.test.tsx"、"src/**/index.*"）。只匹配文件名，不搜内容（搜内容用 search_files）。自动跳过忽略目录。用于「项目里有哪些 X 文件」这类问题。',
       inputSchema: z.object({
@@ -794,7 +833,13 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
         path: z.string().optional().describe('搜索起点目录（相对工作区），缺省为根目录'),
         maxResults: z.number().optional().describe('最大返回条数，默认 200，最大 1000')
       }),
-      execute: async ({ pattern, path = '', maxResults = 200 }) => {
+      execute: async (rawInput, _call, ctx) => {
+        const { pattern, path = '', maxResults = 200 } = rawInput as {
+          pattern: string
+          path?: string
+          maxResults?: number
+        }
+        const root = rootOf(ctx)
         const re = globToRegExp(pattern)
         const absDir = resolveInside(root, path)
         const stat = await fs.stat(absDir)
@@ -807,20 +852,29 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
         const more = out.length >= max ? `\n…（已达上限 ${max}，可能有更多）` : ''
         return `${out.length} 个文件：\n${out.join('\n')}${more}`
       }
-    }),
+    },
 
-    execute_command: tool({
-      description:
-        '在工作区目录下执行 shell 命令并返回输出（stdout + stderr，自动截断）。适用于运行构建 / 测试 / git 操作 / 安装依赖 / 启动服务等。命令默认超时 120 秒。注意这是真实执行环境，删除、覆盖、危险命令（rm -rf、git push --force 等）前先说明影响。' +
-        shellNote,
+    {
+      name: 'execute_command',
+      scope: 'workspace',
+      // shell 环境说明按 ctx.bashPath 现算（注册期不知道这台机器装没装 Git Bash）
+      description: (ctx) =>
+        '在工作区目录下执行 shell 命令并返回输出（stdout + stderr）。适用于运行构建 / 测试 / git 操作 / 安装依赖 / 启动服务等。命令默认超时 120 秒。输出过长时只返回开头与结尾片段，并在文本里给出产物 id 与总长度，用 read_tool_output 按 offset 读完整内容（不会静默丢弃）。注意这是真实执行环境，删除、覆盖、危险命令（rm -rf、git push --force 等）前先说明影响。' +
+        shellNote(ctx),
       inputSchema: z.object({
         command: z.string().describe('要执行的命令'),
         timeoutMs: z.number().optional().describe('超时毫秒数，默认 120000，最大 300000'),
         cwd: z.string().optional().describe('执行目录（相对工作区），缺省为工作区根目录')
       }),
-      execute: async ({ command, timeoutMs, cwd = '' }, options) => {
-        const refused = await guardWrite('命令未运行', {
-          toolCallId: options.toolCallId,
+      execute: async (rawInput, call, ctx) => {
+        const { command, timeoutMs, cwd = '' } = rawInput as {
+          command: string
+          timeoutMs?: number
+          cwd?: string
+        }
+        const root = rootOf(ctx)
+        const refused = await guardWrite(ctx, '命令未运行', {
+          toolCallId: call.toolCallId,
           toolName: 'execute_command',
           command
         })
@@ -829,16 +883,18 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
         const stat = await fs.stat(execDir)
         if (!stat.isDirectory()) throw new Error(`执行目录不是目录：${cwd || '.'}`)
         const t = clampInt(timeoutMs, 1000, 300_000, 120_000)
-        return runCommand(command, execDir, t, options.abortSignal, bashPath)
+        return runCommand(command, execDir, t, ctx, call)
       }
-    }),
+    },
 
     /**
      * 删除文件。存在的意义不只是「省得拼 rm」—— 更重要的是把删除收敛成
      * 一个「单路径 + resolveInside 校验 + 同一道确认闸」的动作：
      * 让模型拼 `rm -rf xxx` 才删，误伤面比单文件大得多。
      */
-    delete_file: tool({
+    {
+      name: 'delete_file',
+      scope: 'workspace',
       description:
         '删除工作区内的文件。默认只删单个文件；path 是目录时必须显式传 recursive=true（会连同目录内所有内容一起删）。路径不存在会报错，不会静默成功。不可恢复操作，调用前请确认路径。',
       inputSchema: z.object({
@@ -848,7 +904,9 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
           .optional()
           .describe('path 是目录时必须显式传 true 才允许删除，默认 false（此时传目录会报错）')
       }),
-      execute: async ({ path, recursive = false }, options) => {
+      execute: async (rawInput, call, ctx) => {
+        const { path, recursive = false } = rawInput as { path: string; recursive?: boolean }
+        const root = rootOf(ctx)
         const abs = resolveInside(root, path)
         // 先确认存在：删一个不存在的路径直接报错，避免「静默成功」让模型误以为已删除
         let stat: Awaited<ReturnType<typeof fs.stat>>
@@ -864,21 +922,20 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
           )
         }
         // 破坏性操作：确认模式下必须请示（与写 / 执行同一道闸，不能绕）
-        const refused = await guardWrite(isDir ? `目录未被删除：${path}` : `文件未被删除：${path}`, {
-          toolCallId: options.toolCallId,
-          toolName: 'delete_file',
-          command: isDir ? `删除目录（含全部内容）：${path}` : `删除文件：${path}`
-        })
+        const refused = await guardWrite(
+          ctx,
+          isDir ? `目录未被删除：${path}` : `文件未被删除：${path}`,
+          {
+            toolCallId: call.toolCallId,
+            toolName: 'delete_file',
+            command: isDir ? `删除目录（含全部内容）：${path}` : `删除文件：${path}`
+          }
+        )
         if (refused) return refused
         if (isDir) await fs.rm(abs, { recursive: true })
         else await fs.unlink(abs)
         return `已删除${isDir ? '目录' : '文件'} ${path}`
       }
-    }),
-
-    // 技能说明通常在**工作区之外**（用户级 / Claude 兼容目录），read_file 的
-    // resolveInside 够不着，所以单独给一个只读工具（范围限制在已发现的技能目录内）。
-    // 没有可用技能时干脆不暴露这个工具，免得模型拿着空清单乱试。
-    ...(opts.skills?.length ? buildReadSkillTool(opts.skills) : {})
-  }
+    }
+  ]
 }

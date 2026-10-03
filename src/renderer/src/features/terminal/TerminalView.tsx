@@ -13,6 +13,12 @@ import { clampCompositionOverflow } from '@/features/terminal/terminal-ime'
 import { resolveTerminalTheme } from '@/features/terminal/terminal-themes'
 import { TERMINAL_FONT_SIZE_DEFAULT, TERMINAL_FONT_SIZE_STEP } from '@/features/terminal/terminal-font'
 
+/**
+ * 重挂载回放的取数上限（字符）：与主进程 `MAX_OUTPUT_BUFFER` 同值（256KB）。
+ * 环形缓冲是有损的（超出的头部已被裁掉），所以回放只能恢复到这个窗口为止。
+ */
+const REPLAY_MAX_CHARS = 256 * 1024
+
 /** 常见命令词表：即使没有任何历史也能给出首词补全建议 */
 const COMMON_COMMANDS = [
   'ls', 'll', 'la', 'pwd', 'cd', 'clear', 'echo', 'cat', 'less', 'more', 'head', 'tail',
@@ -760,14 +766,59 @@ export function TerminalView({
     termRef.current = term
     fitRef.current = fit
 
-    const unsubscribeData = window.api.terminal.onData(({ sessionId, data }) => {
-      if (sessionId !== session.id) return
-      // 交给 zmodem.js 解析；非 ZMODEM 字节会回送 to_terminal 正常渲染
+    /*
+      重挂载回放：PTY 在主进程一直在跑，而渲染端只收**增量**流
+      （`terminal:onData`），所以本组件一旦被卸载重挂（把终端标签拖到分屏 / 拖到
+      另一组、标签宿主换父节点导致 React 重挂载），新实例的滚动缓冲是空的 ——
+      表现就是「历史输出没了，只剩重挂之后的新输出」。
+
+      修法：挂载时把主进程的环形缓冲回放进新实例。
+      ⚠️ **顺序必须是「先订阅、再取缓冲」**：
+      - 先订阅：取缓冲这段时间里到达的输出先缓存起来，回放写完再冲出去，不丢；
+      - 直接订阅即写：接缝处会重复（同一批字节既在缓冲快照里、也走广播）。
+      回放本身走 `term.write` **绕过 zmodem**：传输会话不可能跨重挂载存活，
+      把旧的 ZMODEM 帧再喂给 Sentry 只会伪造出一场新的传输。
+    */
+    let replayDone = false
+    let disposed = false
+    const pending: Uint8Array[] = []
+    /** 正常数据入口：交给 zmodem.js 解析；非 ZMODEM 字节会回送 to_terminal 正常渲染 */
+    const feed = (data: Uint8Array): void => {
       try {
         zterm.consume(data)
       } catch {
         term.write(data)
       }
+    }
+
+    const unsubscribeData = window.api.terminal.onData(({ sessionId, data }) => {
+      if (sessionId !== session.id) return
+      if (!replayDone) {
+        pending.push(data)
+        return
+      }
+      feed(data)
+    })
+
+    void (async () => {
+      // 会话已结束（replay 返回 null）或取失败时没有可回放的内容，直接进入实时模式
+      const history = await window.api.terminal.recentOutput(session.id, REPLAY_MAX_CHARS)
+      if (disposed) return
+      if (history) {
+        term.write(history)
+        // 等回放真正落进 xterm 的缓冲再冲实时数据，否则两路输出会交错
+        await new Promise<void>((resolve) => term.write('', () => resolve()))
+      }
+      if (disposed) return
+      replayDone = true
+      for (const chunk of pending) feed(chunk)
+      pending.length = 0
+    })().catch(() => {
+      // 取缓冲失败不是致命错误：终端照常实时渲染，只是没有历史
+      if (disposed) return
+      replayDone = true
+      for (const chunk of pending) feed(chunk)
+      pending.length = 0
     })
 
     const resizeObserver = new ResizeObserver(() => {
@@ -783,6 +834,7 @@ export function TerminalView({
     resizeObserver.observe(container)
 
     return () => {
+      disposed = true
       resizeObserver.disconnect()
       unclampIme()
       charSizeDisp?.dispose?.()

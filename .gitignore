@@ -13,6 +13,11 @@ src/renderer/public/vditor
 .workbuddy-ai
 # 临时验证产物（resolve-model 单文件打包 / 导出的明文配置），用完即弃
 .tooltest
+# 纯 Node 探针复制真源码到临时目录再跑（verify-*.mjs/.ts 各自一个）
+.cmdtest
+.filetest
+.acphistorytest
+.artifacttest
 # 验证脚本的截图 / 中间产物（verify-*.mjs 会往这里写）
 tmp
 # 构建中间目录：避开 emptyOutDir 的删除配额，先构建到这里再 cp 回 out/

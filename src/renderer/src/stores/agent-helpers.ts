@@ -9,13 +9,8 @@ import { isDraftConversation } from './types'
 import type {
   AgentChatMessage,
   AgentConversation,
-  AgentStreamEvent,
-  AiMessagePart,
-  AiStreamEvent
+  AgentStreamEvent
 } from '@shared/types'
-
-/** requestId -> sessionId：把流式事件路由到发起对话的那个会话 */
-export const aiRequestSessions = new Map<string, string>()
 
 /** requestId -> conversationId：把 Agent 流式事件路由到发起对话的那个会话 */
 export const agentRequestConversations = new Map<string, string>()
@@ -46,6 +41,28 @@ export function newConversation(workspaceId: string): AgentConversation {
     workspaceId,
     title: DEFAULT_CONVERSATION_TITLE,
     messages: [],
+    createdAt: now,
+    updatedAt: now
+  }
+}
+
+/**
+ * 新建一个终端助手的「新建会话」草稿（scope = terminal，mastra 形态）。
+ *
+ * 与工作区草稿同一套纪律：仅内存、不进会话列表、不落盘 —— 发出首条消息那一刻
+ * 由 `sendTerminalMessage` 转正。终端会话**没有形态待定的问题**（只有 mastra），
+ * 所以草稿标记就是「还在 terminalDrafts 表里」，不需要 `!kind` 那种判据。
+ */
+export function newTerminalDraft(inherited?: { configId?: string; modelId?: string }): AgentConversation {
+  const now = Date.now()
+  return {
+    id: crypto.randomUUID(),
+    scope: 'terminal',
+    kind: 'mastra',
+    title: DEFAULT_CONVERSATION_TITLE,
+    messages: [],
+    configId: inherited?.configId,
+    modelId: inherited?.modelId,
     createdAt: now,
     updatedAt: now
   }
@@ -127,7 +144,8 @@ const agentPersistAt = new Map<string, number>()
  *
  * 返回的是**新对象**（不改内存里的 part：屏幕上那份还要继续吃增量）。
  */
-function stripTransientParts(messages: AgentChatMessage[]): AgentChatMessage[] {
+/** ⚠️ 供终端会话落盘复用；导出前它只是 agent 落盘的内部步骤 */
+export function stripTransientParts(messages: AgentChatMessage[]): AgentChatMessage[] {
   return messages.map((message) => ({
     ...message,
     parts: message.parts.map((part) =>
@@ -158,6 +176,7 @@ export async function persistConversation(
    * 这是唯一的守卫点，别在调用方各写一份。
    */
   if (!conversation.kind) return
+  if (!conversation.workspaceId) return
   await window.api.agent.saveConversation({
     id: conversation.id,
     workspaceId: conversation.workspaceId,
@@ -181,6 +200,32 @@ export function persistConversationThrottled(id: string): void {
   void persistConversation(useAppStore.getState().agentConversations, id)
 }
 
+/** 终端会话的落盘（独立目录，见 conversation-store.ts 的 terminalConversationStore） */
+export async function persistTerminalConversation(
+  conversations: AgentConversation[],
+  id: string
+): Promise<void> {
+  const conversation = conversations.find((c) => c.id === id)
+  if (!conversation) return
+  // 草稿（还没发出首条消息）一律不落盘 —— 与工作区会话的 `!kind` 守卫同一纪律
+  if (conversation.messages.length === 0 && !conversation.title?.trim()) return
+  await window.api.agent.terminalConvs.save({
+    id: conversation.id,
+    kind: 'mastra',
+    title: conversation.title,
+    messages: stripTransientParts(conversation.messages),
+    configId: conversation.configId,
+    modelId: conversation.modelId
+  })
+}
+
+export function persistTerminalConversationThrottled(id: string): void {
+  const now = Date.now()
+  if (now - (agentPersistAt.get(id) ?? 0) < AGENT_PERSIST_INTERVAL) return
+  agentPersistAt.set(id, now)
+  void persistTerminalConversation(useAppStore.getState().terminalConversations, id)
+}
+
 /** 通知正文的长度上限（系统通知里放一两行就够，长了会被截断） */
 const NOTICE_SNIPPET_CHARS = 120
 
@@ -195,7 +240,11 @@ const NOTICE_SNIPPET_CHARS = 120
 export function notifyAgentFinished(conversationId: string, finishReason: string): void {
   if (finishReason === 'aborted') return
   const state = useAppStore.getState()
-  const conversation = state.agentConversations.find((c) => c.id === conversationId)
+  // 终端助手的会话在独立的池里（同一个引擎、同一套通知语义）
+  const isTerminal = !state.agentConversations.some((c) => c.id === conversationId)
+  const conversation = isTerminal
+    ? state.terminalConversations.find((c) => c.id === conversationId)
+    : state.agentConversations.find((c) => c.id === conversationId)
   if (!conversation) return
   const workspace = state.agentWorkspaces.find((w) => w.id === conversation.workspaceId)
 
@@ -218,8 +267,8 @@ export function notifyAgentFinished(conversationId: string, finishReason: string
   const failed = finishReason === 'error'
 
   void window.api.app.notify({
-    title: `${failed ? 'Agent 执行出错' : 'Agent 已完成'} · ${conversation.title}`,
-    body: snippet || `${workspace?.name ?? '工作区'} 的会话已结束`
+    title: `${failed ? 'AI 执行出错' : 'AI 已完成'} · ${conversation.title}`,
+    body: snippet || (isTerminal ? '终端助手的会话已结束' : `${workspace?.name ?? '工作区'} 的会话已结束`)
   })
 }
 
@@ -246,7 +295,12 @@ function errorPartAt<T extends ErrorAwarePart>(parts: T[]): T | undefined {
 }
 
 /** Agent 回复生成中的占位 assistant 消息尾部追加 part */
-export function appendAgentPart(parts: AgentChatMessage['parts'], event: AgentStreamEvent) {
+export function appendAgentPart(
+  parts: AgentChatMessage['parts'],
+  event: AgentStreamEvent,
+  opts?: { /** 错误文案的前缀（终端助手的气泡是单行 markdown，要多两个换行才不糊） */
+    errorPrefix?: string }
+) {
   const next = [...parts]
   if (event.type === 'text-delta') {
     const last = next[next.length - 1]
@@ -331,100 +385,11 @@ export function appendAgentPart(parts: AgentChatMessage['parts'], event: AgentSt
     // 重试是「通知」不是内容：不建 part —— 界面在气泡的「正在生成」位置显示「第 N 次重试」
     // （清空半截输出 + 记录 retrying 由 app-store 的 retry 分支做）
   } else if (event.type === 'error') {
-    const part = { type: 'text', text: `⚠️ ${event.message}`, error: true } as const
-    const at = errorPartAt(next)
-    if (at !== undefined) next[next.length - 1] = part
-    else next.push(part)
-  }
-  return next
-}
-
-/** AI 回复生成中的占位 assistant 消息尾部追加 part */
-export function appendAssistantPart(
-  parts: AiMessagePart[],
-  event: AiStreamEvent
-): AiMessagePart[] {
-  const next = [...parts]
-  if (event.type === 'text-delta') {
-    const last = next[next.length - 1]
-    if (canAppendText(last)) {
-      next[next.length - 1] = { type: 'text', text: last.text + event.delta }
-    } else {
-      next.push({ type: 'text', text: event.delta })
-    }
-  } else if (event.type === 'reasoning-delta') {
-    const last = next[next.length - 1]
-    if (last?.type === 'reasoning') {
-      next[next.length - 1] = { type: 'reasoning', text: last.text + event.delta }
-    } else {
-      next.push({ type: 'reasoning', text: event.delta })
-    }
-  } else if (event.type === 'tool-call-delta') {
-    // 入参还在生成：卡片先建出来（工具名可能还没给），半截 JSON 持续往里攒。
-    // 完整 tool-call 到达时用 input 覆盖并丢掉 inputText（见下面的收口）。
-    const index = next.findIndex(
-      (p) => p.type === 'tool-call' && p.toolCallId === event.toolCallId
-    )
-    if (index < 0) {
-      next.push({
-        type: 'tool-call',
-        toolCallId: event.toolCallId,
-        // 增量帧常常没带工具名（有的上游只在完整 tool-call 里给）：先落空串，
-        // 标题由 toolCardTitle 兜底成「工具调用」，后到的真名再补上
-        toolName: event.toolName ?? '',
-        input: null,
-        inputText: event.inputTextDelta
-      })
-    } else {
-      const call = next[index] as Extract<AiMessagePart, { type: 'tool-call' }>
-      next[index] = {
-        ...call,
-        toolName: call.toolName || (event.toolName ?? ''),
-        inputText: (call.inputText ?? '') + event.inputTextDelta
-      }
-    }
-  } else if (event.type === 'tool-call') {
-    // 同一个 toolCallId 可能**先来过一串入参增量**（上面那张半截卡片）：按 id 收口，
-    // 别再推第二张卡（理由见 appendAgentPart 的同名分支）。
-    const index = next.findIndex(
-      (p) => p.type === 'tool-call' && p.toolCallId === event.toolCallId
-    )
-    const existing =
-      index < 0 ? undefined : (next[index] as Extract<AiMessagePart, { type: 'tool-call' }>)
-    if (existing) {
-      next[index] = {
-        type: 'tool-call',
-        toolCallId: existing.toolCallId,
-        toolName: existing.toolName || event.toolName,
-        input: event.input,
-        ...(event.title || existing.title ? { title: event.title ?? existing.title } : {}),
-        ...(event.acpKind || existing.acpKind
-          ? { acpKind: event.acpKind ?? existing.acpKind }
-          : {})
-      }
-    } else {
-      next.push({
-        type: 'tool-call',
-        toolCallId: event.toolCallId,
-        toolName: event.toolName,
-        input: event.input,
-        ...(event.title ? { title: event.title } : {}),
-        ...(event.acpKind ? { acpKind: event.acpKind } : {})
-      })
-    }
-  } else if (event.type === 'tool-result') {
-    next.push({
-      type: 'tool-result',
-      toolCallId: event.toolCallId,
-      toolName: event.toolName,
-      output: event.output,
-      isError: event.isError
-    })
-  } else if (event.type === 'retry') {
-    // 重试是「通知」不是内容：不建 part（界面在气泡的「正在生成」位置显示「第 N 次重试」）
-  } else if (event.type === 'error') {
-    // ⚠️ 前面留两个换行：终端助手是单行气泡里的 markdown，与正文同段会糊在一起
-    const part = { type: 'text', text: `\n\n⚠️ ${event.message}`, error: true } as const
+    const part = {
+      type: 'text',
+      text: `${opts?.errorPrefix ?? ''}⚠️ ${event.message}`,
+      error: true
+    } as const
     const at = errorPartAt(next)
     if (at !== undefined) next[next.length - 1] = part
     else next.push(part)

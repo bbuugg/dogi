@@ -76,10 +76,17 @@
 - **脚本**：侧边栏分区管理，命令面板可「运行脚本」（有终端直接写入执行，无终端则弹框选主机连上去跑）。
 - **主机日志**：SSH 连接（按来源标签分终端会话 / Mosh 引导 / SFTP / SSH 隧道 / 连接测试）、会话就绪 / 关闭 / 断线重试、隧道启停与转发失败、SFTP 连接、主机指纹记录与重置统一记成结构化条目；终端里执行的命令与输出也在内（`terminal` 作用域，机制见 4.13）。
 
-**AI 两条产品线**（共用一套流式事件与渲染组件，别各写一份）
+**AI 两条产品线**（**同一台引擎**，由请求里的 `scope` 分派，见 4.22；流式事件与渲染组件也只写一份）
 
-1. **终端 AI 助手**（`AiPanel`）：挂在终端页面，工具作用于当前终端会话 —— `run_in_terminal` / `send_keys` / `read_terminal_output` / `list_terminal_sessions`。
+1. **终端 AI 助手**（`AiPanel`）：挂在终端页面，工具作用于**发起消息的那个**终端会话 ——
+   `run_in_terminal` / `send_keys` / `read_terminal_output` / `list_terminal_sessions` / `read_tool_output`。
+   超长输出落**产物文件**、给模型 id 让它续读（见 4.24）。
+   **历史落盘**（独立目录，跨重启保留）、左侧可展开**会话列表**、**新开会话**（开草稿，首条消息才转正）、
+   **逐条删除**（旧的「清空历史」已移除）。这些会话**不进 AI Agent 侧边栏**（靠存储边界保证，见 4.22）。
 2. **工作区 Agent**（`AgentPage` / `AgentConversationView`）：绑定本地目录，工具为 `list_files` / `find_files` / `search_files` / `read_file` / `write_file` / `edit_file` / `delete_file` / `execute_command` / `read_skill` / `browser_*`（见下），另有工作区文件树与图片 / 视频 / SVG 预览，以及可折叠的**内嵌浏览器面板**（看 Agent 正在操作哪个页面）。
+
+**客户端工具**（渲染进程执行的能力，见 4.23）：页面用 `registerClientTool` 注册，定义随下一次请求上报，
+主进程把调用广播回渲染端执行，权限与确认按客户端的权限设置在**渲染端**判定。
 
 **Agent 只有两种形态，一个会话固定是其中一种、创建后不可互切**（见 4.3 / 4.18）：
 
@@ -149,10 +156,12 @@ src/
       storage.ts           # electron-store 持久化 + safeStorage 加解密（跨域，留在 services 根）
       terminal/            # sessions.ts（node-pty + ssh2 统一抽象）shells.ts monitor.ts
                            # recording.ts（终端命令 + 输出 → 主机日志，见 4.13）
-      ai/                  # ai.ts（终端助手）agent.ts（工作区 Agent）acp-agent.ts acp-detect.ts
-                           # mcp.ts skills.ts resolve-model.ts ask-followup.ts
+      ai/                  # agent.ts（**两条线共用的引擎**，按 scope 分派）acp-agent.ts acp-detect.ts
+                           # tool-registry.ts（工具注册表）builtin-tools.ts（启动时登记内置工具）
+                           # terminal-tools.ts（终端组工具 + 提示词）client-tools.ts（客户端工具 broker）
+                           # mcp.ts skills.ts resolve-model.ts ask-followup.ts context.ts
                            # workspace-config.ts workspace-fs.ts workspace-media.ts
-                           # agent-core/（工具集 / 系统提示词 / 事件适配 / 路径与忽略规则）
+                           # agent-core/（工作区工具 / 系统提示词 / 事件适配 / 路径与忽略规则）
       api/                 # http.ts ws.ts
       browser/             # session.ts（Playwright 会话 + screencast）resolver.ts input.ts
                            # handlers.ts（事件出口）agent.ts（Agent 工具集）
@@ -168,10 +177,11 @@ src/
       app/                 # 应用装配：App.tsx、activities.tsx（功能区注册表）、layout/（外壳）
       features/<功能>/      # 每个功能区的 UI 与它专属的纯函数
       shared/              # components/（复用组件）+ lib/（复用纯函数）
-      stores/              # 全局 zustand store（跨切面），已拆成四份：
+      stores/              # 全局 zustand store（跨切面），实现体拆成几份：
                            # app-store.ts（create() 实现体 + IPC 事件监听 + re-export）
                            # types.ts（全部类型 / 常量 / slice 接口）、pane-helpers.ts、
-                           # agent-helpers.ts（Agent/AI 会话的纯函数）
+                           # agent-helpers.ts（Agent/AI 会话的纯函数）、
+                           # client-tools.ts（客户端工具注册表 + 权限门，**不在 store 里**）
 scripts/                   # 探针 / 验证脚本（见 5.2），不参与构建，也不在 tsconfig 的 include 里
 ```
 
@@ -211,13 +221,16 @@ npm run pack / dist / dist:win / dist:mac / dist:linux
 ### 3.2 主进程：ipc 按通道前缀拆，services 按功能域分目录
 
 - `src/main/ipc/` 一个模块一个文件，**通道前缀 ≈ 文件名**：`terminal:*`、`ssh:*`（→hosts.ts）、
-  `sftp:*`、`scripts:*`、`notes:*`、`api:*`/`ws:*`、`ai:*`、`agent:*`、`followup:*`、`mcp:*`、
+  `sftp:*`、`scripts:*`、`notes:*`、`api:*`/`ws:*`、`ai:*`、`agent:*`、`clientTools:*`、`followup:*`、`mcp:*`、
   `skills:*`、`plugins:*`/`plugin:*`、`shell:*`、`zmonitor`… `shared.ts` 放 `IpcContext` 与公共工具。
 - 新增通道 → 在对应前缀的模块里 `ipcMain.handle`；**只有新增模块**才需要在 `ipc/index.ts` 加一行 `registerXxxIpc`。
 - 需要广播或读窗口的模块接 `ctx: IpcContext`（`ctx.broadcast` / `ctx.win()`）；纯请求-响应型模块不接收参数。
-- `ipc/index.ts` 里 `registerFollowupIpc` **必须排在 `registerAiIpc` / `registerAgentIpc` 之后**（两者共用一个 broker）。
-- 会话事件的副作用归各自域：数据转发在 terminal.ts、采集生命周期在 monitor.ts、AI 实例销毁在 ai.ts。
-  同一个 `sessionManager` 事件被多方订阅是**刻意的**（EventEmitter 多监听器），别为「集中」合回一个文件。
+  `registerAiIpc()` 现在**不接 ctx**（只剩模型配置与设置的 CRUD，见 4.22）；`registerClientToolsIpc(ctx)`
+  只做两件事：把 broadcaster 装进 broker、接 `clientTools:result` 回填。
+- `ipc/index.ts` 里 `registerFollowupIpc` **必须排在 `registerAgentIpc` 之后**（共用一个 broker 的收尾纪律在 agent 侧）。
+- 会话事件的副作用归各自域：数据转发在 terminal.ts、采集生命周期在 monitor.ts、AI 请求的生命周期在 agent.ts
+  （含 `sessionManager.on('closed')` → `disposeTerminalSession`）。同一个 `sessionManager` 事件被多方订阅是
+  **刻意的**（EventEmitter 多监听器），别为「集中」合回一个文件。
 - 新增服务 → 按功能域放进 `services/<域>/`；被所有域引用的持久化层留在 `services/storage.ts`。
 
 ### 3.3 渲染端三层：features / app / shared
@@ -271,6 +284,19 @@ Session.onData → sessionManager.emit('data') → ipc/terminal.ts broadcast →
 
 - 新增会话类型（telnet / 串口 / …）时复制 `SshSession` 的 handlers 模式 —— 它的构造函数**强制**传 handlers，
   所以不会漏；`LocalSession` 当初就是漏了转发导致终端黑屏。
+- **重挂载要回放，PTY 不会自己重来**：`TerminalView` 持有 xterm 实例（挂载时 `new Terminal()`、卸载时
+  `dispose()`），而渲染端只收**增量**流（`terminal:onData`）。标签一旦**换父节点**就重挂载、新实例缓冲为空 ——
+  用户能碰到的入口是「把终端标签拖到分屏」（`splitTabToGroup`）或「拖到另一组」（`moveTabToGroup`）：
+  `PaneView` 的 `PaneTree` 只保证 leaf↔split 切换时组子树不卸载，**跨组移动仍然换父节点**。
+  修法是挂载时回放主进程环形缓冲（`terminal:recentOutput`，与 `MAX_OUTPUT_BUFFER` 同为 256KB）：
+  **先订阅、再取缓冲**（取缓冲这段时间到达的输出先缓存、回放写完再冲出去；反过来接缝处会重复），
+  回放走 `term.write` **绕过 zmodem**（传输会话不可能跨重挂载存活，把旧 ZMODEM 帧再喂给 Sentry
+  只会伪造出一场传输）。取失败 / 会话已结束（返回 null）不是致命错误，直接进实时模式。
+  代价（明确取舍）：重建的屏幕按新列宽重新折行，滚动位置与选区仍不保留。
+  ⚠️ 别改成「把 xterm 实例提到跨组复用的缓存」——看着更彻底，但要把实例所有权从组件里挪出去，
+  而 `dispose()` 现在有五六个入口（切标签 / 删会话 / 关组 / 卸载 / 组件重挂），漏一个就是泄漏；
+  回放方案对**任何**未来新增的重挂载原因都生效，还顺带把「组件卸载期间主进程仍在产出」的输出找回来。
+  验证：`scripts/verify-terminal-replay.mjs`。
 - 验证：创建会话后调 `window.api.terminal.recentOutput(sessionId)` 应能看到 shell 提示符。
 
 ### 4.2 流式事件必须**自带归属**
@@ -308,7 +334,8 @@ Session.onData → sessionManager.emit('data') → ipc/terminal.ts broadcast →
   - **未定形态：两边都列** —— 选哪个，这个会话就变成哪一类。
   `setAgentConversationModel` 只服务 mastra，ACP 走 `setAcpConversationModel`（签名带 `acpAgentId`，
   未定形态时用它定型）。
-- 终端 AI 助手按 `sessionId` 存 `AiChatState.configId`（`clearAiMessages` 要**保留**它 —— 清的是消息，不是选中的模型）。
+- 终端 AI 助手的 `configId` / `modelId` **存在会话上**（`terminalConversations`），不是存在一个按 `sessionId` 的
+  `AiChatState` 里 —— 换模型跟着会话走，跨终端页面接着聊也还是那个模型（见 4.22）。
 - 请求里带上 `kind` + `configId` + `modelId` + `acpAgentId` + `acpSessionId`，主进程**优先用请求里的，
   取不到才回退**（形态回退到会话记录，再回退到 `mastra`）；会话选的配置被删掉时也要回退，
   否则该会话直接报「未配置」。
@@ -350,8 +377,9 @@ Session.onData → sessionManager.emit('data') → ipc/terminal.ts broadcast →
 - 机制与命令执行确认卡完全相同：`tool.execute` 里挂起 → IPC 广播 → 渲染端渲染卡片 → 用户作答 →
   IPC 回填 resolve → `streamText` **当前回合继续**。
 - broker 是全局单例（`ask-followup.ts` 的 `askFollowupBroker`），Agent 页与终端 AI 助手共用一组通道。
-- **收尾必须做**（少一步就卡死）：`agent.ts` / `ai.ts` 的 `finally` 与 `abort`、以及 `ai.ts` 的 `dispose`
-  都要 `askFollowupBroker.cancel(requestId)`，把挂起的 Promise settle 掉。
+- **收尾必须做**（少一步就卡死）：`agent.ts` 的 `finally` 与 `abort` 都要 `askFollowupBroker.cancel(requestId)`
+  **与 `clientToolBroker.cancel(requestId)`**（两个 broker 都是挂起式，见 4.23 第 34 条），把挂起的 Promise settle 掉。
+- 终端会话请求里带 `sessionId`（工作区带 `workspaceId`），提问卡据此知道自己该送给哪个面板。
 - 终端 AI 助手在折叠态收到提问会自动撑开面板（`hasFollowupForSession` 的 effect）。
 - ⚠️ 提交后 `resolveFollowup` 立刻删 `followupRequests`，但工具结果（`output`）晚一拍才到 ——
   中间若直接退回普通横条，表单会闪一下。用组件内 `submitted` 本地标记顶住。
@@ -597,7 +625,7 @@ shell 就绪后异步执行（每次重连重新探测；Mosh 不探测 —— �
   （旧行为：监控靠「无效结果」兜底，见 4.16）。
 - **结果只写 `SessionInfo.platform`（会话级）**，不写进主机配置 —— 同一主机多会话各探各的；
   识别成功落一条 `hostLogger`（「已识别主机平台：Windows（user@host）」）。
-- **下游消费者**：监控门控（4.16）、AI 的 `boundHint` 与 `list_terminal_sessions` 输出（`ai/ai.ts`）。
+- **下游消费者**：监控门控（4.16）、AI 的 `boundHint` 与 `list_terminal_sessions` 输出（`ai/terminal-tools.ts`）。
   Windows 的默认 shell 可能是 cmd 也可能是 PowerShell，所以 AI 提示按「平台」措辞而不是按标题猜。
 
 ### 4.15 每主机终端编码：只在 SshSession 边界转码，下游契约恒为 UTF-8
@@ -799,6 +827,113 @@ ACP 是「别人的 agent 在别人的进程里管自己的会话」。本应用
 剪贴板是**渲染进程内存态、一次一项**（树上没有多选），刻意不碰系统剪贴板（会污染用户自己复制的内容）；
 剪切粘贴成功后立即清空（留着会让人以为还能再粘一次）。
 
+### 4.22 两条 AI 线合并成一台引擎：终端助手走 `scope:'terminal'`
+
+**一台引擎、两种作用域。** 工作区 Agent 与终端 AI 助手共用 `services/ai/agent.ts` 的 `AgentService`，
+由 `agent:chat` 请求里的 `scope`（`'workspace' | 'terminal'`）分派；旧的 `services/ai/ai.ts`
+（每终端一个 `AiAssistant` 实例）与 `ai:chat` / `ai:abort` / `ai:confirm` / `ai:chat-event` 四条通道
+**已整体删除**，别再加回来。
+
+| 维度 | `scope: 'workspace'` | `scope: 'terminal'` |
+| --- | --- | --- |
+| 工具 | `list_files` / `read_file` / `write_file` / `edit_file` / `search_files` / `find_files` / `execute_command` / `delete_file` / `browser_*` / `read_skill` | `run_in_terminal` / `send_keys` / `read_terminal_output` / `list_terminal_sessions` / `ask_followup_question` |
+| 共有工具 | `read_tool_output`（`scope:'both'`）：读超长工具输出落下的产物文件（见 4.24） | 同左 |
+| 系统提示词 | `agent-core` 的工作区提示词 | `terminal-tools.ts` 的 `buildTerminalSystemPrompt`（含平台提示） |
+| 归属 | `requestMeta` 按 `conversationId` 记 `workspace` | 记 `targetSessionId`（**来自发起消息的那个终端页面**） |
+| 会话存储 | `conversations/` 目录 | `terminal-conversations/` 目录（第二个 `ConversationStore` 实例） |
+
+- **工具绑定按请求算，不记在会话上**：`ctx.targetSessionId` 由请求携带，所以历史会话换一个终端
+  接着聊时，工具自然作用在新终端上（会话记录里不存 terminalId）。
+- ⚠️ **终端会话绝不进 `agentConversations`**：靠**存储边界**保证 —— `ConversationStore('terminal-conversations')`
+  是独立实例、独立目录、独立的一组 `storage.*TerminalConversation*` 方法。
+  **别**改回「同一个池 + 消费方过滤」，那等于把过滤义务摊给每一个列表（侧边栏、搜索、导出、统计…）。
+- **草稿判据与 Agent 不同**：Agent 草稿 = `!kind`（4.3），终端草稿 = `terminalDrafts[sessionId]` 里
+  存在（内存态，不落盘）。两者都在**发出首条消息那一刻**转正：标题取那条消息、进列表、落盘。
+- **清空历史已移除**：改成左侧会话列表里的逐条删除（Popconfirm → `agent:terminal-convs:delete`），
+  会话池是跨终端页面共享的，一刀清掉会连带删掉别的页面正在用的会话。
+- **模型按会话独立**：终端会话同样有 `configId` / `modelId`，下拉在卡片头部。
+- **确认卡共用一张表**：工作区来源带 `workspaceName`，终端来源带 `sessionId` / `sessionTitle`
+  （`AgentConfirmRequest = AiConfirmRequest`），一条 `agent:confirm` 通道，`pendingConfirms` 一张表。
+- **验证**：`scripts/verify-terminal-chat.mjs`（隔离实例 + 进程内 mock LLM：作用域工具集、终端会话
+  独立存储、草稿转正、逐条删除、重启后仍在）。
+
+### 4.23 工具注册表 + 客户端工具（A 方案：定义随请求、权限在渲染端）
+
+工具不再是「谁需要就自己 `build()` 一份」，而是**主进程一份静态注册表** + 每次请求动态组装。
+
+**注册表**（`services/ai/tool-registry.ts`）：`AiToolDef` = `{ name, description（字符串或按 ctx 现算的函数）,
+inputSchema, scope: 'workspace'|'terminal'|'both', available?, execute(input, call, ctx) }`。
+`builtin-tools.ts` 的 `ensureBuiltinToolsRegistered()` 在启动时一次性登记
+终端组 + 工作区组 + `read_skill` + `ask_followup_question` + 浏览器组（浏览器组要渠道，
+所以传的是 `() => BrowserChannel` 的延迟读取）。
+
+`buildToolset({ ctx, extra?, clientTools? })` 的顺序与让位规则：
+
+1. 内置定义，按 `scope` + `available` 过滤 —— `available` 收 `{ctx, mcpToolNames}`，
+   用途是「没技能就不暴露 `read_skill`」「MCP 带了 `browser_*` 就整组让位」（两套同名会静默互相覆盖）；
+2. **随请求携带的客户端工具**：与内置同名时**让位并 warn**（内置优先）；
+3. `extra`（MCP 工具）最后展开，同名覆盖一切（历史行为，别动）。
+
+⚠️ **别在注册层加权限闸**：改动类工具的闸在自己的 `execute` 里（`guardWrite` 要在「确认也会失败」
+的预检之后才弹卡，包在外面只会白白打扰用户）；客户端工具**根本没有主进程闸**（见下）。
+
+**客户端工具**（渲染进程执行的能力：在文件视图里打开文件、切标签、插件注入的界面能力…）：
+
+- **定义随请求走**：`registerClientTool(def, handler)` 是纯渲染端注册（`stores/client-tools.ts`，
+  内存态），发送时由 `sendTerminalMessage` / `sendAgentMessage` 统一带上
+  `clientTools: listClientToolDefs()`。**没有**「预注册 + 主进程持有」的通道，也别加回来 ——
+  带哪组定义是**哪个页面在发消息**决定的，主进程预先持有就等于把作用域判断搬到主进程。
+- **执行 = 挂起 + 广播 + 回填**：`clientToolBroker.invoke()` 挂起 → 广播 `clientTools:invoke`
+  （带 `callId` / `requestId` / `conversationId` / `scope`，见 4.2）→ 渲染端 `handleClientToolInvoke`
+  执行 → `clientTools:result` 回填 resolve，**当前请求的模型循环随即继续**
+  （不是客户端另起一次请求 —— 那要重建整条历史且丢中间态）。
+- **权限与确认全在渲染端**：`full` 直接执行；`confirm` 弹 antd `Modal.confirm`，
+  **拒绝时作为正常工具结果回填**（"用户拒绝了这次调用…"），模型看得见原因并改道 —— 不是 tool error。
+- ⚠️ **任何分支都必须回填一次**，否则主进程那个 Promise 永不 settle、整轮卡死
+  （abort / 流结束的 `cancel(requestId)` 只是兜底，正常路径别依赖它）。
+- 收尾纪律与 ask-followup 同款：`AgentService` 的 `finally` / `abort` 都要 `clientToolBroker.cancel(requestId)`。
+- 探针要造客户端工具时用 `window.__clientTools`（与 `window.__store` 同一个 CDP 调试约定，
+  只在渲染端暴露，不进 preload 白名单）。
+- **验证**：`scripts/verify-tool-registry.mjs`（注册纪律 / 作用域 / `available` / MCP 覆盖 /
+  动态描述 / 随请求组装与同名让位 / broker 广播-回填-取消）。
+
+### 4.24 超长工具输出落「产物」：写命令时订阅实时流，超限给 id 让模型续读
+
+工具输出超过内联上限时不能只截断——被砍掉的中段模型再也拿不回来，命令跑了两万行日志时
+等于「只看到头和尾，中间发生了什么全靠猜」。做法是 `services/ai/output-artifact.ts`：
+**超限时把完整输出落到 `userData/tool-output/<id>.txt`，工具结果里给模型 id / 总量 / 下一次该带什么参数**，
+模型用 `read_tool_output` 按 `(id, offset, length)` 一段段续读。
+
+| 常量 | 值 | 含义 |
+| --- | --- | --- |
+| `ARTIFACT_INLINE_MAX` | 12000 | 超过就落盘（终端工具） |
+| `ARTIFACT_HEAD_CHARS` | 3000 | 内联里保留的**开头** |
+| `ARTIFACT_MAX_CHARS` | 4MB | 单个产物的上限，超出后 descriptor 标 `truncated` |
+| `ARTIFACT_READ_MAX` | 20000 | `read_tool_output` 单次最多返回多少字符 |
+
+- **内联文本 = 开头 + 说明 + 滚动结尾**。说明里必须写清三件事，缺一个模型就接不下去：
+  总量、省略了多少、**下一次调用的完整参数**（`{"id":"…","offset":3000,"length":8000}` 原文嵌在句子里）。
+- ⚠️ **head / mid 是滚动预览，与文件写入互不影响**：哪怕第一块就超过内联上限、已经 spill，
+  开头照样要从这一块的前 `headChars` 个字符里填（早期实现给 `head` 加了 `&& !this.stream` 的条件，
+  于是「一条超长命令」的内联里只剩结尾，模型连命令是什么都看不到）。
+  `mid` 必须是**滚动**的（`pushTail` 按预算截尾），否则内联的「结尾」是 spill 那一刻的内容，不是真正的末尾。
+- ⚠️ **必须订阅实时 `data` 流，不能「先记长度、事后取增量」**。环形缓冲 256KB 是**有损**的，
+  一条刷屏命令跑完再取增量只会拿到 `''`（模型收到「完全没有输出」）。所以 `captureDuring()`
+  在**写命令之前**就挂上 `sessionManager.on('data')`，写完等 `waitMs` 再摘监听。
+  ⚠️ 因此 `TerminalSession.outputLength()` / `outputFrom()` 已从接口与三个会话类里**删除**，
+  只在注释里留了「为什么删」——别为了让新代码好写把它们加回来，那正是这个 bug 的源头。
+  同理 `execute_command`（`agent-core/tools.ts`）也从 `child.stdout.on('data')` 边收边写，
+  它原来是 `slice` 截断，丢了就永久丢了。
+- **ANSI 要跨块有状态剥离**：转义序列会被 chunk 边界劈开，`AnsiStripper` 永远从**最后一个 ESC**
+  往后扣住（`MAX_HOLD = 512` 封顶）交给下一块，逐块独立正则会把半截的 `\x1b[` 当普通字符吃掉。
+- ⚠️ **id 是安全边界**：文件名由 `newArtifactId()` 生成，`artifactPath()` 用
+  `/^[a-z0-9-]{6,80}$/` 校验后才拼路径（顺带挡掉 Windows 保留名），**任何地方都不要把路径或 `dir` 交给模型**。
+  跟 `workspace-fs.ts` 的 `resolveInside` 是同一类防护——模型能传参数，就能传 `../../`。
+- **清理**：删会话 / 删工作区时 `purgeArtifacts(conversationId)`（id 里嵌了会话 slug，按 `${slug}-` 前缀删），
+  写在这三处 `ipc/agent.ts`：`conversations:delete` / 工作区删除循环 / `terminal-convs:delete`。
+- **验证**：`scripts/verify-output-artifact.mjs`（纯 Node，44 条）+ `scripts/verify-terminal-chat.mjs`
+  第 3b 节（真界面端到端）。
+
 ---
 
 ## 五、验证工具链
@@ -829,6 +964,11 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   `connect()` → `eval()` / `reload()` / `bringToFront()` / `screenshot()` / `report(checks)`。
 - **发按键前必须 `bringToFront()`**（`Page.bringToFront` + `Emulation.setFocusEmulationEnabled`），
   否则 reload 之后 keydown 根本不派发。
+- ⚠️ **终端上的滚轮必须用 CDP 真事件**（`Input.dispatchMouseEvent` + `type: 'mouseWheel'`，坐标取元素中心）：
+  往 `.xterm-viewport` 上 `dispatchEvent(new WheelEvent(...))` **滚不动** —— xterm v6 的 wheel 监听挂在
+  `.xterm-scrollable-element` 里的屏幕元素上，而从 viewport 派发的事件是**向下**传播、到不了监听点。
+  实测踩过：回放明明生效（真滚轮能一路滚到会话第一行），合成滚轮却永远停在当前屏幕顶，
+  看起来像「修复没起作用」，白查一轮。**断言「历史还在」之前，先确认真事件能滚。**
 - **造数据直接 `window.__store.setState(...)`**，别点一串 UI 绕到目标页面；
   切功能区用 `ui: { ...s.ui, activeActivity: 'agent' }`，写完 `sleep(900)` 给 React 一帧。
 - **改渲染端后**：`npx vite build --outDir <临时目录>` + `cp -rf` 回 `out/renderer` + `Page.reload`，
@@ -844,10 +984,13 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 | `scripts/verify-agent-browser-tools.mjs` | Agent 浏览器工具行为：**直接跑 `services/browser/agent.ts` 真源码**（本地假站点），覆盖 navigate → ref 点击 → evaluate 验状态 → 中文输入 → press → wait_for → 截图落盘 → close → 关闭后能重建 |
 | `scripts/verify-browser-persistent-profile.mjs` | 浏览器会话持久化 profile：**直接跑 `services/browser/session.ts` 真源码**（本地假站点发持久 cookie）—— 登录态（cookie + localStorage）跨会话重启存活、关会话不删 profile 目录、`purge` 连目录一起清、未注入 profilesRoot 回退临时上下文且不落盘 |
 | `scripts/verify-builtin-playwright-mcp.mjs` | 内置 Playwright MCP（`browserToolMode: system` 用的那个）stdio 冒烟：真实子进程跑 CLI —— initialize → tools/list → **真实 browser_navigate**（headless Edge 打开页面）→ browser_snapshot 看到内容。防的是 overrides 强制 mcp 用顶层 playwright 1.63 稳定版后，某次升级 mcp 引入了 1.64+ 才有的 API |
-| `scripts/verify-agent-posix-command.mjs` | Agent `execute_command` 的 Windows POSIX 执行环境（`agent-core` 真源码）：注入 Git Bash 后 `ls` / 管道 + 通配 / `grep -n` / for 循环 / `$HOME` 按 POSIX 语义工作；不注入时回退 PowerShell 且仍可执行；工具描述如实声明环境。需 `DOGI_TEST_BASH=<bash.exe>` 指定 Git Bash |
+| `scripts/verify-tool-registry.mjs` | 工具注册表与客户端工具（`tool-registry.ts` + `client-tools.ts` 真源码，不起 Electron）—— 同名重复注册抛错、`names()`、`scope` 过滤、`available` 谓词（MCP 带 browser_* 时让位）、MCP 覆盖内置、描述函数按 ctx 现算、**随请求携带的客户端工具进工具集且与内置同名时让位**、confirm 模式下主进程**不**请示（权限在渲染端）、broker 的广播载荷 / 回填 / 执行失败 / `cancel(requestId)` / 通道未就绪 |
+| `scripts/verify-terminal-chat.mjs` | 终端助手并入统一引擎的全链路（隔离实例 + CDP + **进程内 mock LLM**：OpenAI 兼容 SSE，按脚本逐次应答并记录每次请求的工具清单）—— `scope:'terminal'` 工具集含 `run_in_terminal` 且不含工作区工具、客户端工具随请求上报并在**同一请求内**回填续跑、full 不弹确认框 / confirm 由**渲染端**弹框且拒绝对模型是正常结果、`run_in_terminal` 真写进 PTY、终端会话落 `terminal-conversations/` 且不进 agent 列表、草稿转正 / 左侧列表 / 逐条删除 / **面板里没有「清空历史」**、重启后仍在、客户端工具注册表重启后为空、**超长输出落产物**（第 3b 节，见 4.24：`run_in_terminal` 跑 3000 行 → 结果给出产物 id 与精确的下一次读取参数、开头结尾保留在中段之外、再发一轮 `read_tool_output({id, offset, length})` 把中段读回来且读取头给出下一个 offset）。需先 `npm run build`。⚠️ 第 3b 节的命令是**终端 PowerShell 的原生命令**，别再套 `powershell -Command "…"`：双引号里 `$_` 被外层先展开、单引号里的 `"` 又在组装原生参数行时被剥掉，两层壳各吃掉一层引号（两种写法都产不出内容，报错信息长得像工具坏了）；断言产物 id 也要注意 `inlineText` 是 **JSON 字符串**（引号长成 `\"`，正则两边都得容错） |
+| `scripts/verify-output-artifact.mjs` | 工具输出的「产物」机制（`services/ai/output-artifact.ts` 真源码，`.artifacttest` 包装跑，**不需要 Electron**，见 4.24）—— 短输出**不建文件**、超限落盘且文本里带 id / 总量 / 续读指引、内联的滚动结尾**确实是真正的末尾**（用 `MIDDLE_UNIQUE_MARK` 哨兵区分头尾中）、**第一块就超内联上限时开头照样填**、按 offset 分段读能逐字拼回全文、`AnsiStripper` 跨块不吞半截转义序列（CSI / OSC 都被劈开过）、非法 id（含 `../`、绝对路径、Windows 保留名）一律拒绝、4MB 上限标 `truncated`、`purgeArtifacts` 只删本会话、**回归：>256KB 输出不再变成空串** |
+| `scripts/verify-agent-posix-command.mjs` | Agent `execute_command` 的 Windows POSIX 执行环境（`agent-core/tools.ts` 真源码，**按 `buildWorkspaceToolDefs()` + 假 ctx** 调用，见 4.23 的静态定义 API）：注入 Git Bash 后 `ls` / 管道 + 通配 / `grep -n` / for 循环 / `$HOME` 按 POSIX 语义工作；不注入时回退 PowerShell 且仍可执行；工具描述如实声明环境。⚠️ 复制清单里有 `output-artifact.ts`（`execute_command` 现在用它落盘，见 4.24）—— 删掉那一行会 `ERR_MODULE_NOT_FOUND`；需 `DOGI_TEST_BASH=<bash.exe>` 指定 Git Bash，**不指定时 POSIX 用例会失败**（回退 PowerShell 跑 `ls` 只能得到报错，属环境问题不是回归） |
 | `scripts/verify-agent-status.mjs` | 会话列表三态图标 + 系统通知三条路径（前台挡下 / 开关关闭 / 最小化后真发出 —— **会真的弹一条通知**） |
 | `scripts/verify-agent-edit-match.ts` | edit_file 匹配引擎（`agent-core/edit-match.ts`，`node --experimental-strip-types` 直接跑）—— 精确替换、找不到 / 多处 / oldString===newString 的报错、replaceAll、9 级模糊匹配链逐个触发（行 trim / 块锚点 Levenshtein / 空白归一 / 缩进弹性 / 转义归一 / 边界 trim / 上下文感知）、转义还原撑大匹配被拒、CRLF 辅助函数（换行符归一是 Windows 下编辑 CRLF 文件的前提） |
-| `scripts/verify-agent-file-tools.mjs` | Agent 文件工具行为（`tools.ts` 真源码 + 真临时工作区，包装机制同 posix-command）—— read_file 大文件分段读取（旧实现 >20 万字符连 offset/limit 都抛错的回归）、单行截断、续读 offset 提示、相似文件建议、目录 / 二进制指引；**先读后改**（edit / 覆盖写前必须本会话 read_file 过，外部改动后要求重读，写入也记快照）；edit_file 多处命中不猜 / replaceAll / **CRLF 文件用 LF 的 oldString 编辑且保留 CRLF** / 缩进不一致仍命中；确认模式 guardWrite 拒绝与放行 |
+| `scripts/verify-agent-file-tools.mjs` | Agent 文件工具行为（`tools.ts` 真源码 + 真临时工作区，包装机制同 posix-command）—— read_file 大文件分段读取（旧实现 >20 万字符连 offset/limit 都抛错的回归）、单行截断、续读 offset 提示、相似文件建议、目录 / 二进制指引；**先读后改**（edit / 覆盖写前必须本会话 read_file 过，外部改动后要求重读，写入也记快照）；edit_file 多处命中不猜 / replaceAll / **CRLF 文件用 LF 的 oldString 编辑且保留 CRLF** / 缩进不一致仍命中；确认模式 guardWrite 拒绝与放行。⚠️ 复制清单里同样有 `output-artifact.ts`（见上一行） |
 | `scripts/verify-agent-file-preview.mjs` | `dogi-ws://` 图片解码、SVG 预览↔编辑、`<video>` 的 206 Range、压缩包提示、`../` 越界 |
 | `scripts/verify-agent-error-parts.mjs` | 错误文案 part 的追加语义（`stores/agent-helpers.ts` 真源码，只桩掉 `app-store` / `types` 两条 import）—— 同一轮连着多个 `error` 事件（模型级重试每次尝试失败都发一个）**只留最后一条**、错误文案之后的正文增量另起一段、正文不会被接在 `⚠️ …` 后面；Agent 会话与终端 AI 助手两条路径都验 |
 | `scripts/verify-quick-actions.mjs` | `.dogi/workspace.json` 自动建目录、脏数据降级、下拉入口与顶栏同排、执行命令开终端、弹窗开关 |
@@ -859,6 +1002,7 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 | `scripts/verify-port-killer.mjs` | 端口占用插件全链路：插件播种/视图注册 → 探针 spawn 的 node 子进程真占随机端口 → 查询命中（PID / 进程名 / 监听中）→ 行内复制命令（`killCommand` 平台格式）→ **Popconfirm 真杀**（子进程退出 + 端口连接被拒 + 自动复查为空）→ 保护/校验分支（kill PID 1 / 非法 / 不存在、search 70000）→ **UDP 占用**（netstat UDP 行没有状态列）→ 重新查询 |
 | `scripts/verify-terminal-logging.mjs` | 终端命令 + 输出记录：命令装配（普通 / 退格 / Ctrl+C / 不可还原行不记 / bracketed paste）、`[脚本]` 来源标记、输出增量回填同一条目、原始会话文件（含未记录命令的裸输出）、关闭条目、JSONL 同 seq 多行、面板终端过滤、清空连 `sessions/` 归零。⚠️ bracketed paste 用例必须放最后：部分 PowerShell（如本机 5.1）未启用 `?2004h`，合成标记会吞掉后续回显 |
 | `scripts/verify-terminal-prediction.mjs` | 终端命令预测：CDP 真键盘注入（先点终端给 xterm 焦点）——未输入无下拉、「键入 git → 'git status' 行渲染宽度带空格」、「前缀以空格结尾 → 仍带空格」、`→` 接受 → 下拉收起 + PTY 回显补全后的 `git log`、备用屏幕（tmux / vim）里按 `d` 不弹（见 6.5 第 25 条）。⚠️ 防的是 flex 子项边界空格被裁的坑（见 6.5 第 24 条）：断言必须量渲染宽度，`textContent` 测不出来 |
+| `scripts/verify-terminal-replay.mjs` | 终端标签换父节点后回放环形缓冲（机制见 4.1）：本地终端灌 60 行 → 拆分**前**能滚到会话第一行（对照组）→ `splitTabToGroup` 分屏后仍能滚到第一行、当前屏幕仍是最新输出 → 拆分后再打哨兵只见一次（**接缝不重复**，证明「先订阅、再取缓冲」的顺序对）且新输出照常到达 → `moveTabToGroup` 跨组并入同样能滚回第一行。⚠️ 滚轮必须用 CDP `Input.dispatchMouseEvent`（见 5.1 的真事件那条），用合成 `WheelEvent` 会误判成回归 |
 | `scripts/verify-command-history.ts` | 终端命令历史的服务层（`services/terminal/history.ts` 真源码，`node --experimental-strip-types`，不需要 Electron）—— 空启动、add 落盘、去重置顶（重复执行刷新时间）、trim / 空串拒绝、超长截断、上限 1000 丢最旧、「重启」再 init 读回一致、单条删除（不存在静默）、清空归零、损坏 / 非数组 / 坏条目文件逐条校验降级。⚠️ 落盘是异步链，断言文件内容前必须 `flush()` |
 | `scripts/verify-command-history-ui.mjs` | 命令历史的界面链路（隔离实例 + CDP，先 `npm run build`）：真实键盘在终端执行命令 → 回车记入全局 store → **第二个终端标签**的预测下拉出现跨标签历史 → 设置 → 终端管理卡片（条数 / 搜索过滤 / 最新在前 / 行内删除 / Popconfirm 清空）→ 再真实记录一条 → 杀进程重启 → bootstrap 灌回且已删除条目不再出现。⚠️ Modal 底部的版本号 `v0.0.12` 也是 `font-mono`，行断言要选 `span.font-mono[title]`（管理行才有 title）；antd 两字按钮按去空白 textContent 匹配 |
 | `tmp/verify-terminal-drop-upload.mjs` | 终端拖拽上传（SFTP）：进程内假 sshd（pty + shell + SFTP 子系统，REALPATH 固定回家目录）+ 隔离实例，`Input.dispatchDragEvent` 注入**真实原生拖拽**（`data.files` 传绝对路径 → `webUtils.getPathForFile` 拿得到）——拖入文件 + 子目录 → 确认条默认 = 家目录 → 改目录上传 → 远端逐层 MKDIR + 每文件 WRITE 内容逐字节一致、终端「已上传 N 项到 …」、传输托盘 2 笔 done → 再次拖入默认目录被记住 → 本地会话拖入被拒且不建连不传文件。⚠️ CDP 对终端 DOM 刚挂载后的**首次** drop 可能整串被忽略（非代码问题），探针带最多 3 次真实重试 |
@@ -866,7 +1010,7 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 | `scripts/verify-git-changes.ts` | 源代码管理「更改」列表的数据层：**直接跑 `services/git.ts` 真源码**（`node --experimental-strip-types`，不需要打包 / 不起 Electron）—— 临时仓库里验证未跟踪目录被 `-uall` 摊平成目录下的每个文件、列表里没有「以 `/` 结尾的折叠目录」条目、未跟踪文件用 `--no-index` 拿到「整份新增」的 diff、已跟踪文件的 diff 不受影响、未跟踪的**嵌套仓库**输出成带尾斜杠的目录条目（`nested/`，取 diff 返回空）、回退能**递归**删掉整个目录、`listGitDir` 能列出目录条目里的文件（跳过 `.git`，只读展示）且**预览上限 20 项** |
 | `scripts/verify-git-tree.ts` | 源代码管理列表的折树纯函数（`features/agent/git-tree.ts`，`node --experimental-strip-types` 直接跑）—— 多级 / 中文目录名取**路径末段**且非空、不含问号，根目录文件显示文件名，同一目录的多个文件合并成一个节点，完整路径留在 `path`（tooltip 用），重命名按新路径折树且 `origPath` 仍可读，git 的**目录条目**（`nested/`，尾斜杠）取到末段名而不是空串、目录节点带上其下**全部变更路径**（整目录暂存 / 回退用） |
 | `scripts/verify-acp-fs.ts` | ACP 客户端文件访问（`services/ai/acp-fs.ts`，`node --experimental-strip-types`）—— 工作区内读写（相对 / 绝对路径、父目录自动创建、覆盖写）、`line` / `limit` 按行截取、越界一律拒绝（`../`、工作区外绝对路径、工作区根、前缀相同的兄弟目录、`sub/../../`） |
-| `scripts/verify-acp-history.ts` | ACP 历史回放装配（`services/ai/acp-history.ts`，`node --experimental-strip-types` 直接跑真源码）—— 按 `messageId` 分段、**工具结果回到调用所在的那条消息**（回放里夹着下一条消息正文的场景，见 6.6 第 34 条）、无 messageId 的启发式、进行中的 `tool_call_update` 不落结果卡、孤儿结果不丢、思考块成 reasoning、空消息丢弃 |
+| `scripts/verify-acp-history.ts` | ACP 历史回放装配（`services/ai/acp-history.ts` + `src/shared/acp-tools.ts`，复制到 `.acphistorytest/` 后 `node --experimental-strip-types` 跑真源码）—— 按 `messageId` 分段、**工具结果回到调用所在的那条消息**（回放里夹着下一条消息正文的场景，见 6.6 第 34 条）、无 messageId 的启发式（**多轮糊成一条是刻意降级**，见 `pushTool` 的注释）、进行中的 `tool_call_update` 不落结果卡、孤儿结果不丢、思考块成 reasoning、空消息丢弃 |
 | `scripts/verify-agent-conversation-model.mjs` | Agent 会话「形态 / 模型选择」的持久化：**真启动两次应用**（同一 `--user-data-dir`）—— 保存带 `modelId` 读得回、不带 `modelId` 再存时保留旧值（`in` 语义）、显式 `undefined` 才清空、重启后 `kind` / `modelId` / `configId` 仍在；**ACP 会话**的 `acpAgentId` / `acpSessionId` 落盘、不带 `kind` 再存时绑定保留、**消息恒为空**（哪怕传了消息） |
 | `scripts/verify-agent-acp-import.mjs` | AI Agent 侧边栏 + ACP 会话「登记 → 新建/导入 → 回放」的界面链路（隔离实例 + CDP，见 4.3 / 4.18）：工作区行尾只有一个「更多操作」下拉（导入 / 新建会话 / 重命名 / 删除）→ **「新建会话」是草稿**：`kind` 为 undefined、**不进侧边栏列表**、页面上写明「发出第一条消息才建会话」、同一工作区连点两次是同一个空页 → 选内置模型只写草稿 → 发首条消息转正（标题取那条消息、`mastra`、进列表）→ **导入弹窗只做 选 agent / 拉取会话 / 导入**（无检测 / 手动添加 / 新建会话按钮），无 agent 时提示、footer「ACP 设置」打开设置弹窗并定位到 ACP agent 分组、「拉取会话」对起不来的 agent 有反馈 → 用**真实路径**建 ACP 草稿（新建会话 + `setAcpConversationModel` 预置 agent）→ 模型下拉只列**设置里勾选的**模型、**宽度被限死** → `history` 事件渲染成消息流、**正文不被折进折叠条**（注入 `[思考, 工具, 正文, 工具, 工具]`：正文在折叠体**外面**、纯工具轮次无复制按钮，见 6.6 第 34 条）、ACP 没有「编辑重发」入口 → ACP 草稿发首条消息转正（`acp` + 绑定带上、消息不落盘、进列表）、无草稿残留 → **标签右键菜单**：一级只有「关闭标签」，其余关闭方式收进「关闭」二级。⚠️ 断言列表行数要用 `[data-conversation-id]`（store 条数含草稿）；模型下拉要取**可见标签**里那个（每个标签各渲染一份，隐藏的那份选项按它自己的会话算，会是「暂无数据」）；**悬停展开 antd 子菜单**：真鼠标移动推不出 React 的 `onMouseEnter`，要对标题元素派发**带 `relatedTarget` 的 mouseover**；子菜单弹出层类名是 `.ant-dropdown-menu-submenu-popup`（不是老的 submenu-popup）；合成 contextmenu 没有 clientX/Y，右键要用 `Input.dispatchMouseEvent` 真事件（菜单弹在 (0,0) 会让后续坐标全错）；见 5.1 的「隔离实例首帧不提交」坑（探针里要先 `bringToFront` + `reload`） |
 | `scripts/verify-skills.mjs` | 技能发现（含 junction 安装）、无 frontmatter 退化、额外根目录、设置页渲染与开关落盘 |
@@ -1030,7 +1174,7 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   第三方兼容网关（Ollama / vLLM / one-api）普遍没实现而报 404。要 Chat Completions 必须显式 `provider.chat(modelId)`；
   本项目通过 `AiModelConfig.apiStyle` 切换，`openai-compatible` 默认 `chat-completions`。
 - fullStream 字段：`text-delta` 是 `part.text`（v4 是 `textDelta`）、工具是 `input`/`output`（v4 是 `args`/`result`）。
-  适配层在 `services/ai/ai.ts` 的 `adaptPart` 与 `agent-core/agent.ts` 的 `adaptAgentPart`。
+  适配层是 `agent-core/mastra-stream.ts` 的事件适配（两条线共用同一份，见 4.22）。
 - ⚠️ **思考内容的增量在 `part.text`**（不是 `textDelta`，也不是 `delta` —— 只有 `UIMessageChunk` 才用 `delta`）。
   `reasoning-start` / `reasoning-end` 只是起止标记、不带内容；**不存在 `type: 'reasoning'` 这种 fullStream part**，
   写错不会报错，思考内容会被静默丢弃。
@@ -1476,7 +1620,7 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 - **重试次数**（顺带加进设置）：mastra 把 `modelSettings.maxRetries` 直接交给 p-retry 的 `retries`
   （缺省 2），只在 `doStream` **开流前**失败时重试（`agent-BOxKOk3n.js` 的 `retryWithExponentialBackoff`）。
   生效值见 `@shared/ai-timeouts` 的 `resolveMaxRetries`，界面在「设置 → AI → 超时 → 请求失败重试次数」，
-  `0` = 不限制。两条路径（`ai/agent.ts` 工作区 Agent、`ai/ai.ts` 终端助手）都要传。
+  `0` = 不限制。`agent.ts` 两条作用域的路径都要传（工作区 Agent / 终端助手）。
   ⚠️ **`0` 的代价**：翻译成 p-retry 的 `Infinity`，而 mastra 没设 `maxTimeout`，
   退避延时趋近 `Infinity` 后被 Node 夹成 1ms —— 不会空转（每次尝试都是真请求），
   但等于拿网关连接数去赌。别把 0 设成默认值。
@@ -1494,7 +1638,7 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   1. `agent-core/mastra-stream.ts` 把两个 chunk 转成 `{ type: 'tool-call-delta' }` 事件
      （`inputTextDelta` 可以为空串：那一帧的用处是**先把卡片建出来**，标题立刻是真实工具名）；
   2. **下发节奏**统一由 `services/ai/tool-input-throttle.ts` 节流（240 字符 / 60ms）。
-     两条路径（`ai/agent.ts`、`ai/ai.ts`）里**所有**事件都要走包好的 `send()`：
+     `agent.ts` 两条作用域的路径里**所有**事件都要走包好的 `send()`：
      ⚠️ 非增量事件前必须先 `flush()`，否则同一个 `toolCallId` 的增量会排到它自己的完整
      `tool-call` 之后，前端又用旧增量盖回去（顺序错了比不发还糟）。
   3. 渲染端（`stores/agent-helpers.ts`）按 `toolCallId` 攒进 `part.inputText`。
@@ -1518,7 +1662,7 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   而思考内容本身是正常流出来的 —— 两条通道互不相干，别被「有思考内容」误导。
 - **根因**：AI SDK v6/v7 把这两项从顶层字段挪进了 `outputTokenDetails.reasoningTokens` /
   `inputTokenDetails.cacheReadTokens`，顶层只留 inputTokens / outputTokens / totalTokens。
-  而 `services/ai/agent.ts` / `ai.ts` 当时只读 `u.reasoningTokens` / `u.cachedInputTokens`，
+  而 `services/ai/agent.ts` 当时只读 `u.reasoningTokens` / `u.cachedInputTokens`，
   一个字段都命中不了（v5 时代的口径）。
 - **正确做法**：统一走 `agent-core/usage.ts` 的 `normalizeUsage`（多级兜底，含 OpenAI 原始形状的
   `completionTokensDetails` / `promptTokensDetails`），并且**优先从 `finish` chunk 取**
@@ -1528,6 +1672,51 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   调用方据此决定显不显示；拿 0 冒充「上游报的 0」等于骗人。
 - **验证**：同一段长上下文连发两轮（第二轮会命中缓存），圆环详情的「其中缓存命中」不再为 0；
   用推理模型（deepseek-reasoner / o 系等）时「其中思考」也不再为 0。
+
+**33. 纯 Node 探针跑主进程源码：`@shared/*` 的运行时导入会直接炸，且会连带让断言悄悄过期**
+
+- **触发信号**：`verify-acp-history.ts` 报 `ERR_MODULE_NOT_FOUND: Cannot find package '@shared/acp-tools'`
+  —— 或者更糟：**它已经这样坏了好几轮没人发现**（首次跑就挂在 import 上，前面的断言一条没执行）。
+- **根因**：`--experimental-strip-types` 只擦**类型**，`import { x } from '@shared/y'` 这种**运行时**
+  别名导入照旧交给 Node 解析，而 `@shared` 是 vite/tsconfig 的构建期别名，Node 不认。
+  `import type` 才擦得掉（这也是大多数探针一直没踩到的原因）。
+- **正确做法**：需要真源码 + 有运行时别名导入时，走 `.tooltest` 那一套 ——
+  **把源文件与它依赖的 `@shared` 模块一起复制到临时目录**，把说明符改写成相对路径再跑
+  （`verify-acp-history.ts` 现在复制 `acp-history.ts` + `acp-tools.ts` 到 `.acphistorytest/`）。
+  ⚠️ 临时目录加进 `.gitignore`（`.tooltest` / `.cmdtest` / `.filetest` / `.acphistorytest` / `.artifacttest`）。
+- **连带纪律**：探针跑不起来时**断言也跟着腐烂** —— 本次就发现第 7 节还在断言
+  「无 messageId 多轮要拆成多条」，而 `pushTool` 早已改成**刻意糊成一条**（工具调用不是轮次边界）。
+  改实现时同步改断言，或断言直接写新语义（本次改成断言「糊成一条 + 末段正文仍在」）。
+- **验证**：修完必须真跑一遍到 `ALL PASS`，别只把 import 改通就收工。
+
+**34. 客户端工具：任何分支都必须回填，否则整轮静默卡死**
+
+- **触发信号**：模型调用客户端工具后界面一直转圈、没有报错、通知也不弹。
+- **根因**：主进程侧 `clientToolBroker.invoke()` 返回的是**挂起的 Promise**，只有
+  `clientTools:result` 能 settle 它。渲染端 `handleClientToolInvoke` 只要有一个分支忘了
+  `resolve(...)`（工具没注册 / 权限确认抛错 / handler 抛错 —— 或者干脆忘了那个 `if (!handler)`），
+  那个 Promise 永远不 settle，`streamText` 的当前步就卡住。abort 时的 `cancel(requestId)` 只是兜底，
+  正常路径不会走到。
+- **正确做法**：渲染端入口**只留一个出口** —— 所有分支都走同一个 `resolve(...)` 包装；
+  「用户拒绝」按**正常结果**回填（模型要看到原因并改道），不是 tool error。
+- **验证**：`verify-terminal-chat.mjs` 第 4 节（confirm 模式弹框 → 点「拒绝」→ 本轮仍正常收尾，
+  且第二轮请求里带着拒绝原因）；`verify-tool-registry.mjs` 第 7 节（broker 侧的挂起 / 回填 / 取消）。
+
+**35. 「先记长度、事后取增量」读终端输出 —— 环形缓冲有损，刷屏时直接返回空串**
+
+- **触发信号**：AI 在终端跑了一条输出很多的命令（`ls -R /`、大日志 `tail`），工具结果里
+  **一个字输出都没有**，模型接着瞎猜命令是不是失败了。
+- **根因**：`recentOutput` 背后是 **256KB/会话的环形缓冲**（`MAX_OUTPUT_BUFFER`），超了就把最旧的挤掉。
+  于是「先 `outputLength()` 记下当前长度 → 命令跑完 → `outputFrom(start)` 取增量」在刷屏场景下
+  取回的**恰恰是被挤掉的那段**，得到 `''`。这不是边界条件，是这类命令的常态。
+- **正确做法**：**写命令之前**就订阅 `sessionManager.on('data')` 边跑边收（`terminal-tools.ts` 的
+  `captureDuring()`，`finally` 里必须摘监听），超长部分交给产物文件（见 4.24）。
+  ⚠️ 顺带把 `TerminalSession.outputLength()` / `outputFrom()` **删干净**（接口 + 三个会话类 + `SessionManager`），
+  只在注释里留「为什么删」——留着就等于给这个 bug 留一个看起来很顺手的入口。
+  `execute_command` 同理：从 `child.stdout.on('data')` 边收边写，别再 `slice` 截断。
+- **产物 id 是安全边界**：模型能传参数就能传 `../../`。`artifactPath()` 必须先过
+  `/^[a-z0-9-]{6,80}$/` 再拼路径，**任何地方都不要把 `dir` 或真实路径交给模型**（同 `resolveInside`）。
+- **验证**：`scripts/verify-output-artifact.mjs`（最后一条就是 >256KB 的回归用例）、`verify-terminal-chat.mjs` 第 3b 节。
 
 ### 6.7 数据与文件
 

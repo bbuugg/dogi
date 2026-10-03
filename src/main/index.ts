@@ -7,6 +7,7 @@ import { pluginHost } from './services/plugins/host'
 import { storage } from './services/storage'
 import { hostLogger } from './services/log/logger'
 import { commandHistory } from './services/terminal/history'
+import { initArtifactStore } from './services/ai/output-artifact'
 import { acpAgentService } from './services/ai/acp-agent'
 import {
   registerWorkspaceMediaScheme,
@@ -286,6 +287,8 @@ app.whenReady().then(async () => {
   await hostLogger.init()
   // 终端命令历史：同样早于 IPC 注册（渲染端 bootstrap 的 history:list 直接读内存）
   await commandHistory.init(join(app.getPath('userData'), 'command-history.json'))
+  // 工具长输出产物目录（超长输出落盘 + read_tool_output 按段读回），同样早于 IPC 注册
+  await initArtifactStore(join(app.getPath('userData'), 'tool-output'))
   registerIpc(() => mainWindow)
   createWindow()
   // 插件需在 IPC 注册后加载，使插件主进程 handler 可被路由

@@ -20,12 +20,9 @@ import type {
   AgentConversation,
   AgentStreamEvent,
   AgentWorkspace,
-  AiChatMessage,
-  AiConfirmRequest,
   AiModelConfig,
   AiPermissionMode,
   AiSettings,
-  AiStreamEvent,
   ApiGroup,
   ApiHistoryEntry,
   ApiProtocol,
@@ -319,36 +316,6 @@ export function groupTerminalSessionId(
 // ---------------------------------------------------------------------------
 // AI 与 Agent 状态
 // ---------------------------------------------------------------------------
-
-/** 单个终端会话独立的 AI 对话状态 */
-export interface AiChatState {
-  messages: AiChatMessage[]
-  streaming: boolean
-  /** 进行中的对话请求 id（用于事件路由与中止） */
-  requestId: string | null
-  error: string | null
-  /**
-   * 模型请求正在重试（第 `attempt` 次）：界面据此显示一条**自替换**的「第 N 次重试」提示。
-   * 重试是「通知」不是内容 —— 不为它建消息 part，只在气泡的「正在生成」位置替换掉三点指示器。
-   */
-  retrying?: { attempt: number; maxRetries: number } | null
-  /**
-   * 该终端会话使用的模型配置 id —— **按会话独立**，互不影响。
-   * 未设置时回退到设置里的默认模型 `aiSettings.activeConfigId`。
-   */
-  configId?: string
-  /** 配置下的具体模型 id（配置挂了多个模型时按会话选择）；缺省用配置的默认模型 */
-  modelId?: string
-  /**
-   * 最近一次上下文压缩的通知（只用于顶部提示一条，**不进消息历史**）。
-   * 发新的一轮时由主进程重新覆盖；压缩没触发时为 undefined。
-   */
-  contextNotice?: ContextCompression
-}
-
-export function emptyAiChat(): AiChatState {
-  return { messages: [], streaming: false, requestId: null, error: null }
-}
 
 /**
  * 单个会话的运行时状态。
@@ -886,34 +853,67 @@ export interface PreferencesSlice {
 export interface AiSlice {
   aiConfigs: AiModelConfig[]
   aiSettings: AiSettings
-  /** 每个终端会话独立的 AI 对话（key 为 sessionId，互不影响） */
-  aiChats: Record<string, AiChatState>
-  /** 确认模式下等待用户处理的命令执行请求（key 为确认 id；各会话实例独立弹卡） */
-  pendingConfirms: Record<string, AiConfirmRequest>
+  /**
+   * 终端 AI 助手的会话池（独立持久化，主进程分目录存 `terminal-conversations/`）。
+   * **绝不进 agentConversations / AI Agent 侧边栏** —— 由存储边界保证，不靠消费方过滤。
+   * 会话模型与工作区会话同构（均为 mastra 形态；工具是终端操作，scope 不在记录上区分来源）。
+   */
+  terminalConversations: AgentConversation[]
+  /** 各终端页面当前打开的会话（key = sessionId；值指向 terminalConversations 或 terminalDrafts 里的 id） */
+  activeTerminalConv: Record<string, string | null>
+  /**
+   * 各终端页面的「新建会话」草稿（key = sessionId；**仅内存**：不进会话列表、不落盘），
+   * 发出首条消息那一刻转正 —— 标题取那条消息、进列表并落盘（见 `sendTerminalMessage`）。
+   * 同一页面连点两次「新开会话」复用同一份草稿。
+   */
+  terminalDrafts: Record<string, AgentConversation>
+  /**
+   * 确认模式下等待用户处理的改动类工具请求（key 为确认 id）。
+   * 终端助手与工作区 Agent 共用一张表、一条通道（`agent:confirm`）——
+   * 工作区来源带 `workspaceName`，终端来源带 `sessionId` / `sessionTitle`。
+   */
+  pendingConfirms: Record<string, AgentConfirmRequest>
   refreshAiConfigs: () => Promise<void>
   /** 重新拉取 AI 设置（删除/新建配置后同步 activeConfigId，避免渲染端悬空） */
   refreshAiSettings: () => Promise<void>
   setActiveAiConfig: (id: string) => Promise<void>
-  /**
-   * 设置**某个终端会话**的 AI 助手使用的模型（只影响这一个会话）。
-   * 与 `setActiveAiConfig`（设置页的默认模型）区分开：这里改的是单个会话的覆盖值。
-   * `modelId` 是配置下的具体模型 id（配置挂了多个模型时用）。
-   */
-  setAiChatConfig: (sid: string, configId: string, modelId?: string) => void
   saveAiSettings: (patch: Partial<AiSettings>) => Promise<void>
   setAiPermissionMode: (mode: AiPermissionMode) => Promise<void>
+  /** 选中某个终端页面要展示的会话（左侧列表点选；草稿 / 历史会话都可以） */
+  selectTerminalConversation: (sessionId: string, conversationId: string) => void
+  /**
+   * 「新开会话」：给这个终端页面开一个草稿（已有草稿就复用）并选中它。
+   * 模型选择继承该页面上一条会话的 configId / modelId，少一次重新选。
+   */
+  newTerminalConversation: (sessionId: string) => void
+  /** 删除一条终端助手会话（连同落盘文件）；删的是当前打开的那条时自动切到最近一条或新草稿 */
+  deleteTerminalConversation: (sessionId: string, conversationId: string) => Promise<void>
+  /**
+   * 设置**某条终端助手会话**使用的模型（只影响这一条会话）。
+   * 草稿只写内存（不落盘）；转正后随会话落盘，重启后仍在。
+   */
+  setTerminalConversationModel: (
+    conversationId: string,
+    patch: { configId?: string; modelId?: string }
+  ) => Promise<void>
+  /** 回复确认请求：approved=true 执行，false 取消 */
   resolveAiConfirm: (id: string, approved: boolean) => Promise<void>
-  sendAiMessage: (text: string, targetSessionId?: string | null) => Promise<void>
-  abortAi: (sessionId: string) => Promise<void>
-  clearAiMessages: (sessionId: string) => void
+  /**
+   * 发送终端助手的一条消息。工具作用于发起对话的终端页面（`sessionId`），
+   * 绑定按请求计算 —— 历史会话在别的终端里接着聊时，工具作用于新终端。
+   *
+   * ⚠️ 这也是**草稿「转正」的那一刻**：标题取首条消息、进会话列表并落盘。
+   */
+  sendTerminalMessage: (text: string, sessionId: string) => Promise<void>
+  /** 中止该终端页面当前会话的对话 */
+  abortTerminal: (sessionId: string) => Promise<void>
   /** 删除某条消息及其之后的全部消息（用于「从这里重新开始」）；流式期间由 UI 侧禁用 */
-  deleteAiMessagesFrom: (sessionId: string, messageId: string) => void
+  deleteTerminalMessagesFrom: (conversationId: string, messageId: string) => Promise<void>
   /**
    * 编辑并重发某条用户消息：**先删掉它及其之后的全部消息**，再用新文本重发。
-   * 顺序不能反 —— `sendAiMessage` 读的是 store 里的历史，反了模型会看到「编辑前 + 编辑后」两条。
+   * 顺序不能反 —— `sendTerminalMessage` 读的是 store 里的历史，反了模型会看到「编辑前 + 编辑后」两条。
    */
-  resendAiMessage: (sessionId: string, messageId: string, text: string) => Promise<void>
-  handleAiEvent: (requestId: string, event: AiStreamEvent) => void
+  resendTerminalMessage: (conversationId: string, messageId: string, text: string) => Promise<void>
 }
 
 export interface AgentSlice {
@@ -944,8 +944,6 @@ export interface AgentSlice {
    * 按会话隔离：两个会话各跑各的，互不串队。
    */
   agentQueues: Record<string, QueuedAgentMessage[]>
-  /** Agent 确认模式下等待用户处理的命令执行请求（key 为确认 id） */
-  agentPendingConfirms: Record<string, AgentConfirmRequest>
   followupRequests: Record<string, AskFollowupRequest>
   workspaceConfigs: Record<string, WorkspaceConfigSnapshot>
   /** 重新拉取 Agent 工作区列表 */
@@ -1078,7 +1076,10 @@ export interface AgentSlice {
    * （主进程去重），所以会话标签反复挂载 / StrictMode 双跑都安全。
    */
   loadAcpHistory: (conversationId: string) => Promise<void>
-  /** 回复 Agent 命令执行确认：approved=true 执行，false 取消 */
+  /**
+   * 回复改动类工具的确认请求：approved=true 执行，false 取消。
+   * 终端助手与工作区 Agent 共用（同一张 `pendingConfirms` 表、同一条通道）。
+   */
   resolveAgentConfirm: (id: string, approved: boolean) => Promise<void>
   /**
    * 提交 `ask_followup_question` 的回答。`toolCallId` 定位卡片（也是 followupRequests 的 key），

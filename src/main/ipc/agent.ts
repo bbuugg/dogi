@@ -2,6 +2,7 @@ import { ipcMain } from 'electron'
 import { agentService } from '../services/ai/agent'
 import { acpAgentService } from '../services/ai/acp-agent'
 import { detectInstalledAcpAgents } from '../services/ai/acp-detect'
+import { sessionManager } from '../services/terminal/sessions'
 import { clearConversationSummary, compressConversationNow } from '../services/ai/context-summary'
 import {
   listWorkspaceDir,
@@ -19,6 +20,7 @@ import {
 } from '../services/ai/workspace-config'
 import { storage } from '../services/storage'
 import { browserSessions } from '../services/browser/session'
+import { purgeArtifacts } from '../services/ai/output-artifact'
 import { agentBrowserSessionId } from '@shared/browser'
 import type {
   AgentBackend,
@@ -44,13 +46,15 @@ function requireAcpAgent(id?: string) {
 }
 
 /**
- * 工作区 Agent IPC：工作区 CRUD、对话流、确认卡、ACP 会话导入。
+ * Agent IPC：工作区 CRUD、对话流（工作区 + 终端两条作用域）、确认卡、ACP 会话导入。
  *
- * `agent:chat` 按**会话形态**（`kind`，按会话独立）分派到两条完全不同的路径：
+ * `agent:chat` 先按**会话作用域**（`scope`）分派：`workspace`（缺省）与 `terminal`
+ * （终端 AI 助手）都由 agentService 承接 —— 同一个引擎、不同的工具与提示词；
+ * workspace 内再按**会话形态**（`kind`）分流：
  * - `mastra`：内置 Mastra agent（agentService），消息随会话落盘；
  * - `acp`：外部 ACP agent（acpAgentService），**消息由 agent 自己管理**，
  *   本地只存绑定关系（acpAgentId + acpSessionId）。
- * 确认卡两条路径共用同一通道 —— 渲染端不必关心是哪一个在要权限。
+ * 确认卡各路径共用同一通道 —— 渲染端不必关心是哪一个在要权限。
  */
 export function registerAgentIpc(ctx: IpcContext): void {
   /**
@@ -93,7 +97,10 @@ export function registerAgentIpc(ctx: IpcContext): void {
       .filter((c) => c.workspaceId === id)
       .map((c) => c.id)
     const workspaces = storage.deleteAgentWorkspace(id)
-    for (const cid of victims) await browserSessions.purge(agentBrowserSessionId(cid))
+    for (const cid of victims) {
+      await browserSessions.purge(agentBrowserSessionId(cid))
+      await purgeArtifacts(cid)
+    }
     return workspaces
   })
 
@@ -120,7 +127,36 @@ export function registerAgentIpc(ctx: IpcContext): void {
     storage.deleteAgentConversation(id)
     // 会话没了，它的浏览器 profile（登录态等）跟着删 —— 见 session.ts 的 purge 说明
     await browserSessions.purge(agentBrowserSessionId(id))
+    // 长输出产物同理：会话删了，产物也没人再读回去
+    await purgeArtifacts(id)
   })
+
+  // ---------- 终端 AI 助手会话（独立目录存储，绝不进工作区会话列表） ----------
+  // 会话模型与工作区会话同构（AgentConversation），但物理分目录 ——
+  // 「不入 AI Agent 列表」由存储边界保证（见 conversation-store.ts 的 terminalConversationStore）
+  ipcMain.handle('agent:terminal-convs:list', () => storage.listTerminalConversations())
+  ipcMain.handle(
+    'agent:terminal-convs:save',
+    (
+      _e,
+      input: {
+        id?: string
+        kind?: AgentBackend
+        title?: string
+        messages?: AgentChatMessage[]
+        configId?: string
+        modelId?: string
+      }
+    ) => storage.saveTerminalConversation(input)
+  )
+  ipcMain.handle('agent:terminal-convs:delete', async (_e, id: string) => {
+    storage.deleteTerminalConversation(id)
+    await purgeArtifacts(id)
+  })
+  // 终端会话关闭：中止绑定在它上面的终端对话（挂起的确认 / 提问 / 客户端工具一并收尾）
+  sessionManager.on('closed', ({ sessionId }: { sessionId: string }) =>
+    agentService.disposeTerminalSession(sessionId)
+  )
 
   // ---------- 上下文摘要检查点（手动压缩） ----------
   // 原始消息一条不动：压缩只改「组装发往模型的历史」，所以清除摘要就是无损回到全文。
@@ -241,12 +277,19 @@ export function registerAgentIpc(ctx: IpcContext): void {
   )
 
   ipcMain.handle('agent:chat', async (_e, req: AgentChatRequest) => {
-    // 会话形态**按会话固定**：优先取请求里带的（渲染端是会话记录的唯一真源），
-    // 其次回退到磁盘上的会话记录 —— 老会话记录缺 kind 时按 mastra 处理。
-    const conv = storage.getAgentConversation(req.conversationId)
-    const kind: AgentBackend = req.kind ?? conv?.kind ?? 'mastra'
-    const result =
-      kind === 'acp' ? await acpAgentService.chat(req) : await agentService.chat(req)
+    // 作用域分派：terminal（终端助手）与 workspace（缺省）都进 agentService；
+    // workspace 内再按**会话形态**分流（按会话固定：优先取请求里带的，其次回退到
+    // 磁盘上的会话记录 —— 老会话记录缺 kind 时按 mastra 处理）。
+    if ((req.scope ?? 'workspace') === 'workspace') {
+      const conv = storage.getAgentConversation(req.conversationId)
+      const kind: AgentBackend = req.kind ?? conv?.kind ?? 'mastra'
+      if (kind === 'acp') {
+        const result = await acpAgentService.chat(req)
+        chatConversations.set(result.requestId, req.conversationId)
+        return result
+      }
+    }
+    const result = await agentService.chat(req)
     // 事件归属：**必须在这里登记**，因为「未配置模型」这种失败分支是用 setTimeout(0)
     // 发事件的，会比 invoke 的回包更早到达渲染端 —— 渲染端那时还不知道 requestId 属于谁，
     // 事件就被丢掉了（表现为转圈不结束、通知不弹）。这里同步微任务一定早于那个定时器。

@@ -1,17 +1,20 @@
 /**
- * AI Agent（工作区编程/运维助手）服务 —— **内置 Mastra agent 这一条路径**。
+ * AI Agent 服务 —— **两条 AI 线统一的对话引擎**。
  *
- * 核心能力来自同目录下的 agent-core（工具集 / 系统提示词 / 事件适配），
- * 这里只做四件事：
- * 1. 用会话选中的 AI 模型配置把对话跑起来（Mastra Agent.stream，模型解析复用 resolve-model）；
- * 2. 绑定工作区：工具全部限定在该目录内读写与执行命令；
- * 3. 确认模式：**会改动东西的工具**（执行命令 / 写入 / 编辑 / 删除）执行前先请示用户
- *    （串行弹卡；默认不限时，中止即释放；闸门在 agent-core/tools.ts 的 guardWrite）；
- * 4. 中止：走 AbortController。
+ * `agent:chat` 按 `req.scope` 分派到两条路径（会话模型同构，工具与提示词不同）：
+ * - `workspace`（缺省）：工作区 Agent，绑定本地目录，工具由 tool-registry
+ *   按 scope 组装（文件 / 命令 / 浏览器 / 技能 / 客户端工具 / MCP）；
+ * - `terminal`：终端 AI 助手，绑定发起对话的终端会话，工具为终端操作
+ *   （定义见 terminal-tools.ts）。
  *
- * ⚠️ 原生 AI SDK（`ai` 包的 `streamText`）路径已整体移除：现在只有两种 agent ——
- * 本文件的 Mastra agent，以及 `acp-agent.ts` 的外部 ACP agent（消息归 agent 自己管）。
- * 磁盘上 `backend: 'ai-sdk'` 的旧会话由 storage 读取时迁移为 mastra。
+ * 共用的部分都在这个类里：确认请示（串行弹卡）、模型解析（resolve-model）、
+ * 上下文三道闸（sliceByCheckpoint → 条数截断 → compressContext）、
+ * Mastra Agent.stream + 自驱动重试（runStreamWithRetry）、abort 收尾
+ * （确认卡 / 提问 / 客户端工具全部 settle，绝不悬挂）。
+ *
+ * ⚠️ 原生 AI SDK（`ai` 包的 `streamText`）路径已整体移除；旧 `services/ai/ai.ts`
+ * （每终端会话一个 AiAssistant 实例的独立引擎）也随统一移除 —— 磁盘上
+ * `backend: 'ai-sdk'` 的旧会话由 storage 读取时迁移为 mastra。
  */
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
@@ -19,7 +22,6 @@ import type { ToolSet } from 'ai'
 import {
   adaptMastraPart,
   buildAgentSystemPrompt,
-  buildAgentTools,
   createAgentFileState,
   normalizeUsage,
   readChunkUsage,
@@ -31,12 +33,14 @@ import type {
   AgentChatRequest,
   AgentConfirmRequest,
   AgentStreamEvent,
-  BrowserChannel
+  AiModelConfig,
+  AiSettings
 } from '@shared/types'
-import { resolveModel } from './ai'
+import { resolveModel } from './resolve-model'
 import { compressContext, withSummaryPrefix } from './context'
 import { sliceByCheckpoint } from './context-summary'
-import { askFollowupBroker, buildAskFollowupTool } from './ask-followup'
+import { askFollowupBroker } from './ask-followup'
+import { ASK_FOLLOWUP_HINT } from '@shared/ask-followup'
 import { armConfirmTimeout, modelRunTimeout } from './timeouts'
 import { DEFAULT_MAX_STEPS, resolveMaxRetries } from '@shared/ai-timeouts'
 import { describeError, isRetryableNetworkError } from './error-utils'
@@ -44,11 +48,14 @@ import { retryDelayMs, sleepWithSignal } from './retry'
 import { createToolInputThrottle } from './tool-input-throttle'
 import { skillsForAgent } from './skills'
 import { findGitBash } from '../terminal/shells'
-import { ASK_FOLLOWUP_HINT } from '@shared/ask-followup'
-import { agentBrowserSessionId } from '@shared/browser'
-import { buildBrowserAgentTools, BROWSER_PROMPT_SECTION } from '../browser/agent'
+import { BROWSER_PROMPT_SECTION } from '../browser/agent'
+import { buildTerminalSystemPrompt } from './terminal-tools'
+import { toolRegistry, type ToolRunContext } from './tool-registry'
+import { clientToolBroker } from './client-tools'
+import { ensureBuiltinToolsRegistered } from './builtin-tools'
 import { mcpManager } from './mcp'
 import { storage } from '../storage'
+import { sessionManager } from '../terminal/sessions'
 
 /**
  * Windows 上 execute_command 的 POSIX 环境（Git Bash）：检测一次并缓存。
@@ -59,27 +66,6 @@ function agentBashPath(): string | null {
   if (process.platform !== 'win32') return null
   if (cachedBashPath === undefined) cachedBashPath = findGitBash()
   return cachedBashPath
-}
-
-/**
- * 应用**自带**的浏览器工具：浏览器无窗口运行，画面通过 screencast 镜像到界面里的浏览器面板
- * （会话 id 由 conversationId 推导，与面板用同一个 id —— 见 @shared/browser）。
- *
- * 只在浏览器工具选了 `in-app` 时才挂：
- * - `off`：一个浏览器工具都不给（Agent 不该碰浏览器）；
- * - `system`：交给内置 Playwright MCP（拉起本机窗口），**这里让位** ——
- *   两套工具同名（`browser_navigate` 等），同时注册会静默互相覆盖；
- * - `in-app`：走这一套（默认）。此外若用户自己配的 MCP 也带 `browser_*`，同样让位，
- *   避免同名覆盖。
- */
-function appBrowserTools(req: AgentChatRequest, workspacePath: string, mcpTools: ToolSet): ToolSet {
-  if ((storage.getPreferences().browserToolMode ?? 'in-app') !== 'in-app') return {}
-  if (Object.keys(mcpTools).some((k) => k.startsWith('browser_'))) return {}
-  return buildBrowserAgentTools({
-    sessionId: agentBrowserSessionId(req.conversationId),
-    channel: (storage.getPreferences().browserChannel ?? 'auto') as BrowserChannel,
-    workspaceRoot: workspacePath
-  })
 }
 
 /** 由 ipc 层注入：把确认请求与其最终结果广播给渲染进程 */
@@ -95,13 +81,20 @@ interface PendingConfirm {
   timer?: ReturnType<typeof setTimeout>
 }
 
+/** 每个请求的归属元数据：会话关闭时按它中止对应的终端对话 */
+interface RequestMeta {
+  scope: 'workspace' | 'terminal'
+  targetSessionId?: string | null
+}
+
 /**
- * Agent 服务：一次对话绑定一个工作区，工具作用于该目录。
- * 确认请求串行弹出（同一时刻只等一张卡）；中止时释放挂起的确认与请求。
+ * Agent 服务：一次对话绑定一个工作区（workspace）或发起它的终端会话（terminal）。
+ * 确认请求全局串行弹出（同一时刻只等一张卡）；中止时释放挂起的确认与请求。
  */
 class AgentService extends EventEmitter {
   private confirmSink: AgentConfirmSink | null = null
   private abortControllers = new Map<string, AbortController>()
+  private requestMeta = new Map<string, RequestMeta>()
   private pendingConfirms = new Map<string, PendingConfirm>()
   /** 确认请求串行链：前一个确认被应答（或中止）后才弹下一个 */
   private confirmChain: Promise<unknown> = Promise.resolve()
@@ -112,6 +105,8 @@ class AgentService extends EventEmitter {
    */
   private fileStates = new Map<string, AgentFileState>()
   private static readonly MAX_FILE_STATES = 64
+  /** terminal 作用域的工具执行串行队列（key = requestId；与旧终端助手的语义一致） */
+  private toolQueues = new Map<string, { chain: Promise<unknown>; aborted: boolean }>()
 
   private fileStateFor(conversationId: string): AgentFileState {
     let state = this.fileStates.get(conversationId)
@@ -131,13 +126,18 @@ class AgentService extends EventEmitter {
   }
 
   /** 等待用户确认；无 UI 接入时放行，避免流程卡死 */
-  private requestConfirm(
-    workspaceName: string,
-    req: { requestId: string; toolCallId: string; toolName: string; command: string }
-  ): Promise<boolean> {
+  private requestConfirm(req: {
+    requestId: string
+    toolCallId: string
+    toolName: string
+    command: string
+    workspaceName?: string
+    sessionId?: string
+    sessionTitle?: string
+  }): Promise<boolean> {
     const sink = this.confirmSink
     if (!sink) return Promise.resolve(true)
-    const result = this.confirmChain.then(() => this.doRequestConfirm(workspaceName, req, sink))
+    const result = this.confirmChain.then(() => this.doRequestConfirm(req, sink))
     this.confirmChain = result.then(
       () => undefined,
       () => undefined
@@ -146,8 +146,15 @@ class AgentService extends EventEmitter {
   }
 
   private doRequestConfirm(
-    workspaceName: string,
-    req: { requestId: string; toolCallId: string; toolName: string; command: string },
+    req: {
+      requestId: string
+      toolCallId: string
+      toolName: string
+      command: string
+      workspaceName?: string
+      sessionId?: string
+      sessionTitle?: string
+    },
     sink: AgentConfirmSink
   ): Promise<boolean> {
     const id = randomUUID()
@@ -162,14 +169,7 @@ class AgentService extends EventEmitter {
         storage.getAiSettings().confirmTimeoutMs
       )
       this.pendingConfirms.set(id, { requestId: req.requestId, resolve: settle, timer })
-      sink.request({
-        id,
-        requestId: req.requestId,
-        toolCallId: req.toolCallId,
-        toolName: req.toolName,
-        command: req.command,
-        workspaceName
-      })
+      sink.request({ ...req, id })
     })
   }
 
@@ -190,19 +190,52 @@ class AgentService extends EventEmitter {
     }
   }
 
-  /**
-   * 内置 Mastra agent 的一条对话。
-   *
-   * 模型按会话独立：优先用请求里带的 `configId`，回退到设置里的默认模型；
-   * 会话选的配置被删掉时也要回退，否则这个会话会直接报「未配置」。
-   */
-  async chat(req: AgentChatRequest): Promise<{ requestId: string }> {
-    const requestId = randomUUID()
-    const workspace = storage.getAgentWorkspace(req.workspaceId)
+  /** terminal 作用域的工具执行排队：同一对话内串行，中止时未开始的直接拒绝 */
+  private queueToolExecution<T>(requestId: string, fn: () => Promise<T>): Promise<T> {
+    let queue = this.toolQueues.get(requestId)
+    if (!queue) {
+      queue = { chain: Promise.resolve(), aborted: false }
+      this.toolQueues.set(requestId, queue)
+    }
+    // aborted 标志由闭包持有：流结束后 Map 清理，排队中的项仍能感知中止
+    const q = queue
+    const run = q.chain.then(() =>
+      q.aborted ? Promise.reject(new Error('对话已中止，命令未执行')) : fn()
+    )
+    q.chain = run.then(
+      () => undefined,
+      () => undefined
+    )
+    return run
+  }
+
+  /** 模型配置解析：优先请求里带的 configId，回退设置里的默认模型（两条路径共用） */
+  private resolveChatConfig(req: AgentChatRequest): {
+    settings: AiSettings
+    config: AiModelConfig | undefined
+  } {
     const settings = storage.getAiSettings()
     const config =
       (req.configId ? storage.getAiConfig(req.configId) : undefined) ??
       (settings.activeConfigId ? storage.getAiConfig(settings.activeConfigId) : undefined)
+    return { settings, config }
+  }
+
+  async chat(req: AgentChatRequest): Promise<{ requestId: string }> {
+    ensureBuiltinToolsRegistered()
+    return (req.scope ?? 'workspace') === 'terminal' ? this.chatTerminal(req) : this.chatWorkspace(req)
+  }
+
+  /**
+   * 内置 Mastra agent 的**工作区**对话。
+   *
+   * 模型按会话独立：优先用请求里带的 `configId`，回退到设置里的默认模型；
+   * 会话选的配置被删掉时也要回退，否则这个会话会直接报「未配置」。
+   */
+  private async chatWorkspace(req: AgentChatRequest): Promise<{ requestId: string }> {
+    const requestId = randomUUID()
+    const workspace = req.workspaceId ? storage.getAgentWorkspace(req.workspaceId) : undefined
+    const { settings, config } = this.resolveChatConfig(req)
 
     const fail = (message: string) => {
       setTimeout(() => {
@@ -221,28 +254,33 @@ class AgentService extends EventEmitter {
 
     const controller = new AbortController()
     this.abortControllers.set(requestId, controller)
+    this.requestMeta.set(requestId, { scope: 'workspace' })
 
     // 技能每次对话现扫（磁盘即真源，用户随时可以往技能目录里丢东西）：
     // 清单进系统提示词，正文由 read_skill 工具按需读取
     const skills = await skillsForAgent(workspace.path)
     const { tools: mcpTools, errors: mcpErrors } = await mcpManager.buildToolset()
     if (mcpErrors.length) console.warn('[agent] MCP 工具加载异常：', mcpErrors.join('；'))
-    const tools: ToolSet = {
-      ...buildAgentTools(workspace.path, {
-        permissionMode: settings.permissionMode === 'confirm' ? 'confirm' : 'full',
-        requestConfirm: (r) => this.requestConfirm(workspace.name, { requestId, ...r }),
-        skills,
-        bashPath: agentBashPath(),
-        fileState: this.fileStateFor(req.conversationId)
-      }),
-      // 浏览器能力：默认用应用自带的（无窗口、画面在面板里）；只有内置 Playwright MCP
-      // 被显式打开时才让位给它（两者同名工具互斥，见 appBrowserTools）
-      ...appBrowserTools(req, workspace.path, mcpTools),
-      // 其余用户在设置里添加的 MCP server 在此统一注入（见 services/ai/mcp.ts）
-      ...mcpTools,
-      // 提问工具不走确认流程：提问本身就是让用户在卡片上做决定
-      ...buildAskFollowupTool(requestId)
+
+    const ctx: ToolRunContext = {
+      requestId,
+      conversationId: req.conversationId,
+      scope: 'workspace',
+      workspace,
+      signal: controller.signal,
+      permissionMode: settings.permissionMode === 'confirm' ? 'confirm' : 'full',
+      requestConfirm: (r) => this.requestConfirm({ ...r, requestId, workspaceName: workspace.name }),
+      fileState: this.fileStateFor(req.conversationId),
+      skills,
+      bashPath: agentBashPath()
     }
+    // 工具集从注册表组装：内置定义 + 随请求携带的客户端工具 + MCP（extra，同名覆盖内置）
+    const tools: ToolSet = toolRegistry.buildToolset({
+      ctx,
+      extra: mcpTools,
+      clientTools: this.clientToolExecutors(req)
+    })
+
     const hasBrowser = Object.keys(tools).some((k) => k.startsWith('browser_'))
     // ⚠️ 必须带上 req.modelId：会话在「同一配置下切换具体模型」时，modelId 是用户选的，
     // 不传就回退到配置的默认模型 —— 表现为「切换模型不生效，请求还在用旧模型」。
@@ -286,25 +324,145 @@ class AgentService extends EventEmitter {
     // 起流 + 消费流整体交给带重试的 runStreamWithRetry（每次尝试都重建流）。
     // ⚠️ 不再用 mastra 的 `modelSettings.maxRetries`：那条路只在 SDK 内部静默重试，界面看不到
     //    任何迹象；自己驱动才能在每次重试时发一条 `retry` 事件（界面显示「第 N 次重试」）。
-    const maxRetries = resolveMaxRetries(settings.maxRetries)
     void this.runStreamWithRetry(requestId, {
       controller,
-      maxRetries,
+      maxRetries: resolveMaxRetries(settings.maxRetries),
       start: () =>
         agent.stream(modelMessages as never, {
           maxSteps: settings.maxSteps ?? DEFAULT_MAX_STEPS,
           abortSignal: controller.signal,
-          modelSettings: {
-            // mastra 侧同样默认不限时；只设 firstChunkMs（见 timeouts.ts）
-            timeout: modelRunTimeout(settings.modelTimeoutMs),
-            // 重试由 runStreamWithRetry 自己驱动，SDK 内部重试关掉（否则两套叠加、事件对不上）
-            maxRetries: 0,
-            ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
-            ...(config.maxTokens !== undefined ? { maxOutputTokens: config.maxTokens } : {})
-          }
+          modelSettings: this.mastraModelSettings(config, settings)
         }) as unknown as Promise<{ fullStream: AsyncIterable<unknown>; usage?: Promise<unknown> }>
     })
     return { requestId }
+  }
+
+  /**
+   * 终端 AI 助手对话（mastra 引擎；**terminal 作用域只有这一种形态** ——
+   * ACP 的上下文绑定工作区目录，终端拿不到 CWD，绑不上去）。
+   */
+  private async chatTerminal(req: AgentChatRequest): Promise<{ requestId: string }> {
+    const requestId = randomUUID()
+    const { settings, config } = this.resolveChatConfig(req)
+
+    const fail = (message: string) => {
+      setTimeout(() => {
+        this.emitEvent(requestId, { type: 'error', message })
+        this.emitEvent(requestId, { type: 'finish', finishReason: 'error' })
+      }, 0)
+    }
+    if (!config) {
+      fail('尚未配置 AI 模型，请先在设置中添加模型配置')
+      return { requestId }
+    }
+
+    const controller = new AbortController()
+    this.abortControllers.set(requestId, controller)
+    this.requestMeta.set(requestId, { scope: 'terminal', targetSessionId: req.targetSessionId })
+
+    const { tools: mcpTools, errors: mcpErrors } = await mcpManager.buildToolset()
+    const permissionMode = settings.permissionMode === 'confirm' ? 'confirm' : 'full'
+    const ctx: ToolRunContext = {
+      requestId,
+      conversationId: req.conversationId,
+      scope: 'terminal',
+      targetSessionId: req.targetSessionId ?? null,
+      signal: controller.signal,
+      permissionMode,
+      requestConfirm: (r) => this.requestConfirm({ ...r, requestId }),
+      queueToolExecution: (fn) => this.queueToolExecution(requestId, fn)
+    }
+    const tools: ToolSet = toolRegistry.buildToolset({
+      ctx,
+      extra: mcpTools,
+      clientTools: this.clientToolExecutors(req)
+    })
+
+    const model = resolveModel(config, req.modelId)
+    const historyLimit = config.contextMessages ?? 20
+    // 与工作区同口径：先按条数截断，再按 token 预算压缩（只影响本次请求，不动历史）。
+    // 终端会话不支持手动压缩（没有检查点），自动压缩照常生效。
+    const { messages: modelMessages, compressed } = await compressContext(
+      toModelMessages(req.history.slice(-historyLimit)),
+      {
+        budget: config.contextBudget,
+        model: config,
+        modelId: req.modelId,
+        signal: controller.signal
+      }
+    )
+    if (compressed) {
+      // ⚠️ 延后到 invoke 回包之后：渲染端在 await 返回之后才登记 requestId → 会话，
+      // 此刻发出的事件认不出归属会被丢掉（同 chatWorkspace / ipc/agent.ts 的说明）。
+      const info = compressed
+      setTimeout(() => this.emitEvent(requestId, { type: 'context-compressed', info }), 0)
+    }
+
+    const boundSession = req.targetSessionId ? sessionManager.get(req.targetSessionId) : undefined
+    const systemPrompt =
+      buildTerminalSystemPrompt({
+        customPrompt: settings.systemPrompt,
+        permissionMode,
+        boundSession: boundSession
+          ? { title: boundSession.info.title, platform: boundSession.info.platform }
+          : undefined,
+        mcpErrors
+      }) + ASK_FOLLOWUP_HINT
+
+    const { Agent } = await import('@mastra/core/agent')
+    const agent = new Agent({
+      id: 'dogi-terminal',
+      name: 'Dogi Terminal',
+      instructions: systemPrompt,
+      model: model as never,
+      tools: tools as never
+    })
+
+    void this.runStreamWithRetry(requestId, {
+      controller,
+      maxRetries: resolveMaxRetries(settings.maxRetries),
+      start: () =>
+        agent.stream(modelMessages as never, {
+          maxSteps: settings.maxSteps ?? DEFAULT_MAX_STEPS,
+          abortSignal: controller.signal,
+          modelSettings: this.mastraModelSettings(config, settings)
+        }) as unknown as Promise<{ fullStream: AsyncIterable<unknown>; usage?: Promise<unknown> }>
+    })
+    return { requestId }
+  }
+
+  /**
+   * 把请求里携带的客户端工具定义接上回填通道（执行器 = clientToolBroker.invoke）。
+   * 权限与确认全在渲染端（invoke 事件到达后由渲染端按 permissionMode 处理），
+   * 主进程不做任何闸 —— 这里只是「把调用广播回去、等结果」。
+   */
+  private clientToolExecutors(
+    req: AgentChatRequest
+  ): Array<{
+    name: string
+    description: string
+    inputSchema?: Record<string, unknown>
+    execute(input: unknown, call: { toolCallId: string }, ctx: ToolRunContext): Promise<unknown>
+  }> {
+    return (req.clientTools ?? []).map((def) => ({
+      name: def.name,
+      description: def.description,
+      ...(def.inputSchema ? { inputSchema: def.inputSchema } : {}),
+      execute: (input: unknown, call: { toolCallId: string }, runCtx: ToolRunContext) =>
+        clientToolBroker.invoke(def.name, input, call, runCtx)
+    }))
+  }
+
+  /** mastra 的 modelSettings：默认不限时（只设 firstChunkMs），重试由 runStreamWithRetry 自己驱动 */
+  private mastraModelSettings(config: AiModelConfig, settings: AiSettings): Record<string, unknown> {
+    return {
+      // mastra 侧同样默认不限时；只设 firstChunkMs（见 timeouts.ts）
+      timeout: modelRunTimeout(settings.modelTimeoutMs),
+      // 重试由 runStreamWithRetry 自己驱动，SDK 内部重试关掉（否则两套叠加、事件对不上）
+      maxRetries: 0,
+      ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
+      ...(config.maxTokens !== undefined ? { maxOutputTokens: config.maxTokens } : {})
+    }
   }
 
   /**
@@ -459,7 +617,11 @@ class AgentService extends EventEmitter {
     } finally {
       this.clearPendingConfirms(requestId)
       askFollowupBroker.cancel(requestId)
+      clientToolBroker.cancel(requestId)
       this.abortControllers.delete(requestId)
+      this.requestMeta.delete(requestId)
+      // terminal 队列对象由排队中的闭包持有，清理 Map 不影响已中止标志的感知
+      this.toolQueues.delete(requestId)
     }
   }
 
@@ -469,9 +631,24 @@ class AgentService extends EventEmitter {
 
   /** 中止某次对话：释放挂起的确认并中止底层请求 */
   abort(requestId: string): void {
+    // 标记 terminal 队列中止：尚未开始执行的排队命令直接跳过，不再写入终端
+    const queue = this.toolQueues.get(requestId)
+    if (queue) queue.aborted = true
+    // 先释放可能正在等待用户确认的工具，避免执行流悬挂
     this.clearPendingConfirms(requestId)
     askFollowupBroker.cancel(requestId)
+    clientToolBroker.cancel(requestId)
     this.abortControllers.get(requestId)?.abort()
+  }
+
+  /**
+   * 终端会话关闭：中止绑定在它上面的全部终端对话（挂起的确认 / 提问 / 客户端工具一并收尾）。
+   * 由 ipc 层订阅 sessionManager 的 'closed' 事件转发过来。
+   */
+  disposeTerminalSession(sessionId: string): void {
+    for (const [requestId, meta] of [...this.requestMeta.entries()]) {
+      if (meta.scope === 'terminal' && meta.targetSessionId === sessionId) this.abort(requestId)
+    }
   }
 }
 

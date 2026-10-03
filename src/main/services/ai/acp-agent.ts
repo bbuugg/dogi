@@ -458,7 +458,7 @@ class AcpAgentService extends EventEmitter {
 
   async chat(req: AgentChatRequest): Promise<{ requestId: string }> {
     const requestId = randomUUID()
-    const workspace = storage.getAgentWorkspace(req.workspaceId)
+    const workspace = req.workspaceId ? storage.getAgentWorkspace(req.workspaceId) : undefined
     const acpAgent = this.resolveAgent(req.acpAgentId)
 
     const fail = (message: string) => {
@@ -598,7 +598,7 @@ class AcpAgentService extends EventEmitter {
     const existing = this.loadRequests.get(req.conversationId)
     if (existing) return { requestId: existing }
 
-    const workspace = storage.getAgentWorkspace(req.workspaceId)
+    const workspace = req.workspaceId ? storage.getAgentWorkspace(req.workspaceId) : undefined
     const acpAgent = this.resolveAgent(req.acpAgentId)
     const fail = (message: string) => {
       setTimeout(() => {

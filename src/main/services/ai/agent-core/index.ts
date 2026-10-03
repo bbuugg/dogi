@@ -8,15 +8,12 @@
 export {
   buildAgentSystemPrompt,
   toModelMessages,
-  adaptAgentPart,
-  buildAgentTools
+  adaptAgentPart
 } from './agent'
 export type {
   AgentHistoryMessage,
   AgentMessagePart,
-  AgentPermissionMode,
   AgentStreamEvent,
-  AgentToolOptions,
   AgentFileState,
   AgentFileSnapshot,
   AgentSkill
@@ -25,6 +22,6 @@ export { adaptMastraPart } from './mastra-stream'
 export type { MastraAdaptedEvent } from './mastra-stream'
 export { normalizeUsage, readChunkUsage } from './usage'
 export type { RawUsage } from './usage'
-export { buildSkillsPromptSection, buildReadSkillTool, SKILL_FILE } from './skills'
+export { buildSkillsPromptSection, buildReadSkillDef, SKILL_FILE } from './skills'
 export { resolveInside, createIgnoreChecker, parseGitignore, relPathOf } from './workspace'
-export { createAgentFileState } from './tools'
+export { createAgentFileState, buildWorkspaceToolDefs } from './tools'

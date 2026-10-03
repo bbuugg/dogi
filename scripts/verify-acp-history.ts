@@ -17,7 +17,43 @@
 
 import assert from 'node:assert/strict'
 import type { SessionUpdate } from '@agentclientprotocol/sdk'
-import { HistoryAssembler, pushHistoryUpdate } from '../src/main/services/ai/acp-history.ts'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+/**
+ * 包装机制同 verify-agent-file-tools.mjs：真源码要复制到临时目录再跑。
+ * acp-history.ts 有一个**运行时**的 `@shared/acp-tools` 导入（ACP 工具名中文化），
+ * `@shared` 是构建期别名、`--experimental-strip-types` 只擦类型不解析别名，
+ * 直接 import 会 ERR_MODULE_NOT_FOUND —— 所以连它一起复制并改写成相对说明符。
+ */
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const TMP = join(ROOT, '.acphistorytest')
+const COPIES: Array<[string, string]> = [
+  ['src/main/services/ai/acp-history.ts', 'acp-history.ts'],
+  ['src/shared/acp-tools.ts', 'acp-tools.ts']
+]
+const REWRITES: Record<string, Array<[string, string]>> = {
+  'acp-history.ts': [["from '@shared/acp-tools'", "from './acp-tools.ts'"]]
+}
+
+rmSync(TMP, { recursive: true, force: true })
+mkdirSync(TMP, { recursive: true })
+for (const [from, to] of COPIES) {
+  let code = readFileSync(join(ROOT, from), 'utf8')
+  for (const [find, with_] of REWRITES[to] ?? []) {
+    if (!code.includes(find)) {
+      console.error(`[verify] 改写失败：${to} 里找不到 ${find}`)
+      process.exit(1)
+    }
+    code = code.replaceAll(find, with_)
+  }
+  writeFileSync(join(TMP, to), code)
+}
+
+const { HistoryAssembler, pushHistoryUpdate } = await import(
+  pathToFileURL(join(TMP, 'acp-history.ts')).href
+)
 
 const check = (label: string, ok: boolean, extra?: string): void => {
   assert.ok(ok, `FAIL: ${label}${extra ? ` :: ${extra}` : ''}`)
@@ -155,10 +191,15 @@ const run = (updates: SessionUpdate[]) => {
   check('只有状态更新的「空消息」不产出', messages.length === 1, String(messages.length))
 }
 
-// ---------- 7. 没有 messageId 也没有 user 消息：多轮助手内容要拆成多条消息 ----------
+// ---------- 7. 没有 messageId 也没有 user 消息：多轮**刻意**糊成一条（降级） ----------
 {
-  // 模拟 agent 在 session/load 回放时既不给 messageId、也不回放 user 消息的常见情况：
-  // 两轮各自的「工具调用 → 结果 → 答案」被启发式合并成一条会整段折叠，必须按轮拆开。
+  // 模拟 agent 在 session/load 回放时既不给 messageId、也不回放 user 消息的常见情况。
+  //
+  // ⚠️ 这里断言的是**刻意的降级**（见 acp-history.ts `pushTool` 的长注释）：
+  // 轮次边界只由 `user_message_chunk` 界定 —— 工具调用**不是**轮次边界，早期按
+  // 「见到新 tool_call 就拆消息」的实现会把**同一轮内**的「工具→回答→工具→回答」拆成
+  // 一堆小消息、每条各带一个折叠条（用户反馈的「折叠了很多个」）。拿不到边界时
+  // 糊成一条、末尾正文仍在，是最优解 —— 比拆碎好。
   const messages = run([
     call('c1'),
     done('c1'),
@@ -167,16 +208,15 @@ const run = (updates: SessionUpdate[]) => {
     done('c2'),
     { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '第二轮结论' } } as SessionUpdate
   ])
-  check('无 messageId 多轮：每轮拆成独立的助手消息', messages.length === 2, String(messages.length))
   check(
-    '第一轮：调用/结果/答案成对保留',
-    shape(messages[0].parts).join('|') === 'tool-call:c1|tool-result:c1|text',
-    shape(messages[0].parts).join('|')
+    '无 messageId 无用户消息：多轮糊成一条（工具调用不切轮）',
+    messages.length === 1,
+    String(messages.length)
   )
   check(
-    '第二轮：调用/结果/答案成对保留',
-    shape(messages[1].parts).join('|') === 'tool-call:c2|tool-result:c2|text',
-    shape(messages[1].parts).join('|')
+    '糊成一条时内容按回放顺序完整保留（末段正文在末尾，渲染端 findTailStart 保得住）',
+    shape(messages[0].parts).join('|') === 'tool-call:c1|tool-result:c1|text|tool-call:c2|tool-result:c2|text',
+    shape(messages[0].parts).join('|')
   )
 }
 

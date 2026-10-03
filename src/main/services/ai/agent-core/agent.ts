@@ -6,15 +6,14 @@ import type { ModelMessage, TextPart, ToolCallPart, ToolResultPart } from 'ai'
 
 /** 工具结果的输出结构（ai 包没有单独导出这个类型，从 ToolResultPart 派生） */
 type ToolResultOutput = ToolResultPart['output']
-import { buildAgentTools, type AgentPermissionMode, type AgentToolOptions, type AgentFileState, type AgentFileSnapshot } from './tools'
+import { type AgentFileState, type AgentFileSnapshot } from './tools'
 import { buildSkillsPromptSection, type AgentSkill } from './skills'
 import type { ContextCompression, TurnUsage } from '@shared/types'
 import { describeError } from '../error-utils'
 
-export type { AgentPermissionMode, AgentToolOptions, AgentFileState, AgentFileSnapshot, AgentSkill }
-export { buildAgentTools }
+export type { AgentFileState, AgentFileSnapshot, AgentSkill }
 
-/** Agent 消息（渲染端历史的结构化镜像，与 @shared/types.AiChatMessage 同构） */
+/** Agent 消息（渲染端历史的结构化镜像，与 @shared/types.AgentChatMessage 同构） */
 export type AgentMessagePart =
   | { type: 'text'; text: string }
   | { type: 'reasoning'; text: string }
@@ -34,7 +33,7 @@ export interface AgentHistoryMessage {
   createdAt: number
 }
 
-/** 流事件（与 @shared/types.AiStreamEvent 同构；reasoning-delta 为思考内容增量） */
+/** 流事件（与 @shared/types.AgentStreamEvent 同构；reasoning-delta 为思考内容增量） */
 export type AgentStreamEvent =
   | { type: 'text-delta'; delta: string }
   | { type: 'reasoning-delta'; delta: string }
