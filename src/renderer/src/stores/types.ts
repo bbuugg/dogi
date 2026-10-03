@@ -1009,6 +1009,15 @@ export interface AgentSlice {
   /** 重命名会话（立即落盘） */
   renameAgentConversation: (id: string, title: string) => Promise<void>
   /**
+   * 归档 / 取消归档会话（立即落盘）。
+   *
+   * 归档**只改列表归属**：消息、形态、ACP 绑定一律不动，随时可逆。
+   * ⚠️ **不改 `updatedAt`**（同 `setAgentConversationModel`）：归档是展示态操作，
+   * 让它在两个分组里的相对次序跳来跳去没意义。
+   * 归档的会话仍能打开、接着聊 —— `sendAgentMessage` 会顺手取消归档。
+   */
+  setAgentConversationArchived: (id: string, archived: boolean) => Promise<void>
+  /**
    * 删除会话；删的是当前会话时自动切到同工作区的下一个。
    * `deleteRemoteSession`（仅 ACP 会话有意义）= 连 agent 侧的会话一起删（`session/delete`），
    * 失败只提示、本地记录照删（默认不删，避免误删用户数据）。

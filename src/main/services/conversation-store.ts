@@ -51,6 +51,7 @@ function normalizeConversation(raw: LegacyConversation): AgentConversation {
     // 用户下一次发消息触发 save → 文件被重写成没有检查点的版本 → 压缩成果**永久丢失**。
     // 加新字段时务必在这里补一行。
     contextSummary: raw.contextSummary,
+    archived: raw.archived,
     createdAt: raw.createdAt ?? Date.now(),
     updatedAt: raw.updatedAt ?? Date.now()
   }
@@ -93,6 +94,8 @@ export interface SaveConversationInput {
   acpAgentId?: string
   /** 仅 acp：agent 侧的会话 id */
   acpSessionId?: string
+  /** 归档态；同 kind / modelId 一样用 `'x' in input` 语义（undefined = 取消归档） */
+  archived?: boolean
 }
 
 /**
@@ -232,6 +235,8 @@ export class ConversationStore {
       // 根本没有这个字段 —— 如果这里跟着重建对象不带上它，用户每发一条消息
       // 就会把手动压缩的成果悄悄抹掉。
       contextSummary: prev?.contextSummary,
+      // 归档态与模型选择同一套语义：渲染端每次落盘都显式带上，`undefined` 即「取消归档」
+      archived: 'archived' in input ? input.archived : prev?.archived,
       createdAt: prev?.createdAt ?? now,
       updatedAt: now
     }

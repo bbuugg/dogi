@@ -9,6 +9,7 @@ import { AiStatusButton } from '@/features/agent/AiStatusButton'
 import { TransferTray } from '@/app/layout/TransferTray'
 import { SshProfileDialog } from '@/features/hosts/SshProfileDialog'
 import { SettingsModal } from '@/features/settings/SettingsModal'
+import { UpdateNotifier } from '@/app/UpdateNotifier'
 import { CommandPalette } from '@/app/layout/CommandPalette'
 import { RunScriptDialog } from '@/features/scripts/RunScriptDialog'
 import { PanelView } from '@/app/layout/PanelView'
@@ -107,6 +108,7 @@ export default function App() {
 
         <SshProfileDialog />
         <SettingsModal />
+        <UpdateNotifier />
         <CommandPalette />
         <RunScriptDialog />
         </div>

@@ -2332,6 +2332,18 @@ export const useAppStore = create<AppStore>()((set, get) => {
       await persistConversation(get().agentConversations, id)
     },
 
+    setAgentConversationArchived: async (id, archived) => {
+      const target = get().agentConversations.find((c) => c.id === id)
+      if (!target || !!target.archived === archived) return
+      // ⚠️ 不动 updatedAt：归档是「列表里放在哪」，不该让会话在分组里跳来跳去
+      set((s) => ({
+        agentConversations: patchConversation(s.agentConversations, id, { archived }, false)
+      }))
+      // 归档的会话不再参与「切工作区落到哪一条」（latestConversation 跳过它们），
+      // 但当前激活的指针照旧 —— 用户仍能从「已归档」分组里打开它接着聊
+      await persistConversation(get().agentConversations, id)
+    },
+
     deleteAgentConversation: async (id, options = {}) => {
       // 正在流式输出就先中止，否则主进程那个会话的 agent 进程会变成孤儿
       if ((get().agentRuns[id] ?? emptyAgentRun()).requestId) await get().abortAgent(id)
@@ -2427,7 +2439,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
           ? {
             // ACP：消息只进本地镜像（**不落盘**，那部分归 agent 自己管）
             agentAcpMessages: { ...s.agentAcpMessages, [cid]: [...history, assistantMsg] },
-            agentConversations: patchConversation(s.agentConversations, cid, { title, kind }),
+            // 顺手取消归档：又聊起来了的会话不该还躺在「已归档」分组里
+            agentConversations: patchConversation(s.agentConversations, cid, {
+              title,
+              kind,
+              archived: false
+            }),
             agentRuns: {
               ...s.agentRuns,
               [cid]: { streaming: true, requestId: null, error: null, retryable: false, retrying: null }
@@ -2437,7 +2454,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
             agentConversations: patchConversation(s.agentConversations, cid, {
               messages: [...history, assistantMsg],
               title,
-              kind
+              kind,
+              // 同上：继续发消息 = 自动回到未归档分组
+              archived: false
             }),
             agentRuns: {
               ...s.agentRuns,

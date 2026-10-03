@@ -624,17 +624,6 @@ export function GitPanel({
           <Button
             type="text"
             size="small"
-            title={changes.length === 0 ? '没有未提交的改动' : '回滚列表里列出的全部改动'}
-            disabled={busy || changes.length === 0}
-            onClick={() => setRollbackAllPaths(changes.map((c) => c.path))}
-            icon={<RotateCcw className="size-3.5" />}
-            className="!text-muted-foreground hover:!text-destructive disabled:!opacity-40"
-          >
-            回滚全部
-          </Button>
-          <Button
-            type="text"
-            size="small"
             title="刷新"
             disabled={busy}
             onClick={() => void refresh()}

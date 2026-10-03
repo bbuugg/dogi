@@ -38,6 +38,78 @@ export interface CollapsibleRowProps {
   className?: string
 }
 
+/**
+ * 展开体内容外层的统一样式（左边一条竖线 + 小字）。
+ * 吸底版与不吸底版共用一份 —— 两版只有滚动行为不同，别让样式各写一遍。
+ */
+const BODY_INNER_CLASS = cn(
+  'my-1 ml-2.5 border-l border-border py-1 pl-2.5 pr-1',
+  'text-[13px] leading-relaxed text-muted-foreground'
+)
+
+/**
+ * 「贴底跟随」版展开体（`stickToBottom` 为真时才挂）。
+ *
+ * 与消息区（Conversation）用**同一个** `use-stick-to-bottom`：库内部用 spring 动画
+ * 平滑跟随内容增长，这就是「内容向上流动」顺滑观感的来源；它还顺带接管了
+ * 「用户上滚就暂停跟随、滚回底部自动恢复」，不用自己算 scrollHeight 差值。
+ *
+ * ⚠️ 别改回 `scrollTop = scrollHeight` 那种瞬时赋值：流式每来一个 token 就跳一帧，
+ * 展开的思考过程看着是一格一格地蹦。
+ *
+ * ⚠️ 两个 ref 在**这个组件内部**无条件挂载（别按 open / 吸底与否条件传 `undefined`）：
+ * 库的 `contentRef` 是 callback ref，拿到元素才建 ResizeObserver 开始观察内容高度。
+ * 条件挂载会把观察起点拖到「开关翻转的那一帧」，而流式入参的第一帧往往正是内容
+ * 开始变长的那一刻 —— 首屏要等 observer 的异步回调才滚。挂载时那次首滚由下面的
+ * effect 显式给出。
+ * 代价是 `initial` 只能给 `false`：挂载时不许自动落底，否则工具行这类「展开后内容
+ * 不再变」的块一展开就被平白拽到底部。
+ *
+ * 这个组件**只在真需要吸底时挂载**（父组件按 `stickToBottom` 二选一渲染），
+ * 而不是给每个横条都建一个实例 —— 那才是「消息一多就卡」的一大来源。
+ */
+function StickyBody({
+  open,
+  bodyClassName,
+  children
+}: {
+  open: boolean
+  bodyClassName?: string
+  children: ReactNode
+}) {
+  const { scrollRef, contentRef, scrollToBottom } = useStickToBottom({ initial: false })
+  useEffect(() => {
+    void scrollToBottom({ animation: 'instant' })
+  }, [scrollToBottom])
+  return (
+    <div
+      className={cn(
+        'grid transition-[grid-template-rows] duration-200 ease-out',
+        open ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'
+      )}
+    >
+      {/*
+        open 时是滚动容器：`scrollbar-gutter: stable` 预留滚动条槽位。
+        不预留的话，展开的长内容一旦超过 max-h-64，滚动条出现 → 内容盒宽度少 8px →
+        整段文字重新折行、看着像「往左跳了一下」（长思考 / 长工具输出都踩得到）。
+      */}
+      <div
+        ref={scrollRef}
+        className={cn(
+          'min-h-0',
+          open ? 'max-h-64 overflow-y-auto [scrollbar-gutter:stable] mt-4' : 'overflow-hidden'
+        )}
+        // 与消息区同一个理由：关掉 Chromium 的滚动锚定，滚动位置由库显式管理
+        style={{ overflowAnchor: 'none' }}
+      >
+        <div ref={contentRef} className={cn(BODY_INNER_CLASS, bodyClassName)}>
+          {children}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function CollapsibleRow({
   icon,
   children,
@@ -55,27 +127,6 @@ export function CollapsibleRow({
   const open = openProp ?? openState
   const canExpand = expandable ?? body !== undefined
   const showChevronResolved = showChevron ?? canExpand
-
-  /**
-   * 展开体的「贴底跟随」与消息区（Conversation）用**同一个** `use-stick-to-bottom`：
-   * 库内部用 spring 动画平滑跟随内容增长，这就是「内容向上流动」顺滑观感的来源。
-   *
-   * ⚠️ 别改回 `bodyRef.current.scrollTop = scrollHeight` 那种瞬时赋值：流式每来一个 token
-   * 就跳一帧，展开的思考过程看着是一格一格地蹦。库还顺带接管了「用户上滚就暂停跟随、
-   * 滚回底部自动恢复」，不用自己算 scrollHeight 差值。
-   *
-   * ⚠️ 两个 ref **无条件挂载**（别按 `stickToBottom` 条件传 `undefined`）：
-   * 库的 `contentRef` 是 callback ref，拿到元素才建 ResizeObserver 开始观察内容高度。
-   * 条件挂载会把观察起点拖到「开关翻转的那一帧」，而流式入参的第一帧往往正是内容
-   * 开始变长的那一刻 —— 首屏要等 observer 的异步回调才滚，开关来回翻转还会反复建 /
-   * 拆 observer。无条件挂载后，观察从挂载起就在，首滚由下面这个 effect 显式给出。
-   * 代价是 `initial` 只能给 `false`：挂载时不许自动落底，否则工具行这类「展开后内容
-   * 不再变」的块一展开就被平白拽到底部。
-   */
-  const { scrollRef, contentRef, scrollToBottom } = useStickToBottom({ initial: false })
-  useEffect(() => {
-    if (stickToBottom) void scrollToBottom({ animation: 'instant' })
-  }, [stickToBottom, scrollToBottom])
 
   /**
    * 用户手动开合：先让消息区**退出自动贴底**（`holdScroll`），内容才会在原地下方长出来。
@@ -126,41 +177,40 @@ export function CollapsibleRow({
         )}
       </span>
       {/* 折叠用 grid-template-rows 0fr/1fr；展开体（grid item）必须 min-h-0 +
-          overflow 非 visible，否则它的 auto 最小尺寸会把 0fr 轨道顶开、收起时照样露出来 */}
-      {canExpand && (
-        <div
-          className={cn(
-            'grid transition-[grid-template-rows] duration-200 ease-out',
-            open ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'
-          )}
-        >
-          {/*
-            open 时是滚动容器：`scrollbar-gutter: stable` 预留滚动条槽位。
-            不预留的话，展开的长内容一旦超过 max-h-64，滚动条出现 → 内容盒宽度少 8px →
-            整段文字重新折行、看着像「往左跳了一下」（长思考 / 长工具输出都踩得到）。
-          */}
+          overflow 非 visible，否则它的 auto 最小尺寸会把 0fr 轨道顶开、收起时照样露出来。
+
+          两种展开体只在「要不要吸底」上不同（吸底那版自带 0fr/1fr 的 grid 外壳，
+          不吸底那版自己套一个）—— 之所以拆成两个分支而不是给同一个组件传
+          `stickToBottom ? ref : undefined`：hook 不能条件调用，而每条会话里几十个
+          工具 / 思考横条各自建一个 use-stick-to-bottom 实例，等于几十个
+          ResizeObserver + 一整套 scroll / wheel 监听器（每次滚动都读 scrollHeight）。
+          用分支把「不需要吸底的行」彻底排除在这份开销之外。 */}
+      {canExpand &&
+        (stickToBottom ? (
+          <StickyBody open={open} bodyClassName={bodyClassName}>
+            {body}
+          </StickyBody>
+        ) : (
           <div
-            ref={scrollRef}
             className={cn(
-              'min-h-0',
-              open ? 'max-h-64 overflow-y-auto [scrollbar-gutter:stable] mt-4' : 'overflow-hidden'
+              'grid transition-[grid-template-rows] duration-200 ease-out',
+              open ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'
             )}
-            // 与消息区同一个理由：关掉 Chromium 的滚动锚定，滚动位置由库显式管理
-            style={{ overflowAnchor: 'none' }}
           >
             <div
-              ref={contentRef}
               className={cn(
-                'my-1 ml-2.5 border-l border-border py-1 pl-2.5 pr-1',
-                'text-[13px] leading-relaxed text-muted-foreground',
-                bodyClassName
+                'min-h-0',
+                open
+                  ? 'max-h-64 overflow-y-auto [scrollbar-gutter:stable] mt-4'
+                  : 'overflow-hidden'
               )}
+              // 与消息区同一个理由：关掉 Chromium 的滚动锚定
+              style={{ overflowAnchor: 'none' }}
             >
-              {body}
+              <div className={BODY_INNER_CLASS}>{body}</div>
             </div>
           </div>
-        </div>
-      )}
+        ))}
     </div>
   )
 }

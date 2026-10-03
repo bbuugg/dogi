@@ -74,6 +74,10 @@ export function newTerminalDraft(inherited?: { configId?: string; modelId?: stri
  * ⚠️ **草稿（还没发出首条消息的那些）不能盖过真正的会话**：点「新建会话」后随手切走再切回来，
  * 应该回到你原来在用的那条会话，而不是那个一个字都没写过的空页。一条真会话都没有时才用草稿兜底
  * （那时它就是「这个工作区当前的那个新会话页」）。
+ *
+ * ⚠️ **已归档的会话一律跳过**：切工作区 / 删掉当前会话后要落到的那一条，
+ * 不该是用户自己收起来的那条（归档只是「列表里放在哪」，不是「不能用」——
+ * 用户从「已归档」分组里点开它照样能接着聊）。
  */
 export function latestConversation(
   conversations: AgentConversation[],
@@ -83,6 +87,7 @@ export function latestConversation(
   let draft: AgentConversation | null = null
   for (const c of conversations) {
     if (c.workspaceId !== workspaceId) continue
+    if (c.archived) continue
     if (isDraftConversation(c)) {
       if (!draft || c.updatedAt > draft.updatedAt) draft = c
       continue
@@ -189,7 +194,9 @@ export async function persistConversation(
     modelId: conversation.modelId,
     // ACP 会话的绑定关系（agent 配置 id + agent 侧会话 id），落盘后重启仍能接回同一条会话
     acpAgentId: conversation.acpAgentId,
-    acpSessionId: conversation.acpSessionId
+    acpSessionId: conversation.acpSessionId,
+    // 归档态同样每次显式带上（undefined = 取消归档），否则取消归档永远存不下去
+    archived: conversation.archived
   })
 }
 

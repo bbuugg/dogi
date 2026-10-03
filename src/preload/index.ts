@@ -27,6 +27,7 @@ import type {
   ApiPickFileResult,
   ApiRequestEntry,
   AppInfo,
+  AppUpdateStatus,
   BrowserFrame,
   BrowserInputEvent,
   BrowserSessionState,
@@ -382,6 +383,8 @@ const api = {
       modelId?: string
       acpAgentId?: string
       acpSessionId?: string
+      /** 归档态：true 收进「已归档」分组，false / undefined 取消归档 */
+      archived?: boolean
     }): Promise<AgentConversation> => ipcRenderer.invoke('agent:conversations:save', input),
     deleteConversation: (id: string): Promise<void> =>
       ipcRenderer.invoke('agent:conversations:delete', id),
@@ -869,6 +872,23 @@ const api = {
     /** 列出一个目录条目（未跟踪的目录 / 嵌套仓库）里的文件，仅用于展示 */
     dirList: (cwd: string, path: string): Promise<string[]> =>
       ipcRenderer.invoke('git:dirList', cwd, path)
+  },
+  /**
+   * 自动更新（GitHub Releases，正式通道）。
+   *
+   * 启动后的静默检查由**主进程**自己跑（`services/updater.ts`），渲染端只在两种
+   * 情况下参与：订阅状态变化弹「有新版本」、用户手动点检查 / 装更新。
+   */
+  updater: {
+    /** 当前状态快照（开发态 `supported: false`，界面据此置灰） */
+    status: (): Promise<AppUpdateStatus> => ipcRenderer.invoke('updater:status'),
+    /** 手动检查一次（检查中 / 下载中直接返回现状，不重复触发） */
+    check: (): Promise<AppUpdateStatus> => ipcRenderer.invoke('updater:check'),
+    /** 退出并安装已下载的更新（内部会先让渲染端冲刷进行中的状态）；返回是否真的执行了 */
+    install: (): Promise<boolean> => ipcRenderer.invoke('updater:install'),
+    /** 订阅状态变化（下载完成 / 检查失败回到 idle 等） */
+    onStatus: (cb: (status: AppUpdateStatus) => void): Unsubscribe =>
+      subscribe('updater:status', cb)
   }
 }
 
