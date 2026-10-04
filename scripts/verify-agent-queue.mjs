@@ -4,6 +4,8 @@
 //   1. 队列渲染在输入卡片**内部**（header），每条带「现在发 / 编辑 / 删除」三个按钮；
 //   2. 空闲时 submit 直接发一轮（不落队列），流式中 submit 才入队；
 //   3. 流式中「现在发」被忽略、删除生效、空闲后 pump 弹出队首、删会话清空队列；
+//   3b. **手动停止 / 报错后队列暂停自动接续**（`queueHold`）：中止、报错两条路径都不 pump，
+//       自然结束才解除；ACP 回放发的 finish('done') 与切会话都不得绕过这道暂停；
 //   4. 思考展开体走 use-stick-to-bottom：内容增长时贴底（spring 进行中 gap 略大于 0），
 //      用户上滚后**不再**跟随、滚回底部恢复；
 //   5. 工具行（失败态）行内各项的垂直中心完全相等、图标尺寸统一 size-4 —— 对齐契约。
@@ -193,6 +195,90 @@ const cleared = await cdp.eval(`
 })()
 `)
 check('删除会话连带清空队列', cleared.before === 1 && cleared.after === 'cleared', JSON.stringify(cleared))
+
+// ---------- 3b. 手动停止 / 报错后队列暂停自动接续 ----------
+// 直接驱动 store 的事件入口（不依赖真实模型）：这两个 bug 的根因都是
+// 「收到 finish ≠ 本轮自然完成」—— 主进程在中止与报错路径末尾都会补发 finish。
+// ⚠️ 上一个用例把会话删掉了，而 handleAgentEvent 要求会话存在（否则 pool 判空直接 return），
+//    所以这里先重新播种。
+await seed(cdp, { streaming: true })
+const hold = await cdp.eval(`
+(async () => {
+  const get = () => window.__store.getState()
+  const cid = '${CONV_ID}'
+  const setRun = (patch) => window.__store.setState({
+    agentRuns: { ...get().agentRuns, [cid]: { streaming: false, requestId: null, error: null, ...patch } }
+  })
+  const enqueue = (t) => get().enqueueAgentMessage(t, cid)
+  const q = () => (get().agentQueues[cid] || []).map(m => m.text)
+  const reqId = 'verify-queue-hold-req'
+  const out = {}
+  // 发一条流事件。
+  //
+  // ⚠️ 必须**每次**重新登记路由：handleAgentEvent 开头靠 agentRequestConversations
+  // 反查会话，查不到就直接 return；而 finish / error 分支都会把这张表的条目删掉
+  // （见 app-store.ts）。只登记一次的话，第二条往后的事件会被**静默丢弃** ——
+  // 断言假失败，且失败原因跟被测逻辑无关，最容易把人带偏。
+  //
+  // （这里用行注释而非块注释，且注释里不写反引号：整段是嵌在外层模板字符串里的。）
+  const fire = (event) => {
+    window.__agentRequests.set(reqId, cid)
+    get().handleAgentEvent(reqId, event)
+  }
+
+  // (1) 中止：finish('aborted') → 不接续
+  setRun({ streaming: true })
+  enqueue('中止-甲'); enqueue('中止-乙')
+  fire({ type: 'finish', finishReason: 'aborted' })
+  out.afterAbortedHold = get().agentRuns[cid].queueHold
+  out.afterAbortedQueue = q()
+  get().pumpAgentQueue(cid)               // 再泵一次也不该发
+  out.afterAbortedPump = q()
+
+  // (2) 报错：error 事件 + 收尾的 finish('error') → 不接续
+  get().removeQueuedAgentMessage(get().agentQueues[cid][0].id, cid)
+  setRun({ streaming: true })
+  fire({ type: 'error', message: 'boom' })
+  out.afterErrorHold = get().agentRuns[cid].queueHold
+  fire({ type: 'finish', finishReason: 'error' })
+  out.afterErrorFinishHold = get().agentRuns[cid].queueHold
+  out.afterErrorQueue = q()
+  get().pumpAgentQueue(cid)
+  out.afterErrorPump = q()
+
+  // (3) 自然结束 → 解除暂停，pump 照常接上
+  setRun({ streaming: true })
+  fire({ type: 'finish', finishReason: 'done' })
+  out.afterDoneHold = get().agentRuns[cid].queueHold
+
+  // (4) ACP 回放也发 finish('done')：不得借此解除暂停（否则「只是打开会话」就自动发队列）
+  // 会话得临时标成 acp —— 回放的判定同时看 isAcp 与 acpLoading[cid]
+  // （见 handleAgentEvent 的 wasReplay），种子会话是 mastra，
+  // 不换过去这条就走成了普通 finish、断言失去意义。
+  setRun({ streaming: true, queueHold: true })
+  window.__store.setState({
+    agentConversations: get().agentConversations.map(c => (c.id === cid ? { ...c, kind: 'acp' } : c)),
+    acpLoading: { ...get().acpLoading, [cid]: true }
+  })
+  fire({ type: 'finish', finishReason: 'done' })
+  out.afterReplayHold = get().agentRuns[cid].queueHold
+  window.__store.setState({
+    agentConversations: get().agentConversations.map(c => (c.id === cid ? { ...c, kind: 'mastra' } : c)),
+    acpLoading: { ...get().acpLoading, [cid]: false }
+  })
+
+  // (5) 切会话不能绕过暂停（队列在内存里跨切会话活着）
+  out.afterSelectQueue = (() => { get().pumpAgentQueue(cid); return q() })()
+  return out
+})()
+`)
+check('中止后 queueHold 置位且队列保留', hold.afterAbortedHold === true && hold.afterAbortedQueue.length === 1, JSON.stringify(hold.afterAbortedQueue))
+check('中止后 pump 不接续', hold.afterAbortedPump.length === 1, `剩 ${hold.afterAbortedPump.length} 条`)
+check('报错后 queueHold 置位', hold.afterErrorHold === true && hold.afterErrorFinishHold === true, `error=${hold.afterErrorHold} finish=${hold.afterErrorFinishHold}`)
+check('报错后 pump 不接续', hold.afterErrorQueue.length === 0 && hold.afterErrorPump.length === 0, `剩 ${hold.afterErrorPump.length} 条`)
+check('自然结束解除暂停', hold.afterDoneHold === false, String(hold.afterDoneHold))
+check('ACP 回放的 finish done 不解除暂停', hold.afterReplayHold === true, String(hold.afterReplayHold))
+check('切会话 / 再泵也不接续', hold.afterSelectQueue.length === 0, `剩 ${hold.afterSelectQueue.length} 条`)
 
 // ---------- 4. 思考展开体的贴底 / 上滚暂停 ----------
 await seed(cdp, { streaming: true })

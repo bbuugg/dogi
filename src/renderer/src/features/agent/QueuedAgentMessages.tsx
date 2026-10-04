@@ -7,8 +7,10 @@ import { useAppStore, type QueuedAgentMessage } from '@/stores/app-store'
  * 渲染在同一张卡里（底部分隔线把它与 textarea 隔开，浑然一体），见 AgentPage 的输入区。
  *
  * 行为对齐 fishwork 的 `QueuedMessages`：
- * - 本轮**自然结束**后由 `pumpAgentQueue` 按顺序依次发出（报错 / 用户手动停止则不接续，
- *   队列留着等用户自己处理）；
+ * - 本轮**自然结束**后由 `pumpAgentQueue` 按顺序依次发出；
+ * - **手动停止 / 报错则暂停自动发送**（`AgentRunState.queueHold`）：队列原样留着，
+ *   等用户自己「现在发」/ 编辑 / 删除，或直接发一条新的把暂停解掉 ——
+ *   用户既然叫停，就不该由程序替他决定接着往下跑；
  * - 每条支持「现在发」（摘出这条立刻开新一轮，只在空闲时可用）、「编辑」（写回输入框 +
  *   移出队列，让用户接着改再发，与「重发」同一心智）与「删除」。
  *
@@ -24,6 +26,11 @@ export function QueuedAgentMessages({
 }) {
   const items = useAppStore((s) => s.agentQueues[conversationId])
   const streaming = useAppStore((s) => s.agentRuns[conversationId]?.streaming ?? false)
+  /**
+   * 上一轮是手动停止 / 报错收场的：队列暂停自动接续，等用户自己处理（见 `pumpAgentQueue`）。
+   * 这时文案要说清「不会自动发」—— 否则用户排完队切走一会儿回来发现已经发完了。
+   */
+  const held = useAppStore((s) => s.agentRuns[conversationId]?.queueHold ?? false)
   const sendQueuedMessage = useAppStore((s) => s.sendQueuedAgentMessage)
   const removeQueuedMessage = useAppStore((s) => s.removeQueuedAgentMessage)
 
@@ -35,7 +42,7 @@ export function QueuedAgentMessages({
         <Clock className="size-3.5 shrink-0" />
         <span>
           待发送 · {items.length} 条
-          {streaming ? '（本轮结束后依次执行）' : '（已停止，可挑一条现在就发）'}
+          {streaming ? '（本轮结束后依次执行）' : held ? '（已暂停自动发送，可挑一条现在就发）' : '（已停止，可挑一条现在就发）'}
         </span>
       </div>
       <div className="flex flex-col gap-0.5">

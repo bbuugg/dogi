@@ -112,12 +112,22 @@ function DiffBlock({ data }: { data?: { text: string | null; loading: boolean } 
 
 export function GitPanel({
   cwd,
-  onChanges
+  onChanges,
+  refreshToken
 }: {
   /** 工作区目录（用来定位仓库根） */
   cwd: string
   /** 刷新完状态后回报改动数（给入口图标的 badge 用）；null = 不是仓库 */
   onChanges?: (info: { count: number; truncated: boolean } | null) => void
+  /**
+   * 外部要求重新拉一次状态：每变一次就刷一次。
+   *
+   * Agent 每跑完一轮（无论成功、失败还是被手动停止）都会改动工作区里的文件，
+   * 此时面板内容和入口 badge 都得跟上 —— 但面板自己只认 `cwd` 变化与用户手动操作，
+   * 两者都不会发生，所以由外部递一个递增的令牌进来（见 AgentPage 的 gitRefreshSeq）。
+   * 不传就是旧行为：只在 cwd 变化时刷新。
+   */
+  refreshToken?: number
 }) {
   const [status, setStatus] = useState<GitStatusResult | null>(null)
   const [branches, setBranches] = useState<GitBranchesResult | null>(null)
@@ -164,9 +174,11 @@ export function GitPanel({
 
   const refreshRef = useRef(refresh)
   refreshRef.current = refresh
+  // 依赖 refreshToken：Agent 每跑完一轮递一个新值，这里就跟着重拉一次
+  //（走 refreshRef 是为了不把 refresh 本身塞进依赖 —— 它随 cwd 变，会连带重跑）
   useEffect(() => {
     void refreshRef.current()
-  }, [cwd])
+  }, [cwd, refreshToken])
 
   async function run(fn: () => Promise<string>, done?: string): Promise<void> {
     setBusy(true)

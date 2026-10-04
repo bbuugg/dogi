@@ -48,7 +48,7 @@ const BODY_INNER_CLASS = cn(
 )
 
 /**
- * 「贴底跟随」版展开体（`stickToBottom` 为真时才挂）。
+ * 「贴底跟随」版展开体（`stickToBottom` 为真**且行已展开**时才挂，见 `CollapsibleRow` 的分支）。
  *
  * 与消息区（Conversation）用**同一个** `use-stick-to-bottom`：库内部用 spring 动画
  * 平滑跟随内容增长，这就是「内容向上流动」顺滑观感的来源；它还顺带接管了
@@ -57,48 +57,38 @@ const BODY_INNER_CLASS = cn(
  * ⚠️ 别改回 `scrollTop = scrollHeight` 那种瞬时赋值：流式每来一个 token 就跳一帧，
  * 展开的思考过程看着是一格一格地蹦。
  *
- * ⚠️ 两个 ref 在**这个组件内部**无条件挂载（别按 open / 吸底与否条件传 `undefined`）：
- * 库的 `contentRef` 是 callback ref，拿到元素才建 ResizeObserver 开始观察内容高度。
- * 条件挂载会把观察起点拖到「开关翻转的那一帧」，而流式入参的第一帧往往正是内容
- * 开始变长的那一刻 —— 首屏要等 observer 的异步回调才滚。挂载时那次首滚由下面的
- * effect 显式给出。
- * 代价是 `initial` 只能给 `false`：挂载时不许自动落底，否则工具行这类「展开后内容
- * 不再变」的块一展开就被平白拽到底部。
+ * ⚠️ **必须在 `open` 为真时才挂载**（父组件按 `stickToBottom && open` 二选一渲染，
+ * 别改回「吸底就一直挂」）。这不是省性能，是**正确性**：收起态下 grid 轨道是 `0fr`，
+ * 滚动容器的 `clientHeight` 为 0。挂载那一刻若先落底，`scrollTop` 会被设成
+ * `scrollHeight - 1 - 0`（0 高度容器上的极大值）；紧接着展开过渡让 `clientHeight`
+ * 从 0 涨到实际高度，浏览器把 `scrollTop` 夹回合法范围并发出一次 scroll 事件。
  *
- * 这个组件**只在真需要吸底时挂载**（父组件按 `stickToBottom` 二选一渲染），
- * 而不是给每个横条都建一个实例 —— 那才是「消息一多就卡」的一大来源。
+ * 库**只观察 `contentRef`（内容盒），不观察 `scrollRef`（滚动容器）**，所以容器高度
+ * 变化对它不可见 —— 那次夹紧在它看来就是「用户往上滚了」：
+ * `handleScroll` 判定 `isScrollingUp` → `escapedFromLock = true` + `isAtBottom = false`
+ * （`useStickToBottom.js:271`）。而 `isAtBottom` 一旦为假，后续每次内容变长触发的
+ * `scrollToBottom` 都会在 `next()` 第一行 `if (!state.isAtBottom) return false` 直接返回
+ * （`:153`），吸底彻底停摆 —— 表现就是「自动滚动要用户先手动拖到底部才恢复」。
+ *
+ * 只在展开时挂载就没有这个窗口：新挂载的 grid 元素直接以 `1fr` 起步，CSS 过渡
+ * 不在首次样式计算时运行，容器一上来就有真实高度，落底即正确。
+ * 附带好处：收起中的行不再持有 ResizeObserver 与 scroll / wheel 监听器。
  */
-function StickyBody({
-  open,
-  bodyClassName,
-  children
-}: {
-  open: boolean
-  bodyClassName?: string
-  children: ReactNode
-}) {
+function StickyBody({ bodyClassName, children }: { bodyClassName?: string; children: ReactNode }) {
   const { scrollRef, contentRef, scrollToBottom } = useStickToBottom({ initial: false })
   useEffect(() => {
     void scrollToBottom({ animation: 'instant' })
   }, [scrollToBottom])
   return (
-    <div
-      className={cn(
-        'grid transition-[grid-template-rows] duration-200 ease-out',
-        open ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'
-      )}
-    >
+    <div className="grid grid-rows-[1fr]">
       {/*
-        open 时是滚动容器：`scrollbar-gutter: stable` 预留滚动条槽位。
+        滚动容器：`scrollbar-gutter: stable` 预留滚动条槽位。
         不预留的话，展开的长内容一旦超过 max-h-64，滚动条出现 → 内容盒宽度少 8px →
         整段文字重新折行、看着像「往左跳了一下」（长思考 / 长工具输出都踩得到）。
       */}
       <div
         ref={scrollRef}
-        className={cn(
-          'min-h-0',
-          open ? 'max-h-64 overflow-y-auto [scrollbar-gutter:stable] mt-4' : 'overflow-hidden'
-        )}
+        className="min-h-0 max-h-64 overflow-y-auto [scrollbar-gutter:stable] mt-4"
         // 与消息区同一个理由：关掉 Chromium 的滚动锚定，滚动位置由库显式管理
         style={{ overflowAnchor: 'none' }}
       >
@@ -176,20 +166,27 @@ export function CollapsibleRow({
           />
         )}
       </span>
-      {/* 折叠用 grid-template-rows 0fr/1fr；展开体（grid item）必须 min-h-0 +
-          overflow 非 visible，否则它的 auto 最小尺寸会把 0fr 轨道顶开、收起时照样露出来。
+      {/*
+        折叠用 grid-template-rows 0fr/1fr；展开体（grid item）必须 min-h-0 +
+        overflow 非 visible，否则它的 auto 最小尺寸会把 0fr 轨道顶开、收起时照样露出来。
 
-          两种展开体只在「要不要吸底」上不同（吸底那版自带 0fr/1fr 的 grid 外壳，
-          不吸底那版自己套一个）—— 之所以拆成两个分支而不是给同一个组件传
-          `stickToBottom ? ref : undefined`：hook 不能条件调用，而每条会话里几十个
-          工具 / 思考横条各自建一个 use-stick-to-bottom 实例，等于几十个
-          ResizeObserver + 一整套 scroll / wheel 监听器（每次滚动都读 scrollHeight）。
-          用分支把「不需要吸底的行」彻底排除在这份开销之外。 */}
+        三种展开体分支：
+        - **吸底且已展开** → `StickyBody`（带 hook，跟随内容增长）；
+        - **其余**（不吸底 / 吸底但收着）→ 下面那两个纯 DOM 分支。
+
+        ⚠️ 吸底版刻意带 `&& open`：收起态挂载会让滚动容器以 0 高度存在，展开过渡
+        夹紧 `scrollTop` 造成的 scroll 事件被库当成「用户上滚」，吸底会永久停摆
+        （详见 `StickyBody` 的注释）。代价只是收起期间没有跟着滚 —— 那时用户也看不见。
+
+        之所以拆成多个分支而不是给同一个组件传 `stickToBottom ? ref : undefined`：
+        hook 不能条件调用，而每条会话里几十个工具 / 思考横条各自建一个
+        use-stick-to-bottom 实例，等于几十个 ResizeObserver + 一整套 scroll / wheel
+        监听器（每次滚动都读 scrollHeight）。用分支把「不需要吸底的行」彻底排除在
+        这份开销之外。
+      */}
       {canExpand &&
-        (stickToBottom ? (
-          <StickyBody open={open} bodyClassName={bodyClassName}>
-            {body}
-          </StickyBody>
+        (stickToBottom && open ? (
+          <StickyBody bodyClassName={bodyClassName}>{body}</StickyBody>
         ) : (
           <div
             className={cn(

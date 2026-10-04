@@ -683,6 +683,27 @@ export function AgentPage({
   const [gitTabOpen, setGitTabOpen] = useState(false)
   const [gitCount, setGitCount] = useState(0)
   /**
+   * 递给 GitPanel 的刷新令牌：Agent 每跑完一轮 +1，面板据此重拉状态（见 GitPanel 的 refreshToken）。
+   * 与 gitCount 分开存 —— badge 要一直显示，面板令牌只在真的需要重拉时递增。
+   */
+  const [gitRefreshSeq, setGitRefreshSeq] = useState(0)
+
+  /** 重拉工作区的 git 状态，顺带更新 badge 计数。不是仓库 / 出错都归零，不弹错 */
+  const refreshGitCount = useCallback(async () => {
+    const path = active?.path
+    if (!path) {
+      setGitCount(0)
+      return
+    }
+    try {
+      const s = await window.api.git.status(path)
+      setGitCount(s.isRepo ? s.changes.length : 0)
+    } catch {
+      // 拉不到就保持旧数字：badge 是辅助信息，不值得为它弹一个错误
+    }
+  }, [active?.path])
+
+  /**
    * 切工作区 / 打开源码管理标签时刷新 badge 计数。
    * 不用 setInterval 轮询：会话里执行 git 命令后 GitPanel 自己会刷新；这里只负责
    * 进入工作区或打开标签时给个最新数字。
@@ -704,6 +725,37 @@ export function AgentPage({
       cancelled = true
     }
   }, [active?.path, gitTabOpen])
+
+  /**
+   * **Agent 每跑完一轮就刷新 git**（成功、失败、手动停止都算）——
+   * 一轮里 agent 改过的文件是这一轮的直接产出，badge 与源码管理面板必须立刻反映出来，
+   * 否则用户看到的是「跑完了但改动数还是老的」。
+   *
+   * 判据用 `run.streaming` 由 true 变 false：finish / error / abortAgent /
+   * sendAgentMessage 启动失败四条收尾路径都会把它置回 false（见 app-store 的
+   * handleAgentEvent 与 abortAgent），一处订阅就全覆盖，不必在 store 里逐路径挂钩子。
+   *
+   * 只跟本标签自己的会话（`conversationId`）：每个会话标签各自持有 gitCount，
+   * 谁在跑谁刷新，不会因为别的标签跑了一轮就白拉一次 git。
+   *
+   * ⚠️ 不能只依赖 `streaming` 变 false 那一刻：队列里排着消息时，
+   * `pumpAgentQueue` 会在同一轮 finish 里立刻把 streaming 置回 true，
+   * 中间那个 false 未必渲染出来。所以额外记「本标签是否已经历过一次运行」，
+   * 由 true→false 的**边沿**触发，与队列接续无关。
+   */
+  const ranRef = useRef(false)
+  useEffect(() => {
+    if (!conversationId) return
+    if (streaming) {
+      ranRef.current = true
+      return
+    }
+    // 只有「跑过 → 结束」这一次边沿才刷：初始就空闲的标签不刷（交给上面的切工作区 effect）
+    if (!ranRef.current) return
+    ranRef.current = false
+    void refreshGitCount()
+    setGitRefreshSeq((n) => n + 1)
+  }, [conversationId, streaming, refreshGitCount])
 
   /** 内容区（对话 + 右侧面板）实测宽度：面板宽度上限按它算 */
   const contentRef = useRef<HTMLDivElement | null>(null)
@@ -1346,6 +1398,8 @@ export function AgentPage({
               // 面板内部不再有关闭按钮：要关就用下面标签自己的 `onClose`（标签条上的 ×）
               // 或顶栏的源码管理按钮
               onChanges={(info) => setGitCount(info ? info.count : 0)}
+              // Agent 每跑完一轮递增一次，让面板跟着重拉（否则 badge 更新了、列表还是旧的）
+              refreshToken={gitRefreshSeq}
             />
           ),
           onClose: closeGitTab

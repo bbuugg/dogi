@@ -18,6 +18,7 @@ export interface ShortcutActionMeta {
 export const SHORTCUT_ACTIONS: ShortcutActionMeta[] = [
   { action: 'new-session', label: '新建终端', defaultAccelerator: 'CommandOrControl+Alt+T' },
   { action: 'open-command-palette', label: '打开命令面板', defaultAccelerator: 'CommandOrControl+Shift+P' },
+  { action: 'close-tab', label: '关闭标签', defaultAccelerator: 'CommandOrControl+W' },
   { action: 'open-settings', label: '打开设置', defaultAccelerator: 'CommandOrControl+Alt+S' },
   {
     action: 'toggle-agent-terminal',

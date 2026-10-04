@@ -335,11 +335,25 @@ export interface AgentRunState {
    * 重试是「通知」不是内容 —— 不为它建消息 part，只在气泡的「正在生成」位置替换掉三点指示器。
    */
   retrying?: { attempt: number; maxRetries: number } | null
-  /**
+/**
    * 最近一次上下文压缩的通知（只用于顶部提示一条，**不进消息历史**）。
    * 压缩只改「这一次请求怎么带上下文」，屏幕上的历史始终是原文。
    */
   contextNotice?: ContextCompression
+  /**
+   * **待发送队列暂停**：上一轮是「用户手动停止」或「报错」收场的，队列**不自动接续**，
+   * 留着等用户自己处理（「现在发」/ 编辑 / 删除，或干脆直接发一条新的）。
+   *
+   * ⚠️ 别以为「收到 `finish` 事件」就等于「本轮自然结束」：主进程在**中止与报错两条路径的
+   * 末尾都会补一个 `finish`**（`finishReason` 分别是 `'aborted'` / `'error'`，见
+   * `services/ai/agent.ts`、`services/ai/acp-agent.ts`）。早期只按 `streaming` 变 false
+   * 接续队列，于是用户点了停止、或一轮报错之后，排着的消息照样被自动发了出去 ——
+   * 而那正是「手动结束 / 出错不该自动发」要挡的行为。
+   *
+   * 只在**用户显式发起新一轮**时清掉（见 `sendAgentMessage`）：中途切会话、ACP 回放历史
+   * 都不算用户表态，不能顺手清掉这个暂停。
+   */
+  queueHold?: boolean
 }
 
 export function emptyAgentRun(): AgentRunState {

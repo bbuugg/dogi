@@ -962,8 +962,22 @@ inputSchema, scope: 'workspace'|'terminal'|'both', available?, execute(input, ca
 一个实例 = 一个 ResizeObserver + 一套 scroll / wheel 监听器（每次滚动都读 `scrollHeight`），
 一条会话里几十个工具 / 思考横条就是几十份，而**只有真需要吸底的那一行**（流式中的思考面板 /
 正在生成的工具行，`stickToBottom` 为真）需要它。现在拆成 `StickyBody`（带 hook）与不吸底的
-纯 DOM 两个分支按 `stickToBottom` 二选一渲染 —— hook 仍在 `StickyBody` **内部无条件**挂载
-（`contentRef` 是 callback ref，条件挂载会把观察起点拖到开关翻转那一帧，见原注释）。
+纯 DOM 分支渲染。
+
+⚠️ **吸底版必须带 `&& open` 才挂载**（`stickToBottom && open`，别改回「吸底就一直挂」）：
+这不是省性能，是**正确性**。收起态 grid 轨道是 `0fr`、滚动容器 `clientHeight` 为 0，
+挂载那一刻先落底会把 `scrollTop` 设成 `scrollHeight - 1 - 0`（极大值）；紧接着展开过渡
+让 `clientHeight` 涨上去，浏览器夹紧 `scrollTop` 并发出 scroll 事件。库**只观察
+`contentRef`（内容盒）、不观察 `scrollRef`（滚动容器）**，容器高度变化对它不可见，
+那次夹紧在它看来就是「用户上滚」→ `handleScroll` 判 `isScrollingUp` → `escapedFromLock` +
+`isAtBottom=false`（`useStickToBottom.js:271`）；此后每次内容变长触发的 `scrollToBottom`
+都在 `next()` 第一行 `if (!state.isAtBottom) return false` 直接返回（`:153`），吸底永久停摆。
+**现场表现**：流式生成参数的工具行「自动滚动要用户先手动拖到底部才恢复」，且**每行必现** ——
+`ToolCallRow` 是唯一「挂载时 `open=false`、靠 effect 立刻 `setOpen(true)`」的横条
+（`stickToBottom={autoOpen}` 与 `setOpen(true)` 分属渲染与 effect 两拍）。
+`ReasoningPanel` 用 `useState(streaming)` 让 `open` 从 true 起步，所以思考条不受影响 ——
+排查时别拿思考条当「正常对照」去推演工具行。只在展开时挂载就没有这个窗口：
+新挂载的 grid 直接以 `1fr` 起步，CSS 过渡不在首次样式计算时运行，容器一上来就有真实高度。
 
 - **仍然存在的结构成本（刻意没做）**：消息流**没有虚拟化**，所有消息常驻 DOM
   （`AgentPage.tsx` 里明写「非虚拟列表下每条消息都在 DOM 里」）。滚动长会话的剩余开销就在这里；

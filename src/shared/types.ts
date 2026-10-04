@@ -414,6 +414,8 @@ export type AppShortcutAction =
   | 'open-settings'
   | 'new-session'
   | 'open-command-palette'
+  /** 关闭当前聚焦分屏组的激活标签（默认 Ctrl/Cmd+W，走标签自身的关闭确认流程） */
+  | 'close-tab'
   /** 开关 AI Agent 工作区内嵌终端（默认 Ctrl/Cmd+Shift+`） */
   | 'toggle-agent-terminal'
 

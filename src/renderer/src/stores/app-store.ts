@@ -528,6 +528,18 @@ export const useAppStore = create<AppStore>()((set, get) => {
       if (action === 'open-settings') s.setSettingsOpen(true)
       else if (action === 'new-session') void s.createLocalSession()
       else if (action === 'open-command-palette') s.setCommandPaletteOpen(true)
+      // 关闭标签：目标是「当前聚焦分屏组的激活标签」（与 VS Code / 浏览器一致）。
+      // 走 requestClosePanelTab 而不是 closePanelTab —— 和标签右键菜单里的「关闭标签」同一条路径，
+      // confirmCloseTab 开关、笔记「未保存三选一」、Agent「运行中」确认、防手滑全都自动生效，
+      // 不会因为按了个快捷键就把未保存的内容直接丢掉。
+      else if (action === 'close-tab') {
+        const tabId = s.activeGroupId ? s.groups[s.activeGroupId]?.activeTabId : null
+        if (!tabId) return
+        const tab = s.ui.panelTabs.find((t) => t.id === tabId)
+        // 不可关闭的标签（closable=false）不响应快捷键，与标签条上不画 X 一致
+        if (!tab?.closable) return
+        void s.requestClosePanelTab(tabId)
+      }
       // 内嵌终端属于 AgentPage，store 只广播请求，真正的开关在页面里做
       else if (action === 'toggle-agent-terminal') s.toggleAgentTerminal()
     },
@@ -2321,7 +2333,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
           ...(conversation ? addOrFocusTab(s, agentTab(conversation)) : {})
         }
       })
-      // 切到一个已经跑完、但还排着消息的会话（比如上一轮是在别的会话里跑完的）→ 接着发
+      // 切到一个已经跑完、但还排着消息的会话（比如上一轮是在别的会话里跑完的）→ 接着发。
+      // ⚠️ 手动停止 / 报错后进来的会被 `pumpAgentQueue` 里的 queueHold 挡掉（这里不清标记）。
       get().pumpAgentQueue(id)
     },
     renameAgentConversation: async (id, title) => {
@@ -2447,7 +2460,15 @@ export const useAppStore = create<AppStore>()((set, get) => {
             }),
             agentRuns: {
               ...s.agentRuns,
-              [cid]: { streaming: true, requestId: null, error: null, retryable: false, retrying: null }
+              [cid]: {
+                streaming: true,
+                requestId: null,
+                error: null,
+                retryable: false,
+                retrying: null,
+                // 用户主动发消息 = 新的表态，解除上一轮留下的队列暂停
+                queueHold: false
+              }
             }
           }
           : {
@@ -2460,7 +2481,14 @@ export const useAppStore = create<AppStore>()((set, get) => {
             }),
             agentRuns: {
               ...s.agentRuns,
-              [cid]: { streaming: true, requestId: null, error: null, retryable: false, retrying: null }
+              [cid]: {
+                streaming: true,
+                requestId: null,
+                error: null,
+                retryable: false,
+                retrying: null,
+                queueHold: false
+              }
             }
           }
       )
@@ -2559,12 +2587,20 @@ export const useAppStore = create<AppStore>()((set, get) => {
      * 由本轮自然结束（`handleAgentEvent` 的 finish）与切到空闲会话（`selectAgentConversation`）
      * 调用，形成「一条接一条」的链式执行。
      *
-     * ⚠️ 报错与用户手动停止都**不**接续：队列留着，等用户自己再发或重试（与 fishwork 一致）。
+     * ⚠️ **`queueHold` 期间一律不接续**（上一轮是用户手动停止或报错收场的）。
+     * 这里必须判 `finishReason` 之外的状态、而不是只在 finish 分支里判 `finishReason`：
+     * `selectAgentConversation` 也会 pump，同一个会话被切走再切回来就会绕过 finish 那道闸 ——
+     * 队列在内存里跨切会话活着，闸只装在一个入口上等于没装。
+     *
+     * ⚠️ 中止与报错两条路径主进程都会补发 `finish`（`finishReason` 为 `'aborted'` / `'error'`），
+     * 所以「streaming 变 false」**不等于**「本轮自然结束」，早先只按前者接续就是这个 bug。
      */
     pumpAgentQueue: (conversationId) => {
       const cid = conversationId
       if (!cid) return
       if ((get().agentRuns[cid] ?? emptyAgentRun()).streaming) return
+      // 手动停止 / 报错后暂停自动接续：队列留着，等用户自己「现在发」或改写后重发
+      if (get().agentRuns[cid]?.queueHold) return
       const next = (get().agentQueues[cid] ?? [])[0]
       if (!next) return
       get().removeQueuedAgentMessage(next.id, cid)
@@ -2591,7 +2627,11 @@ export const useAppStore = create<AppStore>()((set, get) => {
             streaming: false,
             requestId: null,
             retryable: false,
-            retrying: null
+            retrying: null,
+            // 用户主动停止 = 表态「这一轮到此为止」：待发送队列暂停自动接续，等他自己处理。
+            // 这里要**就地**置位而只靠后续的 finish('aborted')：渲染端此刻已把 streaming 复位，
+            // 用户完全可能在这中间切走会话再切回来，那条路径不经过 finish 事件的闸。
+            queueHold: true
           }
         }
       }))
@@ -2899,6 +2939,18 @@ export const useAppStore = create<AppStore>()((set, get) => {
         // 这次是「打开会话时回放历史」还是「真的跑了一轮」？回放不该发系统通知
         const wasReplay = isAcp && !!get().acpLoading[cid]
         clearLoading()
+        /**
+         * 只有**自然结束**才继续接队列（`finishReason: 'done'`）。
+         *
+         * ⚠️ 「收到 finish」≠「本轮自然完成」：主进程在**中止与报错两条路径末尾都会补一个
+         * finish**（`'aborted'` / `'error'`，见 services/ai/agent.ts 与 acp-agent.ts），
+         * 而 `'error'` 前面还先发了一条 error 事件。所以这里必须按 `finishReason` 判定 ——
+         * 早先只看 `streaming` 变 false 就接续，于是手动停止 / 出错后排着的消息照发不误。
+         *
+         * 用白名单（只认 `'done'`）而不是黑名单：将来主进程新增结束原因（`'cancelled'` 之类）
+         * 时默认落在「不接续」这一侧 —— 队列多留一条等人处理，比擅自替用户续跑安全。
+         */
+        const naturalEnd = event.finishReason === 'done'
         set((s) => ({
           agentRuns: {
             ...s.agentRuns,
@@ -2906,7 +2958,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
               ...(s.agentRuns[cid] ?? emptyAgentRun()),
               streaming: false,
               requestId: null,
-              retrying: null
+              retrying: null,
+              // ⚠️ **回放不许碰这个标记**：ACP 打开会话走 `session/load`，末尾也会发一个
+              // finish('done')（见 services/ai/acp-agent.ts）。回放并不是「跑了一轮」，
+              // 若在这里把 queueHold 清成 false，用户先前手动停止攒下的队列就会被悄悄接上 ——
+              // 表现成「只是打开会话，消息自己发出去了」。回放一律原样保留既有标记。
+              ...(wasReplay ? {} : { queueHold: !naturalEnd })
             }
           }
         }))
@@ -2920,8 +2977,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
         for (const c of Object.values(get().pendingConfirms)) {
           if (c.requestId === requestId) void get().resolveAgentConfirm(c.id, false)
         }
-        // 自然收尾：把队列里的下一条顶上来接着跑（被中止 / 报错的那条不会走到这里，
-        // 队列留着等用户自己处理 —— 见 pumpAgentQueue）
+        // 自然收尾才把队列里的下一条顶上来接着跑（被中止 / 报错的那条不会走到这里 ——
+        // queueHold 期间 pump 直接返回，队列留着等用户自己处理，见 pumpAgentQueue）
         get().pumpAgentQueue(cid)
         return
       }
@@ -2930,6 +2987,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
         // 报错即视为本轮对话结束：立刻复位 streaming，不依赖后续 finish 事件
         agentRequestConversations.delete(requestId)
         clearLoading()
+        // 报错也是「不该自动接续队列」的一类，与中止同口径（queueHold 见 AgentRunState）。
+        // 这里就地置位：error 之后主进程还会补一个 finish('error')，但用户可能先切走会话。
         if (isAcp) {
           // ACP：错误（含「agent 不支持 session/load」这类回放失败）走会话页顶部的错误条 ——
           // 历史还没回放出来时镜像可能是空的，塞进消息流会看不见
@@ -2941,7 +3000,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 streaming: false,
                 requestId: null,
                 error: event.message,
-                retrying: null
+                retrying: null,
+                queueHold: true
               }
             }
           }))
@@ -2958,7 +3018,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 requestId: null,
                 error: null,
                 retryable: event.retryable ?? false,
-                retrying: null
+                retrying: null,
+                queueHold: true
               }
             }
           }))
@@ -3074,4 +3135,13 @@ if (typeof window !== 'undefined') {
     unregister: unregisterClientTool,
     list: listClientToolDefs
   }
+  /**
+   * 请求 id → 会话 id 的路由表（`handleAgentEvent` 靠它把流事件派回发起它的会话，
+   * 见上面那句 `if (!cid) return` —— 未登记的事件会被**静默丢弃**）。
+   *
+   * 同样是模块级内存态、不在 store 里，验证脚本要驱动 `finish` / `error` 这类事件
+   * 就得有办法登记一个假的 requestId，否则事件进不来、断言会假失败。与 `__clientTools`
+   * 同一个约定：只在渲染端暴露，不进 preload 白名单。
+   */
+  ; (window as unknown as Record<string, unknown>).__agentRequests = agentRequestConversations
 }
