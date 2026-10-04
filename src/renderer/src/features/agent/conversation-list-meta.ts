@@ -33,8 +33,9 @@ import type { AgentConversation } from '@shared/types'
 export interface ConversationListMeta {
   id: string
   workspaceId?: string
-  /** 缺省 = 草稿（还没发出首条消息），据此过滤掉不出现在列表里的那些（isDraftConversation） */
   kind?: AgentConversation['kind']
+  /** 草稿（还没发出首条消息）据此过滤掉不出现在列表里的那些（见 isDraftConversation） */
+  draft?: boolean
   title: string
   /** 组内排序键（最近更新在最前） */
   updatedAt: number
@@ -52,6 +53,7 @@ function sameListMeta(a: ConversationListMeta, b: ConversationListMeta): boolean
     a.updatedAt === b.updatedAt &&
     a.archived === b.archived &&
     a.kind === b.kind &&
+    a.draft === b.draft &&
     a.workspaceId === b.workspaceId &&
     a.acpAgentId === b.acpAgentId &&
     a.acpSessionId === b.acpSessionId
@@ -88,6 +90,7 @@ export function selectConversationListMeta(
       id: c.id,
       workspaceId: c.workspaceId,
       kind: c.kind,
+      draft: c.draft,
       title: c.title,
       updatedAt: c.updatedAt,
       archived: c.archived,

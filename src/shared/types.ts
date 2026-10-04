@@ -1047,8 +1047,35 @@ export interface AcpModelList {
 }
 
 /**
- * ACP 会话的运行时状态（agent 侧会话 id + 可切换的模型列表），
- * 由主进程在会话就绪（session/new | session/load）后广播给渲染端。
+ * agent 广告出来的**一个会话配置项**（`session/new` / `session/load` 响应里的
+ * `configOptions[]`，也可以由 `config_option_update` 刷新）。
+ *
+ * ACP 把「这个会话用什么」都表达成配置项：模型只是 `category: 'model'` 的那一项，
+ * 同一条目里还可能有思考档位（`thought_level`）、agent 档位（`mode`）等。
+ * 我们把整组原样收下、按 id 展示与下发（`session/set_config_option`），
+ * 而不是只认模型那一项 —— agent 广告了什么，这个会话就有哪些开关。
+ *
+ * 协议要求「缺失或未知 category 必须优雅处理」，所以 category 只是**展示与分类的提示**，
+ * 正确性一律以 `id` + `value` 为准。
+ */
+export interface AcpConfigOption {
+  /** 配置项 id（下发给 `session/set_config_option` 的 `configId`） */
+  id: string
+  /** 人类可读名称（展示用） */
+  name: string
+  /** agent 给的语义分类（`model` / `thought_level` / `mode` / …）；缺失或未知都正常 */
+  category?: string
+  /** select = 从候选里选一个；boolean = 开关 */
+  type: 'select' | 'boolean'
+  /** 当前值（select 是 value id，boolean 是开关状态） */
+  currentValue: string | boolean
+  /** select 的候选（分组已拍平；boolean 没有候选项） */
+  options: Array<{ value: string; name: string }>
+}
+
+/**
+ * ACP 会话的运行时状态（agent 侧会话 id + 它广告出来的配置项），
+ * 由主进程在会话就绪（`session/new` | `session/load`）后广播给渲染端。
  */
 export interface AcpConversationState {
   conversationId: string
@@ -1056,8 +1083,16 @@ export interface AcpConversationState {
   acpSessionId: string
   /** agent 是否支持 session/load（不支持时导入的历史看不到，只能看实时输出） */
   canLoad: boolean
-  /** agent 上报的模型选择项；null = 该 agent 不上报模型（模型由 agent 自己决定） */
+  /**
+   * agent 上报的模型选择项；null = 该 agent 不上报模型（模型由 agent 自己决定）。
+   *
+   * ⚠️ **模型下拉不以它为数据源**（见 4.18）：会话页列的是「设置 → ACP agent」里
+   * 勾选过的那份（现场那一份常混着用不了的档位）。这里只是给调用方一个「agent 当前的
+   * 档位是什么」的参照，`configOptions` 里的 model 项也照样只作展示。
+   */
   models: AcpModelList | null
+  /** agent 广告出来的全部会话配置项（模型项也在其中，见 AcpConfigOption） */
+  configOptions: AcpConfigOption[]
 }
 
 export interface AiSettings {
@@ -1353,11 +1388,21 @@ export interface AgentConversation {
   /**
    * 会话形态：内置 Mastra agent 或某个固定的外部 ACP agent（**定下来之后不可互切**）。
    *
-   * 缺省表示**还没定**：新建的会话先不指定形态，由**首条消息时选中的模型**决定
-   * （选了 ACP agent 的模型 → `acp`，选了内置模型 → `mastra`），发消息那一刻落盘，
-   * 见 AgentSlice.sendAgentMessage。侧边栏的类型标识在未定时不显示。
+   * ⚠️ 形态在**创建会话时**由用户明确选择（侧边栏「新建会话」里选内置 / 某个 ACP agent），
+   * 不再由首条消息时选中的模型推断。缺省只可能出现在**极老的存档**里，
+   * 读回时由 `normalizeConversation` 兜底成 `mastra`（历史上就是这样定的型）。
    */
   kind?: AgentBackend
+  /**
+   * **草稿**：还没发出首条消息的新建会话（仅内存态、**绝不落盘**、不进侧边栏列表）。
+   *
+   * 发出第一条消息那一刻由 `sendAgentMessage` 清掉并落盘。
+   *
+   * ⚠️ 这是草稿的**唯一**判据（见 `isDraftConversation`）：不要改回「`!kind` 就是草稿」——
+   * 形态现在创建时就定了，`!kind` 会把**所有真会话**误判成草稿（它们刚从存档读回来）。
+   * 也别用 `messages.length === 0`：清空过消息的会话、ACP 会话都会被误判。
+   */
+  draft?: boolean
   /** 标题（默认由首条用户消息截断生成，可重命名；导入的 ACP 会话取 agent 给的标题） */
   title: string
   /** 该会话的完整消息历史；**只有 `kind: 'mastra'` 才有内容**，ACP 会话恒为空数组 */
@@ -1527,6 +1572,17 @@ export type AgentStreamEvent =
     }
   /** 一轮结束时的用量统计（input/output/total tokens、tps、耗时等） */
   | { type: 'usage'; usage: TurnUsage }
+  /**
+   * **上下文占用**（不是某一轮的用量，而是「此刻挂在窗口里的 token」）。
+   *
+   * 只有 ACP 路径会发：`session/update` 的 `usage_update` 带 `{ used, size }` ——
+   * `used` 是当前上下文里的 token，`size` 是 agent 自己的上下文窗口。
+   *
+   * ⚠️ 刻意**不**折进 `usage` 事件：那两者的含义不同（一个是这一轮的账，一个是当下的水位），
+   * 混在一起会让「会话累计」把每次的水位都加一遍。渲染端按会话单独存一份，
+   * 输入框的圆环在**有数据时**才打开（ACP 会话不再无条件隐藏）。
+   */
+  | { type: 'context-usage'; used: number; budget: number }
   /** 本轮请求发出前触发了上下文压缩（只是通知，不进消息历史） */
   | { type: 'context-compressed'; info: ContextCompression }
   | { type: 'finish'; finishReason: string }

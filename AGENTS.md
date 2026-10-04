@@ -99,6 +99,9 @@
 两者共同支持：
 
 - **模型按会话独立、可切换**（mastra 换模型配置 / ACP 走 `set_config_option`）；**ACP 绑定不可换**。
+- **创建会话时就要选形态**（内置 / 某个已登记的 ACP agent），之后不可互切。
+- ACP 会话**一打开就建好 agent 侧会话**（`session/new`），把 agent 广告的 `configOptions`
+  渲染成输入框上方的一排开关（思考档位等）；agent 报的 `usage_update` 会点亮输入框的上下文圆环。
 - 权限模式 `full` / `confirm`（确认模式下执行命令前弹确认卡）。
 - `ask_followup_question`：AI 在回合中途向用户发**结构化选择题**，答完同一回合继续（见 4.5）。
 - **MCP**：任意 stdio MCP server，工具自动合并给 AI。
@@ -308,32 +311,35 @@ Session.onData → sessionManager.emit('data') → ipc/terminal.ts broadcast →
   广播 `{ requestId, conversationId, event }`，渲染端优先用主进程给的 conversationId 补登记。
   新增任何「按 requestId 路由」的流式功能都照这个来。
 
-### 4.3 会话形态：**首条消息定型**，之后固定；模型按会话独立
+### 4.3 会话形态：**创建时就选**，之后不可互切；模型按会话独立
 
 - `AgentConversation` 有 `kind?: 'mastra' | 'acp'`（**形态标识 + 分派依据**）+ `modelId?: string`；
   mastra 多一个 `configId`（`AiModelConfig.id`），ACP 多两个绑定字段
   `acpAgentId`（`AcpAgentConfig.id`）+ `acpSessionId`（agent 侧的会话 id）。
-- ⚠️ **`kind` 是可缺省的**：新建的会话（侧边栏「新建会话」/ 导入弹窗的「新建会话」/ 进工作区时自动建的那个）
-  **刻意不写 kind**，形态由**首条消息时选中的模型**决定 —— 选了某个 ACP agent 的模型（未定形态下会先写进
-  `acpAgentId`）就是 `acp`，否则按内部的 mastra 走（没选模型就回退到设置里的默认模型配置）。
-  `sendAgentMessage` 里在发请求**之前**把 `kind` 一起写进会话并落盘。
-  - 消费方要形态就调 **`conversationKind(conversation)`**（`stores/types.ts`）：已定的按已定，
-    未定的按「已经选了什么」推断，都没选返回 `undefined`（会话还没定型，别当 mastra 用）。
-  - ⚠️ **`!kind` 同时就是「草稿」判据（`isDraftConversation`）**：草稿 = 还没发出首条消息的会话，
-    会话页 / 标签 / 模型选择都挂在它上面，但**不出现在侧边栏列表、不落盘** ——「新建会话」只是
-    打开当前工作区的新建会话页，发出首条消息那一刻才转正（标题取那条消息、进列表、落盘）。
-    同一工作区已有草稿时「新建会话」复用它（连点两次还是同一个空页）。
-    别用 `messages.length === 0` 之类的条件代替（清空过消息的会话 / ACP 会话会被误判）。
-  - 未定形态的会话**不落盘**：`setAgentConversationModel` / `setAcpConversationModel` 只改内存
-    （落了盘会被 storage 的兜底当成 mastra），也不预置 ACP 会话 id。
-- **形态定下来之后不可互切**，ACP 绑定（agent）也不可换，之后只能换模型。
+- ⚠️ **形态在「新建会话」时就定了**（2026-10 改的，早期版本是「首条消息时由选中的模型定型」）：
+  侧边栏工作区行尾的「新建会话」是**下拉**，第一组是「内置 Agent」，第二组是每个已登记的
+  `ACP · <名字>`（一个 agent 都没登记时给一条指向设置的禁用提示）。入口是
+  `createAgentConversation(workspaceId, kind, acpAgentId?)`，缺省 `kind` = 内置。
+  消费方统一走 **`conversationKind(conversation)`**（`stores/types.ts`），它只为极老的
+  「没有 kind 的存档」保留了一小段按 `acpAgentId` 的推断。
+- ⚠️ **草稿的判据是显式的 `AgentConversation.draft === true`**（`isDraftConversation`），
+  **不是 `!kind`** —— 形态既然创建时就定，用 `!kind` 会把所有真会话误判成草稿（它们刚从存档读回来）。
+  草稿 = 还没发出首条消息的会话：会话页 / 标签 / 模型选择 / ACP 配置项都挂在它上面，但
+  **不出现在侧边栏列表（`AgentPanel` 按 `meta.draft` 过滤）、不落盘**（守卫在 `persistConversation`）。
+  发出首条消息那一刻 `sendAgentMessage` 清掉 `draft` 并落盘（标题取那条消息）。
+  同一工作区已有草稿时「新建会话」复用它（连点两次还是同一个空页），复用时按传入的形态校正。
+  落盘链路里**不出现** `draft`（`normalizeConversation` 是显式重建对象），所以读回来的永远不是草稿。
+- **形态不可互切**，ACP 绑定（agent）也不可换，之后只能换模型。
   模型下拉按形态换内容：
   - **ACP：只列 `AcpAgentConfig.models`（设置 → ACP agent 里拉取并勾选的模型）**，
     走 `session/set_config_option` 切换、**不重建会话**；
-  - mastra：列全部模型配置；
-  - **未定形态：两边都列** —— 选哪个，这个会话就变成哪一类。
-  `setAgentConversationModel` 只服务 mastra，ACP 走 `setAcpConversationModel`（签名带 `acpAgentId`，
-  未定形态时用它定型）。
+  - mastra：列全部模型配置。
+  下拉**不再承担「顺带定型」的职责**。`setAgentConversationModel` 只服务 mastra，
+  ACP 走 `setAcpConversationModel`（签名带 `acpAgentId`）。
+- **ACP 的 agent 侧会话在「打开会话页」时就建好**（`agent:acp:prepare` → `session/new`，
+  见 4.18 的「配置项」小节）：配置项立刻可用，不必等发完第一条消息。
+  ⚠️ 那条常驻连接对「建了却一直不发消息」的草稿是纯孤儿，所以有
+  `DRAFT_IDLE_TTL_MS`（15 分钟）兜底回收；真发出第一条（`acpSessionId` 落盘）就取消定时器。
 - 终端 AI 助手的 `configId` / `modelId` **存在会话上**（`terminalConversations`），不是存在一个按 `sessionId` 的
   `AiChatState` 里 —— 换模型跟着会话走，跨终端页面接着聊也还是那个模型（见 4.22）。
 - 请求里带上 `kind` + `configId` + `modelId` + `acpAgentId` + `acpSessionId`，主进程**优先用请求里的，
@@ -363,10 +369,11 @@ Session.onData → sessionManager.emit('data') → ipc/terminal.ts broadcast →
 - 切工作区用 `selectAgentWorkspace`（自动定位最近更新的**真会话**；一条都没有才退回该工作区的
   草稿，连草稿都没有才现建一个）；「当前会话」一律读 `activeAgentConversationId`，
   **不要再用 workspaceId 索引消息**。
-- ⚠️ **「新建会话」是草稿，不进列表**（见 4.3 的 `isDraftConversation`）：点按钮只打开这个
-  工作区的新建会话页（内存里真实存在、可选中模型），**发出首条消息那一刻**才转正 ——
-  标题取那条消息、形态按选中的模型定、进列表并落盘。侧边栏列表必须过滤草稿
-  （`AgentPanel` 的 `byWorkspace`）；别把它当 bug「修」回去，也别在别的列表里忘了过滤。
+- ⚠️ **「新建会话」是草稿，不进列表**（见 4.3 的 `isDraftConversation`）：选好形态后只打开这个
+  工作区的新建会话页（内存里真实存在、可选中模型 / 改 ACP 配置项），**发出首条消息那一刻**才转正 ——
+  标题取那条消息、清掉 `draft` 标记、进列表并落盘。侧边栏列表必须过滤草稿
+  （`AgentPanel` 的 `byWorkspace` 按投影里的 `draft` 过滤）；别把它当 bug「修」回去，
+  也别在别的列表里忘了过滤。
 - 删除会话 / 工作区前先 `abortAgent(id)`，否则主进程的 agent 进程变孤儿。
 - ⚠️ 切换功能区**不会**自动打开会话标签（对齐笔记）：只有点侧边栏会话行和新建会话才开标签。
 - 会话视图是 **props 驱动**的 `AgentConversationView({ conversationId })`，`AgentPage` 只是薄接线层 ——
@@ -713,10 +720,24 @@ ACP 是「别人的 agent 在别人的进程里管自己的会话」。本应用
   `sessionCapabilities.list` 时**报明确错误**（不是返回空列表 —— 那会让人以为「没有会话」）。
 - **导入**：只写一条本地记录（`kind: 'acp'` + `acpAgentId` + `acpSessionId`），标题取 agent 给的；
   同 agent + 同 sessionId 已存在就跳过，不会生成重复记录。
-- **新建**：走侧边栏「新建会话」（草稿）→ 模型下拉里选**该 agent 的模型**（未定形态会先写进
-  `acpAgentId`）→ 发出首条消息时按 4.3 定型并 `session/new`，返回的 id 由 `agent:acp-state`
-  广播回填后落盘。⚠️ **不要**为了「新建会话」在临时连接里就 `session/new`：
-  非持久化 agent 一杀进程那个会话就没了。
+- **新建**：侧边栏「新建会话」里直接选 `ACP · <名字>`（形态创建时就定了，见 4.3）。
+- **配置项（`session/new` 的广告数据当会话配置用）**：ACP 把「这个会话用什么」统一表达成
+  `configOptions`，模型只是其中 `category: 'model'` 的那一项。
+  - **创建时就取回**：打开一个还没建过 agent 会话的 ACP 会话页 → 渲染端发 `agent:acp:prepare`
+    → `ensureSession` 建好常驻连接并 `session/new` → `AcpConversationState`（经
+    `agent:acp-state` 广播）带回 **agent 侧会话 id + `configOptions` 整组**（`AcpConfigOption`：
+    id / name / category / type / currentValue / 候选项，分组已拍平）。
+    ⚠️ 这里**必须走常驻连接、不能用临时连接**：非持久化 agent 一杀进程会话就没了
+    （4.18 老纪律）；临时连接只用于 `listSessions` / `listModels`。
+  - **展示**：`features/agent/AcpConfigItems.tsx` 把**模型项与 `mode` 项之外**的配置项
+    渲染成输入框上方的一排（select 用 agent 给的 name，boolean 用 Switch）。模型项仍由
+    模型下拉负责（它列的是设置里勾选过的那份），`mode` 项驱动权限档位（主进程已把它并进
+    `availableModes`，见 `applySessionResponse`），所以两处都不重复渲染。
+    协议允许 `category` 缺失 / 未知，展示只依赖 `name`、下发只依赖 `id`，自定义项天然可用。
+  - **切换**：`agent:acp:setConfigOption` → `session/set_config_option`（**不重建会话**），
+    成功后 agent 通常回一条 `config_option_update`，主进程整组刷新并重新广播
+    （**拿到空数组时按脏数据处理、不动本地**，免得一次异常抹光整组）。
+  - 渲染端点一下先**乐观更新** `acpStates`，否则 IPC 往返那几百毫秒里控件会弹回旧值。
 - **回放（`session/load`）**：打开会话（会话标签 `visible`）时让 agent 把历史作为 `session/update`
   重放，主进程的 `HistoryAssembler`（`services/ai/acp-history.ts`，纯逻辑、可单独验证）
   按 `ContentChunk.messageId` 把 chunk 拼成消息列表，作为**一条 `history` 事件整段下发**
@@ -739,11 +760,15 @@ ACP 是「别人的 agent 在别人的进程里管自己的会话」。本应用
     ⚠️ 别把这条降级挪到「打开会话」的路径上：那会让「看一眼历史」把绑定悄悄换掉。
 - **模型切换**：`session/set_config_option`（optionId 取自 `session/new | session/load` 响应的
   `configOptions` 里 `category=model` 那一项），**不重建会话** —— 重建会丢 agent 侧上下文。
+  实现是 `applyConfigOption` 的特化（`applyModel` 只认模型项），任意配置项走同一条路。
+- **上下文统计（`session/update` 的 `usage_update`）**：ACP 的 `usage_update` 带 `{ used, size }`
+  —— 「此刻挂在窗口里的 token」与「agent 自己的上下文窗口」，经 `toStreamEvent` 映射成
+  `{ type: 'context-usage', used, budget }`。⚠️ 刻意**不**折进 `usage` 事件：那个是「这一轮的账」
+  （会话累计要加总），混进来会把每次的水位都加一遍。渲染端按会话存在 `acpContextUsage`，
+  输入框的圆环**有数据才出现**（见 4.20）。回放期间的那条也照发（`runLoad` 里单捡这一种）。
 - ⚠️ **输入框工具行里 ACP 会话不显示「权限模式」与「MCP」开关**（`AgentPage` 里用
   `conversationKind(conversation)` 判，即 `isAcp`）：这两项只管**内置 agent 的工具**，
   ACP 会话的工具、审批、MCP 全归外部 agent 自己管 —— 给开关只会让人以为改了有用。
-  **未定形态的新建会话会跟着模型选择即时出现 / 消失**：`setAcpConversationModel` 写 `acpAgentId`、
-  `setAgentConversationModel` 清 `acpAgentId`（见 4.3），所以 `isAcp` 两个方向都会翻。
 - **删除**：默认只删本地绑定（agent 侧会话留着，下次还能导入回来）；删除确认框里可勾选
   「同时删除 agent 侧会话」（走 `session/delete`，agent 没声明该能力就只提示、本地照删）。
 - **消息的本地镜像** `agentAcpMessages: Record<conversationId, AgentChatMessage[]>` 只在内存里：
@@ -802,6 +827,11 @@ ACP 是「别人的 agent 在别人的进程里管自己的会话」。本应用
   ⚠️ **会话累计 token 不在这里**，它在输入框的上下文圆环（`ContextRing`）详情里的「会话累计」段 ——
   与 fishwork 一致。累计每轮都在变，粘顶部会一直晃，而且是圆环里同一份数据的第二个副本
   （迁移时正是这个重复，别再搬回顶部）。
+- ⚠️ **上下文圆环由「有没有数据」决定显不显示，不按会话形态**：内置会话等第一轮的真实
+  `inputTokens`；ACP 会话等 agent 的 `usage_update`（`acpContextUsage`，见 4.18）——
+  不少 agent 不报，那时不该给一个永远空的圈。ACP 那一档传 `source: 'agent'`，
+  详情里不给「压缩上下文 / 清除摘要」（上下文在 agent 侧，按了也没用），分子分母也换成
+  agent 报的水位 / 窗口大小，**不与内置那条从消息 usage 推出来的值混算**。
 - 验证：`scripts/verify-context-compression.mjs`（`.tooltest` 包装跑真源码，覆盖不超预算零拷贝、
   切轮边界、摘要失败回退、非法预算；摘要成功路径要真调模型，属集成验证）。
 
@@ -1141,10 +1171,11 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 | `tmp/verify-tab-close-confirm.mjs` | 标签关闭确认（页面内确认 + emit 关闭，机制见 6.5 第 32 条）：隔离实例 + CDP，`createLocalSession` 开真实本地终端 + `openNoteTab` 开真实笔记（Milkdown 编辑器 `execCommand('insertText')` 输入变脏）—— 通用防手滑确认出现在**可见标签面板内**（`[role=dialog]` 且 `offsetParent` 非空、根节点挂在 `relative` 容器、遮罩非全窗宽）→ 取消不动 / 关闭生效 → 勾「以后都不再提示」落盘 `confirmCloseTab` → 偏好关闭后直接关 → `requestCloseGroup` 逐个确认（自动激活下一个标签）、取消即中止整批 → 笔记**开关开**弹「未保存三选一」（不保存 = 丢弃且文件不动）、**开关关**不问直接丢弃关闭。⚠️ **`cdp.eval` 是 `awaitPromise:true`：`requestClosePanelTab` / `requestCloseGroup` / `createLocalSession` 这类返回 Promise 的动作必须 `void` 掉再 eval，否则 eval 会等到用户点按钮才返回（探针第一次跑就是这样死锁超时的）**；⚠️ antd 给两个汉字按钮插空格，「取消 / 关闭」要按去空白后的 `textContent` 匹配（同 6.5 第 20 条） |
 | `scripts/verify-git-changes.ts` | 源代码管理「更改」列表的数据层：**直接跑 `services/git.ts` 真源码**（`node --experimental-strip-types`，不需要打包 / 不起 Electron）—— 临时仓库里验证未跟踪目录被 `-uall` 摊平成目录下的每个文件、列表里没有「以 `/` 结尾的折叠目录」条目、未跟踪文件用 `--no-index` 拿到「整份新增」的 diff、已跟踪文件的 diff 不受影响、未跟踪的**嵌套仓库**输出成带尾斜杠的目录条目（`nested/`，取 diff 返回空）、回退能**递归**删掉整个目录、`listGitDir` 能列出目录条目里的文件（跳过 `.git`，只读展示）且**预览上限 20 项** |
 | `scripts/verify-git-tree.ts` | 源代码管理列表的折树纯函数（`features/agent/git-tree.ts`，`node --experimental-strip-types` 直接跑）—— 多级 / 中文目录名取**路径末段**且非空、不含问号，根目录文件显示文件名，同一目录的多个文件合并成一个节点，完整路径留在 `path`（tooltip 用），重命名按新路径折树且 `origPath` 仍可读，git 的**目录条目**（`nested/`，尾斜杠）取到末段名而不是空串、目录节点带上其下**全部变更路径**（整目录暂存 / 回退用） |
+| `scripts/verify-acp-config-options.ts` | ACP 会话配置项与 usage_update 的映射（`services/ai/acp-config-options.ts` 真源码，`node --experimental-strip-types`，**纯逻辑不需要 Electron**）—— select / boolean 的收下与丢弃规则（没 id、没候选项、未知 type 都丢掉）、**分组拍平**、缺 name 退回 value、**未知 / 缺失 category 一律放过**（协议要求优雅处理，自定义项天然可用）、模型项提取（category=model）、`usage_update` → `context-usage` 且**数字缺失时返回 null**（不用 0 冒充「上游报的 0」，圆环会因此显示「没占过」） |
 | `scripts/verify-acp-fs.ts` | ACP 客户端文件访问（`services/ai/acp-fs.ts`，`node --experimental-strip-types`）—— 工作区内读写（相对 / 绝对路径、父目录自动创建、覆盖写）、`line` / `limit` 按行截取、越界一律拒绝（`../`、工作区外绝对路径、工作区根、前缀相同的兄弟目录、`sub/../../`） |
 | `scripts/verify-acp-history.ts` | ACP 历史回放装配（`services/ai/acp-history.ts` + `src/shared/acp-tools.ts`，复制到 `.acphistorytest/` 后 `node --experimental-strip-types` 跑真源码）—— 按 `messageId` 分段、**工具结果回到调用所在的那条消息**（回放里夹着下一条消息正文的场景，见 6.6 第 34 条）、无 messageId 的启发式（**多轮糊成一条是刻意降级**，见 `pushTool` 的注释）、进行中的 `tool_call_update` 不落结果卡、孤儿结果不丢、思考块成 reasoning、空消息丢弃 |
 | `scripts/verify-agent-conversation-model.mjs` | Agent 会话「形态 / 模型选择」的持久化：**真启动两次应用**（同一 `--user-data-dir`）—— 保存带 `modelId` 读得回、不带 `modelId` 再存时保留旧值（`in` 语义）、显式 `undefined` 才清空、重启后 `kind` / `modelId` / `configId` 仍在；**ACP 会话**的 `acpAgentId` / `acpSessionId` 落盘、不带 `kind` 再存时绑定保留、**消息恒为空**（哪怕传了消息） |
-| `scripts/verify-agent-acp-import.mjs` | AI Agent 侧边栏 + ACP 会话「登记 → 新建/导入 → 回放」的界面链路（隔离实例 + CDP，见 4.3 / 4.18）：工作区行尾只有一个「更多操作」下拉（导入 / 新建会话 / 重命名 / 删除）→ **「新建会话」是草稿**：`kind` 为 undefined、**不进侧边栏列表**、页面上写明「发出第一条消息才建会话」、同一工作区连点两次是同一个空页 → 选内置模型只写草稿 → 发首条消息转正（标题取那条消息、`mastra`、进列表）→ **导入弹窗只做 选 agent / 拉取会话 / 导入**（无检测 / 手动添加 / 新建会话按钮），无 agent 时提示、footer「ACP 设置」打开设置弹窗并定位到 ACP agent 分组、「拉取会话」对起不来的 agent 有反馈 → 用**真实路径**建 ACP 草稿（新建会话 + `setAcpConversationModel` 预置 agent）→ 模型下拉只列**设置里勾选的**模型、**宽度被限死** → `history` 事件渲染成消息流、**正文不被折进折叠条**（注入 `[思考, 工具, 正文, 工具, 工具]`：正文在折叠体**外面**、纯工具轮次无复制按钮，见 6.6 第 34 条）、ACP 没有「编辑重发」入口 → ACP 草稿发首条消息转正（`acp` + 绑定带上、消息不落盘、进列表）、无草稿残留 → **标签右键菜单**：一级只有「关闭标签」，其余关闭方式收进「关闭」二级。⚠️ 断言列表行数要用 `[data-conversation-id]`（store 条数含草稿）；模型下拉要取**可见标签**里那个（每个标签各渲染一份，隐藏的那份选项按它自己的会话算，会是「暂无数据」）；**悬停展开 antd 子菜单**：真鼠标移动推不出 React 的 `onMouseEnter`，要对标题元素派发**带 `relatedTarget` 的 mouseover**；子菜单弹出层类名是 `.ant-dropdown-menu-submenu-popup`（不是老的 submenu-popup）；合成 contextmenu 没有 clientX/Y，右键要用 `Input.dispatchMouseEvent` 真事件（菜单弹在 (0,0) 会让后续坐标全错）；见 5.1 的「隔离实例首帧不提交」坑（探针里要先 `bringToFront` + `reload`） |
+| `scripts/verify-agent-acp-import.mjs` | AI Agent 侧边栏 + ACP 会话「登记 → 新建/导入 → 回放」的界面链路（隔离实例 + CDP，见 4.3 / 4.18）：工作区行尾只有「新建会话」下拉（**形态在这里就选**：内置 Agent / 每个已登记的 `ACP · <名字>`）+ 一个「更多操作」下拉（导入 / 重命名 / 删除）→ **新建出来的是草稿**（`draft === true`）、**不进侧边栏列表**、页面上写明「发出第一条消息才建会话」、同一工作区连点两次是同一个空页 → 选内置模型只写草稿 → 发首条消息转正（标题取那条消息、清掉 `draft`、进列表）→ **导入弹窗只做 选 agent / 拉取会话 / 导入**（无检测 / 手动添加 / 新建会话按钮），无 agent 时提示、footer「ACP 设置」打开设置弹窗并定位到 ACP agent 分组、「拉取会话」对起不来的 agent 有反馈 → 用**真实路径**建 ACP 草稿（`createAgentConversation(ws, 'acp', acpAgentId)`，见 4.3）+ `setAcpConversationModel` 选模型→ 模型下拉只列**设置里勾选的**模型、**宽度被限死** → `history` 事件渲染成消息流、**正文不被折进折叠条**（注入 `[思考, 工具, 正文, 工具, 工具]`：正文在折叠体**外面**、纯工具轮次无复制按钮，见 6.6 第 34 条）、ACP 没有「编辑重发」入口 → ACP 草稿发首条消息转正（`acp` + 绑定带上、消息不落盘、进列表）、无草稿残留 → **标签右键菜单**：一级只有「关闭标签」，其余关闭方式收进「关闭」二级。⚠️ 断言列表行数要用 `[data-conversation-id]`（store 条数含草稿）；模型下拉要取**可见标签**里那个（每个标签各渲染一份，隐藏的那份选项按它自己的会话算，会是「暂无数据」）；**悬停展开 antd 子菜单**：真鼠标移动推不出 React 的 `onMouseEnter`，要对标题元素派发**带 `relatedTarget` 的 mouseover**；子菜单弹出层类名是 `.ant-dropdown-menu-submenu-popup`（不是老的 submenu-popup）；合成 contextmenu 没有 clientX/Y，右键要用 `Input.dispatchMouseEvent` 真事件（菜单弹在 (0,0) 会让后续坐标全错）；见 5.1 的「隔离实例首帧不提交」坑（探针里要先 `bringToFront` + `reload`） |
 | `scripts/verify-skills.mjs` | 技能发现（含 junction 安装）、无 frontmatter 退化、额外根目录、设置页渲染与开关落盘 |
 | `scripts/verify-context-compression.mjs` | 上下文压缩与会话累计（见 4.20）：`.tooltest` 包装直接跑 `services/ai/context.ts` 与 `@shared/agent-usage` **真源码** —— `estimateTokens` 口径、未超预算**零拷贝**、空历史、单轮超预算不压缩、摘要失败回退截断（含 `truncated` 标记与占位说明）、保留比例决定留几轮、非法预算回退默认值；累计 token 累加 / `totalTokens` 不反推 / 缺字段不产生 NaN。⚠️ 摘要失败用例靠**指向本机没人监听的端口**（`127.0.0.1:1`）触发，不碰外网 |
 | `scripts/check-missing-color-utils.mjs` | 扫描产物 CSS，找出「语义色令牌漏映射导致整族工具类没生成」 |

@@ -1,3 +1,4 @@
+import { AcpConfigItems } from '@/features/agent/AcpConfigItems'
 import { AgentFilesPanel } from '@/features/agent/AgentFilesPanel'
 import { AiMarkdown } from '@/features/agent/AiMarkdown'
 import { AskFollowupCard } from '@/features/agent/AskFollowupCard'
@@ -34,6 +35,7 @@ import { sumUsage } from '@shared/agent-usage'
 import { resolveContextBudget } from '@shared/context-budget'
 import { DEFAULT_BROWSER_VIEWPORT, agentBrowserSessionId } from '@shared/browser'
 import type {
+  AcpConfigOption,
   AgentChatMessage,
   AgentConfirmRequest,
   AgentMessagePart,
@@ -410,6 +412,8 @@ const MessageBubble = memo(MessageBubbleImpl)
 
 /** 稳定的空消息数组：避免每次渲染新引用导致滚动 effect 误触发 */
 const NO_MESSAGES: AgentChatMessage[] = []
+/** 「还没有 agent 广告任何配置项」时的稳定空数组（selector 必须每次返回同一引用） */
+const NO_ACP_CONFIG_OPTIONS: AcpConfigOption[] = []
 
 /**
  * 右侧多标签面板的标签 key。
@@ -491,6 +495,12 @@ export function AgentPage({
   const agentAcpMessages = useAppStore((s) => s.agentAcpMessages)
   const acpLoading = useAppStore((s) => s.acpLoading)
   const loadAcpHistory = useAppStore((s) => s.loadAcpHistory)
+  const prepareAcpSession = useAppStore((s) => s.prepareAcpSession)
+  const setAcpConfigOption = useAppStore((s) => s.setAcpConfigOption)
+  /** 该会话的 agent 广告出来的配置项（`session/new` / `session/load` 时取回） */
+  const acpConfigOptions = useAppStore((s) =>
+    conversationId ? (s.acpStates[conversationId]?.configOptions ?? NO_ACP_CONFIG_OPTIONS) : NO_ACP_CONFIG_OPTIONS
+  )
   const setAgentConversationModel = useAppStore((s) => s.setAgentConversationModel)
   const setAcpConversationModel = useAppStore((s) => s.setAcpConversationModel)
   const setAiPermissionMode = useAppStore((s) => s.setAiPermissionMode)
@@ -504,17 +514,14 @@ export function AgentPage({
   /**
    * 会话形态：**内置 Mastra agent 或某个外部 ACP agent**（定下来之后不可互切）。
    *
-   * 新建的会话是「未定形态」——由**首条消息时选中的模型**决定（见 4.3），所以这里用
-   * 「有效形态」：已定的按已定，未定的按已经选中的模型推断（选中 / 预置了 ACP agent → acp，
-   * 选了内置模型 → mastra，都没选 → undefined）。两者的消息来源不同 ——
-   * mastra 存在会话记录里，ACP 存在本地镜像里（不落盘）。
+   * 形态在**创建会话时**就定了（侧边栏「新建会话」里选内置还是某个 ACP agent，见 4.3），
+   * 这里走 `conversationKind` 兼容极老的、缺 `kind` 的存档。
+   * 两者的消息来源不同 —— mastra 存在会话记录里，ACP 存在本地镜像里（不落盘）。
    */
   const kind = conversationKind(conversation)
-  /** 还没定形态（新建的会话，首条消息定型）——此时模型下拉要同时列出两边供选择 */
-  const undecided = Boolean(conversation) && !conversation?.kind
   /**
    * 草稿 = 这个工作区的「新建会话页」（还没发出首条消息，侧边栏不列它）。
-   * 发出第一条消息那一刻它才转正：标题取这条消息、形态按选中的模型定（见 isDraftConversation）。
+   * 发出第一条消息那一刻它才转正：标题取这条消息、清掉 `draft` 标记并落盘。
    */
   const draft = !!conversation && isDraftConversation(conversation)
   const isAcp = kind === 'acp'
@@ -567,8 +574,8 @@ export function AgentPage({
   const usable = (id?: string | null): string | undefined =>
     !isAcp && hasUsableConfig(aiConfigs, id) ? (id ?? undefined) : undefined
   const effectiveConfigId = usable(conversation?.configId) ?? usable(aiSettings.activeConfigId)
-  /** 可发消息：ACP 要有绑定的 agent；内置要有可用模型；未定形态时两边有其一即可 */
-  const hasConfig = isAcp ? Boolean(boundAcp) : Boolean(effectiveConfigId) || (undecided && Boolean(boundAcp))
+  /** 可发消息：ACP 要有绑定的 agent；内置要有可用模型 */
+  const hasConfig = isAcp ? Boolean(boundAcp) : Boolean(effectiveConfigId)
 
   // ---------- 上下文用量圆环（输入框工具行，见 ContextRing） ----------
   const contextCompressing = useAppStore((s) => s.contextCompressing)
@@ -611,8 +618,23 @@ export function AgentPage({
     const id = effectiveConfigId ?? aiSettings.activeConfigId
     return resolveContextBudget(aiConfigs.find((c) => c.id === id)?.contextBudget)
   }, [aiConfigs, aiSettings.activeConfigId, effectiveConfigId])
-  /** 草稿（还没发出首条消息）与 ACP 会话都不显示：前者没有历史，后者上下文在 agent 侧 */
-  const showContextRing = !draft && !isAcp && Boolean(conversationId)
+  /**
+   * ACP 会话的上下文水位：agent 经 `session/update` 的 `usage_update` 上报
+   * 「此刻窗口里挂了多少 / 窗口多大」。它**盖过**内置那条从消息 usage 推出来的值 ——
+   * 两个口径含义不同（一个是 agent 自己窗口的水位，一个是这一轮发出去的历史量），
+   * 不能混算。
+   */
+  const acpContextUsage = useAppStore((s) =>
+    conversationId ? s.acpContextUsage[conversationId] : undefined
+  )
+  const ringUsed = isAcp ? (acpContextUsage?.used ?? null) : used
+  const ringBudget = isAcp ? (acpContextUsage?.budget ?? null) : contextBudget
+  /**
+   * 圆环显不显示**由数据决定**，不再由会话形态一刀切：
+   * - 内置：没跑过一轮就没有水位（草稿同理）；
+   * - ACP：agent 报了 `usage_update` 才有 —— 不少 agent 不报，那时不该显示一个空圈。
+   */
+  const showContextRing = Boolean(conversationId) && ringUsed !== null
 
   /**
    * ACP 会话：**切到可见时**让 agent 回放它的历史（本地不落盘，所以每次打开都拉一次）。
@@ -625,6 +647,23 @@ export function AgentPage({
     if (!visible || !conversationId || !isAcp) return
     void loadAcpHistory(conversationId)
   }, [visible, conversationId, isAcp, loadAcpHistory])
+
+  /**
+   * ACP 会话**还没有 agent 侧会话**时（新建的会话页、或者从没连上过），
+   * 切到可见就先建一个（`session/new`）—— 把它广告的配置项取回来，页面上那些开关
+   * 立刻就能用，而不是等发完第一条消息才冒出来。
+   *
+   * 已有会话 id 的不重复建（回放 / 首轮提问会自己 `ensureSession`）。
+   */
+  const acpPreparing = useAppStore((s) =>
+    conversationId ? s.acpPreparing[conversationId] : undefined
+  )
+  useEffect(() => {
+    if (!visible || !conversationId || !isAcp) return
+    if (conversation?.acpSessionId) return
+    if (!conversation?.acpAgentId) return
+    void prepareAcpSession(conversationId)
+  }, [visible, conversationId, isAcp, conversation?.acpSessionId, conversation?.acpAgentId, prepareAcpSession])
 
   const pendingConfirm = useAppStore((s) => {
     if (!activeId) return null
@@ -1129,8 +1168,8 @@ export function AgentPage({
   /**
    * 模型下拉的选中值编码（解析见 handleModelSelect）：
    * - mastra：`cfg:<配置id>:<模型id>`
-   * - ACP：`acp:<agentId>:<模型id>` —— 带上 agent id：未定形态的会话可能在两个 agent 的
-   *   模型之间挑；已定形态下它就是绑定（不可换）的那个 agent
+   * - ACP：`acp:<agentId>:<模型id>` —— 带上 agent id：ACP 会话绑定不可换，
+   *   这里仍带着它，让下拉只列**绑定那个 agent** 勾选过的模型
    */
   const modelSelectValue = (() => {
     if (isAcp) {
@@ -1154,8 +1193,7 @@ export function AgentPage({
   const handleModelSelect = (value?: string) => {
     if (!conversationId || !value) return
     if (value.startsWith('acp:')) {
-      // ACP 的模型：已定形态的会话只换模型（走 session/set_config_option，不重建会话）；
-      // 未定的会话顺带把 agent 一起定下来（首条消息时落成 kind: 'acp'）
+      // ACP 的模型：走 session/set_config_option，不重建会话
       const rest = value.slice(4)
       const at = rest.indexOf(':')
       if (at < 0) return
@@ -1200,9 +1238,8 @@ export function AgentPage({
    * `value: undefined` 的选项：模型列表整个不渲染，点它也没有任何反应。
    * 所以「配置 / 模型 id」的从属关系用组内条目的 label 前缀表达，不再嵌套分组。
    *
-   * - 形态已定：只列这一类（ACP = 绑定 agent 勾选的模型；mastra = 全部模型配置）；
-   * - 形态未定（新建的会话）：**两边都列** —— 选哪个，这个会话就变成哪一类
-   *   （首条消息定型，见 sendAgentMessage）。
+   * 只列这一类：ACP = 绑定 agent 在设置里勾选过的模型；mastra = 全部模型配置
+   * （形态在创建会话时就定了，下拉不再承担「顺带定型」的职责）。
    */
   const modelOptions = isAcp
     ? boundAcp
@@ -1218,15 +1255,22 @@ export function AgentPage({
             )
           }
         ]
-        : []),
-      // 未定形态：顺带列出已登记 agent 的模型（选它 = 把这个会话定成 ACP）；
-      // 没有勾选模型的 agent 只在它是本会话预置的那个时才列（给那条提示）
-      ...(undecided
-        ? acpAgents
-          .filter((a) => (a.models ?? []).length > 0 || a.id === conversation?.acpAgentId)
-          .map((a) => ({ label: `Agent · ${a.name}`, options: acpOptionsOf(a) }))
         : [])
     ]
+
+  /**
+   * agent 广告出来的**其它**会话配置项（思考档位、各类开关…），按它给的 name 渲染成一排。
+   *
+   * - 模型项（`category: 'model'`）**不在这里**：那个位置已经是上面的模型下拉，
+   *   而且下拉列的是「设置 → ACP agent」里勾选过的那份（见 4.18）；
+   * - `category: 'mode'` 的那一项也跳过 —— 它驱动的是权限档位，由左边那个权限开关管
+   *   （主进程把它并进了 availableModes，见 applySessionResponse）。
+   *
+   * 切换一律走 `session/set_config_option`，**不重建会话**（重建会丢 agent 侧上下文）。
+   */
+  const acpExtraOptions = acpConfigOptions.filter(
+    (o) => o.category !== 'model' && o.category !== 'mode'
+  )
 
   /** 点「编辑」：把这条的内容灌进输入框并进入编辑态（发送时走重发，先删这条及其之后） */
   const startEdit = useCallback((target: AgentChatMessage) => {
@@ -1634,7 +1678,9 @@ export function AgentPage({
                 <div className="text-xs text-muted-foreground/60">
                   {draft
                     ? // 草稿：把「发出第一条消息才建会话」这件事说清楚（行为和列表里看到的一致）
-                    '选好模型后发出第一条消息：会话会以这条消息为名出现，类型由所选模型决定'
+                    isAcp
+                      ? '发出第一条消息后，会话会以这条消息为名出现在列表里；历史由该 Agent 自己保存，本应用不落盘'
+                      : '发出第一条消息后，会话会以这条消息为名出现在列表里'
                     : isAcp
                       ? '发第一条消息会在 agent 侧创建会话；之后的历史由 agent 自己保存，本应用不落盘。'
                       : '例如：列出项目结构，帮我加一个 /health 接口，然后跑一遍测试'}
@@ -1719,6 +1765,33 @@ export function AgentPage({
                     'focus-within:border-primary/50 focus-within:bg-muted/70'
                   )}
                 >
+                  {/* agent 广告出来的会话配置项（ACP 会话专有）：模型与档位之外的开关 */}
+                  {isAcp && conversationId && (
+                    <AcpConfigItems
+                      options={acpExtraOptions}
+                      preparing={!!acpPreparing}
+                      onChange={(optionId, value) => {
+                        // 乐观更新：先把本地那份当前值改掉，等 agent 的 config_option_update
+                        // 回来再校正（否则 IPC 往返的那几百毫秒里控件会弹回旧值）
+                        useAppStore.setState((s) => {
+                          const state = s.acpStates[conversationId]
+                          if (!state) return {}
+                          return {
+                            acpStates: {
+                              ...s.acpStates,
+                              [conversationId]: {
+                                ...state,
+                                configOptions: state.configOptions.map((o) =>
+                                  o.id === optionId ? { ...o, currentValue: value } : o
+                                )
+                              }
+                            }
+                          }
+                        })
+                        void setAcpConfigOption(conversationId, optionId, value)
+                      }}
+                    />
+                  )}
                   {/* 待发送队列作为 header 渲染在**同一张卡片内**，与输入框浑然一体 */}
                   {conversationId && (
                     <QueuedAgentMessages
@@ -1763,8 +1836,7 @@ export function AgentPage({
                       左侧权限按钮固定不挤，右侧整组可压缩（模型选择吸收挤压、按钮 shrink-0 保持原样）。
                       ⚠️ **ACP 会话不显示权限与 MCP**：这两个开关只管**内置 agent** 的工具 ——
                       ACP 会话的工具、权限模式、MCP 全归外部 agent 自己管，在这里给开关
-                      只会让人以为改了有用（见 4.18）。未定形态的新建会话按**当前选中的模型**
-                      即时切换（选 ACP 模型 → 立刻消失，选内置模型 → 立刻出现）。 */}
+                      只会让人以为改了有用（见 4.18）。 */}
                   <div className="flex items-center justify-between gap-2 px-2 py-1.5">
                     <div className="flex shrink-0 items-center gap-0.5">
                       {!isAcp && (
@@ -1808,19 +1880,26 @@ export function AgentPage({
                     <div className="flex min-w-0 items-center gap-1">
                       {!isAcp && <McpConfigPopover />}
                       {/* 上下文用量圆环：紧挨模型选择左侧（同为「这个会话用什么」的开关）。
-                          悬停出详情与手动压缩；草稿 / ACP 会话不显示 */}
+                          悬停出详情；**由数据决定显不显示**（内置要跑过一轮、ACP 要等 agent
+                          报 usage_update），不再按会话形态一刀切隐藏 */}
                       {showContextRing && conversationId && (
                         <ContextRing
-                          used={used}
-                          estimated={compressedUsed !== null}
-                          budget={contextBudget}
-                          lastUsage={lastUsage}
+                          used={ringUsed}
+                          estimated={!isAcp && compressedUsed !== null}
+                          budget={ringBudget}
+                          lastUsage={isAcp ? undefined : lastUsage}
                           totalUsage={totalUsage}
                           notice={contextNotice}
                           checkpoint={contextCheckpoint}
                           compressing={contextCompressing}
-                          onCompress={() => compressAgentContext(conversationId)}
-                          onClear={() => clearAgentContextSummary(conversationId)}
+                          // ACP 的上下文在 agent 侧，本地压缩对它没有意义 → 不给按钮
+                          source={isAcp ? 'agent' : 'local'}
+                          {...(isAcp
+                            ? {}
+                            : {
+                                onCompress: () => compressAgentContext(conversationId),
+                                onClear: () => clearAgentContextSummary(conversationId)
+                              })}
                         />
                       )}
                       <Select

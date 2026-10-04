@@ -59,7 +59,10 @@ const streamTick = (list: AgentConversation[], id: string, text: string): AgentC
     '不含 messages（列表不读历史）',
     !Object.prototype.hasOwnProperty.call(meta[0] as Record<string, unknown>, 'messages')
   )
-  check('草稿（缺 kind）的 kind 为 undefined', selectConversationListMeta([conv('d', { kind: undefined })])[0].kind === undefined)
+  check(
+    '草稿标记带上（列表据此把它滤掉）',
+    selectConversationListMeta([conv('d', { draft: true })])[0].draft === true
+  )
 }
 
 // ---------- 流式 500 个 token：引用必须保持不变 ----------
@@ -91,8 +94,8 @@ const streamTick = (list: AgentConversation[], id: string, text: string): AgentC
   const bumped = selectConversationListMeta([base[0], { ...base[1], updatedAt: 2000 }])
   check('updatedAt 变化（组内重排）→ 新数组', bumped !== m0)
 
-  const promoted = selectConversationListMeta([{ ...base[0], kind: 'mastra' }, base[1]])
-  check('草稿转正（kind 从无到有）→ 新数组', promoted !== m0)
+  const promoted = selectConversationListMeta([{ ...base[0], draft: false }, base[1]])
+  check('草稿转正（draft 标记清掉）→ 新数组', promoted !== m0)
 
   const rebound = selectConversationListMeta([
     base[0],

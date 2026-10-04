@@ -98,6 +98,8 @@ export function registerAgentIpc(ctx: IpcContext): void {
       .map((c) => c.id)
     const workspaces = storage.deleteAgentWorkspace(id)
     for (const cid of victims) {
+      // 会话没了，常驻的外部 agent 进程也一起收掉
+      acpAgentService.disposeConversation(cid)
       await browserSessions.purge(agentBrowserSessionId(cid))
       await purgeArtifacts(cid)
     }
@@ -126,6 +128,8 @@ export function registerAgentIpc(ctx: IpcContext): void {
     ) => storage.saveAgentConversation(input)
   )
   ipcMain.handle('agent:conversations:delete', async (_e, id: string) => {
+    // 会话没了，它的常驻 agent 进程也该收掉（否则外部 agent 变成孤儿进程）
+    acpAgentService.disposeConversation(id)
     storage.deleteAgentConversation(id)
     // 会话没了，它的浏览器 profile（登录态等）跟着删 —— 见 session.ts 的 purge 说明
     await browserSessions.purge(agentBrowserSessionId(id))
@@ -212,6 +216,24 @@ export function registerAgentIpc(ctx: IpcContext): void {
     'agent:acp:setModel',
     (_e, payload: { conversationId: string; modelId?: string }) =>
       acpAgentService.setModel(payload.conversationId, payload.modelId)
+  )
+  /**
+   * 切换 agent 广告出来的**任意**会话配置项（模型之外的思考档位 / 开关）。
+   * 同样走 `session/set_config_option`，不重建会话。
+   */
+  ipcMain.handle(
+    'agent:acp:setConfigOption',
+    (_e, payload: { conversationId: string; optionId: string; value: string | boolean }) =>
+      acpAgentService.setConfigOption(payload.conversationId, payload.optionId, payload.value)
+  )
+  /**
+   * **创建 ACP 会话时就建好 agent 侧的会话**（`session/new`），把它广告的配置项取回来，
+   * 并把 agent 侧会话 id 广播回渲染端落盘。会话还没发过消息就没有历史，不用回放。
+   */
+  ipcMain.handle(
+    'agent:acp:prepare',
+    (_e, payload: { workspaceId?: string; conversationId: string; acpAgentId?: string; modelId?: string }) =>
+      acpAgentService.prepare(payload)
   )
 
   // ---------- 工作区文件（右侧文件树的懒加载列表 + 编辑器读写） ----------

@@ -16,6 +16,7 @@ import {
 import {
   Archive,
   ArchiveRestore,
+  Bot,
   ChevronRight,
   CirclePause,
   Folder,
@@ -26,9 +27,13 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
+  Sparkles,
   Trash2
 } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+
+/** 「没登记任何 ACP agent」时的稳定空数组：selector 必须每次返回同一引用（见 zustand 快照比较） */
+const EMPTY_ACP_AGENTS: { id: string; name: string }[] = []
 
 /** 会话行图标槽的三种状态（静止时为 null，槽仍然占位以对齐两列） */
 type RowStatus = 'ask' | 'confirm' | 'running' | null
@@ -183,6 +188,8 @@ function defaultName(path: string): string {
  */
 export function AgentPanel() {
   const workspaces = useAppStore((s) => s.agentWorkspaces)
+  /** 已登记的 ACP agent（「新建会话」时要选内置还是某个具体的 agent） */
+  const acpAgents = useAppStore((s) => s.aiSettings.acpAgents ?? EMPTY_ACP_AGENTS)
   /**
    * ⚠️ 这里订阅的是**展示投影**而不是 `s.agentConversations`（见 selectConversationListMeta）：
    * 流式输出每个 token 都会换掉会话对象与整个数组，直接订阅会让**整列会话行每帧重渲染**
@@ -249,7 +256,8 @@ export function AgentPanel() {
     const map = new Map<string, ConversationListMeta[]>()
     const archivedMap = new Map<string, ConversationListMeta[]>()
     for (const c of conversations) {
-      if (!c.kind) continue // 草稿（还没发出首条消息）不进列表，见 isDraftConversation
+      // 草稿（还没发出首条消息）不进列表 —— 判据是显式标记，不是「有没有 kind」
+      if (c.draft) continue
       if (!c.workspaceId) continue
       const bucket = c.archived ? archivedMap : map
       const list = bucket.get(c.workspaceId) ?? []
@@ -394,6 +402,32 @@ export function AgentPanel() {
 
   /** 行尾小按钮统一样式：平时隐形，hover 所在行才浮现；没有 hover 的窄屏（<768px）常显 */
   const rowAction = SIDEBAR_ROW_ACTION
+
+  /**
+   * 「新建会话」的形态选择：**内置 Agent** 或某个已登记的 **ACP agent**。
+   *
+   * 形态在创建时就定下来（不再由首条消息时选中的模型推断），所以这一步是显式的。
+   * ACP 那一组按 agent 逐个列；一个都没登记时给一条指向设置的禁用提示（不给死路）。
+   */
+  const newConversationItems = (): MenuProps['items'] => [
+    { key: 'mastra', label: '内置 Agent', icon: <Sparkles className="size-3.5" /> },
+    ...(acpAgents.length > 0
+      ? [
+        { type: 'divider' as const },
+        ...acpAgents.map((a) => ({
+          key: `acp:${a.id}`,
+          label: `ACP · ${a.name}`,
+          icon: <Bot className="size-3.5" />
+        }))
+      ]
+      : [
+        {
+          key: 'acp-hint',
+          label: 'ACP Agent：先到「设置 → ACP agent」登记一个',
+          disabled: true
+        }
+      ])
+  ]
 
   /**
    * 工作区行的操作菜单。
@@ -548,19 +582,34 @@ export function AgentPanel() {
                     <SidebarRowActions
                       hoverClass="group-hover:pointer-events-auto group-hover:opacity-100 max-md:pointer-events-auto max-md:opacity-100"
                     >
-                      <button
-                        type="button"
-                        title={`在 ${w.name} 中新建会话`}
-                        aria-label={`在 ${w.name} 中新建会话`}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          createAgentConversation(w.id)
-                          if (!isExpanded) toggleExpand(w.id)
+                      {/*「新建会话」要先定形态（内置 / 某个 ACP agent），所以是下拉而不是直点 */}
+                      <Dropdown
+                        trigger={['click']}
+                        placement="bottomRight"
+                        menu={{
+                          items: newConversationItems(),
+                          onClick: ({ key, domEvent }) => {
+                            domEvent.stopPropagation()
+                            const [backend, agentId] = String(key).split(':')
+                            createAgentConversation(
+                              w.id,
+                              backend === 'acp' ? 'acp' : 'mastra',
+                              agentId || undefined
+                            )
+                            if (!isExpanded) toggleExpand(w.id)
+                          }
                         }}
-                        className={rowAction}
                       >
-                        <MessageSquarePlus className="size-3.5" />
-                      </button>
+                        <button
+                          type="button"
+                          title={`在 ${w.name} 中新建会话`}
+                          aria-label={`在 ${w.name} 中新建会话`}
+                          onClick={(e) => e.stopPropagation()}
+                          className={rowAction}
+                        >
+                          <MessageSquarePlus className="size-3.5" />
+                        </button>
+                      </Dropdown>
                       <Dropdown
                         trigger={['click']}
                         placement="bottomRight"

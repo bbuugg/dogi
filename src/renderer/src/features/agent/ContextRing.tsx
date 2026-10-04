@@ -54,8 +54,16 @@ export interface ContextRingProps {
   /** 已落库的摘要检查点 —— 有它才需要「清除摘要」 */
   checkpoint?: ConversationContextSummary
   compressing?: boolean
-  onCompress: () => Promise<ContextActionResult>
+  /** 「压缩上下文」；`source: 'agent'` 时不渲染按钮，所以 ACP 会话可以不传 */
+  onCompress?: () => Promise<ContextActionResult>
   onClear?: () => Promise<ContextActionResult>
+  /**
+   * 水位的**来源**，决定详情里的说明文案与「压缩上下文」按钮：
+   * - `'local'`（默认，内置 Mastra 会话）：分母是我们自己的预算，「压缩上下文」有效；
+   * - `'agent'`（ACP 会话）：水位是 agent 经 `session/update` 的 `usage_update` 上报的，
+   *   上下文也在 agent 侧 —— **没有可压缩的东西**，所以不显示压缩 / 清除摘要按钮。
+   */
+  source?: 'local' | 'agent'
   className?: string
 }
 
@@ -86,8 +94,10 @@ export function ContextRing({
   compressing = false,
   onCompress,
   onClear,
+  source = 'local',
   className
 }: ContextRingProps) {
+  const fromAgent = source === 'agent'
   const ratio = used !== null && budget ? Math.min(1, used / budget) : null
   const percent = ratio !== null ? Math.round(ratio * 100) : null
   // 颜色档：无数据淡灰 → 正常灰 → 80% 琥珀预警 → 100% 红
@@ -169,9 +179,11 @@ export function ContextRing({
         </div>
       )}
       <p className="text-muted-foreground">
-        {estimated
-          ? '圆环 = 压缩后的估算占用（刚压过、还没发新一轮）；下一轮跑完会换成服务端回报的真实值。'
-          : '圆环 = 上一轮发给模型的真实历史量，本轮跑完后更新。超过预算会自动压缩旧的若干轮。'}
+        {fromAgent
+          ? '圆环 = 该 Agent 报告的上下文占用与它自己的窗口大小（本应用不压缩它的上下文）。'
+          : estimated
+            ? '圆环 = 压缩后的估算占用（刚压过、还没发新一轮）；下一轮跑完会换成服务端回报的真实值。'
+            : '圆环 = 上一轮发给模型的真实历史量，本轮跑完后更新。超过预算会自动压缩旧的若干轮。'}
       </p>
 
       {/* 会话累计：整段会话烧掉的 token。它**只在这里**——消息列顶部那条提示条
@@ -224,6 +236,9 @@ export function ContextRing({
       )}
 
       <div className="border-t pt-2" />
+      {/* 上下文在 agent 侧时，下面这些全是本地机制，一概不显示（免得给个按不动的按钮） */}
+      {fromAgent ? null : (
+        <>
       {notice ? (
         <p className="text-muted-foreground">
           最近一次压缩：{fmt(notice.beforeTokens)} → {fmt(notice.afterTokens)} token，摘要{' '}
@@ -243,21 +258,23 @@ export function ContextRing({
       )}
 
       <div className="flex items-center gap-1 pt-1">
-        <Button
-          size="small"
-          className="h-7 px-2.5 text-xs"
-          disabled={compressing}
-          onClick={() => void run(onCompress, '压缩失败')}
-        >
-          {compressing ? (
-            <span className="flex items-center gap-1">
-              <Loader2 className="size-3 animate-spin" />
-              压缩中…
-            </span>
-          ) : (
-            '压缩上下文'
-          )}
-        </Button>
+        {onCompress && (
+          <Button
+            size="small"
+            className="h-7 px-2.5 text-xs"
+            disabled={compressing}
+            onClick={() => void run(onCompress, '压缩失败')}
+          >
+            {compressing ? (
+              <span className="flex items-center gap-1">
+                <Loader2 className="size-3 animate-spin" />
+                压缩中…
+              </span>
+            ) : (
+              '压缩上下文'
+            )}
+          </Button>
+        )}
         {checkpoint && onClear && (
           <Button
             size="small"
@@ -270,6 +287,8 @@ export function ContextRing({
           </Button>
         )}
       </div>
+        </>
+      )}
     </div>
   )
 
@@ -286,7 +305,11 @@ export function ContextRing({
         type="text"
         size="small"
         aria-label="上下文用量"
-        title="上下文用量（悬停看详情，可手动压缩）"
+        title={
+          fromAgent
+            ? '上下文用量（由该 Agent 报告）'
+            : '上下文用量（悬停看详情，可手动压缩）'
+        }
         className={cn('shrink-0 px-1.5', className)}
       >
         {compressing ? (

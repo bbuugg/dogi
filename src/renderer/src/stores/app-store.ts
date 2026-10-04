@@ -212,8 +212,17 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const needsPersist = !!before && before.acpSessionId !== state.acpSessionId
       // 原来就有 id、现在换了一个 = agent 不支持 session/load 时的降级重绑，得让用户知道
       const rebound = !!before?.acpSessionId && before.acpSessionId !== state.acpSessionId
+      // 换了 agent 侧会话（不支持 load 时的降级重绑）：之前那份水位属于旧会话，得丢掉
+      const dropUsage =
+        !!before?.acpSessionId && !!state.acpSessionId && before.acpSessionId !== state.acpSessionId
       set((s) => ({
         acpStates: { ...s.acpStates, [state.conversationId]: state },
+        ...(dropUsage && state.conversationId in s.acpContextUsage
+          ? (() => {
+              const { [state.conversationId]: _stale, ...rest } = s.acpContextUsage
+              return { acpContextUsage: rest }
+            })()
+          : {}),
         ...(needsPersist
           ? {
               agentConversations: patchConversation(
@@ -327,6 +336,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
     agentAcpMessages: {},
     acpStates: {},
     acpLoading: {},
+    // agent 上报的上下文水位 / 建会话中：都只活在内存里（重启后由新会话的第一条 usage_update 补上）
+    acpContextUsage: {},
+    acpPreparing: {},
     followupRequests: {},
     // 待发送队列：会话进行中继续发的消息排在这里（只存内存，见 QueuedAgentMessage）
     agentQueues: {},
@@ -2079,20 +2091,19 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const conversation = get().agentConversations.find((c) => c.id === id)
       // ACP 会话的模型走 setAcpConversationModel（要下发到 agent），这里只管 mastra
       if (!conversation || conversation.kind === 'acp') return
-      // 选了内置模型 = 这个会话就按内置（mastra）走：顺手清掉未定形态时可能预置的 ACP agent
+      // 内置会话不该留着 ACP 绑定（形态创建时就定了，理论上不会有；留着纯属兜底）
       const next = { ...patch, acpAgentId: undefined }
       // 不动 updatedAt：这是配置变更，不该让会话在列表里跳到最前
       set((s) => ({ agentConversations: patchConversation(s.agentConversations, id, next, false) }))
-      // 未定形态的会话不落盘（persistConversation 里统一拦掉，见那里的 ⚠️）
+      // 草稿不落盘（persistConversation 里统一拦掉，见那里的 ⚠️）
       await persistConversation(get().agentConversations, id)
     },
 
     /**
      * 会话模型下拉里选中「某个 ACP agent 的模型」。
      *
-     * - 形态未定（新建会话）：这就是**定型**动作 —— 记下 `acpAgentId` + `modelId`，
-     *   首条消息时按它落成 `kind: 'acp'`（先不落盘，与 setAgentConversationModel 同理）；
      * - 形态已是 acp：只换 `modelId` 并立即下发 `session/set_config_option`（不重建会话）；
+     * - 草稿（还没发过消息）：记下 `acpAgentId` + `modelId`，仍不落盘（由草稿守卫统一拦掉）——
      * - 形态已是 mastra：忽略（**形态不可互切**）。
      */
     setAcpConversationModel: async (id, { acpAgentId, modelId }) => {
@@ -2110,7 +2121,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           false
         )
       }))
-      // 未定形态的会话不落盘（persistConversation 里统一拦掉）
+      // 草稿不落盘（persistConversation 里统一拦掉）
       await persistConversation(get().agentConversations, id)
       // 立即下发到 agent；会话还没连上（没发过消息）时由下一轮提问前的 applyModel 兜底
       try {
@@ -2216,28 +2227,98 @@ export const useAppStore = create<AppStore>()((set, get) => {
         }
       }),
 
-    createAgentConversation: (workspaceId) =>
+    createAgentConversation: (workspaceId, kind, acpAgentId) =>
       set((s) => {
         const wid = workspaceId ?? s.activeAgentWorkspaceId
         if (!wid) return {}
+        const backend: AgentBackend = kind ?? 'mastra'
         /**
          * 「新建会话」= 打开**这个工作区的新建会话页**（草稿，侧边栏不列它，见 isDraftConversation）。
          *
          * 该工作区已经有草稿就**复用它**：连点两次「新建会话」应当还是同一个空页，
          * 而不是攒出两条看不见的空会话（它们永远不会出现在列表里，只能算内存垃圾）。
+         *
+         * 复用时按传入的形态校正：用户选了「用 ACP 建」，而这一页已经是内置形态的草稿，
+         * 就把它改成 ACP（草稿还没发过消息，形态可以换；已转正的会话则永不改）。
          */
         const existing = s.agentConversations.find(
           (c) => c.workspaceId === wid && isDraftConversation(c)
         )
-        const target = existing ?? newConversation(wid)
+        const target = newConversation(wid, backend, acpAgentId)
         return {
           activeAgentWorkspaceId: wid,
-          // 新会话排在前面，符合「最近在用」的直觉（复用草稿时位置不动）
-          agentConversations: existing ? s.agentConversations : [target, ...s.agentConversations],
+          agentConversations: existing
+            ? patchConversation(
+                s.agentConversations,
+                existing.id,
+                {
+                  kind: target.kind,
+                  acpAgentId: target.acpAgentId,
+                  // 从 ACP 改回内置时清掉遗留的模型配置（形态不再需要它）
+                  ...(target.kind === 'acp' ? {} : { configId: undefined })
+                },
+                // 形态校正不算「有活动」，不 bump updatedAt
+                false
+              )
+            : [target, ...s.agentConversations],
           activeAgentConversationId: target.id,
           ...addOrFocusTab(s, agentTab(target))
         }
       }),
+
+    /**
+     * 建好 ACP 会话的 agent 侧会话（`session/new`），把它广告的配置项取回来。
+     *
+     * 幂等且不抛：主进程已有连接时只重广播一次状态；agent 起不来时用户仍能打开这个会话页，
+     * 发第一条消息会再试一次（runTurn 里的 ensureSession）。
+     */
+    prepareAcpSession: async (conversationId) => {
+      const conversation = get().agentConversations.find((c) => c.id === conversationId)
+      if (!conversation || conversation.kind !== 'acp') return
+      if (!conversation.acpAgentId) return
+      if (get().acpPreparing[conversationId]) return
+      set((s) => ({ acpPreparing: { ...s.acpPreparing, [conversationId]: true } }))
+      try {
+        const { acpSessionId } = await window.api.agent.acp.prepare({
+          workspaceId: conversation.workspaceId,
+          conversationId,
+          acpAgentId: conversation.acpAgentId,
+          modelId: conversation.modelId
+        })
+        // agent 侧 id 由 acp-state 广播回填并落盘；这里只兜住「广播先于回包到达」的时序
+        if (acpSessionId && conversation.acpSessionId !== acpSessionId) {
+          set((s) => ({
+            agentConversations: patchConversation(
+              s.agentConversations,
+              conversationId,
+              { acpSessionId },
+              false
+            )
+          }))
+        }
+      } catch (err) {
+        // 建不起来不打扰用户：这个会话页照样能用，第一条消息会再试一次
+        console.warn('[agent] 准备 ACP 会话失败', conversationId, err)
+      } finally {
+        set((s) => {
+          if (!(conversationId in s.acpPreparing)) return {}
+          const { [conversationId]: _done, ...acpPreparing } = s.acpPreparing
+          return { acpPreparing }
+        })
+      }
+    },
+
+    /** 切换 agent 广告出来的任意会话配置项（模型之外的思考档位 / 开关） */
+    setAcpConfigOption: async (conversationId, optionId, value) => {
+      const conversation = get().agentConversations.find((c) => c.id === conversationId)
+      if (!conversation || conversation.kind !== 'acp') return
+      try {
+        await window.api.agent.acp.setConfigOption({ conversationId, optionId, value })
+      } catch (err) {
+        const { message } = await import('antd')
+        message.warning(`切换配置项失败：${err instanceof Error ? err.message : String(err)}`)
+      }
+    },
 
     importAcpConversations: async ({ workspaceId, acpAgentId, sessions }) => {
       if (sessions.length === 0) return
@@ -2373,6 +2454,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
         const { [id]: _removedAcp, ...agentAcpMessages } = s.agentAcpMessages
         const { [id]: _removedState, ...acpStates } = s.acpStates
         const { [id]: _removedLoading, ...acpLoading } = s.acpLoading
+        const { [id]: _removedUsage, ...acpContextUsage } = s.acpContextUsage
+        const { [id]: _removedPreparing, ...acpPreparing } = s.acpPreparing
         // 待发送队列也跟着没（会话都没了，排着的消息无处可发）
         const { [id]: _removedQueue, ...agentQueues } = s.agentQueues
         // 删的正是当前会话时，切到同工作区剩下的最近一个，没有就现建
@@ -2386,6 +2469,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
           agentAcpMessages,
           acpStates,
           acpLoading,
+          acpContextUsage,
+          acpPreparing,
           agentQueues,
           activeAgentConversationId: ensured.activeId,
           // 会话没了，它的标签也跟着关
@@ -2420,10 +2505,9 @@ export const useAppStore = create<AppStore>()((set, get) => {
         createdAt: now + 1
       }
       /**
-       * **首条消息定型**：会话形态在创建时是「未定」的，由这里选中的模型决定 ——
-       * 选了某个 ACP agent 的模型（未定形态下会先写进 `acpAgentId`）就是 `acp`，
-       * 否则按内置的 mastra 走（没选模型时回退到设置里的默认模型配置）。
-       * 定型后立刻连 `kind` 一起落盘，之后不可再切（见 4.3）。
+       * 形态在**创建会话时**就定了（用户在「新建会话」里选的），这里只做兜底 ——
+       * 极老的会话记录可能没有 `kind`（历史上由首条消息定型），按内置的 mastra 走。
+       * 转正 = 清掉 `draft` 标记：从这一刻起会话进侧边栏列表、也开始落盘。
        */
       const kind: AgentBackend = conversation.kind ?? (conversation.acpAgentId ? 'acp' : 'mastra')
       // 本轮带过去的「已有消息」：ACP 会话的上下文由 agent 自己维护，本地镜像仅供展示；
@@ -2443,6 +2527,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             agentConversations: patchConversation(s.agentConversations, cid, {
               title,
               kind,
+              draft: false,
               archived: false
             }),
             agentRuns: {
@@ -2455,6 +2540,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
               messages: [...history, assistantMsg],
               title,
               kind,
+              // 草稿转正：从这一刻起进侧边栏列表、也开始落盘
+              draft: false,
               // 同上：继续发消息 = 自动回到未归档分组
               archived: false
             }),
@@ -2846,6 +2933,22 @@ export const useAppStore = create<AppStore>()((set, get) => {
       // ACP 的历史回放（打开会话时由 session/load 产出）：整段替换本地镜像
       if (event.type === 'history') {
         set((s) => ({ agentAcpMessages: { ...s.agentAcpMessages, [cid]: event.messages } }))
+        return
+      }
+
+      /**
+       * 上下文水位（ACP 的 `usage_update`）：按会话单独存一份，**不进消息历史**。
+       *
+       * 为什么不并进 `usage`：那个是「这一轮的账」（会话累计要加总），这个是「此刻窗口里
+       * 挂了多少」（重复上报同一水位，加总会离谱）。输入框的圆环据此在**有数据时**才出现。
+       */
+      if (event.type === 'context-usage') {
+        set((s) => ({
+          acpContextUsage: {
+            ...s.acpContextUsage,
+            [cid]: { used: event.used, budget: event.budget }
+          }
+        }))
         return
       }
 

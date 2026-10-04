@@ -10,8 +10,12 @@
  * - 消息**由 agent 自己管理**：本地不保存任何消息。
  *   - 新建的会话：首轮对话用 `session/new` 建会话，把返回的 sessionId 广播回渲染端落盘；
  *   - 导入的会话：打开时用 `session/load`，agent 把整段历史回放（拼成消息列表整段下发）。
- * - 模型可以切换：走 `session/set_config_option`（agent 在 session/new|load 的 configOptions
- *   里上报 category=model 的那一项），切换**不重建会话**（重建会丢 agent 侧上下文）。
+ * - **配置项**：agent 把「这个会话用什么」表达成 `configOptions`（模型只是其中
+ *   `category: 'model'` 的一项），我们在**创建会话时就 `session/new`**（`prepare`）把它整组取回，
+ *   按 id 展示与下发，切换走 `session/set_config_option`、**不重建会话**。
+ *   解析是纯逻辑，另见 `./acp-config-options.ts`（可脱离 Electron 单测）。
+ * - **上下文水位**：`session/update` 的 `usage_update`（`{ used, size }`）映射成独立的
+ *   `context-usage` 事件（刻意不并进 `usage` —— 那是一轮一加总的账，这是当下水位）。
  * - 会话发现与导入：`listSessions()`（`session/list`）、`deleteSession()`（`session/delete`）
  *   都建临时连接，用完即杀。
  */
@@ -34,6 +38,7 @@ import type {
 } from '@agentclientprotocol/sdk'
 import type {
   AcpAgentConfig,
+  AcpConfigOption,
   AcpConversationState,
   AcpModelList,
   AcpSessionInfo,
@@ -46,6 +51,8 @@ import { storage } from '../storage'
 import type { AgentConfirmSink } from './agent'
 import { HistoryAssembler, pushHistoryUpdate, toolLabelOf } from './acp-history'
 import { acpToolKindOf, acpToolTitle } from '@shared/acp-tools'
+// 配置项与 usage_update 的映射是**纯逻辑**，单独一个文件（可脱离 Electron 跑真源码验证）
+import { extractConfigOptions, extractModelOption, usageUpdateToEvent } from './acp-config-options'
 import { readWorkspaceTextFile, writeWorkspaceTextFile } from './acp-fs'
 import { armConfirmTimeout } from './timeouts'
 
@@ -54,6 +61,17 @@ const TEMP_CONNECTION_TIMEOUT_MS = 30_000
 
 /** 发出 session/cancel 后等 agent 收手的兜底时间；超时就强断连接（会话可能因此失效） */
 const CANCEL_FALLBACK_MS = 8_000
+
+/**
+ * 「新建了 ACP 会话但一直没发消息」的连接回收时限。
+ *
+ * 形态选择在**创建会话时**就定了，所以打开一个 ACP 新会话页就会先建好 agent 会话
+ * （好让配置项立刻可用，见 `prepare`）。若用户转头再没理它 —— 会话是草稿、不落盘、
+ * 也没有可关的标签 —— 那条 agent 连接就成了纯孤儿进程。到期直接 teardown：
+ * 真要继续用时 `ensureSession` 会重新建一条（agent 侧的会话 id 也随之丢，
+ * 那本来就是个没人发过消息的空会话）。
+ */
+const DRAFT_IDLE_TTL_MS = 15 * 60_000
 
 /** agent 派生的会话 id → 本地会话（用于会话列表落盘） */
 function describeError(err: unknown): string {
@@ -141,29 +159,6 @@ function killProcessTree(proc: ChildProcess): void {
   proc.kill()
 }
 
-/** 从 configOptions 里取「模型选择项」（category=model 的 select），并把分组结构拍平 */
-function extractModelOption(
-  configOptions: Array<unknown> | null | undefined
-): AcpModelList | null {
-  const option = (configOptions ?? []).find(
-    (o) => (o as { type?: string; category?: string }).type === 'select' &&
-      (o as { category?: string }).category === 'model'
-  ) as
-    | {
-        id: string
-        currentValue: string
-        options: Array<
-          { value: string; name: string } | { options: Array<{ value: string; name: string }> }
-        >
-      }
-    | undefined
-  if (!option) return null
-  const models = option.options.flatMap((o) =>
-    'value' in o ? [{ value: o.value, name: o.name }] : o.options
-  )
-  return { optionId: option.id, currentValue: option.currentValue, models }
-}
-
 /** 把 ACP 会话更新映射为应用的流事件（**实时回合**路径，不含历史回放） */
 function toStreamEvent(update: SessionUpdate): AgentStreamEvent | null {
   switch (update.sessionUpdate) {
@@ -197,8 +192,9 @@ function toStreamEvent(update: SessionUpdate): AgentStreamEvent | null {
       }
     }
     default:
-      // plan / usage_update / current_mode_update 等：现有 UI 没有对应形态，忽略
-      return null
+      // 其余（usage_update / plan / available_commands / session_info …）：
+      // 用得上的走各自的专门映射，其余没有对应界面形态，忽略
+      return usageUpdateToEvent(update as { sessionUpdate: string })
   }
 }
 
@@ -248,6 +244,16 @@ interface ConversationAcpSession {
   canLoad: boolean
   /** agent 上报的模型选择项；null = 不上报（模型由 agent 自己决定） */
   modelOption: AcpModelList | null
+  /**
+   * agent 广告出来的**全部**会话配置项（模型项只是其中 `category: 'model'` 的那一项）。
+   * 会话页按它渲染每个开关、按 id 下发 `session/set_config_option`。
+   */
+  configOptions: AcpConfigOption[]
+  /**
+   * 「已建好会话但还没发过消息」的连接的兜底回收定时器（见 DRAFT_IDLE_TTL_MS）。
+   * 真正开始对话（sessionId 落盘）后即清掉。
+   */
+  draftIdleTimer: ReturnType<typeof setTimeout> | null
   /** 通知连接关闭，让 connectWith 的 op 返回 */
   closeConnection: () => void
   /** 取消兜底定时器（见 CANCEL_FALLBACK_MS） */
@@ -648,7 +654,13 @@ class AcpAgentService extends EventEmitter {
       if (!ctx) throw new Error('ACP 会话未就绪')
       await this.applyModel(ws, modelId, true)
       const assembler = new HistoryAssembler()
-      ws.updateSink = (update) => pushHistoryUpdate(assembler, update)
+      // 回放期间也可能带 `usage_update`（回放完 agent 会报一次上下文水位）——
+      // 装配器不认识它，所以这里照常用 toStreamEvent 捡出水位那条转发出去（其余照旧只进装配器）
+      ws.updateSink = (update) => {
+        pushHistoryUpdate(assembler, update)
+        const event = toStreamEvent(update)
+        if (event?.type === 'context-usage') this.emitEvent(requestId, event)
+      }
       // session/load 的响应在回放完之后才返回，所以这里拿到响应即回放完毕
       await ctx.request(acp.methods.agent.session.load, {
         sessionId: acpSessionId,
@@ -708,8 +720,15 @@ class AcpAgentService extends EventEmitter {
     if (existing) {
       const alive = !existing.closed && existing.proc.exitCode === null
       const sameAgent = existing.acpAgentId === acpAgent.id
-      // 会话 id 一致（都是同一个 agent 侧会话 / 都还没建）才算同一条
-      const sameSession = (existing.sessionId ?? null) === (acpSessionId ?? null)
+      /**
+       * 会话 id 对得上才算同一条。⚠️ `acpSessionId` **没给**时（新建会话的第一条消息与
+       * `prepare` 并发：连接已经建好、渲染端还没把 id 落盘）按「复用已建好的那条」处理 ——
+       * 否则会白白拆掉连接重建一个会话（agent 侧那个空会话就成孤儿了）。
+       */
+      const sameSession =
+        acpSessionId === undefined
+          ? existing.sessionId !== null
+          : existing.sessionId === acpSessionId
       if (alive && sameAgent && sameSession) return existing
       this.teardown(conversationId)
     }
@@ -732,15 +751,17 @@ class AcpAgentService extends EventEmitter {
     }
   }
 
-  /** 把会话状态（agent 侧 id + 模型列表）广播给渲染端，让本地会话记录跟上 */
+  /** 把会话状态（agent 侧 id + 它广告出来的配置项）广播给渲染端，让本地会话记录跟上 */
   private broadcastState(ws: ConversationAcpSession): void {
     if (!ws.sessionId || ws.stateBroadcast) return
     ws.stateBroadcast = true
+    // 会话 id 已有归属（落盘 / 至少被渲染端记账）后才不再重发，配置项变化仍会重新广播
     const state: AcpConversationState = {
       conversationId: ws.conversationId,
       acpSessionId: ws.sessionId,
       canLoad: ws.canLoad,
-      models: ws.modelOption
+      models: ws.modelOption,
+      configOptions: ws.configOptions
     }
     this.emit('acp-state', state)
   }
@@ -775,6 +796,8 @@ class AcpAgentService extends EventEmitter {
       appliedModeId: null,
       canLoad: false,
       modelOption: null,
+      configOptions: [],
+      draftIdleTimer: null,
       closeConnection: () => {},
       cancelFallback: null,
       stateBroadcast: false,
@@ -796,6 +819,10 @@ class AcpAgentService extends EventEmitter {
     })
     proc.on('exit', (code) => {
       ws.closed = true
+      if (ws.draftIdleTimer) {
+        clearTimeout(ws.draftIdleTimer)
+        ws.draftIdleTimer = null
+      }
       ws.closeConnection()
       // 进程没了 → sessionReady 必须落定。否则 `ensureSession` 里的
       // `await ws.sessionReady` 会永远悬着（详见下面 .catch 的注释）。
@@ -914,7 +941,7 @@ class AcpAgentService extends EventEmitter {
     return ws
   }
 
-  /** 把 session/new | session/load 的结果落到会话上（id / 档位 / 模型选择项） */
+  /** 把 session/new | session/load 的结果落到会话上（id / 档位 / 配置项） */
   private applySessionResponse(
     ws: ConversationAcpSession,
     sessionId: string,
@@ -926,20 +953,71 @@ class AcpAgentService extends EventEmitter {
     ws.defaultModeId = modes?.currentModeId ?? null
     ws.appliedModeId = ws.defaultModeId
     ws.modelOption = extractModelOption(configOptions)
+    ws.configOptions = extractConfigOptions(configOptions)
+    /**
+     * 有些 agent 把「档位」也表达成 `category: 'mode'` 的配置项而不是 `modes`（协议里
+     * 两者都合法）。权限模式要能切档（见 pickModeId），所以把这类选项也并进 availableModes
+     * —— 否则这类 agent 上「需确认 / 自动执行」永远切不动。
+     */
+    this.mergeModeConfigOptions(ws)
+    this.armDraftIdleTimer(ws)
   }
 
-  /** agent 主动更新了 configOptions（如自己换了模型）：刷新本地记录并同步渲染端 */
+  /** 把 `category: 'mode'` 的配置项并进 availableModes（幂等，可重复调用） */
+  private mergeModeConfigOptions(ws: ConversationAcpSession): void {
+    for (const opt of ws.configOptions) {
+      if (opt.category !== 'mode' || opt.type !== 'select') continue
+      if (ws.availableModes.some((m) => m.id === opt.currentValue)) continue
+      ws.availableModes = [
+        ...ws.availableModes,
+        ...opt.options.map((o) => ({ id: o.value, name: o.name }))
+      ]
+      if (!ws.defaultModeId && typeof opt.currentValue === 'string') {
+        ws.defaultModeId = opt.currentValue
+        ws.appliedModeId = opt.currentValue
+      }
+    }
+  }
+
+  /**
+   * 给「还没发过消息」的连接挂上兜底回收定时器（见 DRAFT_IDLE_TTL_MS）。
+   *
+   * 只在**渲染端还没落盘 acpSessionId** 的窗口期有价值：一旦 id 落盘（真会话了）就清掉，
+   * 之后由删除会话 / 应用退出负责收尾。
+   */
+  private armDraftIdleTimer(ws: ConversationAcpSession): void {
+    if (ws.draftIdleTimer) {
+      clearTimeout(ws.draftIdleTimer)
+      ws.draftIdleTimer = null
+    }
+    if (!ws.sessionId) return
+    if (storage.getAgentConversation(ws.conversationId)?.acpSessionId) return
+    ws.draftIdleTimer = setTimeout(() => {
+      ws.draftIdleTimer = null
+      // 期间用户可能已经发出第一条消息（id 落盘了），那就不是孤儿、留着继续用
+      if (storage.getAgentConversation(ws.conversationId)?.acpSessionId) return
+      console.error('[acp-agent] 新建会话长时间未使用，回收 agent 连接', ws.conversationId)
+      this.teardown(ws.conversationId)
+    }, DRAFT_IDLE_TTL_MS)
+  }
+
+  /** agent 主动更新了 configOptions（如自己换了模型 / 思考档位）：刷新本地记录并同步渲染端 */
   private onConfigOptionUpdate(
     ws: ConversationAcpSession,
     update: SessionUpdate
   ): void {
     const configOptions = (update as { configOptions?: Array<unknown> }).configOptions
-    const next = extractModelOption(configOptions)
-    if (next) {
-      ws.modelOption = next
-      ws.stateBroadcast = false
-      this.broadcastState(ws)
-    }
+    const next = extractConfigOptions(configOptions)
+    // 协议说这是一次「全量」下发，但拿到空数组时按脏数据处理：什么都不改，
+    // 免得一次异常把这一整组开关从会话页抹光（下一轮 `config_option_update` 会补回来）。
+    if (next.length === 0) return
+    ws.configOptions = next
+    ws.modelOption = next.find((o) => o.category === 'model' && o.type === 'select')
+      ? extractModelOption(configOptions)
+      : ws.modelOption
+    this.mergeModeConfigOptions(ws)
+    ws.stateBroadcast = false
+    this.broadcastState(ws)
   }
 
   /** 移除会话的常驻连接：杀进程并触发 connectWith 返回 */
@@ -948,6 +1026,7 @@ class AcpAgentService extends EventEmitter {
     if (!ws) return
     this.sessions.delete(conversationId)
     if (ws.cancelFallback) clearTimeout(ws.cancelFallback)
+    if (ws.draftIdleTimer) clearTimeout(ws.draftIdleTimer)
     killProcessTree(ws.proc)
     ws.closeConnection()
     if (ws.currentRequestId) this.abortedRequests.add(ws.currentRequestId)
@@ -1017,32 +1096,51 @@ class AcpAgentService extends EventEmitter {
   }
 
   /**
-   * 把会话选中的模型下发到 agent（`session/set_config_option`）。
+   * 下发一个会话配置项（`session/set_config_option`），**不重建会话** ——
+   * 重建会丢 agent 侧上下文。模型只是其中一项（见 `applyModel`）。
    *
-   * **不重建会话** —— 重建会丢 agent 侧上下文。agent 不上报模型 / 值没变 / 切不动，
-   * 都只记日志，不打断这一轮。
+   * agent 不上报这一项 / 值没变 / 切不动时按 `silent` 决定：静默记日志还是抛出去。
    */
+  private async applyConfigOption(
+    ws: ConversationAcpSession,
+    optionId: string,
+    value: string | boolean,
+    silent = false
+  ): Promise<void> {
+    const option = ws.configOptions.find((o) => o.id === optionId)
+    if (!option || !ws.ctx || !ws.sessionId) return
+    if (option.currentValue === value) return
+    try {
+      await ws.ctx.request(acp.methods.agent.session.setConfigOption, {
+        sessionId: ws.sessionId,
+        configId: optionId,
+        value
+      })
+      ws.configOptions = ws.configOptions.map((o) =>
+        o.id === optionId ? { ...o, currentValue: value } : o
+      )
+      // 模型项的镜像同步更新（会话页的模型下拉据此显示「已经在用哪个」）
+      if (ws.modelOption && ws.modelOption.optionId === optionId && typeof value === 'string') {
+        ws.modelOption = { ...ws.modelOption, currentValue: value }
+      }
+      if (typeof value === 'string' && option.category === 'mode') ws.appliedModeId = value
+      ws.stateBroadcast = false
+      this.broadcastState(ws)
+    } catch (err) {
+      if (!silent) throw err
+      console.error('[acp-agent] 切换配置项失败', optionId, String(value), describeError(err))
+    }
+  }
+
+  /** 把会话选中的模型下发到 agent；会话页的模型下拉走它 */
   private async applyModel(
     ws: ConversationAcpSession,
     modelId: string | undefined,
     silent = false
   ): Promise<void> {
     const option = ws.modelOption
-    if (!modelId || !option || !ws.ctx || !ws.sessionId) return
-    if (option.currentValue === modelId) return
-    try {
-      await ws.ctx.request(acp.methods.agent.session.setConfigOption, {
-        sessionId: ws.sessionId,
-        configId: option.optionId,
-        value: modelId
-      })
-      ws.modelOption = { ...option, currentValue: modelId }
-      ws.stateBroadcast = false
-      this.broadcastState(ws)
-    } catch (err) {
-      if (!silent) throw err
-      console.error('[acp-agent] 切换模型失败', modelId, describeError(err))
-    }
+    if (!modelId || !option) return
+    await this.applyConfigOption(ws, option.optionId, modelId, silent)
   }
 
   /** 渲染端在下拉里切换某个 ACP 会话的模型：立即下发到 agent（会话 id / 模型已由渲染端落盘） */
@@ -1052,6 +1150,73 @@ class AcpAgentService extends EventEmitter {
     // 真正建会话时 `ensureSession` 之后的 applyModel 会一并下发
     if (!ws || !ws.ctx) return
     await this.applyModel(ws, modelId)
+  }
+
+  /**
+   * 渲染端切换 agent 广告出来的**任意**配置项（模型之外的思考档位 / 开关等）。
+   *
+   * 会话还没连上时静默跳过：那一次的选择可以由调用方重发时带上，
+   * 真建好会话时 `ensureSession` 之后的 `applyConfigOption` 会补下发。
+   */
+  async setConfigOption(
+    conversationId: string,
+    optionId: string,
+    value: string | boolean
+  ): Promise<void> {
+    const ws = this.sessions.get(conversationId)
+    if (!ws || !ws.ctx) return
+    await this.applyConfigOption(ws, optionId, value)
+  }
+
+  /**
+   * **创建会话时**就建好 agent 侧的会话（`session/new`），把 agent 广告的配置项取回来。
+   *
+   * 为什么不是等第一条消息：形态在创建时就选了，打开会话页就该能看到「这个 agent
+   * 有哪些开关、当前各是什么」，而不是发完第一条才冒出来。
+   *
+   * 与 `load` 不同：这里**不需要回放历史**（本来就是空的），所以直接复用常驻连接
+   * （`ensureSession` 会把 agent 侧会话 id 广播回渲染端落盘）。
+   */
+  async prepare(payload: {
+    workspaceId?: string
+    conversationId: string
+    acpAgentId?: string
+    modelId?: string
+  }): Promise<{ acpSessionId?: string }> {
+    const workspace = payload.workspaceId
+      ? storage.getAgentWorkspace(payload.workspaceId)
+      : undefined
+    const acpAgent = this.resolveAgent(payload.acpAgentId)
+    if (!workspace || !acpAgent) return {}
+    // 已经有会话了（发过消息 / 已 import）：别重建，只把当前状态再广播一次
+    if (this.sessions.has(payload.conversationId)) {
+      const ws = this.sessions.get(payload.conversationId)!
+      ws.stateBroadcast = false
+      this.broadcastState(ws)
+      return { acpSessionId: ws.sessionId ?? undefined }
+    }
+    try {
+      const ws = await this.ensureSession(
+        workspace,
+        payload.conversationId,
+        acpAgent,
+        undefined,
+        payload.modelId
+      )
+      // 会话建好就把它选的模型摆正（agent 的默认值未必是用户在这一栏选的那个）
+      await this.applyModel(ws, payload.modelId, true)
+      return { acpSessionId: ws.sessionId ?? undefined }
+    } catch (err) {
+      // 建不起来不是致命错误：这个会话页照样能打开，发第一条消息时会再试一次
+      console.error('[acp-agent] 准备会话失败', payload.conversationId, describeError(err))
+      return {}
+    }
+  }
+
+  /** 会话被删 / 标签关闭时的收尾：干掉它那条常驻 agent 连接（否则进程变孤儿） */
+  disposeConversation(conversationId: string): void {
+    if (this.loadRequests.has(conversationId)) this.loadRequests.delete(conversationId)
+    this.teardown(conversationId)
   }
 
   /** ACP 权限请求：full 模式自动放行，confirm 模式弹确认卡 */
