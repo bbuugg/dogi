@@ -1,6 +1,6 @@
 {
   "name": "dogi",
-  "version": "0.0.16",
+  "version": "0.0.17",
   "description": "AI 驱动的研发运维工作台",
   "author": "Dogi",
   "main": "./out/main/index.js",
