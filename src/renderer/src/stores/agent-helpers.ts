@@ -7,6 +7,7 @@
 import { useAppStore } from './app-store'
 import { isDraftConversation } from './types'
 import type {
+  AgentBackend,
   AgentChatMessage,
   AgentConversation,
   AgentStreamEvent
@@ -26,19 +27,28 @@ export function titleFromMessage(text: string): string {
 }
 
 /**
- * 新建一个「草稿」会话（= 当前工作区的新建会话页；**形态待定**、**不出现在会话列表里**）。
+ * 新建一个「草稿」会话（= 当前工作区的新建会话页；**仅内存态、不落盘、不进会话列表**）。
  *
- * ⚠️ 这里**刻意不写 `kind`**：会话形态由**首条消息时选中的模型**决定 ——
- * 选了某个 ACP agent 的模型就是 `acp`，选了内置模型就是 `mastra`
- * （见 AgentSlice.sendAgentMessage）。`!kind` 同时就是「草稿」的判据
- * （`isDraftConversation`）：侧边栏不列它，发出首条消息那一刻才转正并落盘；
- * 在此之前它只活在内存里 —— 一旦落盘，storage 的兜底会把缺省形态当成 `mastra`。
+ * ⚠️ **形态在这里就定了**（`kind` 必填，默认内置 Mastra；ACP 还要带 `acpAgentId`）——
+ * 形态由用户在「新建会话」时明确选择，不再由首条消息时选中的模型推断。
+ * 草稿的判据因此改成显式的 `draft: true`（`isDraftConversation`）：发出首条消息那一刻
+ * `sendAgentMessage` 清掉它并落盘。
+ *
+ * `draft` 绝不进落盘请求（`persistConversation` 里有守卫），而主进程的
+ * `normalizeConversation` 也是显式重建对象、不列这个字段 —— 于是「读回来的会话永远不是草稿」。
  */
-export function newConversation(workspaceId: string): AgentConversation {
+export function newConversation(
+  workspaceId: string,
+  kind: AgentBackend = 'mastra',
+  acpAgentId?: string
+): AgentConversation {
   const now = Date.now()
   return {
     id: crypto.randomUUID(),
     workspaceId,
+    draft: true,
+    kind,
+    ...(kind === 'acp' ? { acpAgentId } : {}),
     title: DEFAULT_CONVERSATION_TITLE,
     messages: [],
     createdAt: now,
@@ -173,13 +183,13 @@ export async function persistConversation(
   const conversation = conversations.find((c) => c.id === id)
   if (!conversation) return
   /**
-   * ⚠️ **形态还没定的会话一律不落盘**（新建后还没发过消息的那些）。
+   * ⚠️ **草稿一律不落盘**（新建后还没发过消息的那些）。
    *
-   * `kind` 由首条消息定型（见 4.3），而 storage 对缺省 `kind` 的兜底是 `mastra` ——
-   * 提前落盘（改名、清空、切模型…都会走到这里）会把这条会话**永久锁成内置**：
-   * 之后 `setAcpConversationModel` 会因「形态已定」直接忽略，用户再也选不了 ACP 模型。
+   * 草稿是纯内存态：侧边栏不列它、不该在重启后复活。形态现在创建时就定了
+   * （见 `newConversation`），所以判据是显式的 `draft` 标记 —— **不是 `!kind`**。
    * 这是唯一的守卫点，别在调用方各写一份。
    */
+  if (conversation.draft) return
   if (!conversation.kind) return
   if (!conversation.workspaceId) return
   await window.api.agent.saveConversation({

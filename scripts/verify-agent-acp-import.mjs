@@ -152,11 +152,35 @@ try {
   await cdp.eval(`document.body.click()`)
   await sleep(400)
 
-  // ---------- 2. 新建会话 = 打开「新建会话页」（草稿不进列表），形态待定 ----------
+  // ---------- 2. 新建会话 = 先选形态（内置 / 某个 ACP agent），再建出「新建会话页」 ----------
   /** 侧边栏里的会话行（草稿不进列表，所以它才是「列表里到底有几条会话」的真值） */
   const convRows = `Array.from(document.querySelectorAll('[data-conversation-id]'))`
   const rowsBefore = await cdp.eval(`${convRows}.length`)
-  // 「新建会话」现在常驻行尾（在「更多」左边），不必展开下拉
+  /**
+   * 「新建会话」常驻行尾（在「更多」左边），但它是**下拉**：形态在创建时就定，
+   * 所以要先在菜单里点「内置 Agent」或某个 `ACP · <名字>`（见 4.3）。
+   */
+  const clickNewConversation = async (label) => {
+    await cdp.eval(
+      `(function () {
+         const btn = document.querySelector('button[title$="中新建会话"]')
+         if (!btn) throw new Error('找不到行尾「新建会话」按钮')
+         btn.click()
+       })()`
+    )
+    await sleep(600)
+    await cdp.eval(
+      `(function () {
+         const item = Array.from(document.querySelectorAll('.ant-dropdown-menu-item'))
+           .find((el) => el.innerText.replace(/\\s/g, '') === ${JSON.stringify(label)})
+         if (!item) throw new Error('下拉里找不到「' + ${JSON.stringify(label)} + '」')
+         item.click()
+       })()`
+    )
+    await sleep(700)
+  }
+
+  // 先断言「创建时就要选形态」这件事本身：下拉里两项都在
   await cdp.eval(
     `(function () {
        const btn = document.querySelector('button[title$="中新建会话"]')
@@ -164,12 +188,25 @@ try {
        btn.click()
      })()`
   )
-  await sleep(700)
-
-  const fresh = await cdp.eval(
-    `window.__store.getState().agentConversations.find((c) => c.kind === undefined)?.id ?? null`
+  await sleep(600)
+  const menuItems = await cdp.eval(
+    `Array.from(document.querySelectorAll('.ant-dropdown-menu-item'))
+       .map((el) => el.innerText.replace(/\\s/g, ''))
+       .join('|')`
   )
-  check('新建会话建出「形态待定」的会话页（kind 为 undefined）', !!fresh, String(fresh))
+  check(
+    '「新建会话」是下拉，形态在创建时就选（内置 / ACP）',
+    /内置Agent/.test(menuItems),
+    menuItems
+  )
+  await cdp.eval(`document.body.click()`)
+  await sleep(400)
+
+  await clickNewConversation('内置 Agent')
+  const fresh = await cdp.eval(
+    `window.__store.getState().agentConversations.find((c) => c.draft === true)?.id ?? null`
+  )
+  check('选「内置 Agent」建出内置形态的会话页（kind=mastra + draft）', !!fresh, String(fresh))
   const rowsAfter = await cdp.eval(`${convRows}.length`)
   check(
     '新建会话**不会**在列表里立刻多出一条空会话（草稿不进列表）',
@@ -179,21 +216,14 @@ try {
   const draftPageText = await cdp.eval('document.body.innerText')
   check(
     '页面上说清了「发出第一条消息才建会话」',
-    /选好模型后发出第一条消息/.test(draftPageText),
+    /发出第一条消息后/.test(draftPageText),
     draftPageText.slice(0, 120)
   )
 
   // 连点两次「新建会话」应当还是同一个空页（不攒看不见的草稿）
-  await cdp.eval(
-    `(function () {
-       const btn = document.querySelector('button[title$="中新建会话"]')
-       if (!btn) throw new Error('找不到行尾「新建会话」按钮')
-       btn.click()
-     })()`
-  )
-  await sleep(600)
+  await clickNewConversation('内置 Agent')
   const draftCount = await cdp.eval(
-    `window.__store.getState().agentConversations.filter((c) => c.kind === undefined).length`
+    `window.__store.getState().agentConversations.filter((c) => c.draft === true).length`
   )
   check('同一工作区连点两次「新建会话」还是同一个空页', draftCount === 1, String(draftCount))
 
@@ -206,8 +236,11 @@ try {
     `window.__store.getState().agentConversations.find((c) => c.id === ${JSON.stringify(fresh)}) ?? null`
   )
   check(
-    '选中内置模型只写进草稿（configId / modelId 在、形态仍待定）',
-    drafted?.configId === 'probe-cfg' && drafted?.modelId === 'probe-model' && drafted?.kind === undefined,
+    '选中内置模型只写进草稿（configId / modelId 在、仍是草稿、不落盘）',
+    drafted?.configId === 'probe-cfg' &&
+      drafted?.modelId === 'probe-model' &&
+      drafted?.kind === 'mastra' &&
+      drafted?.draft === true,
     JSON.stringify(drafted)?.slice(0, 160)
   )
 
@@ -313,10 +346,10 @@ try {
   await sleep(600)
 
   // ---------- 4. 新建 ACP 会话（真实路径）：新建会话 → 选该 agent 的模型 ----------
-  await cdp.eval(`window.__store.getState().createAgentConversation()`)
+  await cdp.eval(`window.__store.getState().createAgentConversation(null, 'acp', 'acp-smoke-1')`)
   await sleep(600)
   const created = await cdp.eval(
-    `window.__store.getState().agentConversations.find((c) => c.kind === undefined && !c.acpAgentId)?.id ?? null`
+    `window.__store.getState().agentConversations.find((c) => c.draft === true)?.id ?? null`
   )
   check(
     '上一条草稿转正后，「新建会话」能再开一个**新的**空页',
@@ -332,8 +365,8 @@ try {
     `window.__store.getState().agentConversations.find((c) => c.id === ${JSON.stringify(created)}) ?? null`
   )
   check(
-    '未定会话选中 ACP 模型 = 预置 agent（类型由所选模型 / ACP agent 决定）',
-    acpDraft?.acpAgentId === 'acp-smoke-1' && acpDraft?.kind === undefined && !acpDraft?.configId,
+    '选 ACP 建出来的会话已经是 acp 形态并带着 agent 绑定（草稿期间不落盘）',
+    acpDraft?.acpAgentId === 'acp-smoke-1' && acpDraft?.kind === 'acp' && !acpDraft?.configId,
     JSON.stringify(acpDraft)?.slice(0, 160)
   )
 
@@ -471,7 +504,7 @@ try {
   )
   check('ACP 草稿转正后同样进列表（会话名取自首条消息）', /rpc首条/.test(acpRow), acpRow)
   const draftsLeft = await cdp.eval(
-    `window.__store.getState().agentConversations.filter((c) => c.kind === undefined).length`
+    `window.__store.getState().agentConversations.filter((c) => c.draft === true).length`
   )
   check('两条草稿都转正了，没有残留', draftsLeft === 0, String(draftsLeft))
 

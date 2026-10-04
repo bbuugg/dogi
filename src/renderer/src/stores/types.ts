@@ -243,34 +243,34 @@ export function agentTab(conversation: Pick<AgentConversation, 'id' | 'title'>):
 }
 
 /**
- * 会话的**有效形态**（`AgentConversation.kind` 的「未定」态在这里被推断出来）。
+ * 会话的**有效形态**（兼容旧存档：`AgentConversation.kind` 缺失的老记录按内置处理）。
  *
- * 新建的会话刻意不写 `kind` —— 形态由**首条消息时选中的模型**决定（见 4.3）。
- * 所以消费方（会话页的模型下拉、侧边栏的类型标识）要统一走这个函数：
- * 已定的按已定；未定的按「已经选中了什么」推断（选中 / 预置了 ACP agent → `acp`，
- * 选了内置模型 → `mastra`，都没选 → undefined）；`undefined` 时标识先不显示。
+ * ⚠️ 形态现在**创建会话时就定了**（用户在「新建会话」里选内置还是某个 ACP agent，见 4.3），
+ * 所以这个函数基本就是读 `kind`；保留那一小段推断只是为兼容还没落过盘的旧记录。
+ * 消费方（会话页的模型下拉、侧边栏的类型标识）统一走它，别各处自己判。
  */
 export function conversationKind(
   c: Pick<AgentConversation, 'kind' | 'acpAgentId' | 'configId'> | undefined | null
 ): AgentBackend | undefined {
   if (!c) return undefined
-  return c.kind ?? (c.acpAgentId ? 'acp' : c.configId ? 'mastra' : undefined)
+  return c.kind ?? (c.acpAgentId ? 'acp' : 'mastra')
 }
 
 /**
- * 「草稿」= **还没发出首条消息**的会话。
+ * 「草稿」= **还没发出首条消息**的新建会话（`AgentConversation.draft === true`）。
  *
- * `kind` 只在首条消息时定型（见 4.3），所以 `!kind` 就是「一个键都没按过」。
- * 草稿在内存里是**真实存在**的会话（会话页、标签、模型选择都挂在它上面），但——
+ * 草稿在内存里是**真实存在**的会话（会话页、标签、模型 / 配置项选择都挂在它上面），但——
  * - **不进侧边栏的会话列表**：用户点「新建会话」看到的是「当前工作区的新建会话页」，
  *   列表里不该立刻多出一条空会话；
- * - 发出第一条消息那一刻它才「转正」：标题取首条消息、形态按选中的模型定，随后出现在列表里。
+ * - **绝不落盘**（纯内存态，守卫点在 `persistConversation`）；
+ * - 发出第一条消息那一刻才「转正」：标题取首条消息，随后出现在列表里。
  *
- * 别用别的条件（如 `messages.length === 0`）代替：清空过消息的会话、ACP 会话的 `messages`
- * 恒为空，都会被误判成草稿。
+ * ⚠️ 判据是显式的 `draft` 标记，**不是 `!kind`** —— 形态现在创建时就定了，
+ * 用 `!kind` 会把所有真会话误判成草稿。也别用 `messages.length === 0`：
+ * 清空过消息的会话、ACP 会话（消息恒不落盘）都会被误判。
  */
-export function isDraftConversation(c: Pick<AgentConversation, 'kind'>): boolean {
-  return !c.kind
+export function isDraftConversation(c: Pick<AgentConversation, 'draft'>): boolean {
+  return c.draft === true
 }
 
 /**
@@ -947,8 +947,18 @@ export interface AgentSlice {
    * 重启应用后为空 —— 靠重新 `session/load` 恢复（`mastra` 会话不走这里，看 messages）。
    */
   agentAcpMessages: Record<string, AgentChatMessage[]>
-  /** ACP 会话的运行时状态（agent 侧会话 id / 可切换的模型），key = conversationId */
+  /** ACP 会话的运行时状态（agent 侧会话 id + 它广告的配置项），key = conversationId */
   acpStates: Record<string, AcpConversationState>
+  /**
+   * ACP 会话的**上下文水位**（key = conversationId）：agent 经 `session/update` 的
+   * `usage_update` 上报「此刻窗口里挂了多少 token / 窗口多大」。
+   *
+   * 只在 agent 报了之后才有值 —— 输入框的圆环按「有没有数据」决定显不显示
+   * （不是按会话形态一刀切隐藏）。
+   */
+  acpContextUsage: Record<string, { used: number; budget: number }>
+  /** 正在为该会话建 agent 侧会话（`session/new`）中，key = conversationId */
+  acpPreparing: Record<string, boolean>
   /** 正在回放历史的 ACP 会话（key = conversationId），供会话页显示加载态 */
   acpLoading: Record<string, boolean>
   /**
@@ -988,9 +998,8 @@ export interface AgentSlice {
   ) => Promise<void>
   /**
    * 会话模型下拉里选中「某个 ACP agent 的模型」：
-   * - 形态未定（新建的会话）→ 这就是定型动作（记下 acpAgentId + modelId，首条消息时落成 `acp`）；
    * - 形态已是 acp → 只换模型并下发 `session/set_config_option`（不重建会话）；
-   * - 形态已是 mastra → 忽略（形态不可互切）。
+   * - 形态已是 mastra → 忽略（形态不可互切，见 createAgentConversation：形态在创建时定）。
    */
   setAcpConversationModel: (
     id: string,
@@ -1003,12 +1012,34 @@ export interface AgentSlice {
   selectAgentWorkspace: (id: string) => void
   /**
    * 「新建会话」= 打开**这个工作区的新建会话页**（草稿：仅内存、不进侧边栏列表、不落盘），
-   * 并选中它。该工作区已有草稿就复用它（连点两次还是同一个空页）。
+   * 并选中它。
    *
-   * 会话是**发出首条消息那一刻**才真正诞生的：标题取那条消息、形态按选中的模型定，
-   * 随后出现在列表里（见 `sendAgentMessage` 与 `isDraftConversation`）。
+   * ⚠️ **形态在这里就定了**（不再由首条消息时选中的模型推断）：
+   * - `kind` 缺省 = 内置 Mastra agent；
+   * - 传 `'acp'` + `acpAgentId` = 绑到某个已登记的 ACP agent。
+   * 侧边栏的「新建会话」就是按这两条给出的入口。
+   *
+   * 该工作区**已有草稿就复用它**（连点两次还是同一个空页）；复用时按传入的形态校正 ——
+   * 用户在别处选了「用 ACP 建」，而这一页已经是内置形态的草稿，就把它改成 ACP。
+   * 形态定下来之后**不可互切**（已转正的会话更不可能改）。
    */
-  createAgentConversation: (workspaceId?: string) => void
+  createAgentConversation: (workspaceId?: string, kind?: AgentBackend, acpAgentId?: string) => void
+  /**
+   * 为一个 ACP 会话**建好 agent 侧的会话**（`session/new`）：把它广告的配置项取回来，
+   * 并把 agent 侧会话 id 记到会话上（随后落盘）。
+   *
+   * 幂等：主进程已有该会话的常驻连接时只重广播一次状态；失败不抛（发第一条消息时会再试）。
+   */
+  prepareAcpSession: (conversationId: string) => Promise<void>
+  /**
+   * 切换 ACP agent 广告出来的**任意**会话配置项（思考档位 / 开关…；模型走
+   * `setAcpConversationModel`）。立即下发 `session/set_config_option`，不重建会话。
+   */
+  setAcpConfigOption: (
+    conversationId: string,
+    optionId: string,
+    value: string | boolean
+  ) => Promise<void>
   /**
    * 批量导入 ACP agent 侧的已有会话（`session/list` 拉取后勾选的结果）：
    * 每个会话生成一条绑定记录（acpAgentId + acpSessionId），消息由 agent 自己管理。

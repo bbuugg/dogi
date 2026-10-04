@@ -445,6 +445,22 @@ const api = {
       /** 切换某个 ACP 会话的模型（`session/set_config_option`，不重建会话） */
       setModel: (payload: { conversationId: string; modelId?: string }): Promise<void> =>
         ipcRenderer.invoke('agent:acp:setModel', payload),
+      /** 切换 agent 广告出来的任意会话配置项（思考档位 / 开关…），同样不重建会话 */
+      setConfigOption: (payload: {
+        conversationId: string
+        optionId: string
+        value: string | boolean
+      }): Promise<void> => ipcRenderer.invoke('agent:acp:setConfigOption', payload),
+      /**
+       * **创建 ACP 会话时**就建好 agent 侧的会话（`session/new`）：取回它广告的配置项，
+       * 并把 agent 侧会话 id 广播回渲染端落盘（`onState`）。发第一条消息时不必再建一次。
+       */
+      prepare: (payload: {
+        workspaceId?: string
+        conversationId: string
+        acpAgentId?: string
+        modelId?: string
+      }): Promise<{ acpSessionId?: string }> => ipcRenderer.invoke('agent:acp:prepare', payload),
       /**
        * 会话就绪（新建 / 载入）后的状态推送：agent 侧会话 id + 可切换的模型列表。
        * 新建的 ACP 会话靠它把 `session/new` 返回的 id 落盘。
