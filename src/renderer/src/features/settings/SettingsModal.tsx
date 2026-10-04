@@ -121,11 +121,22 @@ export function SettingsModal() {
       })
       return
     }
+    // 有新版本待下载：点一下就开始后台下载（可随时取消）
+    if (update.state === 'available') {
+      await window.api.updater.download()
+      return
+    }
+    // 正在下载：点一下取消
+    if (update.state === 'downloading') {
+      await window.api.updater.cancel()
+      return
+    }
     setChecking(true)
     try {
       const next = await window.api.updater.check()
       setUpdate(next)
       if (next.state === 'up-to-date') message.success('已是最新版本')
+      else if (next.state === 'available') message.info(`发现新版本 ${next.latest ?? ''}，点击开始下载`)
       else if (next.state === 'downloading') message.info(`正在后台下载 ${next.latest ?? ''}`)
       else if (next.state === 'downloaded')
         message.success(`${next.latest ?? ''} 已就绪，重启即可安装`)
@@ -199,7 +210,11 @@ export function SettingsModal() {
                   ? '开发版本不支持检查更新'
                   : update?.state === 'downloaded'
                     ? `点击安装 ${update.latest ?? ''}`
-                    : '点击检查更新'
+                    : update?.state === 'available'
+                      ? `发现新版本 ${update.latest ?? ''}，点击下载`
+                      : update?.state === 'downloading'
+                        ? '正在下载，点击取消'
+                        : '点击检查更新'
               }
               className="flex items-center gap-1 rounded px-0.5 font-mono text-[11px] text-muted-foreground/70 transition-colors hover:bg-primary/10 hover:text-foreground disabled:opacity-60"
             >
@@ -208,6 +223,8 @@ export function SettingsModal() {
                 <span className="size-1.5 rounded-full bg-emerald-500" aria-label="有可用更新" />
               ) : update?.state === 'downloading' ? (
                 <Loader2 className="size-3 animate-spin" />
+              ) : update?.state === 'available' ? (
+                <span className="size-1.5 rounded-full bg-red-500" aria-label="有可用更新" />
               ) : null}
             </button>
             <a

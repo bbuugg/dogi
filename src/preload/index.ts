@@ -901,6 +901,10 @@ const api = {
     status: (): Promise<AppUpdateStatus> => ipcRenderer.invoke('updater:status'),
     /** 手动检查一次（检查中 / 下载中直接返回现状，不重复触发） */
     check: (): Promise<AppUpdateStatus> => ipcRenderer.invoke('updater:check'),
+    /** 开始后台下载已发现的新版本（由用户点击徽章 / 版本号触发） */
+    download: (): Promise<void> => ipcRenderer.invoke('updater:download'),
+    /** 取消正在进行的下载，回到「待下载」 */
+    cancel: (): Promise<void> => ipcRenderer.invoke('updater:cancel'),
     /** 退出并安装已下载的更新（内部会先让渲染端冲刷进行中的状态）；返回是否真的执行了 */
     install: (): Promise<boolean> => ipcRenderer.invoke('updater:install'),
     /** 订阅状态变化（下载完成 / 检查失败回到 idle 等） */

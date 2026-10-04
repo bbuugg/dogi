@@ -35,7 +35,10 @@
  * 触屏抬起即消失（鼠标 / 笔抬起后仍悬在线上则保留，移出线才收）；
  * **拉柄与激活解耦**：悬停在拉的任意位置拉柄都在，只有指针落进某个点的
  * `HIT_RADIUS` 内才把它「激活」——
- * 点放大、左侧弹出带箭头的预览气泡、同时平滑滚到那条消息。指针移开 / 抬起即清除激活。
+ * 点放大、左侧弹出带箭头的预览气泡。**跳转只在点击时发生**（桌面点按钮、触屏点按都走它）——
+ * 鼠标悬停只是「放大 + 看预览」，绝不抢滚动：指针只是划过线、消息列表就被猛拽到那条，
+ * 正是「hover 就滚动太灵敏」的元凶，所以 hover 阶段不调用 `onJump`，真正跳转交给 click。
+ * 指针移开 / 抬起即清除激活。
  * 因为触屏没有 hover，这里**不用 Tooltip**（antd 的气泡在触屏上弹不出来），
  * 预览气泡是一张自己定位的浮层，随激活点走，尾巴始终指向激活点。
  *
@@ -582,9 +585,13 @@ export function MessageOutline({
       return
     }
 
-    // 点变了才跳，避免同一激活点上每帧重复滚动；跳到簇里的第一条
+    // 鼠标**悬停**只放大 + 弹预览，不抢滚动：用户只是把指针移过去看一眼，
+    // 列表就猛跳到那条消息，正是「hover 就滚动太灵敏」的元凶。真正的跳转交给
+    // 点击（按钮的 onClick，桌面 / 触屏都走它）；触屏没有 hover，按下（pointerdown）
+    // 即视为一次明确的跳转意图，仍照跳。
     const first = hit.cluster.items[0].id
-    if (hit.cluster.key !== lastJumpRef.current) {
+    const isHover = event.pointerType === 'mouse' && event.type === 'pointermove'
+    if (!isHover && hit.cluster.key !== lastJumpRef.current) {
       lastJumpRef.current = hit.cluster.key
       onJump(first)
     }

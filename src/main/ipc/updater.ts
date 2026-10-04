@@ -2,9 +2,11 @@ import { ipcMain } from 'electron'
 import type { AppUpdateStatus } from '@shared/types'
 import { requestRendererFlush } from './system'
 import {
+  cancelDownload,
   checkForUpdates,
   initUpdater,
   quitAndInstall,
+  startDownload,
   updaterStatus
 } from '../services/updater'
 import type { IpcContext } from './shared'
@@ -24,6 +26,12 @@ export function registerUpdaterIpc(ctx: IpcContext): void {
 
   // 手动「检查更新」（设置页左下角版本号）。静默检查由主进程自己在启动后触发。
   ipcMain.handle('updater:check', () => checkForUpdates())
+
+  // 用户点击红徽章 / 版本号：开始后台下载已发现的新版本
+  ipcMain.handle('updater:download', () => startDownload())
+
+  // 取消正在进行的下载（下载中通知的「取消」按钮）
+  ipcMain.handle('updater:cancel', () => cancelDownload())
 
   // 装更新 = 重启：先让渲染端把进行中的状态落盘（会话 / 会话列表增量），
   // 冲刷完再退出，顺序反了会丢最后一次产出

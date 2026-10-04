@@ -1623,9 +1623,11 @@ export interface AppInfo {
  * 自动更新的状态机（`services/updater.ts` 持有，渲染端只读）。
  *
  * - `idle`：没在动（启动初始态，或上次检查失败 —— 失败是常态，不单独占一个状态）；
- * - `checking` / `downloading` / `up-to-date` / `downloaded`：检查与下载的常规阶段；
- * - `available`：理论上不会出现（`autoDownload` 为真，发现即进入 downloading），
- *   留着是为了将来改成「询问后再下载」时不必改类型。
+ * - `checking` / `up-to-date`：检查阶段（及「已是最新」终态）；
+ * - `available`：发现新版本但**还没开始下载**——`autoDownload = false` 后这是常态，
+ *   渲染端据此在菜单与设置页亮红徽章，等用户点击才开始下；
+ * - `downloading`：后台下载中（可经 `cancelDownload` 取消，回到 `available`）；
+ * - `downloaded`：下完待安装，提示用户重启安装。
  *
  * ⚠️ **只给正式通道**：`allowPrerelease = false`，beta / nightly 不会推给用户
  * （见 updater 的产品约定）。

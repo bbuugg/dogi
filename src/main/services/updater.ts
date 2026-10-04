@@ -4,7 +4,8 @@
  * ## 产品约定（用户明确要求）
  *
  * - **静默检查**：启动后后台查一次，不弹窗、不打断当前工作；
- * - **静默下载**：发现新版就在后台下完（`autoDownload`），下完再问用户要不要装；
+ * - **不自动下载**：发现新版先提示（红徽章），由用户主动点击才开始后台下载，且可随时取消；
+ *   下完再问用户要不要装（`autoDownload = false`）。
  * - **不碰预发布版**：`allowPrerelease = false`，正式通道之外的一律不推送。
  *
  * ## 为什么单独一层而不是散在 IPC 里
@@ -32,10 +33,19 @@ import { hostLogger } from './log/logger'
  * `electron-updater` 是 CJS 包，而本项目主进程产物是 **ESM**（package.json `type: module`）。
  * ESM 里对 CJS 的具名导入依赖 cjs-module-lexer 的静态分析，**不保证**解析得出
  * `exports.autoUpdater` —— 所以一律走 default import 再解构（见 tsconfig 的 esModuleInterop）。
+ *
+ * `CancellationToken` **必须**取自本包的转出（`main.js` 里的
+ * `__exportStar(require("./types"), exports)`），**绝不能**写成
+ * `import { CancellationToken } from 'builder-util-runtime'`：
+ * 那个包不是本项目的直接依赖，npm 只把它作为 electron-updater 的依赖**嵌套**装在
+ * `node_modules/electron-updater/node_modules/` 下；而主进程产物里是裸导入，
+ * 只会在 `out/main` 往上逐级的 `node_modules` 里找，**看不见嵌套副本** ——
+ * 打包后启动即报 `Cannot find package 'builder-util-runtime'`
+ * （dev 能跑，只因顶层恰好有个 devDependency 侧的旧副本）。走本包转出则永远跟随它自己的解析。
  */
 import updaterPkg from 'electron-updater'
 
-const { autoUpdater } = updaterPkg
+const { autoUpdater, CancellationToken } = updaterPkg
 
 /** 启动后多久开始静默检查（ms）：别和窗口首屏抢网 */
 const SILENT_CHECK_DELAY = 8000
@@ -44,6 +54,13 @@ const SILENT_CHECK_DELAY = 8000
 let state: AppUpdateState = 'idle'
 /** 最近一次发现的新版本号（downloaded / available 时有值） */
 let latestVersion: string | null = null
+/**
+ * 进行中下载的取消令牌；为 null 表示当前没在下载（据此判断是否可取消）。
+ * 类型直接取 `downloadUpdate` 的入参类型：`CancellationToken` 是带私有成员的 class，
+ * 只要声明来源与 electron-updater 不是同一份，TS 就会判定两者不兼容。
+ */
+type DownloadToken = NonNullable<Parameters<typeof autoUpdater.downloadUpdate>[0]>
+let downloadToken: DownloadToken | null = null
 /** 上报出口（`registerUpdaterIpc` 注入 broadcaster） */
 let broadcast: ((status: AppUpdateStatus) => void) | null = null
 
@@ -77,8 +94,8 @@ export function initUpdater(report: (status: AppUpdateStatus) => void): void {
   // 开发态不挂事件：免得 dev 里手动调 checkForUpdates 抛一堆看不懂的栈
   if (!updaterSupported()) return
 
-  // 自动下载 + 不自动安装：下完问用户（用户要的是「静默检查」，不是「静默替换」）
-  autoUpdater.autoDownload = true
+  // 不自动下载：发现即提示，由用户点击后再后台下（且可取消）；装仍要用户点头
+  autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = false
   // 不推预发布版（产品约定）
   autoUpdater.allowPrerelease = false
@@ -91,8 +108,15 @@ export function initUpdater(report: (status: AppUpdateStatus) => void): void {
   })
 
   autoUpdater.on('update-available', (info) => {
-    hostLogger.info('app', `发现新版本 ${info.version}，正在后台下载`)
-    setState('downloading', info.version)
+    hostLogger.info('app', `发现新版本 ${info.version}，等待用户点击后下载`)
+    setState('available', info.version)
+  })
+
+  // 用户取消下载：回到「有新版本待下载」，红徽章继续提示，可再次点击下载
+  autoUpdater.on('update-cancelled', (info) => {
+    hostLogger.info('app', `已取消下载 ${info?.version ?? ''}`)
+    downloadToken = null
+    setState('available', latestVersion)
   })
 
   autoUpdater.on('update-not-available', () => {
@@ -136,6 +160,39 @@ export async function checkForUpdates(): Promise<AppUpdateStatus> {
   } catch (err) {
     hostLogger.warn('app', '检查更新失败', err instanceof Error ? err.message : String(err))
   }
+  return updaterStatus()
+}
+
+/**
+ * 开始后台下载已发现的新版本。由渲染端（点红徽章 / 设置页版本号）触发：
+ * 因为 `autoDownload = false`，发现新版时只进 `available` 态，不下。
+ *
+ * 用一份 `CancellationToken` 关联这次下载，`cancelDownload()` 调它的 `cancel()`
+ * 中止（electron-updater 会据此抛 `CancellationError` 并触发 `update-cancelled`）。
+ */
+export function startDownload(): AppUpdateStatus {
+  if (!updaterSupported()) return updaterStatus()
+  // 只从「待下载」起步；下载中 / 已下完 / 检查中都不重入
+  if (state !== 'available') return updaterStatus()
+  downloadToken = new CancellationToken()
+  setState('downloading', latestVersion)
+  void autoUpdater.downloadUpdate(downloadToken).catch((err) => {
+    const message = err instanceof Error ? err.message : String(err)
+    hostLogger.warn('app', '下载更新失败', message)
+    // 取消走 update-cancelled 事件，不会落到这；其余失败才回落到待下载
+    if (downloadToken) {
+      downloadToken = null
+      setState('available', latestVersion)
+    }
+  })
+  return updaterStatus()
+}
+
+/** 取消正在进行的下载，回到「有新版本待下载」（红徽章继续提示） */
+export function cancelDownload(): AppUpdateStatus {
+  if (state !== 'downloading' || !downloadToken) return updaterStatus()
+  downloadToken.cancel()
+  downloadToken = null
   return updaterStatus()
 }
 

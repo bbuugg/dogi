@@ -6,6 +6,7 @@ import {
   Command as CommandIcon,
   FileDown,
   FileUp,
+  Loader2,
   Menu,
   Monitor,
   Moon,
@@ -13,10 +14,10 @@ import {
   Settings,
   Sun
 } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { DataTransferDialog, type TransferMode } from './DataTransferDialog'
 import { COLOR_THEMES } from '@/shared/lib/color-themes'
-import type { ColorThemeName, ThemeMode } from '@shared/types'
+import type { AppUpdateState, ColorThemeName, ThemeMode } from '@shared/types'
 
 /** 状态栏条目统一样式（外部传入的节点也用它，保证与内置条目一致） */
 export const STATUS_ITEM_CLASS =
@@ -59,6 +60,12 @@ function MenuButton({ onTransfer }: { onTransfer: (mode: TransferMode) => void }
   const setTheme = useAppStore((s) => s.setTheme)
   const setColorTheme = useAppStore((s) => s.setColorTheme)
   const [open, setOpen] = useState(false)
+  /** 自动更新状态：决定菜单按钮右上角的徽章（红 = 待下载 / 转圈 = 下载中 / 绿 = 可装） */
+  const [updateState, setUpdateState] = useState<AppUpdateState>('idle')
+  useEffect(() => {
+    void window.api.updater.status().then((s) => setUpdateState(s.state))
+    return window.api.updater.onStatus((s) => setUpdateState(s.state))
+  }, [])
 
   const hint = 'ml-auto pl-3 text-xs text-muted-foreground'
   const icon = 'size-3.5 text-muted-foreground'
@@ -210,8 +217,40 @@ function MenuButton({ onTransfer }: { onTransfer: (mode: TransferMode) => void }
         type="text"
         title="菜单"
         icon={<Menu className="size-4" />}
-        className={STATUS_ITEM_CLASS}
-      />
+        className={STATUS_ITEM_CLASS + ' relative'}
+      >
+        {updateState === 'available' ? (
+          <span
+            role="status"
+            aria-label="有新版本可用"
+            onClick={(e) => {
+              e.stopPropagation()
+              void window.api.updater.download()
+            }}
+            className="absolute -right-1 -top-1 size-2.5 cursor-pointer rounded-full bg-red-500 ring-2 ring-sidebar"
+          />
+        ) : updateState === 'downloading' ? (
+          <Loader2
+            role="status"
+            aria-label="正在下载更新"
+            onClick={(e) => {
+              e.stopPropagation()
+              void window.api.updater.cancel()
+            }}
+            className="absolute -right-1.5 -top-1.5 size-3 cursor-pointer animate-spin text-muted-foreground"
+          />
+        ) : updateState === 'downloaded' ? (
+          <span
+            role="status"
+            aria-label="更新已就绪"
+            onClick={(e) => {
+              e.stopPropagation()
+              setSettingsOpen(true)
+            }}
+            className="absolute -right-1 -top-1 size-2.5 cursor-pointer rounded-full bg-emerald-500 ring-2 ring-sidebar"
+          />
+        ) : null}
+      </Button>
     </Dropdown>
   )
 }

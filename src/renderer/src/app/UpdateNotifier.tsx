@@ -3,46 +3,69 @@ import { Button, notification } from 'antd'
 import type { AppUpdateStatus } from '@shared/types'
 
 /**
- * 自动更新的**唯一提示出口**：后台静默下完新版后，在这里问一次「要不要现在装」。
+ * 自动更新的**唯一提示出口**：发现新版后引导用户「点一下再下载」，下载中可取消，
+ * 下完再问一次「要不要现在装」。
  *
- * ## 为什么挂在应用根部、而不是塞进设置页
+ * ## 为什么不自动下载（产品改动）
  *
- * 静默检查是主进程自己跑的（`services/updater.ts`），用户不会主动去看设置页——
- * 提示必须自己出现。但它也**只能是通知**：不进标题栏 / 状态栏常驻（那会变成新的噪音），
- * 一次运行内只提示一次（用户点「稍后」就不再打扰）。
+ * 之前是「发现即后台下完」，现在改成：主进程发现新版只进 `available` 态（红徽章提示），
+ * 用户**主动点击**才开始 `downloadUpdate`，且下载途中可 `cancel` 取消。所以这里要覆盖
+ * 三个状态：
  *
- * ## 三条产品约定（与 updater 服务一一对应）
+ * - `available`：红徽章已在菜单 / 设置页亮起，这里**不**弹通知（避免和徽章重复打扰）；
+ * - `downloading`：弹一条常驻通知，带「取消」按钮（调 `updater.cancel`）；
+ * - `downloaded`：把下载通知收掉，弹「已下载完成，重启安装」通知（一次运行只提示一次）。
  *
- * - 只提示**正式通道**的版本（`allowPrerelease = false` 由主进程侧把关）；
- * - 不自动装：装 = 重启，必须用户点头；主进程会先冲刷渲染端状态再退，不丢最后几秒产出；
- * - 检查失败**不提示**（断网 / 限流是常态，只进主机日志的 `app` 作用域）。
+ * 取消下载会回到 `available`，红徽章继续提示，可再次点击下载。
  */
+const DOWNLOADING_KEY = 'app-update-downloading'
+const READY_KEY = 'app-update-ready'
+
 export function UpdateNotifier() {
-  /** 本次运行是否已经提示过 */
+  /** 本次运行是否已经提示过「安装」：装 = 重启，只打扰一次 */
   const notifiedRef = useRef(false)
 
   useEffect(() => {
-    const prompt = (status: AppUpdateStatus): void => {
+    const showDownloading = (status: AppUpdateStatus): void => {
+      notification.open({
+        key: DOWNLOADING_KEY,
+        message: `正在下载 Dogi ${status.latest ?? ''}`,
+        description: '下载完成后会提示你安装；可随时取消。',
+        duration: 0,
+        placement: 'bottomRight',
+        actions: (
+          <Button
+            size="small"
+            onClick={() => {
+              notification.destroy(DOWNLOADING_KEY)
+              void window.api.updater.cancel()
+            }}
+          >
+            取消
+          </Button>
+        )
+      })
+    }
+
+    const showReady = (status: AppUpdateStatus): void => {
       if (notifiedRef.current) return
       notifiedRef.current = true
       notification.open({
-        key: 'app-update',
+        key: READY_KEY,
         message: `Dogi ${status.latest ?? ''} 已下载完成`,
         description: '重启即可安装；正在进行的会话会先落盘再退出。',
         duration: 0,
         placement: 'bottomRight',
-        // antd 6 的 `actions` 是**自定义内容区**（ReactNode），不是 v5 那套描述符数组；
-        // 关通知用 `destroy`（`close` 在 antd 6 已移除）
         actions: (
           <div className="flex gap-2">
-            <Button size="small" onClick={() => notification.destroy('app-update')}>
+            <Button size="small" onClick={() => notification.destroy(READY_KEY)}>
               稍后
             </Button>
             <Button
               size="small"
               type="primary"
               onClick={() => {
-                notification.destroy('app-update')
+                notification.destroy(READY_KEY)
                 void window.api.updater.install()
               }}
             >
@@ -53,14 +76,26 @@ export function UpdateNotifier() {
       })
     }
 
-    // 挂载时补读一次状态：应用刚启动、后台已经下完（比如上次没退干净）的情况不能漏
+    const onStatus = (status: AppUpdateStatus): void => {
+      if (status.state === 'downloading') {
+        showDownloading(status)
+      } else if (status.state === 'downloaded') {
+        // 收掉下载中的通知，换成安装提示
+        notification.destroy(DOWNLOADING_KEY)
+        showReady(status)
+      } else if (status.state === 'available') {
+        // 取消下载后回到「待下载」：收掉下载中的通知（红徽章继续提示）
+        notification.destroy(DOWNLOADING_KEY)
+      }
+    }
+
+    // 挂载时补读一次：应用刚启动、后台已经下完 / 正在下（比如上次没退干净）的情况不能漏
     void window.api.updater.status().then((status) => {
-      if (status.state === 'downloaded') prompt(status)
+      if (status.state === 'downloaded') showReady(status)
+      else if (status.state === 'downloading') showDownloading(status)
     })
 
-    return window.api.updater.onStatus((status) => {
-      if (status.state === 'downloaded') prompt(status)
-    })
+    return window.api.updater.onStatus(onStatus)
   }, [])
 
   return null
