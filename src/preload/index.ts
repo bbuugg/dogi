@@ -879,7 +879,8 @@ const api = {
   /** 源代码管理（git）：以工作区目录为入口，定位仓库根后执行 */
   git: {
     status: (cwd: string): Promise<GitStatusResult> => ipcRenderer.invoke('git:status', cwd),
-    branches: (cwd: string): Promise<GitBranchesResult> => ipcRenderer.invoke('git:branches', cwd),
+    branches: (cwd: string, pruneRemote?: boolean): Promise<GitBranchesResult> =>
+      ipcRenderer.invoke('git:branches', cwd, pruneRemote),
     log: (cwd: string, n?: number): Promise<GitCommit[]> => ipcRenderer.invoke('git:log', cwd, n),
     diff: (cwd: string, path: string, staged: boolean): Promise<string> =>
       ipcRenderer.invoke('git:diff', cwd, path, staged),

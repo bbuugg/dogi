@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { CloudDownload, Pencil, Plus, Trash2, X } from 'lucide-react'
 import type { AiApiStyle, AiModelConfig, AiProviderKind } from '@shared/types'
+import { DEFAULT_CONTEXT_WINDOW, formatContextWindow } from '@shared/context-budget'
 import { useAppStore } from '@/stores/app-store'
 import { Button, Input, Modal, Popconfirm, Select, Tag } from 'antd'
 
@@ -36,6 +37,51 @@ function hasApiStyleChoice(kind: AiProviderKind): boolean {
   return kind === 'openai' || kind === 'openai-compatible'
 }
 
+/**
+ * 设置 →「模型」：模型配置（= 网关）列表 + 每份配置下的**模型清单**与**各自的上下文窗口**。
+ *
+ * 上下文窗口**按模型**配（`AiModelConfig.contextWindows`，移植自 fishwork）：
+ * 窗口是模型自己的属性而不是网关的属性 —— 同一个 baseURL 下 128k 与 200k 的模型可以并存。
+ * 列表行上只读展示（模型 id 后面跟一段灰字），要改就点行上的 ✎ 打开「编辑模型」弹窗，
+ * 那里是预设几档 + 自定义。它同时是圆环的分母与自动压缩的触发阈值来源（窗口 × 80%），
+ * 所以改完不必重启，下一轮就按新窗口判断。没单独配的模型走兜底值（默认 200k）。
+ */
+
+const WINDOW_DEFAULT = 'default'
+const WINDOW_CUSTOM = 'custom'
+const WINDOW_PRESETS: Array<{ value: string; label: string }> = [
+  { value: WINDOW_DEFAULT, label: `默认（${formatContextWindow(DEFAULT_CONTEXT_WINDOW)} 兜底）` },
+  { value: '128000', label: '128k' },
+  { value: '200000', label: '200k' },
+  { value: '256000', label: '256k' },
+  { value: '512000', label: '512k' },
+  { value: '1000000', label: '1M' },
+  { value: WINDOW_CUSTOM, label: '自定义…' }
+]
+
+/** 已配的窗口 → 预设 Select 的取值（不在预设里就是「自定义」；没配是「默认」） */
+function windowPresetOf(tokens: number | undefined): string {
+  if (tokens == null) return WINDOW_DEFAULT
+  const raw = String(tokens)
+  return WINDOW_PRESETS.some((p) => p.value === raw) ? raw : WINDOW_CUSTOM
+}
+
+/** 预设 + 自定义草稿 → 要写入的 token 数；`undefined` = 不配（走兜底） */
+function draftWindowTokens(preset: string, custom: string): number | undefined {
+  if (preset === WINDOW_DEFAULT) return undefined
+  if (preset !== WINDOW_CUSTOM) return Number(preset)
+  const value = Number(custom)
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined
+}
+
+/** 自定义窗口「填了但不是个合法值」—— 用来拦保存并提示，而不是静默丢掉 */
+function isCustomWindowInvalid(preset: string, custom: string): boolean {
+  if (preset !== WINDOW_CUSTOM) return false
+  if (!custom.trim()) return false
+  const value = Number(custom)
+  return !(Number.isFinite(value) && value > 0)
+}
+
 interface FormState {
   id: string
   name: string
@@ -49,7 +95,11 @@ interface FormState {
   temperature: string
   maxTokens: string
   contextMessages: string
-  contextBudget: string
+  /**
+   * ⚠️ 编辑已有配置时必须**原样带回**：主进程的 `saveConfig` 是整份替换，
+   * 不传这个字段等于把已配的窗口全清空（不是「保持原值」）。
+   */
+  contextWindows: Record<string, number>
 }
 
 const EMPTY: FormState = {
@@ -63,7 +113,7 @@ const EMPTY: FormState = {
   temperature: '',
   maxTokens: '',
   contextMessages: '20',
-  contextBudget: ''
+  contextWindows: {}
 }
 
 function toForm(config: AiModelConfig | null): FormState {
@@ -79,7 +129,7 @@ function toForm(config: AiModelConfig | null): FormState {
     temperature: config.temperature !== undefined ? String(config.temperature) : '',
     maxTokens: config.maxTokens !== undefined ? String(config.maxTokens) : '',
     contextMessages: String(config.contextMessages ?? 20),
-    contextBudget: config.contextBudget !== undefined ? String(config.contextBudget) : ''
+    contextWindows: { ...(config.contextWindows ?? {}) }
   }
 }
 
@@ -103,6 +153,16 @@ export function ModelSettings() {
     loading: boolean
     error: string | null
   } | null>(null)
+  /** 「编辑模型」弹窗状态（只改一个模型的 id 与窗口，不动网关设置）。`modelId` 缺省 = 新增 */
+  const [modelEditing, setModelEditing] = useState<{
+    configId: string
+    modelId?: string
+  } | null>(null)
+  const [modelId, setModelId] = useState('')
+  const [modelWindow, setModelWindow] = useState(WINDOW_DEFAULT)
+  const [modelWindowCustom, setModelWindowCustom] = useState('')
+  const [modelBusy, setModelBusy] = useState(false)
+  const [modelError, setModelError] = useState('')
 
   const patch = (partial: Partial<FormState>) =>
     setEditing((f) => (f ? { ...f, ...partial } : f))
@@ -174,8 +234,7 @@ export function ModelSettings() {
         temperature: editing.temperature ? Number(editing.temperature) : undefined,
         maxTokens: editing.maxTokens ? Number(editing.maxTokens) : undefined,
         contextMessages: Number(editing.contextMessages) || 20,
-        // 空串 = 不写字段，主进程回退默认 80k（别把 0 写进去，那会让压缩永远触发）
-        contextBudget: editing.contextBudget ? Number(editing.contextBudget) : undefined,
+        contextWindows: editing.contextWindows,
         createdAt: 0,
         updatedAt: 0
       })
@@ -202,12 +261,16 @@ export function ModelSettings() {
   const removeModel = async (config: AiModelConfig, model: string) => {
     const source = config.models?.length ? config.models : config.model ? [config.model] : []
     const rest = source.filter((m) => m !== model)
+    const contextWindows = { ...(config.contextWindows ?? {}) }
+    // 连带删掉它的窗口条目：留着的话，将来加回同名模型会继承一个用户已经看不到的旧窗口
+    delete contextWindows[model]
     await window.api.ai.saveConfig({
       ...config,
       apiKey: undefined,
       models: rest,
       // 删空后把遗留的 model 字段一并清空，否则它会被列表当作仍有模型而重新显示
-      model: rest[0] ?? undefined
+      model: rest[0] ?? undefined,
+      contextWindows
     })
     await refreshAiConfigs()
   }
@@ -251,8 +314,7 @@ export function ModelSettings() {
     }
   }
 
-  const togglePickerModel = (m: string, checked: boolean) =>
-    setPicker((p) => {
+  const togglePickerModel = (m: string, checked: boolean) =>    setPicker((p) => {
       if (!p) return p
       const selected = checked ? [...p.selected, m] : p.selected.filter((x) => x !== m)
       return { ...p, selected }
@@ -265,10 +327,80 @@ export function ModelSettings() {
       ...picker.config,
       apiKey: undefined,
       models: merged,
-      model: merged[0] ?? picker.config.model
+      model: merged[0] ?? picker.config.model,
+      // ⚠️ 原样带回：saveConfig 是整份替换，不传等于把已配的窗口清空
+      contextWindows: picker.config.contextWindows
     })
     await refreshAiConfigs()
     setPicker(null)
+  }
+
+  // ---------- 「编辑模型」弹窗（模型 id + 上下文窗口） ----------
+
+  /** 打开模型弹窗：不传 modelId = 新增 */
+  const openModelDialog = (config: AiModelConfig, targetId?: string): void => {
+    const tokens = targetId ? config.contextWindows?.[targetId] : undefined
+    const preset = windowPresetOf(tokens)
+    setModelEditing({ configId: config.id, ...(targetId ? { modelId: targetId } : {}) })
+    setModelId(targetId ?? '')
+    setModelWindow(preset)
+    setModelWindowCustom(preset === WINDOW_CUSTOM ? String(tokens ?? '') : '')
+    setModelError('')
+  }
+
+  const closeModelDialog = (): void => {
+    setModelEditing(null)
+    setModelId('')
+    setModelWindow(WINDOW_DEFAULT)
+    setModelWindowCustom('')
+    setModelError('')
+  }
+
+  /** 保存模型行：新增 / 改名 / 改窗口，都只写「模型清单 + 窗口」两样 */
+  const saveModelEntry = async (): Promise<void> => {
+    if (!modelEditing) return
+    const config = aiConfigs.find((c) => c.id === modelEditing.configId)
+    if (!config) return
+    const trimmed = modelId.trim()
+    if (!trimmed) {
+      setModelError('模型 id 不能为空')
+      return
+    }
+    const oldId = modelEditing.modelId
+    if (oldId && oldId !== trimmed && config.models?.includes(trimmed)) {
+      setModelError(`「${trimmed}」已经在这份配置里了`)
+      return
+    }
+    if (isCustomWindowInvalid(modelWindow, modelWindowCustom)) {
+      setModelError('自定义窗口要填正整数（token）')
+      return
+    }
+
+    setModelBusy(true)
+    try {
+      const source = config.models?.length ? config.models : config.model ? [config.model] : []
+      const models = oldId ? source.map((m) => (m === oldId ? trimmed : m)) : [...source, trimmed]
+      const windows = { ...(config.contextWindows ?? {}) }
+      // 改了 id 就把旧 id 的窗口搬过去 / 删掉，否则会留下一条永远不生效的孤儿配置
+      if (oldId && oldId !== trimmed) delete windows[oldId]
+      const tokens = draftWindowTokens(modelWindow, modelWindowCustom)
+      if (tokens === undefined) delete windows[trimmed]
+      else windows[trimmed] = tokens
+
+      await window.api.ai.saveConfig({
+        ...config,
+        apiKey: undefined,
+        models: Array.from(new Set(models)),
+        model: Array.from(new Set(models))[0] ?? config.model,
+        contextWindows: windows
+      })
+      await refreshAiConfigs()
+      closeModelDialog()
+    } catch (err) {
+      setModelError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setModelBusy(false)
+    }
   }
 
   return (
@@ -309,30 +441,56 @@ export function ModelSettings() {
                 {config.baseURL ? ` · ${config.baseURL}` : ''}
                 {config.hasApiKey ? '' : ' · 未配置 Key'}
               </div>
-              {(config.models?.length ? config.models! : config.model ? [config.model] : [])
-                .filter(Boolean)
-                .length > 0 && (
-                <div className="mt-1 flex flex-wrap gap-1">
-                  {(config.models?.length ? config.models! : [config.model!])
-                    .filter(Boolean)
-                    .map((m) => (
-                    <Popconfirm
-                      key={m}
-                      title="移除模型"
-                      description={`确定从「${config.name}」移除模型「${m}」吗？`}
-                      okText="移除"
-                      cancelText="取消"
-                      okButtonProps={{ danger: true }}
-                      onConfirm={() => void removeModel(config, m)}
-                    >
-                      <Tag className="m-0 cursor-pointer font-mono text-xs">
-                        {m}
-                        <X className="ml-0.5 inline-block size-2.5 align-middle" />
-                      </Tag>
-                    </Popconfirm>
-                  ))}
-                </div>
-              )}
+              {/* ⚠️ 这块**不要**再套「有模型才渲染」的条件：里面那个「添加模型」入口
+                  恰恰是「这份配置还没有任何模型」时唯一的加模型方式，套上就等于没有入口了。 */}
+              <div className="mt-1 flex flex-wrap gap-1">
+                {(config.models?.length ? config.models! : [config.model!])
+                  .filter(Boolean)
+                  .map((m) => {
+                    const win = config.contextWindows?.[m]
+                    return (
+                      <span key={m} className="flex items-center gap-0.5">
+                        <Popconfirm
+                          title="移除模型"
+                          description={`确定从「${config.name}」移除模型「${m}」吗？`}
+                          okText="移除"
+                          cancelText="取消"
+                          okButtonProps={{ danger: true }}
+                          onConfirm={() => void removeModel(config, m)}
+                        >
+                          <Tag className="m-0 cursor-pointer font-mono text-xs">
+                              {m}
+                              {/* 灰字展示窗口：一眼看全「这个网关下各模型多大窗口」，不用点开就知道 */}
+                              <span className="ml-1 font-sans not-italic text-muted-foreground">
+                                {win ? formatContextWindow(win) : '默认'}
+                              </span>
+                              <X className="ml-0.5 inline-block size-2.5 align-middle" />
+                            </Tag>
+                          </Popconfirm>
+                          {/* ✎ 只改这一个模型的 id 与窗口，不动网关设置 */}
+                          <button
+                            type="button"
+                            className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground"
+                            title={`编辑模型「${m}」（改 id 或上下文窗口）`}
+                            aria-label={`编辑模型 ${m}`}
+                            onClick={() => openModelDialog(config, m)}
+                          >
+                            <Pencil className="size-3" />
+                          </button>
+                        </span>
+                      )
+                    })}
+                  {/* 还没有模型时，这个「添加模型」就是唯一的加模型入口 */}
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 rounded border border-dashed border-border px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground"
+                    title="添加一个模型并设置它的上下文窗口"
+                    onClick={() => openModelDialog(config)}
+                  >
+                    <Plus className="size-3" />
+                    添加模型
+                  </button>
+              </div>
             </div>
             <Button
               icon={<Pencil className="size-3.5" />}
@@ -516,20 +674,11 @@ export function ModelSettings() {
                   onChange={(e) => patch({ contextMessages: e.target.value })}
                 />
               </div>
-              <div className="grid gap-1.5">
-                <span className="text-xs font-medium text-foreground">上下文预算 (Tokens)</span>
-                <Input
-                  type="number"
-                  placeholder="默认 80000"
-                  value={editing.contextBudget}
-                  onChange={(e) => patch({ contextBudget: e.target.value })}
-                />
-                <span className="text-xs text-muted-foreground">
-                  历史超过这个 token 数就触发上下文压缩：旧的若干轮摘要成一段、保留近期原文（屏幕上的历史不会被删）。
-                  接大上下文模型时可以调大，留空则用 80000。
-                </span>
-              </div>
             </div>
+            <p className="text-xs text-muted-foreground">
+              上下文窗口在**每个模型**上单独设置（列表行点 ✎）：它是圆环的分母与自动压缩的阈值来源，
+              到窗口的 80% 就会把旧的若干轮摘要成一段。
+            </p>
             {error && <p className="text-xs text-destructive">{error}</p>}
           </div>
         )}
@@ -581,6 +730,58 @@ export function ModelSettings() {
                 已选 {picker.selected.length} 个，确认后将追加到「{picker.config.name}」（已存在的不会重复）。
               </p>
             )}
+          </div>
+        )}
+      </Modal>
+
+      <Modal
+        title={
+          modelEditing?.modelId
+            ? '编辑模型'
+            : `添加模型${modelEditing ? ` · ${aiConfigs.find((c) => c.id === modelEditing.configId)?.name ?? ''}` : ''}`
+        }
+        open={modelEditing !== null}
+        onCancel={closeModelDialog}
+        onOk={() => void saveModelEntry()}
+        confirmLoading={modelBusy}
+        okText="保存"
+        cancelText="取消"
+        width={440}
+        destroyOnHidden
+        centered
+      >
+        {modelEditing && (
+          <div className="space-y-3 pt-1">
+            <div className="grid gap-1.5">
+              <span className="text-xs font-medium text-foreground">模型 ID</span>
+              <Input
+                value={modelId}
+                placeholder="如 gpt-5.1"
+                onChange={(e) => setModelId(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <span className="text-xs font-medium text-foreground">上下文窗口</span>
+              <Select
+                value={modelWindow}
+                onChange={(v) => setModelWindow(v)}
+                style={{ width: '100%' }}
+                options={WINDOW_PRESETS}
+              />
+              {modelWindow === WINDOW_CUSTOM && (
+                <Input
+                  type="number"
+                  placeholder="token 数，如 400000"
+                  value={modelWindowCustom}
+                  onChange={(e) => setModelWindowCustom(e.target.value)}
+                />
+              )}
+              <p className="text-xs text-muted-foreground">
+                历史估算超过窗口的 {Math.round(0.8 * 100)}% 就自动压缩旧的若干轮；这个值也是输入框里
+                上下文圆环的分母。选「默认」则用 {formatContextWindow(DEFAULT_CONTEXT_WINDOW)} 兜底。
+              </p>
+            </div>
+            {modelError && <p className="text-xs text-destructive">{modelError}</p>}
           </div>
         )}
       </Modal>

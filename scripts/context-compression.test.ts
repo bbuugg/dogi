@@ -1,15 +1,21 @@
 /**
  * 上下文压缩 + 会话累计用量的纯逻辑验证（真源码，由 verify-context-compression.mjs 包装执行）。
  *
- * 覆盖 compressContext 的**不需要真实模型**的分支：未超预算零改动、切轮边界、摘要失败回退截断、
- * 单轮超预算不压缩。摘要成功的路径要真调模型，不在这里造（那属于集成验证）。
+ * 覆盖 compressContext 的**不需要真实模型**的分支：未超阈值零改动、切轮边界、摘要失败回退截断、
+ * 单轮超窗口不压缩。摘要成功的路径要真调模型，不在这里造（那属于集成验证）。
+ *
+ * 阈值口径（移植自 fishwork）：触发线是「窗口 × COMPRESS_TRIGGER_RATIO」，不是窗口本身；
+ * 窗口按**模型**查 `contextWindows` 表，查不到回落遗留 `contextBudget`，再回落 200k。
  */
 import {
   compressContext,
+  countTokens,
+  estimateBaseTokens,
   estimateTokens,
-  DEFAULT_CONTEXT_BUDGET,
-  type CompressResult
+  COMPRESS_TRIGGER_RATIO,
+  DEFAULT_CONTEXT_WINDOW
 } from '../ai/context.ts'
+import { resolveContextWindow } from '../shared/context-budget.ts'
 import { sumUsage } from '../shared/agent-usage.ts'
 
 let failed = 0
@@ -65,35 +71,126 @@ console.log('\n[estimateTokens]')
   // 其余 4 字符 ≈ 1 token
   check('英文按 0.25/字符', estimateTokens('a'.repeat(8)) === 2, `实际 ${estimateTokens('a'.repeat(8))}`)
   check('混排', estimateTokens('中文abc') === Math.ceil(2 * 1.5 + 3 * 0.25))
-  check('默认预算是 80000', DEFAULT_CONTEXT_BUDGET === 80_000)
+  check('默认窗口是 200000', DEFAULT_CONTEXT_WINDOW === 200_000)
+  check('触发比例是 0.8', COMPRESS_TRIGGER_RATIO === 0.8)
 }
 
-console.log('\n[compressContext] 未超预算：零改动')
+/** 带一个窗口的配置（模型配置里的 `contextWindows` 是「模型 id → 窗口」） */
+function modelWith(windows?: Record<string, number>, model = 'm1'): unknown {
+  return { ...BAD_MODEL, ...(windows ? { contextWindows: windows } : {}) }
+}
+
+console.log('\n[resolveContextWindow] 窗口解析：显式 > 遗留 > 兜底')
+{
+  const win = { 'a': 400_000, 'b': 128_000 }
+  check('按模型 id 命中显式窗口', resolveContextWindow(win, 'b') === 128_000)
+  check('没配的模型回落遗留预算', resolveContextWindow(win, 'zzz', 80_000) === 80_000)
+  check('既没配也没遗留 → 兜底 200k', resolveContextWindow(win, 'zzz') === DEFAULT_CONTEXT_WINDOW)
+  check('整个 contextWindows 缺失 → 遗留值', resolveContextWindow(undefined, 'a', 64_000) === 64_000)
+  check('没选模型时不查表 → 遗留值', resolveContextWindow(win, undefined, 64_000) === 64_000)
+  // 显式窗口优先于遗留值：用户显式配了就以他为准
+  check('显式窗口压过遗留值', resolveContextWindow(win, 'a', 80_000) === 400_000)
+  // 手改坏的 JSON 不能让阈值变成 0 或 NaN（那会让每轮都触发压缩）
+  check('0 视为没配', resolveContextWindow({ a: 0 }, 'a', 80_000) === 80_000)
+  check('NaN 视为没配', resolveContextWindow({ a: Number.NaN }, 'a', 80_000) === 80_000)
+  check('负数视为没配', resolveContextWindow({ a: -1 }, 'a', 80_000) === 80_000)
+  check('取整', resolveContextWindow({ a: 1000.7 }, 'a') === 1000)
+}
+
+console.log('\n[estimateBaseTokens] 系统提示词 + 工具 schema')
+{
+  const noTools = await estimateBaseTokens('你是助手', {})
+  check('空工具时只算提示词', noTools === estimateTokens('你是助手'), String(noTools))
+  const withTool = await estimateBaseTokens('你是助手', {
+    t1: { description: '读文件', inputSchema: { jsonSchema: { type: 'object' } } }
+  })
+  check('工具的描述与 schema 都计入', withTool > noTools, `${noTools} → ${withTool}`)
+  // 拿不到 schema / 不是工具对象时只算描述，且**不能抛错** —— 一个估不准的工具
+  // 不该把整轮对话搞挂（宁可低估）
+  const badTool = await estimateBaseTokens('x', { t: null, u: { inputSchema: 123 } })
+  check('非法工具不抛错', typeof badTool === 'number' && Number.isFinite(badTool))
+}
+
+console.log('\n[compressContext] 未超阈值：零改动')
 {
   const msgs = [user('你好'), assistant('在')]
-  const r: CompressResult = await compressContext(msgs, { budget: 80_000, model: BAD_MODEL })
+  // 窗口 80k → 触发线 64k，两条小消息远不到
+  const r = await compressContext(msgs, {
+    model: modelWith({ m1: 80_000 }),
+    modelId: 'm1'
+  })
   check('compressed 为 null', r.compressed === null)
   check('messages 是同一引用（零拷贝）', r.messages === msgs)
 }
 
 console.log('\n[compressContext] 空历史：零改动')
 {
-  const r = await compressContext([], { budget: 1, model: BAD_MODEL })
+  const r = await compressContext([], { model: modelWith({ m1: 1000 }), modelId: 'm1' })
   check('compressed 为 null', r.compressed === null)
 }
 
-console.log('\n[compressContext] 单轮就超预算：不压缩（最后一轮含本轮输入，绝不能摘要掉）')
+console.log('\n[compressContext] 单轮就超窗口：不压缩（最后一轮含本轮输入，绝不能摘要掉）')
 {
   const msgs = [user('超长内容'.repeat(5000)), assistant('回答'.repeat(5000))]
-  const r = await compressContext(msgs, { budget: 10, model: BAD_MODEL })
+  const r = await compressContext(msgs, { model: modelWith({ m1: 100 }), modelId: 'm1' })
   check('compressed 为 null', r.compressed === null)
   check('messages 未变', r.messages === msgs)
+}
+
+console.log('\n[compressContext] 触发线 = 窗口 × 0.8（不是窗口本身）')
+{
+  // 一段历史算成 ~X token，窗口取 X/0.85 → 消息本身没超窗口，但超了触发线 → 仍应压缩
+  const history = longHistory(4)
+  const tokens = countTokens(history)
+  const window = Math.ceil(tokens / 0.85)
+  const r = await compressContext(history, { model: modelWith({ m1: window }), modelId: 'm1' })
+  check(
+    '消息量低于窗口但高于 80% 触发线时也会压缩',
+    tokens <= window && r.compressed !== null,
+    `tokens=${tokens} window=${window} 触发线=${Math.floor(window * 0.8)}`
+  )
+  // 同一段历史，窗口放大到装得下全部 → 不触发
+  const r2 = await compressContext(history, {
+    model: modelWith({ m1: window * 10 }),
+    modelId: 'm1'
+  })
+  check('窗口足够大时不压缩', r2.compressed === null)
+}
+
+console.log('\n[compressContext] baseTokens 计入 beforeTokens 与触发判定')
+{
+  const history = longHistory(6)
+  const tokens = countTokens(history)
+  // base 取历史的一成，于是「触发线」正好落在 tokens 与 tokens+base 之间：
+  // 不计 base 时够不着触发线（不压缩），计入 base 后越线（压缩）。
+  const base = Math.max(1_000, Math.floor(tokens * 0.2))
+  // 窗口要让触发线（窗口 × 0.8）≈ 1.05 × tokens：比消息量略高、比消息量+base 略低
+  const win = Math.ceil((tokens * 1.05) / COMPRESS_TRIGGER_RATIO)
+  const without = await compressContext(history, { model: modelWith({ m1: win }), modelId: 'm1' })
+  const with_ = await compressContext(history, {
+    model: modelWith({ m1: win }),
+    modelId: 'm1',
+    baseTokens: base
+  })
+  const trigger = Math.floor(win * COMPRESS_TRIGGER_RATIO)
+  check(
+    '触发线落在 tokens 与 tokens+base 之间（用例前提）',
+    tokens < trigger && trigger < tokens + base,
+    `tokens=${tokens} trigger=${trigger} base=${base}`
+  )
+  check('不计 base 时不触发', without.compressed === null)
+  check('计入 base 后触发', with_.compressed !== null)
+  check(
+    'beforeTokens 含 baseTokens',
+    with_.compressed!.beforeTokens === tokens + base,
+    `${with_.compressed!.beforeTokens} vs ${tokens} + ${base}`
+  )
 }
 
 console.log('\n[compressContext] 摘要失败 → 回退截断（仍要能把请求发出去）')
 {
   const history = longHistory(8)
-  const r = await compressContext(history, { budget: 20_000, model: BAD_MODEL })
+  const r = await compressContext(history, { model: modelWith({ m1: 20_000 }), modelId: 'm1' })
   check('确实触发了压缩', r.compressed !== null)
   if (r.compressed) {
     const c = r.compressed
@@ -116,10 +213,19 @@ console.log('\n[compressContext] 切轮边界：保留比例决定留几轮')
 {
   const history = longHistory(4)
 
-  // ratio=0 → 只留最后一轮（它含本轮输入）；ratio=1 → 留「满预算」的近期轮。
-  // 注意 ratio=1 **不等于**「全保留」：预算是有限的，超出部分照样要摘要掉。
-  const r0 = await compressContext(history, { budget: 10_000, keepRecentRatio: 0, model: BAD_MODEL })
-  const r1 = await compressContext(history, { budget: 10_000, keepRecentRatio: 1, model: BAD_MODEL })
+  // ratio=0 → 只留最后一轮（它含本轮输入）；ratio=1 → 留「满窗口」的近期轮。
+  // 注意 ratio=1 **不等于**「全保留」：窗口是有限的，超出部分照样要摘要掉。
+  const win = { m1: 10_000 }
+  const r0 = await compressContext(history, {
+    model: modelWith(win),
+    modelId: 'm1',
+    keepRecentRatio: 0
+  })
+  const r1 = await compressContext(history, {
+    model: modelWith(win),
+    modelId: 'm1',
+    keepRecentRatio: 1
+  })
   check('ratio=0 时会压缩', r0.compressed !== null)
   check('ratio=0 时只保留 1 轮', r0.compressed?.keptTurns === 1, String(r0.compressed?.keptTurns))
   check('ratio=1 保留的轮数 ≥ ratio=0', (r1.compressed?.keptTurns ?? 0) >= (r0.compressed?.keptTurns ?? 0),
@@ -127,17 +233,26 @@ console.log('\n[compressContext] 切轮边界：保留比例决定留几轮')
   check('ratio=1 时压缩量更小', (r1.compressed?.summarizedTurns ?? 99) <= (r0.compressed?.summarizedTurns ?? 0),
     `${r1.compressed?.summarizedTurns} vs ${r0.compressed?.summarizedTurns}`)
 
-  // 预算大到装得下全部轮次 → 不该触发任何压缩
-  const rAll = await compressContext(history, { budget: 10_000_000, model: BAD_MODEL })
-  check('预算充足时不压缩', rAll.compressed === null)
+  // 窗口大到装得下全部轮次 → 不该触发任何压缩
+  const rAll = await compressContext(history, { model: modelWith({ m1: 10_000_000 }), modelId: 'm1' })
+  check('窗口充足时不压缩', rAll.compressed === null)
 }
 
-console.log('\n[compressContext] 预算非法 → 回退默认值')
+console.log('\n[compressContext] 窗口非法 / 未配 → 回退兜底值')
 {
-  const r = await compressContext([user('短')], { budget: 0, model: BAD_MODEL })
-  check('budget=0 不报错、不压缩', r.compressed === null)
-  const r2 = await compressContext([user('短')], { budget: Number.NaN, model: BAD_MODEL })
-  check('budget=NaN 不报错、不压缩', r2.compressed === null)
+  const msgs = [user('短')]
+  const r = await compressContext(msgs, { model: modelWith({ m1: 0 }), modelId: 'm1' })
+  check('窗口=0 不报错、不压缩（回落 200k）', r.compressed === null)
+  const r2 = await compressContext(msgs, {
+    model: modelWith({ m1: Number.NaN }),
+    modelId: 'm1'
+  })
+  check('窗口=NaN 不报错、不压缩', r2.compressed === null)
+  // 遗留 contextBudget 仍生效：老配置不会被升级平白改成 200k
+  const r3 = await compressContext(msgs, {
+    model: { ...BAD_MODEL, contextBudget: 500 } as never
+  })
+  check('未配 contextWindows 时沿用遗留 contextBudget', r3.compressed === null)
 }
 
 console.log('\n[sumUsage] 会话累计')

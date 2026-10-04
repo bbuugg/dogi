@@ -107,6 +107,7 @@ import {
 } from './pane-helpers'
 import {
   agentRequestConversations,
+  pendingAgentStops,
   DEFAULT_CONVERSATION_TITLE,
   titleFromMessage,
   newConversation,
@@ -1846,6 +1847,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       if (!cid) return
       // 正在跑的那条先中止（与 deleteAgentConversation 同纪律：不留孤儿请求）
       await get().abortAgent(cid)
+      pendingAgentStops.delete(cid)
       await window.api.agent.terminalConvs.delete(cid)
       set((s) => {
         const remaining = s.terminalConversations.filter((c) => c.id !== cid)
@@ -1964,7 +1966,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
             [cid]: { ...(s.agentRuns[cid] ?? emptyAgentRun()), requestId }
           }
         }))
+        // 用户在 requestId 还没回来的窗口里点过停止 → 这一刻补上中止（见 pendingAgentStops）
+        if (pendingAgentStops.delete(cid)) void window.api.agent.abort(requestId)
       } catch (err) {
+        pendingAgentStops.delete(cid)
         set((s) => ({
           agentRuns: {
             ...s.agentRuns,
@@ -1983,14 +1988,19 @@ export const useAppStore = create<AppStore>()((set, get) => {
       if (!sessionId) return
       const cid = get().activeTerminalConv[sessionId]
       if (!cid) return
-      const requestId = (get().agentRuns[cid] ?? emptyAgentRun()).requestId
-      if (!requestId) return
-      agentRequestConversations.delete(requestId)
-      // 只清属于本次请求的确认卡
-      for (const c of Object.values(get().pendingConfirms)) {
-        if (c.requestId === requestId) void get().resolveAiConfirm(c.id, false)
+      const run = get().agentRuns[cid] ?? emptyAgentRun()
+      const requestId = run.requestId
+      if (requestId) {
+        agentRequestConversations.delete(requestId)
+        // 只清属于本次请求的确认卡
+        for (const c of Object.values(get().pendingConfirms)) {
+          if (c.requestId === requestId) void get().resolveAiConfirm(c.id, false)
+        }
+        await window.api.agent.abort(requestId)
+      } else if (run.streaming) {
+        // 同 abortAgent：主进程还在准备这一轮时没有 requestId 可中止，记下来补发
+        pendingAgentStops.add(cid)
       }
-      await window.api.agent.abort(requestId)
       set((s) => ({
         agentRuns: {
           ...s.agentRuns,
@@ -2441,6 +2451,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
     deleteAgentConversation: async (id, options = {}) => {
       // 正在流式输出就先中止，否则主进程那个会话的 agent 进程会变成孤儿
       if ((get().agentRuns[id] ?? emptyAgentRun()).requestId) await get().abortAgent(id)
+      // 顺带清掉「已叫停、requestId 还没落地」的待中止标记（会话没了就不该留着）
+      pendingAgentStops.delete(id)
       const target = get().agentConversations.find((c) => c.id === id)
       // ACP 会话：默认只删本地绑定（agent 侧会话保留，下次还能导入回来）；
       // 用户显式勾了「同时删除」才连 agent 侧一起删 —— 失败只提示，本地记录照删。
@@ -2604,7 +2616,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
             [cid]: { ...(s.agentRuns[cid] ?? emptyAgentRun()), requestId }
           }
         }))
+        // 用户在 requestId 还没回来的窗口里点过停止 → 这一刻补上中止（见 pendingAgentStops）
+        if (pendingAgentStops.delete(cid)) void window.api.agent.abort(requestId)
       } catch (err) {
+        pendingAgentStops.delete(cid)
         set((s) => ({
           agentRuns: {
             ...s.agentRuns,
@@ -2698,14 +2713,23 @@ export const useAppStore = create<AppStore>()((set, get) => {
       // 必传：删除会话 / 工作区时也显式指定，避免留下孤儿请求
       const cid = conversationId
       if (!cid) return
-      const requestId = (get().agentRuns[cid] ?? emptyAgentRun()).requestId
-      if (!requestId) return
-      agentRequestConversations.delete(requestId)
-      // 只清属于本次请求的确认卡
-      for (const c of Object.values(get().pendingConfirms)) {
-        if (c.requestId === requestId) void get().resolveAgentConfirm(c.id, false)
+      const run = get().agentRuns[cid] ?? emptyAgentRun()
+      const requestId = run.requestId
+      if (requestId) {
+        agentRequestConversations.delete(requestId)
+        // 只清属于本次请求的确认卡
+        for (const c of Object.values(get().pendingConfirms)) {
+          if (c.requestId === requestId) void get().resolveAgentConfirm(c.id, false)
+        }
+        await window.api.agent.abort(requestId)
+      } else if (run.streaming) {
+        // ⚠️ 还没有 requestId 可中止**不等于**没在跑：主进程此刻正在准备这一轮
+        // （扫技能目录 / 启动 MCP server / 估算 token / 压缩上下文，全在 `agent:chat`
+        // 回包之前），而界面已经是「运行中」。早先这里直接 return，用户点「停止」
+        // 毫无反应：请求照跑到底，本轮自然结束还会把待发送队列接着发出去。
+        // 记下来，requestId 一落地就补发 abort（见 sendAgentMessage）。
+        pendingAgentStops.add(cid)
       }
-      await window.api.agent.abort(requestId)
       set((s) => ({
         agentRuns: {
           ...s.agentRuns,
@@ -2718,6 +2742,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
             // 用户主动停止 = 表态「这一轮到此为止」：待发送队列暂停自动接续，等他自己处理。
             // 这里要**就地**置位而只靠后续的 finish('aborted')：渲染端此刻已把 streaming 复位，
             // 用户完全可能在这中间切走会话再切回来，那条路径不经过 finish 事件的闸。
+            // ⚠️ 与 requestId 有无无关：正是「requestId 还没落地」时最容易漏掉这个表态。
             queueHold: true
           }
         }
@@ -3066,7 +3091,12 @@ export const useAppStore = create<AppStore>()((set, get) => {
               // finish('done')（见 services/ai/acp-agent.ts）。回放并不是「跑了一轮」，
               // 若在这里把 queueHold 清成 false，用户先前手动停止攒下的队列就会被悄悄接上 ——
               // 表现成「只是打开会话，消息自己发出去了」。回放一律原样保留既有标记。
-              ...(wasReplay ? {} : { queueHold: !naturalEnd })
+              //
+              // ⚠️ 另一个方向：**用户已经叫停后晚到的 finish('done') 也不许解除暂停**。
+              // 主进程在中止生效前可能已经把最后一段跑完并发了 finish('done')，直接赋值
+              // 等于撤销用户的表态 —— 表现同样是「我明明点了停止，队列还在自己发」。
+              // 所以这里取「或」：已置位的暂停保持不变，只有真正没人叫停的自然结束才继续接队列。
+              ...(wasReplay ? {} : { queueHold: (s.agentRuns[cid]?.queueHold ?? false) || !naturalEnd })
             }
           }
         }))

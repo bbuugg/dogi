@@ -86,7 +86,10 @@ jobs:
           # CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           # CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
 
-      # 产物落盘到 release/，按平台上传为Artifact，方便未打 tag 时也能取包
+      # 产物落盘到 release/，按平台上传为Artifact，方便未打 tag 时也能取包。
+      # ⚠️ latest*.yml / *.blockmap 是 electron-builder 生成的自动更新清单与增量包，
+      #    必须一起收（`--publish never` 也照样生成它们）。注意块标量里的 `#` 不是
+      #    注释而是文件名字符串 —— 说明只能写在这个位置。
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         if: always()
@@ -98,9 +101,16 @@ jobs:
             release/*.AppImage
             release/*.deb
             release/*.zip
+            release/latest*.yml
+            release/*.blockmap
           if-no-files-found: ignore
 
-      # 仅当推送 v* tag 时，把产物附加到自动创建的 GitHub Release
+      # 仅当推送 v* tag 时，把产物附加到自动创建的 GitHub Release。
+      # ⚠️ files 里必须含 latest*.yml：客户端 checkForUpdates() 就是去
+      #    <release>/download/vX/latest.yml 取清单，漏了会抛
+      #    ERR_UPDATER_CHANNEL_FILE_NOT_FOUND 并被 error 事件静默吞掉 ——
+      #    表现为「永远收不到更新、点了检查更新也没反应」（真实事故，见 AGENTS.md 4.26）。
+      #    *.blockmap 只影响能否增量下载（缺了每次全量下 ~126MB），不影响功能。
       - name: Publish Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
@@ -111,6 +121,8 @@ jobs:
             release/*.AppImage
             release/*.deb
             release/*.zip
+            release/latest*.yml
+            release/*.blockmap
           draft: false
           prerelease: false
         env:

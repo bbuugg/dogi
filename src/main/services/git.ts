@@ -6,6 +6,7 @@ import type {
   GitBranchesResult,
   GitChange,
   GitCommit,
+  GitStashEntry,
   GitStatusResult
 } from '@shared/types'
 
@@ -30,7 +31,13 @@ function runGit(cwd: string, args: string[]): Promise<GitRun> {
   return new Promise((resolve) => {
     const proc = spawn('git', ['-c', 'core.quotepath=false', ...args], {
       cwd,
-      windowsHide: true
+      windowsHide: true,
+      /**
+       * 面板没有 TTY，缺凭据时 git 会**一直等**用户输入密码，表现为「点推送没反应」。
+       * `GIT_TERMINAL_PROMPT=0` 让它立刻失败并报错，用户去设置里补远端凭据 ——
+       * 比挂死好。只对网络类命令有意义，对本地命令无害。
+       */
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
     })
     let stdout = ''
     let stderr = ''
@@ -173,6 +180,29 @@ function parseRemotes(out: string): GitStatusResult['remotes'] {
 /** 改动列表上限：超过这个数就截断，避免巨型仓库（没配 .gitignore）把列表卡死 */
 const MAX_CHANGES = 200
 
+/** 贮藏栈最多回这么多条（真到几十条的时候，用户要的多半是最近几条） */
+const MAX_STASHES = 50
+
+/**
+ * 解析 `git stash list --format=%gd%x1f%gs`。
+ *
+ * 用 `%x1f`（单元分隔符）而不是 `:` 拆：贮藏说明里本来就可能带冒号
+ * （git 自动生成的那种形如 `WIP on main: 改了 xx`），而 `\x1f` 不可能出现在
+ * git 的引用名或说明里。
+ */
+function parseStashes(stdout: string): GitStashEntry[] {
+  const out: GitStashEntry[] = []
+  for (const line of stdout.split('\n')) {
+    if (!line.trim()) continue
+    const [ref = '', message = ''] = line.split('\x1f')
+    const m = /^stash@\{(\d+)\}$/.exec(ref.trim())
+    if (!m) continue
+    out.push({ ref: ref.trim(), index: Number(m[1]), message: message.trim() })
+    if (out.length >= MAX_STASHES) break
+  }
+  return out
+}
+
 export async function getGitStatus(cwd: string): Promise<GitStatusResult> {
   if (!(await isGitRepo(cwd))) {
     return {
@@ -185,7 +215,8 @@ export async function getGitStatus(cwd: string): Promise<GitStatusResult> {
       behind: 0,
       remotes: [],
       changes: [],
-      truncated: false
+      truncated: false,
+      stashes: []
     }
   }
   const root = await gitRoot(cwd)
@@ -197,9 +228,10 @@ export async function getGitStatus(cwd: string): Promise<GitStatusResult> {
    * 也没有 diff，展开只能显示「无可显示的差异」（用户报告：改的是文件夹下的一堆文件）。
    * all 会把目录下的每个文件各列一行，渲染端再按路径把它们折成目录树。
    */
-  const [statusRes, remoteRes] = await Promise.all([
+  const [statusRes, remoteRes, stashRes] = await Promise.all([
     runGit(repo, ['status', '--porcelain=v1', '-b', '--untracked-files=all']),
-    runGit(repo, ['remote', '-v'])
+    runGit(repo, ['remote', '-v']),
+    runGit(repo, ['stash', 'list', '--format=%gd%x1f%gs'])
   ])
 
   const lines = statusRes.stdout.split('\n')
@@ -213,14 +245,26 @@ export async function getGitStatus(cwd: string): Promise<GitStatusResult> {
     isRepo: true,
     root: repo,
     remotes: parseRemotes(remoteRes.stdout),
+    stashes: parseStashes(stashRes.stdout),
     changes,
     truncated,
     ...head
   }
 }
 
-export async function getGitBranches(cwd: string): Promise<GitBranchesResult> {
+export async function getGitBranches(cwd: string, pruneRemote = false): Promise<GitBranchesResult> {
   const root = (await gitRoot(cwd)) || cwd
+  /**
+   * 手动刷新（pruneRemote=true）时尽力修剪远端已删的分支（`git fetch --prune --all`）。
+   *
+   * 场景：分支在 GitHub 界面 / 别的客户端删了，本地 `refs/remotes/<remote>/<branch>` 还留着，
+   * 分支列表就一直显示它，点「删除远端分支」时 git 报 remote ref does not exist。
+   * 只读远端、不动本地分支与提交，所以失败（离线 / 无凭据 / 超时）无所谓 —— 调用方只当没发生。
+   * 平时（打开面板、写操作之后）不联网，纯本地 ref，快。
+   */
+  if (pruneRemote) {
+    await runGit(root, ['fetch', '--prune', '--quiet', '--all']).catch(() => {})
+  }
   const [local, remote] = await Promise.all([
     runGit(root, ['branch', '--format=%(refname:short)']),
     runGit(root, ['branch', '-r', '--format=%(refname:short)'])
@@ -337,6 +381,34 @@ async function rollbackFile(root: string, path: string, mode: 'worktree' | 'all'
   }
 }
 
+/**
+ * 分支 / 远端名的合法性：不允许以 `-` 开头（会被 git 当成选项）、不允许含空白。
+ * @returns 出错的人话；合法则 null
+ */
+function invalidRefName(name: string, label: string): string | null {
+  if (!name) return `${label}不能为空`
+  if (name.startsWith('-')) return `${label}不合法：${name}`
+  if (/\s/.test(name)) return `${label}不合法：${name}`
+  return null
+}
+
+/** 本地分支是否存在（判定交给 git，不自己猜） */
+async function branchExists(repo: string, name: string): Promise<boolean> {
+  const r = await runGit(repo, ['show-ref', '--verify', '--quiet', `refs/heads/${name}`])
+  return r.code === 0
+}
+
+/**
+ * 网络动作的输出：**stderr 优先、退回 stdout**。
+ *
+ * git 的成功信息常写在 stderr（`push`、`pull` 的进度都是），只看 stdout 会把
+ * 「已推送」显示成空串；而 `stash pop` 撞上冲突时退出码是 1、「哪个文件冲突、
+ * stash 还留着」这些关键信息全在 stdout 上 —— 只看 stderr 会把一段有用的诊断丢掉。
+ */
+function outputOf(res: GitRun): string {
+  return (res.stderr.trim() || res.stdout.trim()).trimEnd()
+}
+
 /** 统一跑写操作：非零退出把 git 的原话抛出来，让渲染端当错误消息展示 */
 async function runAction(repo: string, action: GitAction): Promise<string> {
   let res: GitRun
@@ -356,27 +428,87 @@ async function runAction(repo: string, action: GitAction): Promise<string> {
     case 'checkout':
       res = await runGit(repo, ['checkout', action.ref])
       break
-    case 'create-branch':
+    case 'create-branch': {
+      const bad = invalidRefName(action.name.trim(), '分支名')
+      if (bad) throw new Error(bad)
+      if (await branchExists(repo, action.name.trim())) {
+        throw new Error(`分支 ${action.name.trim()} 已经存在`)
+      }
       res = action.from
         ? await runGit(repo, ['checkout', '-b', action.name, action.from])
         : await runGit(repo, ['checkout', '-b', action.name])
       break
+    }
+    case 'delete-branch': {
+      const name = action.name.trim()
+      const bad = invalidRefName(name, '分支名')
+      if (bad) throw new Error(bad)
+      if (!(await branchExists(repo, name))) throw new Error(`本地分支 ${name} 不存在`)
+      // 当前分支 git 一定不让删（也可能被别的 worktree 占着），自己先判一句人话 ——
+      // git 的原话是 "cannot delete branch 'x' used by worktree at …"，看不出是被谁占
+      const cur = await runGit(repo, ['branch', '--show-current'])
+      if (cur.stdout.trim() === name) {
+        throw new Error('不能删除当前所在的分支：先切到别的分支再删')
+      }
+      res = await runGit(
+        repo,
+        action.force ? ['branch', '--delete', '--force', name] : ['branch', '--delete', name]
+      )
+      // 把「没合并」翻成面板上的下一步操作：光把 git 原话丢给前端，
+      // 用户不知道确认框里还有个「强制删除」的勾能继续
+      if (res.code !== 0 && /not fully merged/i.test(res.stderr)) {
+        throw new Error(
+          `分支 ${name} 还没合并到任何其它分支：勾上「强制删除」才会删（未合并的提交删完只剩 reflog 能找回）`
+        )
+      }
+      break
+    }
+    case 'delete-remote-branch': {
+      const remote = action.remote.trim()
+      const branch = action.branch.trim()
+      const bad = invalidRefName(remote, '远端名') ?? invalidRefName(branch, '分支名')
+      if (bad) throw new Error(bad)
+      res = await runGit(repo, ['push', remote, '--delete', branch])
+      break
+    }
     case 'set-remote': {
+      const bad = invalidRefName(action.name.trim(), '远端名')
+      if (bad) throw new Error(bad)
       const exists = await runGit(repo, ['remote', 'get-url', action.name])
       res = exists.code === 0
         ? await runGit(repo, ['remote', 'set-url', action.name, action.url])
         : await runGit(repo, ['remote', 'add', action.name, action.url])
       break
     }
+    case 'remove-remote': {
+      const bad = invalidRefName(action.name.trim(), '远端名')
+      if (bad) throw new Error(bad)
+      res = await runGit(repo, ['remote', 'remove', action.name.trim()])
+      break
+    }
     case 'rollback':
       await rollbackFile(repo, action.path, action.mode)
       return ''
-    case 'rollback-all':
-      for (const p of action.paths) await rollbackFile(repo, p, 'all')
+    case 'rollback-all': {
+      // 目录级回退按所在分组区分语义：未暂存组只丢工作区那份、已暂存组连索引一起回 HEAD
+      const mode = action.mode ?? 'all'
+      for (const p of action.paths) await rollbackFile(repo, p, mode)
       return ''
+    }
     case 'push': {
-      // 没配上游就挑第一个远端、按当前分支推并设置跟踪；有上游直接推
       const st = await getGitStatus(repo)
+      // 指定远端：有上游也**不改**上游配置，只推这一趟；没有上游才顺带 -u
+      if (action.remote) {
+        if (!st.remotes.some((r) => r.name === action.remote)) {
+          throw new Error(`还没有名为 ${action.remote} 的远端：先在「管理远端」里添加`)
+        }
+        const ref = st.branch ?? 'HEAD'
+        res = st.upstream
+          ? await runGit(repo, ['push', action.remote, ref])
+          : await runGit(repo, ['push', '-u', action.remote, ref])
+        break
+      }
+      // 没指定：按上游推（没有上游就 `--set-upstream` 第一个远端，没有远端则报错）
       if (st.upstream) {
         res = await runGit(repo, ['push'])
       } else if (st.remotes.length === 0) {
@@ -391,12 +523,42 @@ async function runAction(repo: string, action: GitAction): Promise<string> {
     case 'pull':
       res = await runGit(repo, ['pull'])
       break
+    case 'stash-push': {
+      const args = ['stash', 'push']
+      if (action.includeUntracked) args.push('--include-untracked')
+      const message = (action.message ?? '').trim()
+      if (message) {
+        // `-m` 的值以 `-` 开头会被 git 当成选项
+        if (message.startsWith('-')) throw new Error('贮藏说明不能以 - 开头')
+        args.push('-m', message)
+      }
+      res = await runGit(repo, args)
+      break
+    }
+    case 'stash-pop':
+    case 'stash-apply':
+    case 'stash-drop': {
+      const ref = (action.ref ?? '').trim()
+      // ref 是拼进命令行的，只认 `stash@{n}` 这一种形状，别让它变成任意参数
+      if (ref && !/^stash@\{\d+\}$/.test(ref)) throw new Error(`贮藏引用不合法：${ref}`)
+      const sub =
+        action.action === 'stash-pop'
+          ? 'pop'
+          : action.action === 'stash-apply'
+            ? 'apply'
+            : 'drop'
+      res = await runGit(repo, ['stash', sub, ...(ref ? [ref] : [])])
+      // ⚠️ 用 outputOf（stderr 优先、退回 stdout）而不是只看 stderr：
+      // `stash pop` 撞上冲突时退出码是 1，而「哪个文件冲突、stash 还留着」全在 stdout 上
+      if (res.code !== 0) throw new Error(outputOf(res) || `git stash ${sub} 失败`)
+      return outputOf(res)
+    }
   }
   if (res.code !== 0) {
     const msg = res.stderr.trim() || res.stdout.trim() || 'git 命令执行失败'
     throw new Error(msg)
   }
-  return (res.stdout.trim() || res.stderr.trim()).trimEnd()
+  return outputOf(res)
 }
 
 export async function runGitAction(cwd: string, action: GitAction): Promise<string> {

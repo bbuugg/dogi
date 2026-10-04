@@ -26,15 +26,21 @@ const FILES = [
   ['src/main/services/ai/context.ts', 'ai/context.ts'],
   ['src/main/services/ai/resolve-model.ts', 'ai/resolve-model.ts'],
   ['src/shared/agent-usage.ts', 'shared/agent-usage.ts'],
+  ['src/shared/context-budget.ts', 'shared/context-budget.ts'],
   ['scripts/context-compression.test.ts', 'context-compression.test.ts']
 ]
 
 /** 每个文件要改写的 import 说明符 */
 const REWRITES = {
-  'ai/context.ts': [["from './resolve-model'", "from './resolve-model.ts'"]],
+  'ai/context.ts': [
+    ["from './resolve-model'", "from './resolve-model.ts'"],
+    // context-budget 是 shared 里的常量 / 解析函数（值 import，擦类型不会消失），得改写别名
+    ["from '@shared/context-budget'", "from '../shared/context-budget.ts'"]
+  ],
   'context-compression.test.ts': [
     ["from '../ai/context.ts'", "from './ai/context.ts'"],
-    ["from '../shared/agent-usage.ts'", "from './shared/agent-usage.ts'"]
+    ["from '../shared/agent-usage.ts'", "from './shared/agent-usage.ts'"],
+    ["from '../shared/context-budget.ts'", "from './shared/context-budget.ts'"]
   ]
 }
 

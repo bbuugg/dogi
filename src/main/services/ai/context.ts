@@ -11,16 +11,20 @@
  *   renderer 的会话记录里，结构是 `parts`；先转 `ModelMessage[]` 再压缩，压缩结果直接喂
  *   `agent.stream()`，不落盘、不改会话记录 —— 压缩只是「这一次请求怎么带上下文」的策略，
  *   屏幕上的历史始终是原文（用户能翻、能复制、能编辑重发）。
- * - 预算来自 `AiModelConfig.contextBudget`（设置页可配），不是环境变量。
+ * - 窗口来自 `AiModelConfig.contextWindows`（按模型配，设置页可改），不是环境变量。
  */
-import { generateText } from 'ai'
+import { asSchema, generateText } from 'ai'
 import type { ModelMessage } from 'ai'
 import type { AiModelConfig, ContextCompression } from '@shared/types'
-import { DEFAULT_CONTEXT_BUDGET, resolveContextBudget } from '@shared/context-budget'
+import {
+  COMPRESS_TRIGGER_RATIO,
+  DEFAULT_CONTEXT_WINDOW,
+  resolveContextWindow
+} from '@shared/context-budget'
 import { resolveModel } from './resolve-model'
 
-/** 默认上下文预算：真源在 shared（渲染端的用量圆环用同一个值算分母） */
-export { DEFAULT_CONTEXT_BUDGET, resolveContextBudget }
+/** 默认上下文窗口：真源在 shared（渲染端的用量圆环用同一个值算分母） */
+export { DEFAULT_CONTEXT_WINDOW, COMPRESS_TRIGGER_RATIO, resolveContextWindow }
 /** 触发压缩后，保留的「近期原文」占预算的比例（其余的旧轮摘要掉） */
 export const KEEP_RECENT_RATIO = 0.5
 /** 摘要请求的最大输出 token */
@@ -85,6 +89,49 @@ function messageToText(m: ModelMessage): string {
 export function countTokens(messages: ModelMessage[]): number {
   let sum = 0
   for (const m of messages) sum += estimateTokens(messageToText(m))
+  return sum
+}
+
+/**
+ * 把一条工具定义折成「模型实际看到的那部分文本」：描述 + 入参 JSON Schema。
+ *
+ * 拿不到 schema（不是 AI SDK 工具 / schema 是懒加载的 thenable 且 await 失败 / 转换抛错）
+ * 就只算描述：宁可低估，也不要因为一个估不准的工具把整轮对话搞挂。
+ */
+async function toolToText(tool: unknown): Promise<string> {
+  if (!tool || typeof tool !== 'object') return ''
+  const t = tool as { description?: unknown; inputSchema?: unknown }
+  const parts: string[] = [typeof t.description === 'string' ? t.description : '']
+  if (t.inputSchema) {
+    try {
+      const schema = asSchema(t.inputSchema as never) as { jsonSchema?: unknown }
+      const raw = schema?.jsonSchema
+      const resolved =
+        raw && typeof (raw as PromiseLike<unknown>).then === 'function'
+          ? await raw
+          : raw
+      if (resolved) parts.push(JSON.stringify(resolved))
+    } catch {
+      // 拿不到就只算描述（见函数注释）
+    }
+  }
+  return parts.filter(Boolean).join('\n')
+}
+
+/**
+ * 估算「每轮都要发、但不在 messages 里」的那部分上下文：**系统提示词 + 工具 schema**。
+ *
+ * ⚠️ 别把它当成精确值：它只是让 `beforeTokens` / `afterTokens` 更接近「本次请求真实多大」，
+ * 而这两条数会直接显示给用户（提示条与圆环详情）。漏算系统提示词会出现「压缩前后一样大」
+ * 这种一眼假的数字，所以必须算；但它是估算，措辞上也要如实（见 ContextRing 的 estimated）。
+ */
+export async function estimateBaseTokens(
+  instructions: string,
+  tools: Record<string, unknown>
+): Promise<number> {
+  const texts = await Promise.all(Object.values(tools).map((t) => toolToText(t)))
+  let sum = estimateTokens(instructions)
+  for (const text of texts) sum += estimateTokens(text)
   return sum
 }
 
@@ -205,12 +252,16 @@ export function withSummaryPrefix(messages: ModelMessage[], text: string): Model
 }
 
 /**
- * 按预算压缩上下文。
+ * 按上下文窗口压缩。
  *
- * - 不超预算 → 原样返回（`compressed = null`，调用方零感知）；
- * - 超预算 → 旧轮摘要成一段，保留近期原文；
+ * - 不超阈值（窗口 × `COMPRESS_TRIGGER_RATIO`）→ 原样返回（`compressed = null`，调用方零感知）；
+ * - 超阈值 → 旧轮摘要成一段，保留近期原文；
  * - 摘要请求失败 → 回退成「砍掉旧轮」（截断），保证请求还能发出去，
  *   不会因为一次摘要失败把整轮搞挂。
+ *
+ * `baseTokens` 是「系统提示词 + 工具 schema」的估算（见 `estimateBaseTokens`）——
+ * 它们每轮都发出去却不在 `messages` 里，不计进去的话统计会明显偏小。
+ * 手动压缩那条路拿不到它（不建 agent），传 0 即按纯消息算。
  *
  * 压缩后会做一次「相邻同角色文本合并」，避免摘要消息与保留下来的第一条消息撞角色
  * （部分 provider 对连续同角色消息会拒）。
@@ -218,7 +269,9 @@ export function withSummaryPrefix(messages: ModelMessage[], text: string): Model
 export async function compressContext(
   messages: ModelMessage[],
   opts: {
-    budget?: number
+    contextWindow?: number
+    /** 系统提示词 + 工具 schema 的估算；缺省按 0（= 只算消息） */
+    baseTokens?: number
     keepRecentRatio?: number
     summaryMaxTokens?: number
     model: AiModelConfig
@@ -226,20 +279,33 @@ export async function compressContext(
     signal?: AbortSignal
   }
 ): Promise<CompressResult> {
-  const budget = resolveContextBudget(opts.budget)
+  const contextWindow = resolveContextWindow(
+    opts.model.contextWindows,
+    opts.modelId,
+    opts.contextWindow
+  )
+  const triggerTokens = Math.floor(contextWindow * COMPRESS_TRIGGER_RATIO)
   const keepRatio = opts.keepRecentRatio ?? KEEP_RECENT_RATIO
   const summaryMaxTokens = opts.summaryMaxTokens ?? SUMMARY_MAX_TOKENS
+  const baseTokens = opts.baseTokens ?? 0
 
-  const beforeTokens = countTokens(messages)
+  const messageTokens = countTokens(messages)
+  const beforeTokens = messageTokens + baseTokens
   const noop: CompressResult = { messages, compressed: null }
-  // 空历史 / 未超预算：不动
-  if (messages.length === 0 || beforeTokens <= budget) return noop
+  // 空历史 / 未超阈值：不动
+  if (messages.length === 0 || beforeTokens <= triggerTokens) return noop
 
   const turns = splitTurns(messages)
   // 至少保留最后一轮（它含本轮用户输入，绝不能摘要掉）
   if (turns.length <= 1) return noop
 
-  const keepBudget = Math.floor(budget * keepRatio)
+  /**
+   * 保留区的基准是**窗口**而不是触发阈值：阈值本身已经打了 8 折留余量，
+   * 这里若再按阈值打折，保留区会小到「刚压缩完没几轮又要压」。
+   *
+   * 同样的道理，baseTokens 不从保留预算里扣 —— 它已经计入触发阈值了，再扣一次就扣重了。
+   */
+  const keepBudget = Math.floor(contextWindow * keepRatio)
   // 从最后一轮往前累加，塞满 keepBudget 就停
   let keptTurns = 0
   let keptTokens = 0
@@ -266,7 +332,7 @@ export async function compressContext(
 
   const summaryText = summary
     ? `（以下为先前 ${summarizedTurns} 轮对话的摘要，已压缩替代原文）\n\n${summary}`
-    : `（先前 ${summarizedTurns} 轮对话已超出上下文预算，摘要失败，已截断丢弃）`
+    : `（先前 ${summarizedTurns} 轮对话已超出上下文窗口，摘要失败，已截断丢弃）`
 
   // 摘要作为 user 角色消息：后面紧跟保留下来的第一轮（也是 user 开头）时，
   // mergeAdjacentText 会把它们并成一条，避免连续 user 被部分 provider 拒。

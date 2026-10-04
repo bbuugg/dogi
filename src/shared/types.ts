@@ -893,12 +893,20 @@ export interface AiModelConfig {
   /** 携带的历史消息条数 */
   contextMessages?: number
   /**
-   * 上下文预算（token）：历史转成请求前先估算 token，超过它就触发**上下文压缩**
-   * （旧轮摘要成一段、保留近期原文，见 services/ai/context.ts）。
-   * 缺省 80k；接大上下文模型时可以调大。
+   * 各模型的**上下文窗口**（模型 id → token 数，如 `{ 'gpt-5.1': 400000 }`）。
    *
-   * 与 contextMessages 是两道独立的闸：前者按**条数**截断（先过），后者按 **token**
-   * 决定要不要摘要（后过）。两道都过不了的极端情况（单轮就超预算）不压缩。
+   * 为什么按模型 id 而不是按配置：一份配置下可以挂很多模型，窗口是**模型自己的属性**
+   * 而不是网关的属性 —— 同一个 baseURL 下 128k 与 200k 的模型可以并存。
+   * 没配的模型走 `resolveContextWindow` 的兜底（旧配置回落到下面的 `contextBudget`，再回落到 200k）。
+   *
+   * 两处共用这一份真源（`@shared/context-budget`）：前端圆环的分母、主进程自动压缩的触发阈值。
+   * ACP 会话不读它（上下文在 agent 侧管理）。
+   */
+  contextWindows?: Record<string, number>
+  /**
+   * ⚠️ **遗留字段**（保留只为读老数据，新界面不再写它）：改成按模型配之前，
+   * 一份配置只有一个上下文预算。`resolveContextWindow` 会把它当整份配置的兜底值 ——
+   * 老配置因此仍按原来的数字生效，不会因为升级平白跳到 200k。
    */
   contextBudget?: number
   createdAt: number
@@ -1696,6 +1704,23 @@ export interface GitStatusResult {
   changes: GitChange[]
   /** 改动过多被截断（列表已上限收敛）；为 true 时禁用批量操作 */
   truncated: boolean
+  /**
+   * 贮藏栈（`git stash list`，最近一次在前）。
+   *
+   * 放在 status 里而不是单开一个接口：它跟改动列表一样是「每次刷新都该是最新的」，
+   * 而贮藏 / 弹出 / 删除都会改工作区，本来就要跟着刷新。
+   */
+  stashes: GitStashEntry[]
+}
+
+/** 一条贮藏（`git stash list` 里的一行） */
+export interface GitStashEntry {
+  /** 引用名，形如 `stash@{0}`（git 命令直接用；0 = 最近一次） */
+  ref: string
+  /** 同上，只是拆出来的序号，方便界面按「最近一次」做文案 */
+  index: number
+  /** 贮藏说明（`git stash push -m` 给的那句，或 git 自动生成的 `WIP on <分支>: ...`） */
+  message: string
 }
 
 export interface GitBranchesResult {
@@ -1718,18 +1743,64 @@ export interface GitCommit {
   date: string
 }
 
-/** git 写操作：按 action 选择字段 */
+/**
+ * git 写操作：按 action 选择字段。
+ *
+ * 刻意**不提供**强推（`--force`）与 `reset --hard` 这类丢改动的操作：面板能改仓库状态，
+ * 但不会悄悄毁掉用户手上的工作。唯一显式的破坏性开关是 `delete-branch` 的 `force`（= `-D`），
+ * 因为「删分支」这个意图本身就是扔掉这条线，而「还没合并」恰恰是最常见的正当删除场景；
+ * 它必须由用户在确认框里勾选。
+ */
 export type GitAction =
   | { action: 'stage'; paths: string[] }
   | { action: 'unstage'; paths: string[] }
   | { action: 'rollback'; path: string; mode: 'worktree' | 'all' }
-  | { action: 'rollback-all'; paths: string[] }
+  | { action: 'rollback-all'; paths: string[]; mode?: 'worktree' | 'all' }
   | { action: 'commit'; message: string }
   | { action: 'checkout'; ref: string }
+  /** 新建分支并切过去；`from` 不给 = 从当前 HEAD 切（可以是分支名、远端分支或提交 hash） */
   | { action: 'create-branch'; name: string; from?: string }
+  /**
+   * 删除本地分支（`git branch --delete`）。破坏性，界面必须二次确认。
+   *
+   * 默认只删**已合并**的分支（判定交给 git 做，不自己算 merge-base）：分支上还有没并进
+   * 任何本地分支的提交时 git 会拒绝，需显式 `force: true`（= `-D`）。
+   *
+   * 刻意没有「顺手删掉远端同名分支」的开关：那是另一条不可逆路径，要删让用户显式走
+   * `delete-remote-branch`。
+   */
+  | { action: 'delete-branch'; name: string; force?: boolean }
+  /**
+   * 删除远端分支（`git push <remote> --delete <branch>`）。破坏性，界面必须二次确认。
+   *
+   * `remote` 与 `branch` 分开传而不是给一个 `origin/feature/x`：分支名里允许带 `/`，
+   * 从右边切不回去，只能按「第一段是远端名」拆（远端名本身不允许含 `/`）。
+   */
+  | { action: 'delete-remote-branch'; remote: string; branch: string }
+  /** 添加 / 修改远端地址（同名已存在就改它的 URL） */
   | { action: 'set-remote'; name: string; url: string }
-  | { action: 'push' }
+  /**
+   * 删除一个远端（`git remote remove <name>`）。
+   *
+   * 只删「这个远端配在哪」，不动本地分支 / 提交，也不影响远端仓库本身 ——
+   * 但它的远端跟踪分支与当前分支对它的上游配置会一起消失，所以界面仍要给一次确认。
+   */
+  | { action: 'remove-remote'; name: string }
+  | { action: 'push'; remote?: string }
   | { action: 'pull' }
+  /**
+   * 贮藏当前改动（`git stash push`）：工作区与暂存区的改动收进 stash 栈，工作区回到干净状态。
+   *
+   * `message` 给这次贮藏一个说明（git 会自动加 `WIP on <分支>` 前缀）；
+   * `includeUntracked` 连未跟踪文件一起收（= `-u`）—— 不收的话新文件会留在工作区。
+   */
+  | { action: 'stash-push'; message?: string; includeUntracked?: boolean }
+  /** 弹出一次贮藏（`git stash pop [<ref>]`）：应用**并**从栈里删掉 */
+  | { action: 'stash-pop'; ref?: string }
+  /** 应用一次贮藏但留在栈里（`git stash apply [<ref>]`） */
+  | { action: 'stash-apply'; ref?: string }
+  /** 删除一次贮藏（`git stash drop [<ref>]`）。**破坏性**，界面要确认 */
+  | { action: 'stash-drop'; ref?: string }
   | { action: 'init' }
 
 /** 单块磁盘/分区的使用情况 */

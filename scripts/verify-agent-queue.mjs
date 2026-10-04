@@ -6,6 +6,9 @@
 //   3. 流式中「现在发」被忽略、删除生效、空闲后 pump 弹出队首、删会话清空队列；
 //   3b. **手动停止 / 报错后队列暂停自动接续**（`queueHold`）：中止、报错两条路径都不 pump，
 //       自然结束才解除；ACP 回放发的 finish('done') 与切会话都不得绕过这道暂停；
+//   3c. 走真实的 `abortAgent`：**requestId 还没落地时点停止也要停得住**（主进程准备阶段
+//       曾放在回包之前，那时 abortAgent 直接 return，队列照发），且停止后晚到的
+//       finish('done') 不得撤销暂停；
 //   4. 思考展开体走 use-stick-to-bottom：内容增长时贴底（spring 进行中 gap 略大于 0），
 //      用户上滚后**不再**跟随、滚回底部恢复；
 //   5. 工具行（失败态）行内各项的垂直中心完全相等、图标尺寸统一 size-4 —— 对齐契约。
@@ -142,6 +145,16 @@ check('状态图标仍在最右端（预览之后）', dom.cmdLastChildIsSvg ===
 check('纯结构化入参不渲染 JSON 噪声预览', dom.structuredPreview === null, String(dom.structuredPreview))
 
 // ---------- 2 + 3. 队列行为 ----------
+// ⚠️ 先清空该会话队列：第 1 节为了验渲染往里排了两条，队列是**按会话**存的，
+//    不清的话下面每条断言都会多出那两个条目（错得看不出跟被测逻辑有没有关系）。
+await cdp.eval(`
+(() => {
+  const g = window.__store.getState()
+  const cid = '${CONV_ID}'
+  for (const m of [...(g.agentQueues[cid] || [])]) g.removeQueuedAgentMessage(m.id, cid)
+  return 1
+})()
+`)
 const behavior = await cdp.eval(`
 (async () => {
   const get = () => window.__store.getState()
@@ -272,13 +285,57 @@ const hold = await cdp.eval(`
   return out
 })()
 `)
-check('中止后 queueHold 置位且队列保留', hold.afterAbortedHold === true && hold.afterAbortedQueue.length === 1, JSON.stringify(hold.afterAbortedQueue))
-check('中止后 pump 不接续', hold.afterAbortedPump.length === 1, `剩 ${hold.afterAbortedPump.length} 条`)
+check('中止后 queueHold 置位且队列保留', hold.afterAbortedHold === true && hold.afterAbortedQueue.length === 2, JSON.stringify(hold.afterAbortedQueue))
+check('中止后 pump 不接续', hold.afterAbortedPump.length === 2, `剩 ${hold.afterAbortedPump.length} 条`)
 check('报错后 queueHold 置位', hold.afterErrorHold === true && hold.afterErrorFinishHold === true, `error=${hold.afterErrorHold} finish=${hold.afterErrorFinishHold}`)
-check('报错后 pump 不接续', hold.afterErrorQueue.length === 0 && hold.afterErrorPump.length === 0, `剩 ${hold.afterErrorPump.length} 条`)
+check('报错后 pump 不接续', hold.afterErrorQueue.length === 1 && hold.afterErrorPump.length === 1, `剩 ${hold.afterErrorPump.length} 条`)
 check('自然结束解除暂停', hold.afterDoneHold === false, String(hold.afterDoneHold))
 check('ACP 回放的 finish done 不解除暂停', hold.afterReplayHold === true, String(hold.afterReplayHold))
 check('切会话 / 再泵也不接续', hold.afterSelectQueue.length === 0, `剩 ${hold.afterSelectQueue.length} 条`)
+
+// ---------- 3c. 用户真点「停止」：requestId 还没落地也必须停得住 ----------
+// 3b 只驱动事件入口，没走 abortAgent；而用户遇到的正是 abortAgent 这条路：
+// 主进程原先把准备阶段（MCP server 启动 / 估算 token / 上下文压缩）放在
+// `agent:chat` **返回 requestId 之前**，那段时间界面已经是「运行中」，
+// abortAgent 却因为拿不到 requestId 直接 return —— 既没中止、也没置 queueHold，
+// 那一轮照跑到底，结束后把队列接着发出去。
+// （主进程侧已改成准备阶段后台化、立即回 requestId；这里守住渲染端不依赖那件事。）
+await seed(cdp, { streaming: true })
+const gap = await cdp.eval(`
+(async () => {
+  const get = () => window.__store.getState()
+  const cid = '${CONV_ID}'
+  const reqId = 'verify-queue-gap-req'
+  const setRun = (patch) => window.__store.setState({
+    agentRuns: { ...get().agentRuns, [cid]: { streaming: false, requestId: null, error: null, ...patch } }
+  })
+  const q = () => (get().agentQueues[cid] || []).map(m => m.text)
+  const out = {}
+  const fire = (event) => { window.__agentRequests.set(reqId, cid); get().handleAgentEvent(reqId, event) }
+
+  // 情形一：主进程还在准备，requestId 尚未交回来（streaming 已经是 true）
+  setRun({ streaming: true, requestId: null })
+  get().enqueueAgentMessage('空窗-甲', cid)
+  get().enqueueAgentMessage('空窗-乙', cid)
+  await get().abortAgent(cid)
+  out.hold = get().agentRuns[cid].queueHold
+  out.streaming = get().agentRuns[cid].streaming
+  out.queue = q()
+  get().pumpAgentQueue(cid)
+  out.afterPump = q()
+
+  // 情形二：中止生效前主进程已跑完并补发 finish('done')：不得撤销用户的暂停
+  setRun({ streaming: true, requestId: null, queueHold: true })
+  fire({ type: 'finish', finishReason: 'done' })
+  out.holdAfterLateDone = get().agentRuns[cid].queueHold
+  get().pumpAgentQueue(cid)
+  out.queueAfterLateDone = q()
+  return out
+})()
+`)
+check('requestId 未落地时点停止：暂停置位、状态复位、队列保留', gap.hold === true && gap.streaming === false && gap.queue.length === 2, JSON.stringify(gap))
+check('requestId 未落地时点停止：pump 不接续', gap.afterPump.length === 2, `剩 ${gap.afterPump.length} 条`)
+check('停止后晚到的 finish done 不撤销暂停', gap.holdAfterLateDone === true && gap.queueAfterLateDone.length === 2, JSON.stringify(gap))
 
 // ---------- 4. 思考展开体的贴底 / 上滚暂停 ----------
 await seed(cdp, { streaming: true })

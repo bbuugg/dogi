@@ -809,12 +809,31 @@ ACP 是「别人的 agent 在别人的进程里管自己的会话」。本应用
 
 ### 4.20 上下文压缩 + 会话累计 token：压缩只改「这一次请求」，不改历史
 
-移植自 fishwork（`packages/agent/src/context.ts`）。**两道独立的闸**，顺序固定：
-先按**条数**截断（`AiModelConfig.contextMessages`，缺省 20），再按 **token** 预算压缩
-（`AiModelConfig.contextBudget`，缺省 80k，设置页可填）。两道都过不了的极端情况（单轮就超预算）不压缩。
+移植自 fishwork（`packages/agent/src/context.ts`）。**三道闸**，顺序固定：
+先按**条数**截断（`AiModelConfig.contextMessages`，缺省 20），再按**上下文窗口**压缩，
+统计口径把「系统提示词 + 工具 schema」也计进去。
 
+- **窗口按模型配，不按配置配**：`AiModelConfig.contextWindows`（`模型 id → token 数`）。
+  窗口是模型自己的属性而不是网关的属性 —— 同一个 baseURL 下 128k 与 200k 的模型可以并存。
+  解析链 `resolveContextWindow(contextWindows, modelId, contextBudget)`：
+  **显式窗口 > 遗留 `contextBudget` > 200k**（真源在 `@shared/context-budget`，前后端共用）。
+  ⚠️ `contextBudget` 是**遗留字段**：改口径之前是「一份配置一个数字」，留着它是为了让老配置
+  继续按原数字生效 —— 删掉等于给所有老用户平白把 80k 改成 200k。
+  设置页在模型 id 后面**只读**展示窗口（灰字「默认」= 走兜底），要改点行上的 ✎。
+  ⚠️ `saveConfig` 是**整份替换**，「保存配置 / 改网关 / 删除模型 / 拉取模型合并」四条路径
+  都必须原样带回 `contextWindows`，漏一处就等于把已配的窗口清空。
+- **触发线是「窗口 × `COMPRESS_TRIGGER_RATIO`(0.8)」，不是窗口本身**：留出的 20% 用来吸收
+  「系统提示词 + 工具 schema 的估算误差」与「本轮输出预留」—— 等到把窗口真正塞满才压，
+  上游已经先报 context_length_exceeded 了。圆环据此画线，与真正触发的阈值同源。
+- **`baseTokens` 计入 before/after**：系统提示词与工具 schema 每轮都发出去却不在 `messages` 里，
+  不计进去的话提示条上「压缩前后」会看着几乎没变化。⚠️ 它的输入（`instructions` + `tools`）
+  必须在压缩**之前**算好，所以两条链路里 `new Agent({ instructions })` 的内联写法都改成
+  先抽局部变量。取不到工具 schema 时只算描述、宁可低估也**不许抛错**。
+  手动压缩那条路不建 agent、拿不到它，就按纯消息算 —— 圆环已标「压缩后估算」，别去改。
 - **按轮摘要而不是按 token 滑窗**：滑窗从中间切断 tool-call / tool-result 会破坏协议
   （tool 消息必须紧跟它的 assistant），按轮切天然合法；代价是粒度粗，但摘要也是模型做的。
+  保留区按**窗口**的 50% 算（不按触发阈值再打折，否则刚压完没几轮又要压），
+  且**不从保留预算里扣 `baseTokens`** —— 它已经计入触发阈值了，再扣就是扣重。
 - ⚠️ **压缩结果不落盘、不改会话记录**：它只决定「这一次 `agent.stream()` 带哪些消息」，
   屏幕上的历史始终是原文（可翻 / 可复制 / 可编辑重发）。所以**会话累计 token 是现算的**
   （`@shared/agent-usage` 的 `sumUsage`），不在会话上另存累计字段 —— 另存就多出一个可能与消息对不上的副本。
@@ -832,8 +851,11 @@ ACP 是「别人的 agent 在别人的进程里管自己的会话」。本应用
   不少 agent 不报，那时不该给一个永远空的圈。ACP 那一档传 `source: 'agent'`，
   详情里不给「压缩上下文 / 清除摘要」（上下文在 agent 侧，按了也没用），分子分母也换成
   agent 报的水位 / 窗口大小，**不与内置那条从消息 usage 推出来的值混算**。
-- 验证：`scripts/verify-context-compression.mjs`（`.tooltest` 包装跑真源码，覆盖不超预算零拷贝、
-  切轮边界、摘要失败回退、非法预算；摘要成功路径要真调模型，属集成验证）。
+- ⚠️ 圆环的分母按**会话选中的模型**查表（`resolveContextWindow(windows, conversation.modelId, …)`）：
+  一份配置下不同模型窗口不同，用配置级的旧值会算错百分比。
+- 验证：`scripts/verify-context-compression.mjs`（`.tooltest` 包装跑真源码，覆盖窗口解析三级回落、
+  0.8 触发线、`baseTokens` 计入 before/after 与触发判定、未超阈值零拷贝、切轮边界、
+  摘要失败回退、非法窗口回退；摘要成功路径要真调模型，属集成验证）。
 
 ### 4.21 文件视图（Agent 工作区）：树、菜单、以及「先关标签再动盘」
 
@@ -1040,11 +1062,22 @@ inputSchema, scope: 'workspace'|'terminal'|'both', available?, execute(input, ca
   （`HostLogScope` 加了 `'app'`，面板过滤项同步加了「应用」）。
 - **装更新前先冲刷渲染端**：`updater:install` 走 `requestRendererFlush` 再 `quitAndInstall`，
   顺序反了会丢最后一次会话产出（与 `main/index.ts` 的 `before-quit` 同一套纪律）。
-- **发版**：`package.json` 里 `repository` + `build.publish: [{ provider: 'github', owner, repo }]`；
-  `electron-builder --publish always`（或带 `GH_TOKEN`）会把安装包与 `latest.yml` 挂到 Release。
+- **发版**：`package.json` 里 `repository` + `build.publish: [{ provider: 'github', owner, repo }]`。
+  本项目的 `dist:*` 全是 `electron-builder --publish never`（只出包，不上传），真正的上传在
+  `.github/workflows/build.yml` 的 `softprops/action-gh-release`。
+  ⚠️ **该步骤的 `files` 白名单必须包含 `release/latest*.yml` 与 `release/*.blockmap`** ——
+  `--publish never` 同样会在 `release/` 里生成 `latest.yml`（这就是打包产物 `app-update.yml`
+  要的清单），但 Release 上不挂它就等于自动更新全挂：客户端拉到 tag 后请求
+  `<release>/download/vX/latest.yml` 得到 404 → `ERR_UPDATER_CHANNEL_FILE_NOT_FOUND`
+  → 被 `error` 事件静默吞掉，用户永远收不到更新（真实事故：v0.0.6–v0.0.15 所有 Release 的
+  assets 里都只有安装包）。`*.blockmap` 是增量下载用的，缺了只是每次全量下 ~126MB。
   ⚠️ 顶层 `files` 白名单仍是唯一 matcher（见 6.2 第 9 条），**别在任何平台段加 `files`**。
-- **验证**：开发态下探针断言 `updater:status` 通且 `supported: false`、点版本号给明确提示
-  （不报错）；打包后真机验证要看 GitHub Release 是否产出 `latest.yml`。
+- ⚠️ **macOS 自动更新要 `zip` 目标**：`MacUpdater` 用 `findFile(files, "zip", ["pkg", "dmg"])`
+  找包，只有 `dmg` 会抛 `ERR_UPDATER_ZIP_FILE_NOT_FOUND`；且 Squirrel.Mac 要求包**已签名**，
+  本仓库 CI 的签名步骤默认注释掉，所以 mac 侧在自己配好证书前不要对外承诺自动更新。
+- **验证**：`scripts/verify-updater-release.mjs`（纯 Node：用 `electron-updater` 自己的
+  `GitHubProvider` 打真实 Release，断言能取到清单 —— 改完 workflow 后跑它确认线上可更新）；
+  开发态下另一路断言 `updater:status` 通且 `supported: false`、点版本号给明确提示（不报错）。
 
 ### 4.27 Agent 侧面板的终端标签：**标签身份与会话是两回事**（重连必须就地换会话）
 
@@ -1107,6 +1140,39 @@ inputSchema, scope: 'workspace'|'terminal'|'both', available?, execute(input, ca
   `sameListMeta` 比较），否则归档切换不换引用、侧边栏不刷新（结构共享纪律见 4.25）。
 - **未覆盖自动化**：目前只有手工验证（归档 → 行进「已归档」分组 → 恢复 → 重启后状态仍在 →
   归档中的会话发消息后自动回到未归档列表）。
+
+### 4.30 源代码管理面板（移植自 fishwork 的 GitPanel）
+
+面板 = 头部一行（分支下拉 + 刷新 / 树状↔平铺 / 更多）+ 中部变更与历史 + 底部提交框。
+
+- ⚠️ **分支下拉占头部标题位**，不再单独占一行状态条 —— 标签条上已经写着「源代码管理」，
+  再摆一行分支名是重复表达。分离头指针 / ↑↓ / 上游 / 「未配置远端」的指示一并搬进那个按钮里。
+- **行尾垃圾桶删分支**（本地与远端分支各一颗，当前分支那颗禁用）。⚠️ antd `Dropdown` 的
+  `label` 里内嵌按钮必须自己 `e.stopPropagation()`：不拦的话点垃圾桶会顺手把该分支检出、
+  还会把菜单关掉。三类破坏性动作（删本地分支 / 删远端分支 / 删远端）共用一个确认框。
+- **`delete-branch` 默认只删已合并的**（判定交给 git，不自己算 merge-base）；未合并时
+  git 会拒绝，此时把错误翻成「勾上『强制删除』才会删（未合并的提交删完只剩 reflog 能找回）」，
+  而不是把 git 原话丢给前端。`force` 是**唯一**的破坏性开关，必须由用户在确认框里勾。
+- **刻意不提供**强推与 `reset --hard`：面板能改仓库状态，但不会悄悄毁掉用户手上的工作。
+  也没有「删本地分支时顺手删远端同名分支」的开关 —— 那是另一条不可逆路径。
+- **入参校验**：分支名 / 远端名不许以 `-` 开头（会被 git 当选项）、不许含空白；
+  贮藏 `ref` 只认 `stash@{n}`（它是拼进命令行的，别让它变成任意参数）。
+- ⚠️ **网络动作带 `GIT_TERMINAL_PROMPT=0`**：面板没有 TTY，缺凭据时 git 会一直等用户输密码，
+  表现为「点推送没反应」。让它立刻失败，用户去补凭据 —— 比挂死好。
+- ⚠️ **`stash pop` 撞冲突是「失败但也真的改了工作区」**：所以 `applyStash` **不走**只在成功时
+  刷新的 `run()`，失败分支也要 `refresh()`，否则屏幕上的改动列表会和磁盘对不上。
+  报错同理用「stderr 优先、stdout 兜底」—— 哪个文件冲突、stash 还留着这些都在 stdout 上。
+- **贮藏栈放在 `GitStatusResult.stashes` 里**而不是单开接口：它跟改动列表一样是「每次刷新都
+  该是最新的」，而贮藏 / 弹出 / 删除都会改工作区。解析 `git stash list --format=%gd%x1f%gs`
+  用 `\x1f` 而不是 `:` —— 说明里本来就有冒号（`WIP on main: …`）。上限 50 条。
+  ⚠️ 贮藏列表是**有历史的东西**（用户会回来找它），所以是独立折叠分组，别塞进「更多」菜单。
+- **树状 / 平铺**只影响两组变更列表的排布（选择记在 `localStorage`，用 lazy initializer，
+  否则会先按默认值渲染一帧再跳回去）。两种排布共用同一个 `renderRows` —— diff 展开、
+  暂存、回退因此只有一份实现，不会出现「某项操作在一种视图下失效」。
+- **推送快捷键绑在提交输入框上**（Ctrl/⌘+Shift+Enter），不进全局快捷键表：推送的作用对象是
+  「当前这个工作区的仓库」，全局快捷键那一刻不一定知道哪个面板是活的 —— 推错仓库比推不了更糟。
+- 验证：`scripts/verify-git-changes.ts`（直接跑 `services/git.ts` 真源码）覆盖分支增删的拦截、
+  远端增删、贮藏 push/pop/apply/drop 与非法 ref；`scripts/verify-git-tree.ts` 覆盖折树纯函数。
 
 ---
 
@@ -2057,13 +2123,6 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
     多模态模型要「看图」得另做（当前 `toToolOutput` 会把 base64 截断成废数据）。
 - **验证覆盖的空白**：`ask_followup_question`（追问卡）、命令面板、快捷键分发、SFTP 传输取消、
   WebSocket 各帧类型目前**没有**端到端脚本，改动这些区域时优先补脚本或至少手动过一遍。
-- **历史脚本已移除**：见 5.2 末尾说明。
-
----
-
-_本文档记录的是「为什么这么做」，不是「代码长什么样」—— 代码会变，约束背后的原因不会。_
-_新增条目时：写清触发信号与验证方式，别只写结论。_
-��区域时优先补脚本或至少手动过一遍。
 - **历史脚本已移除**：见 5.2 末尾说明。
 
 ---

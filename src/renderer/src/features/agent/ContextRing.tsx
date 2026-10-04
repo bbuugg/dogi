@@ -6,6 +6,7 @@ import type {
   ConversationUsage,
   TurnUsage
 } from '@shared/types'
+import { COMPRESS_TRIGGER_RATIO } from '@shared/context-budget'
 import { cn } from 'cn'
 
 /** 圆环几何：r=7 在 18×18 视窗里给 2.5 描边刚好留白；弧线从 12 点方向起画 */
@@ -27,8 +28,9 @@ export interface ContextRingProps {
   /** 上一轮发给模型的**真实**输入 token；还没跑过一轮时为 null */
   used: number | null
   /**
-   * 这一轮生效的预算 —— 圆环的分母。
-   * 必须与主进程判断要不要压缩时用的是同一个值（`resolveContextBudget`），
+   * 这个会话的**上下文窗口**（token）—— 圆环的分母。
+   *
+   * 必须与主进程判断要不要压缩时用的是同一个值（`resolveContextWindow`），
    * 否则圆环显示「还剩 20%」而实际早就压过了。
    */
   budget: number | null
@@ -183,7 +185,9 @@ export function ContextRing({
           ? '圆环 = 该 Agent 报告的上下文占用与它自己的窗口大小（本应用不压缩它的上下文）。'
           : estimated
             ? '圆环 = 压缩后的估算占用（刚压过、还没发新一轮）；下一轮跑完会换成服务端回报的真实值。'
-            : '圆环 = 上一轮发给模型的真实历史量，本轮跑完后更新。超过预算会自动压缩旧的若干轮。'}
+            : `圆环 = 上一轮发给模型的真实历史量，本轮跑完后更新。到窗口的 ${Math.round(
+                COMPRESS_TRIGGER_RATIO * 100
+              )}% 就会自动压缩旧的若干轮。`}
       </p>
 
       {/* 会话累计：整段会话烧掉的 token。它**只在这里**——消息列顶部那条提示条

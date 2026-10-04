@@ -95,3 +95,22 @@ export function buildRows(files: Array<{ change: GitChange; letter: string }>): 
   ]
   return toRows(root)
 }
+
+/**
+ * 这组变更里所有目录的路径（父目录在前）。
+ *
+ * 「全部折叠 / 全部展开」要一次性覆盖整棵树 —— 树是渲染期现拼的，调用方手上只有扁平的
+ * `changes`，所以这里顺手把目录路径也列出来。
+ */
+export function allDirPaths(changes: GitChange[]): string[] {
+  const out: string[] = []
+  const walk = (nodes: RowNode[]): void => {
+    for (const node of nodes) {
+      if (node.kind !== 'dir') continue
+      out.push(node.path)
+      walk(node.children)
+    }
+  }
+  walk(buildRows(changes.map((c) => ({ change: c, letter: c.index }))))
+  return out
+}

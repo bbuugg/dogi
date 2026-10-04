@@ -1,6 +1,6 @@
 {
   "name": "dogi",
-  "version": "0.0.15",
+  "version": "0.0.16",
   "description": "AI 驱动的研发运维工作台",
   "author": "Dogi",
   "main": "./out/main/index.js",
@@ -175,7 +175,8 @@
     },
     "mac": {
       "target": [
-        "dmg"
+        "dmg",
+        "zip"
       ],
       "category": "public.app-category.developer-tools",
       "electronLanguages": [

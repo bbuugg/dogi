@@ -16,6 +16,20 @@ import type {
 /** requestId -> conversationId：把 Agent 流式事件路由到发起对话的那个会话 */
 export const agentRequestConversations = new Map<string, string>()
 
+/**
+ * 会话 id 集合：**用户已经点了停止，但主进程还没把 requestId 交回来**的待中止标记。
+ *
+ * ⚠️ 为什么需要它：`agent:chat` 的回包（requestId）要等主进程把这一轮**准备好**才回来 ——
+ * 扫技能目录、启动 MCP server 子进程、估算 baseTokens、按窗口压缩上下文、动态 import agent
+ * 全都发生在返回之前，加起来常见几百毫秒、开了 MCP 或触发了压缩时能到好几秒。
+ * 而渲染端在这段时间里界面已经是「运行中」，用户完全可能这时点「停止」——那一刻没有
+ * requestId 可中止。早先 `abortAgent` 直接 `return`，于是「停止」毫无反应：请求照跑到底，
+ * 本轮自然结束还会把**待发送队列**接着发出去（用户要停的正是这个）。
+ *
+ * 记下来，`sendAgentMessage` 拿到 requestId 的那一刻立刻补发一次 abort。
+ */
+export const pendingAgentStops = new Set<string>()
+
 /** 会话默认标题（用户没命名、也没发过消息时显示） */
 export const DEFAULT_CONVERSATION_TITLE = '新会话'
 

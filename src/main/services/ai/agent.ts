@@ -33,11 +33,12 @@ import type {
   AgentChatRequest,
   AgentConfirmRequest,
   AgentStreamEvent,
+  AgentWorkspace,
   AiModelConfig,
   AiSettings
 } from '@shared/types'
 import { resolveModel } from './resolve-model'
-import { compressContext, withSummaryPrefix } from './context'
+import { compressContext, estimateBaseTokens, withSummaryPrefix } from './context'
 import { sliceByCheckpoint } from './context-summary'
 import { askFollowupBroker } from './ask-followup'
 import { ASK_FOLLOWUP_HINT } from '@shared/ask-followup'
@@ -256,6 +257,67 @@ class AgentService extends EventEmitter {
     this.abortControllers.set(requestId, controller)
     this.requestMeta.set(requestId, { scope: 'workspace' })
 
+    /**
+     * ⚠️ **准备阶段在后台跑，这里立即把 requestId 交回渲染端**（起流部分见
+     * `prepareWorkspaceTurn` 之后的 `then`）。理由是 requestId 是「停止」的唯一把手：
+     * 渲染端只有拿到它才发得了 `agent:abort`。而准备阶段动辄几百毫秒 —— 扫技能目录、
+     * **启动 MCP server 子进程**、估算 baseTokens、按窗口压缩上下文（要真调一次模型）、
+     * 动态 import agent；开了 MCP 或触发了压缩时能到好几秒。这段时间界面已经是「运行中」，
+     * 用户点「停止」会扑空（渲染端没有 requestId 可中止），那一轮照跑到底、跑完还会把
+     * **待发送队列**接着发出去 —— 用户想停的正是这个。
+     *
+     * 失败照旧由事件表达（error + finish('error')）：此刻 ipc 层已把 requestId 登记进
+     * chatConversations，渲染端认得归属（见 4.2「事件必须自带归属」）。
+     */
+    void this.prepareWorkspaceTurn(requestId, controller, req, settings, config, workspace)
+      .then(async ({ model, tools, instructions, modelMessages }) => {
+        // 准备期间用户已经叫停：controller 早就 aborted，不必再起流（省掉一次真实请求）。
+        // ⚠️ 这里要自己收尾 —— 清理只写在 runStreamWithRetry 的 finally 里，早退不经它。
+        if (controller.signal.aborted) return this.forgetRequest(requestId)
+        // ⚠️ 动态 import（主进程产物是 ESM，不能用 require）：与原先一致，只是挪到了后台。
+        const { Agent } = await import('@mastra/core/agent')
+        const agent = new Agent({
+          id: 'dogi',
+          name: 'Dogi',
+          instructions,
+          model: model as never,
+          tools: tools as never
+        })
+        // 起流 + 消费流整体交给带重试的 runStreamWithRetry（每次尝试都重建流）。
+        // ⚠️ 不再用 mastra 的 `modelSettings.maxRetries`：那条路只在 SDK 内部静默重试，界面看不到
+        //    任何迹象；自己驱动才能在每次重试时发一条 `retry` 事件（界面显示「第 N 次重试」）。
+        return this.runStreamWithRetry(requestId, {
+          controller,
+          maxRetries: resolveMaxRetries(settings.maxRetries),
+          start: () =>
+            agent.stream(modelMessages as never, {
+              maxSteps: settings.maxSteps ?? DEFAULT_MAX_STEPS,
+              abortSignal: controller.signal,
+              modelSettings: this.mastraModelSettings(config, settings)
+            }) as unknown as Promise<{ fullStream: AsyncIterable<unknown>; usage?: Promise<unknown> }>
+        })
+      })
+      .catch((err) => this.failPreparation(requestId, controller, err))
+    return { requestId }
+  }
+
+  /**
+   * 工作区对话的**准备阶段**：扫技能 → 组装工具集 → 建提示词 → 三道闸算出这一轮要发的消息。
+   * 起流在调用方（拿到这些之后立即 return requestId）。
+   */
+  private async prepareWorkspaceTurn(
+    requestId: string,
+    controller: AbortController,
+    req: AgentChatRequest,
+    settings: AiSettings,
+    config: AiModelConfig,
+    workspace: AgentWorkspace
+  ): Promise<{
+    model: ReturnType<typeof resolveModel>
+    tools: ToolSet
+    instructions: string
+    modelMessages: Awaited<ReturnType<typeof compressContext>>['messages']
+  }> {
     // 技能每次对话现扫（磁盘即真源，用户随时可以往技能目录里丢东西）：
     // 清单进系统提示词，正文由 read_skill 工具按需读取
     const skills = await skillsForAgent(workspace.path)
@@ -286,7 +348,17 @@ class AgentService extends EventEmitter {
     // 不传就回退到配置的默认模型 —— 表现为「切换模型不生效，请求还在用旧模型」。
     const model = resolveModel(config, req.modelId)
     const historyLimit = config.contextMessages ?? 20
-    // 三道闸，**顺序不能换**：① 手动压缩的检查点切片 → ② 按条数截断 → ③ 按 token 自动压缩。
+    /**
+     * ⚠️ 抽成局部变量而不是内联在下面的 `new Agent({...})` 里：
+     * 系统提示词每轮都发出去却不进 `messages`，不算进 baseTokens 的话统计会明显偏小
+     * （提示条上的「压缩前后」会看着几乎没变化）。
+     */
+    const instructions =
+      buildAgentSystemPrompt(workspace.path, workspace.name, skills) +
+      (hasBrowser ? '\n\n' + BROWSER_PROMPT_SECTION : '') +
+      ASK_FOLLOWUP_HINT
+    const baseTokens = await estimateBaseTokens(instructions, tools)
+    // 三道闸，**顺序不能换**：① 手动压缩的检查点切片 → ② 按条数截断 → ③ 按上下文窗口自动压缩。
     // ① 必须在 ② 之前：反过来 slice(-historyLimit) 可能把刚注入的摘要消息本身切掉，
     // 检查点就白设了（而且是静默白设，界面看不出任何异常）。
     // ③ 只改「这一次请求怎么带上下文」，不碰落盘的历史（屏幕上的原文始终可翻可复制）。
@@ -296,9 +368,9 @@ class AgentService extends EventEmitter {
     const { messages: modelMessages, compressed } = await compressContext(
       sliced.summaryText ? withSummaryPrefix(recent, sliced.summaryText) : recent,
       {
-        budget: config.contextBudget,
         model: config,
         modelId: req.modelId,
+        baseTokens,
         signal: controller.signal
       }
     )
@@ -308,33 +380,30 @@ class AgentService extends EventEmitter {
       const info = compressed
       setTimeout(() => this.emitEvent(requestId, { type: 'context-compressed', info }), 0)
     }
+    return { model, tools, instructions, modelMessages }
+  }
 
-    const { Agent } = await import('@mastra/core/agent')
-    const agent = new Agent({
-      id: 'dogi',
-      name: 'Dogi',
-      instructions:
-        buildAgentSystemPrompt(workspace.path, workspace.name, skills) +
-        (hasBrowser ? '\n\n' + BROWSER_PROMPT_SECTION : '') +
-        ASK_FOLLOWUP_HINT,
-      model: model as never,
-      tools: tools as never
-    })
+  /**
+   * 准备阶段抛错时的收尾：清理归属信息 + 把失败当事件发出去（渲染端只认事件收尾）。
+   * 用户已叫停（controller 已 aborted）则按中止静默收场 —— 没人再听这一轮。
+   */
+  private failPreparation(requestId: string, controller: AbortController, err: unknown): void {
+    this.forgetRequest(requestId)
+    if (controller.signal.aborted) return
+    console.error(`[agent] 对话准备失败 requestId=${requestId}：`, err)
+    this.emitEvent(requestId, { type: 'error', message: describeError(err) })
+    this.emitEvent(requestId, { type: 'finish', finishReason: 'error' })
+  }
 
-    // 起流 + 消费流整体交给带重试的 runStreamWithRetry（每次尝试都重建流）。
-    // ⚠️ 不再用 mastra 的 `modelSettings.maxRetries`：那条路只在 SDK 内部静默重试，界面看不到
-    //    任何迹象；自己驱动才能在每次重试时发一条 `retry` 事件（界面显示「第 N 次重试」）。
-    void this.runStreamWithRetry(requestId, {
-      controller,
-      maxRetries: resolveMaxRetries(settings.maxRetries),
-      start: () =>
-        agent.stream(modelMessages as never, {
-          maxSteps: settings.maxSteps ?? DEFAULT_MAX_STEPS,
-          abortSignal: controller.signal,
-          modelSettings: this.mastraModelSettings(config, settings)
-        }) as unknown as Promise<{ fullStream: AsyncIterable<unknown>; usage?: Promise<unknown> }>
-    })
-    return { requestId }
+  /**
+   * 清掉某个请求的归属信息（与 runStreamWithRetry 的 finally 同一套）。
+   * 准备阶段就走掉（起流前抛错 / 中止）时不经那个 finally，必须显式调用，
+   * 否则 abortControllers / requestMeta 留下孤儿条目（终端会话关闭时还会拿它误中止）。
+   */
+  private forgetRequest(requestId: string): void {
+    this.abortControllers.delete(requestId)
+    this.requestMeta.delete(requestId)
+    this.toolQueues.delete(requestId)
   }
 
   /**
@@ -360,6 +429,48 @@ class AgentService extends EventEmitter {
     this.abortControllers.set(requestId, controller)
     this.requestMeta.set(requestId, { scope: 'terminal', targetSessionId: req.targetSessionId })
 
+    // ⚠️ 同 chatWorkspace：准备阶段（MCP 启动 / 估算 token / 上下文压缩）在后台跑，
+    // 这里立即交回 requestId —— 它是「停止」的唯一把手，迟了用户就按不住这一轮。
+    void this.prepareTerminalTurn(requestId, controller, req, settings, config)
+      .then(async ({ model, tools, systemPrompt, modelMessages }) => {
+        // 准备期间已被叫停：不必再起流（清理只写在 runStreamWithRetry 的 finally 里，早退不经它）
+        if (controller.signal.aborted) return this.forgetRequest(requestId)
+        const { Agent } = await import('@mastra/core/agent')
+        const agent = new Agent({
+          id: 'dogi-terminal',
+          name: 'Dogi Terminal',
+          instructions: systemPrompt,
+          model: model as never,
+          tools: tools as never
+        })
+        return this.runStreamWithRetry(requestId, {
+          controller,
+          maxRetries: resolveMaxRetries(settings.maxRetries),
+          start: () =>
+            agent.stream(modelMessages as never, {
+              maxSteps: settings.maxSteps ?? DEFAULT_MAX_STEPS,
+              abortSignal: controller.signal,
+              modelSettings: this.mastraModelSettings(config, settings)
+            }) as unknown as Promise<{ fullStream: AsyncIterable<unknown>; usage?: Promise<unknown> }>
+        })
+      })
+      .catch((err) => this.failPreparation(requestId, controller, err))
+    return { requestId }
+  }
+
+  /** 终端助手对话的**准备阶段**（同 chatWorkspace → prepareWorkspaceTurn 的分工） */
+  private async prepareTerminalTurn(
+    requestId: string,
+    controller: AbortController,
+    req: AgentChatRequest,
+    settings: AiSettings,
+    config: AiModelConfig
+  ): Promise<{
+    model: ReturnType<typeof resolveModel>
+    tools: ToolSet
+    systemPrompt: string
+    modelMessages: Awaited<ReturnType<typeof compressContext>>['messages']
+  }> {
     const { tools: mcpTools, errors: mcpErrors } = await mcpManager.buildToolset()
     const permissionMode = settings.permissionMode === 'confirm' ? 'confirm' : 'full'
     const ctx: ToolRunContext = {
@@ -380,23 +491,6 @@ class AgentService extends EventEmitter {
 
     const model = resolveModel(config, req.modelId)
     const historyLimit = config.contextMessages ?? 20
-    // 与工作区同口径：先按条数截断，再按 token 预算压缩（只影响本次请求，不动历史）。
-    // 终端会话不支持手动压缩（没有检查点），自动压缩照常生效。
-    const { messages: modelMessages, compressed } = await compressContext(
-      toModelMessages(req.history.slice(-historyLimit)),
-      {
-        budget: config.contextBudget,
-        model: config,
-        modelId: req.modelId,
-        signal: controller.signal
-      }
-    )
-    if (compressed) {
-      // ⚠️ 延后到 invoke 回包之后：渲染端在 await 返回之后才登记 requestId → 会话，
-      // 此刻发出的事件认不出归属会被丢掉（同 chatWorkspace / ipc/agent.ts 的说明）。
-      const info = compressed
-      setTimeout(() => this.emitEvent(requestId, { type: 'context-compressed', info }), 0)
-    }
 
     const boundSession = req.targetSessionId ? sessionManager.get(req.targetSessionId) : undefined
     const systemPrompt =
@@ -409,26 +503,28 @@ class AgentService extends EventEmitter {
         mcpErrors
       }) + ASK_FOLLOWUP_HINT
 
-    const { Agent } = await import('@mastra/core/agent')
-    const agent = new Agent({
-      id: 'dogi-terminal',
-      name: 'Dogi Terminal',
-      instructions: systemPrompt,
-      model: model as never,
-      tools: tools as never
-    })
+    // ⚠️ 系统提示词必须在压缩**之前**算好：它每轮都发出去却不进 messages，
+    // 不计入 baseTokens 的话统计会明显偏小（提示条上「压缩前后」会看着没变化）。
+    const baseTokens = await estimateBaseTokens(systemPrompt, tools)
 
-    void this.runStreamWithRetry(requestId, {
-      controller,
-      maxRetries: resolveMaxRetries(settings.maxRetries),
-      start: () =>
-        agent.stream(modelMessages as never, {
-          maxSteps: settings.maxSteps ?? DEFAULT_MAX_STEPS,
-          abortSignal: controller.signal,
-          modelSettings: this.mastraModelSettings(config, settings)
-        }) as unknown as Promise<{ fullStream: AsyncIterable<unknown>; usage?: Promise<unknown> }>
-    })
-    return { requestId }
+    // 与工作区同口径：先按条数截断，再按上下文窗口压缩（只影响本次请求，不动历史）。
+    // 终端会话不支持手动压缩（没有检查点），自动压缩照常生效。
+    const { messages: modelMessages, compressed } = await compressContext(
+      toModelMessages(req.history.slice(-historyLimit)),
+      {
+        model: config,
+        modelId: req.modelId,
+        baseTokens,
+        signal: controller.signal
+      }
+    )
+    if (compressed) {
+      // ⚠️ 延后到 invoke 回包之后：渲染端在 await 返回之后才登记 requestId → 会话，
+      // 此刻发出的事件认不出归属会被丢掉（同 chatWorkspace / ipc/agent.ts 的说明）。
+      const info = compressed
+      setTimeout(() => this.emitEvent(requestId, { type: 'context-compressed', info }), 0)
+    }
+    return { model, tools, systemPrompt, modelMessages }
   }
 
   /**

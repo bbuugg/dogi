@@ -17,7 +17,7 @@ import type { GitAction } from '@shared/types'
  */
 export function registerGitIpc(): void {
   ipcMain.handle('git:status', (_e, cwd: string) => getGitStatus(cwd))
-  ipcMain.handle('git:branches', (_e, cwd: string) => getGitBranches(cwd))
+  ipcMain.handle('git:branches', (_e, cwd: string, pruneRemote?: boolean) => getGitBranches(cwd, pruneRemote ?? false))
   ipcMain.handle('git:log', (_e, cwd: string, n?: number) => getGitLog(cwd, n ?? 30))
   ipcMain.handle('git:diff', (_e, cwd: string, path: string, staged: boolean) =>
     getGitDiff(cwd, path, staged)

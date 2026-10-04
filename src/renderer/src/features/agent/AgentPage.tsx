@@ -32,7 +32,7 @@ import { useInlineConfirm } from '@/shared/components/InlineConfirm'
 import { conversationKind, isDraftConversation, useAppStore } from '@/stores/app-store'
 import { ASK_FOLLOWUP_TOOL } from '@shared/ask-followup'
 import { sumUsage } from '@shared/agent-usage'
-import { resolveContextBudget } from '@shared/context-budget'
+import { resolveContextWindow } from '@shared/context-budget'
 import { DEFAULT_BROWSER_VIEWPORT, agentBrowserSessionId } from '@shared/browser'
 import type {
   AcpConfigOption,
@@ -613,11 +613,15 @@ export function AgentPage({
    *
    * ⚠️ 两边必须同源（`@shared/context-budget`）：主进程拿它判「要不要压缩」，
    * 圆环拿它算百分比 —— 各写一份默认值的话，圆环显示还剩 20% 而实际早就压过了。
+   *
+   * 窗口**按会话选中的那个模型**查表（一份配置下可以挂不同窗口的多个模型）；
+   * 会话没选模型时按配置取（旧单模型配置的兼容路径）。查不到就走兜底值。
    */
   const contextBudget = useMemo(() => {
     const id = effectiveConfigId ?? aiSettings.activeConfigId
-    return resolveContextBudget(aiConfigs.find((c) => c.id === id)?.contextBudget)
-  }, [aiConfigs, aiSettings.activeConfigId, effectiveConfigId])
+    const config = aiConfigs.find((c) => c.id === id)
+    return resolveContextWindow(config?.contextWindows, conversation?.modelId, config?.contextBudget)
+  }, [aiConfigs, aiSettings.activeConfigId, effectiveConfigId, conversation?.modelId])
   /**
    * ACP 会话的上下文水位：agent 经 `session/update` 的 `usage_update` 上报
    * 「此刻窗口里挂了多少 / 窗口多大」。它**盖过**内置那条从消息 usage 推出来的值 ——
