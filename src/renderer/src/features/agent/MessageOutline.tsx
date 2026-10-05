@@ -22,7 +22,7 @@
  *
  * 真实时间轴有个副作用：赶进度时连着问五句，这五个点会叠成一小坨，谁也点不准。
  * 所以按**像素距离**（不是比例 —— 同样的比例在不同高度的窗口里差很远）把挨得太近
- * 的点并成一个「簇点」：点更大、旁边带一个提问条数，簇内顺序仍然是消息顺序。
+ * 的点并成一个「簇点」：点更大（尺寸随条数增长），簇内顺序仍然是消息顺序。
  *
  * 指向簇点时预览气泡变成一份**清单**：列出这段时间里的每一条提问，点哪一条就滚到
  * 那一条（`onJump`），并把它高亮 —— 所以「刚才那一串问的是啥」不用往回翻。
@@ -685,21 +685,6 @@ export function MessageOutline({
               </button>
             )
           })}
-
-          {/* 条数徽标：簇点有多大光看大小不直观，旁边直接写「这几条」的条数。
-              激活时气泡正好盖住这一块，不重复出现。 */}
-          {clusters.map((cluster) =>
-            cluster.items.length > 1 && active?.key !== cluster.key ? (
-              <span
-                key={`n-${cluster.key}`}
-                aria-hidden
-                className="pointer-events-none absolute -translate-y-1/2 text-[9px] leading-none tabular-nums text-foreground/45"
-                style={{ top: `${cluster.frac * 100}%`, right: 'calc(100% + 2px)' }}
-              >
-                {cluster.items.length}
-              </span>
-            ) : null
-          )}
 
           {/* 预览气泡：贴着激活点左侧，尾巴正指激活点。单条提问只读（pointer-events-none，
               不抢指针）；多条提问时它是一份可点的清单，才需要接管指针 —— 见下面注释。 */}
