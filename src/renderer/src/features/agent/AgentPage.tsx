@@ -1746,7 +1746,7 @@ export function AgentPage({
               </div>
             ) : (
               <Conversation
-                className="min-h-0 flex-1 pt-4"
+                className="min-h-0 flex-1 pt-4 no-scrollbar"
                 resetKey={`${conversationId ?? '__none__'}#${scrollResetSeq}`}
               >
                 <ConversationContent>

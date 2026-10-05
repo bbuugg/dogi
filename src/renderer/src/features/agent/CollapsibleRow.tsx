@@ -88,7 +88,7 @@ function StickyBody({ bodyClassName, children }: { bodyClassName?: string; child
       */}
       <div
         ref={scrollRef}
-        className="min-h-0 max-h-64 overflow-y-auto [scrollbar-gutter:stable] mt-4"
+        className="min-h-0 max-h-64 overflow-y-auto [scrollbar-gutter:stable] mt-4 no-scrollbar"
         // 与消息区同一个理由：关掉 Chromium 的滚动锚定，滚动位置由库显式管理
         style={{ overflowAnchor: 'none' }}
       >

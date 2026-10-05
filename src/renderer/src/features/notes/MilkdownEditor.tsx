@@ -6,6 +6,7 @@ import { imageBlockSchema } from '@milkdown/kit/component/image-block'
 import { toggleLinkCommand } from '@milkdown/kit/component/link-tooltip'
 import { commandsCtx, editorViewCtx, KeymapReady, keymapCtx, type CmdKey } from '@milkdown/kit/core'
 import type { Ctx, MilkdownPlugin } from '@milkdown/kit/ctx'
+import { dropIndicatorState } from '@milkdown/kit/plugin/cursor'
 import {
   addBlockTypeCommand,
   codeBlockSchema,
@@ -98,6 +99,51 @@ const FEATURE_CONFIGS = {
       math: { label: '公式' }
     }
   }
+}
+
+/**
+ * 让 drop 指示线（拖块时的落点线）的回调在编辑器销毁后不再抛异常。
+ *
+ * ## 现象
+ *
+ * 拖动块的过程中关掉笔记标签，控制台出现一条没人接的异常：
+ * `Uncaught MilkdownError: Context "dropIndicatorState" not found, do you forget to inject it?`
+ *
+ * ## 原因（上游两处叠加，本地绕不开）
+ *
+ * 1. `prosemirror-drop-indicator` 在 drop / dragend / dragleave 时**延迟 30ms** 才调 onHide，
+ *    而它插件视图的 destroy 只摘监听、**不 clearTimeout**（见该包 `createDropIndicatorView`）
+ *    —— 那个定时器活得比编辑器还久。
+ * 2. Milkdown 把 `dropIndicatorState` 做成 `$ctx` 注入的 slice，它的 cleanup 就是
+ *    `ctx.remove(slice)`；`editor.destroy()` 一跑，slice 就从容器里没了。
+ *
+ * 两者一对：定时器落在 destroy 之后触发时，onHide 里的
+ * `ctx.set(dropIndicatorState.key, null)` 在 `Container.get` 找不到 slice，直接抛，
+ * 而它跑在 setTimeout 里，谁也接不住。
+ *
+ * ## 修法
+ *
+ * 只给**这一个 slice 的写入**加护栏：`isInjected` 为假就说明编辑器已经拆了，
+ * 这时的写入本来就无处可去（指示线的 DOM 元素也随插件视图一起被摘掉了），
+ * 静默丢弃即可。**别改成「ctx 写不存在的 slice 一律忽略」** —— 那样会把真正的
+ * 「忘了 inject」也一起吞掉，别处的 ctx 缺失仍然是 bug，该报。
+ *
+ * 护栏挂在 `editor.ctx` 的实例上：`Ctx` 的每个方法都是实例上的箭头函数字段，
+ * 而 `#prepare` 里 `ctx.produce(undefined)` 返回的就是 `#ctx` 本身（没开 inspector
+ * 时不 produce 新实例），所以插件闭包里拿到的正是这个实例 —— 改实例属性就够，
+ * 不用去动原型或上游包。（真开了 `enableInspector()` 的话 produce 会另建实例、
+ * 共享容器但不是同一个对象，那时护栏不生效；本项目没开。）
+ *
+ * 验证：`scripts/verify-notes-drop-indicator-teardown.mjs`。
+ */
+function guardDropIndicatorStateWrites(ctx: Ctx): void {
+  const dropKey = dropIndicatorState.key
+  const rawSet = ctx.set
+  // 只读性来自类型声明，运行时的实例属性是可写的；用局部类型断言绕过 readonly
+  ;(ctx as { set: Ctx['set'] }).set = ((sliceType: unknown, value: unknown) => {
+    if (sliceType === dropKey && !ctx.isInjected(dropKey)) return
+    rawSet.call(ctx, sliceType as never, value as never)
+  }) as Ctx['set']
 }
 
 /**
@@ -220,6 +266,8 @@ function CrepeEditor({ value = '', onChange }: MilkdownEditorProps) {
     })
     // 追加 Typora 风格键位（在 create 之前 use，官方插件同样在这一步注册）
     crepe.editor.use(typoraKeymapPlugin)
+    // 必须在 create 之前：销毁后再回调的 drop 指示线会写一个已被移除的 ctx slice
+    guardDropIndicatorStateWrites(crepe.editor.ctx)
 
     crepe.on((listener) => {
       listener.markdownUpdated((_ctx, markdown, prevMarkdown) => {

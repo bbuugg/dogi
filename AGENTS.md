@@ -1258,6 +1258,7 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 | `scripts/verify-agent-acp-import.mjs` | AI Agent 侧边栏 + ACP 会话「登记 → 新建/导入 → 回放」的界面链路（隔离实例 + CDP，见 4.3 / 4.18）：工作区行尾只有「新建会话」下拉（**形态在这里就选**：内置 Agent / 每个已登记的 `ACP · <名字>`）+ 一个「更多操作」下拉（导入 / 重命名 / 删除）→ **新建出来的是草稿**（`draft === true`）、**不进侧边栏列表**、页面上写明「发出第一条消息才建会话」、同一工作区连点两次是同一个空页 → 选内置模型只写草稿 → 发首条消息转正（标题取那条消息、清掉 `draft`、进列表）→ **导入弹窗只做 选 agent / 拉取会话 / 导入**（无检测 / 手动添加 / 新建会话按钮），无 agent 时提示、footer「ACP 设置」打开设置弹窗并定位到 ACP agent 分组、「拉取会话」对起不来的 agent 有反馈 → 用**真实路径**建 ACP 草稿（`createAgentConversation(ws, 'acp', acpAgentId)`，见 4.3）+ `setAcpConversationModel` 选模型→ 模型下拉只列**设置里勾选的**模型、**宽度被限死** → `history` 事件渲染成消息流、**正文不被折进折叠条**（注入 `[思考, 工具, 正文, 工具, 工具]`：正文在折叠体**外面**、纯工具轮次无复制按钮，见 6.6 第 34 条）、ACP 没有「编辑重发」入口 → ACP 草稿发首条消息转正（`acp` + 绑定带上、消息不落盘、进列表）、无草稿残留 → **标签右键菜单**：一级只有「关闭标签」，其余关闭方式收进「关闭」二级。⚠️ 断言列表行数要用 `[data-conversation-id]`（store 条数含草稿）；模型下拉要取**可见标签**里那个（每个标签各渲染一份，隐藏的那份选项按它自己的会话算，会是「暂无数据」）；**悬停展开 antd 子菜单**：真鼠标移动推不出 React 的 `onMouseEnter`，要对标题元素派发**带 `relatedTarget` 的 mouseover**；子菜单弹出层类名是 `.ant-dropdown-menu-submenu-popup`（不是老的 submenu-popup）；合成 contextmenu 没有 clientX/Y，右键要用 `Input.dispatchMouseEvent` 真事件（菜单弹在 (0,0) 会让后续坐标全错）；见 5.1 的「隔离实例首帧不提交」坑（探针里要先 `bringToFront` + `reload`） |
 | `scripts/verify-skills.mjs` | 技能发现（含 junction 安装）、无 frontmatter 退化、额外根目录、设置页渲染与开关落盘 |
 | `scripts/verify-context-compression.mjs` | 上下文压缩与会话累计（见 4.20）：`.tooltest` 包装直接跑 `services/ai/context.ts` 与 `@shared/agent-usage` **真源码** —— `estimateTokens` 口径、未超预算**零拷贝**、空历史、单轮超预算不压缩、摘要失败回退截断（含 `truncated` 标记与占位说明）、保留比例决定留几轮、非法预算回退默认值；累计 token 累加 / `totalTokens` 不反推 / 缺字段不产生 NaN。⚠️ 摘要失败用例靠**指向本机没人监听的端口**（`127.0.0.1:1`）触发，不碰外网 |
+| `scripts/verify-notes-drop-indicator-teardown.mjs` | 笔记块拖拽的**编辑器销毁期**回归（隔离实例 + CDP，先 `npm run build`）：打一次 `dragleave` 挂上 drop 指示线的 30ms 隐藏定时器 → 只拖不关标签不得抛 → **拖完立刻关标签**，那个落在 destroy 之后的回调也不得抛 `Context "dropIndicatorState" not found`。脚本在页内 hook `setTimeout` 数 30ms 定时器、并断言关闭时定时器仍在排队且编辑器确已从 DOM 摘掉，保证这条门不是空跑（见 6.5 第 32 条） |
 | `scripts/check-missing-color-utils.mjs` | 扫描产物 CSS，找出「语义色令牌漏映射导致整族工具类没生成」 |
 | `scripts/shot-titlebar.mjs` | 强制 hover 截图 + 计算样式，查标题栏配色 |
 | `scripts/browser-input.test.ts` | 浏览器面板的坐标映射纯函数（`object-contain` 留白 / 画面矩形 / 黑边丢点 / 滚轮）。**能直接跑**：`node --experimental-strip-types scripts/browser-input.test.ts`（被测文件只有 type-only import，不需要 `.tooltest` 包装） |
@@ -1735,6 +1736,23 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   子控件 `onChange` 只放「切换时的副作用」（如端口从 22 换成 3389），不要再手写
   `setFieldValue('kind', ...)` —— Field 先派发 store 更新、再调子组件 onChange，顺序安全。
 - **验证**：`scripts/verify-rdp-host-ui.mjs`（切「远程桌面」→ rdp 字段齐备、端口自动 3389）。
+
+**32. 拖块时关笔记标签 → `Context "dropIndicatorState" not found`（上游定时器活得比编辑器久）**
+
+- **现场**：拖动块的过程中把笔记标签关掉（或任何让编辑器卸载的动作），控制台一条没人接的
+  `Uncaught MilkdownError: Context "dropIndicatorState" not found`。功能不受影响，只是脏异常。
+- **根因**（上游两处叠加，调用点绕不开）：`prosemirror-drop-indicator` 在 drop / dragend / dragleave 时
+  **延迟 30ms** 才调 `onHide`，而它插件视图的 `destroy` 只摘监听、**不 `clearTimeout`** ——
+  那个定时器活得比 Milkdown 编辑器还久；同时 `dropIndicatorState` 是 `$ctx` 注入的 slice，
+  cleanup 就是 `ctx.remove(slice)`，`editor.destroy()` 一跑它就从容器里没了。
+  两者一对：定时器落在 destroy 之后触发时，`onHide` 的 `ctx.set(dropIndicatorState.key, null)`
+  在 `Container.get` 找不到 slice，直接抛，而它跑在 `setTimeout` 里，谁也接不住。
+- **正确做法**：`MilkdownEditor.tsx` 的 `guardDropIndicatorStateWrites` 在建编辑器时（**create 之前**）
+  给 `editor.ctx` 的 `set` 套一层护栏，只拦 `dropIndicatorState` 这一个 slice 且 `isInjected` 为假时静默丢弃。
+  挂**实例**上就够（`Ctx` 的方法是实例上的箭头函数字段，`#prepare` 里 `ctx.produce(undefined)`
+  返回的就是 `#ctx` 本身）；⚠️ **别改成「ctx 写不存在的 slice 一律忽略」** —— 那会把真正的
+  「忘了 inject」也一起吞掉，别处的 ctx 缺失仍然是 bug。
+- **验证**：`scripts/verify-notes-drop-indicator-teardown.mjs`。
 
 ### 6.6 AI / Agent 专项
 

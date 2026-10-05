@@ -3,6 +3,8 @@ out
 .vscode
 .trae
 .zcode
+.dogi
+.fishwork
 build/config.gypi
 release
 .merkle-snapshot.json
