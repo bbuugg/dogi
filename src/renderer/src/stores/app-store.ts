@@ -2267,6 +2267,14 @@ export const useAppStore = create<AppStore>()((set, get) => {
           (c) => c.workspaceId === wid && isDraftConversation(c)
         )
         const target = newConversation(wid, backend, acpAgentId)
+        /**
+         * ⚠️ 复用草稿时激活与开标签都必须是 **`existing.id`**，不能用 `target.id`：
+         * `target` 只是用来取形态字段的临时对象，它的 id 从没进过 `agentConversations`。
+         * 用它开标签的话，AgentPage 按 conversationId 查不到会话（conversation 为 undefined），
+         * 就退成「打开工作区面板」空态 —— 表现为「工作区里明明建了会话，却停在空页面」。
+         * 该工作区**一条真会话都没有**时必现：ensureConversation 已经先建了一条草稿。
+         */
+        const effectiveId = existing ? existing.id : target.id
         return {
           activeAgentWorkspaceId: wid,
           agentConversations: existing
@@ -2283,8 +2291,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
                 false
               )
             : [target, ...s.agentConversations],
-          activeAgentConversationId: target.id,
-          ...addOrFocusTab(s, agentTab(target))
+          activeAgentConversationId: effectiveId,
+          ...addOrFocusTab(s, agentTab({ id: effectiveId, title: target.title }))
         }
       }),
 
