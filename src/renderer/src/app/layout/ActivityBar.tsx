@@ -36,7 +36,7 @@ export function ActivityBar() {
 
   return (
     <nav
-      className="flex w-12 shrink-0 flex-col items-center gap-1 bg-sidebar py-2"
+      className="flex w-10 shrink-0 flex-col items-center gap-1 bg-sidebar py-2"
       aria-label="功能区"
     >
       {activities.map((a) => {

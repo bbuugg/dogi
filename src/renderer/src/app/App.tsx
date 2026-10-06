@@ -18,6 +18,7 @@ import { ResizeHandle } from '@/shared/components/ResizeHandle'
 import { AntdProvider } from '@/shared/components/AntdProvider'
 import { DndProvider } from 'react-dnd'
 import { HTML5Backend } from 'react-dnd-html5-backend'
+import { cn } from 'cn'
 
 export default function App() {
   const activeSessionId = useAppStore((s) => s.activeSessionId)
@@ -79,7 +80,14 @@ export default function App() {
             />
           )}
 
-          <main className="relative flex min-w-0 flex-1 flex-col bg-sidebar px-2">
+          {/* 左侧内边距只在侧边栏展开时给：折叠后活动栏直接紧贴内容区，
+              再留 8px 会让活动栏显得更宽（同色背景上凭空多出一条空隙）。 */}
+          <main
+            className={cn(
+              'relative flex min-w-0 flex-1 flex-col bg-sidebar px-2',
+              !sidebarVisible && 'pl-0'
+            )}
+          >
             {/* 主区域恒为 PanelView：AI Agent 会话也是其中一种标签。
                 切到某个功能区**不会**自动打开它的标签（与笔记一致）：
                 只有点侧边栏里的具体条目（会话 / 笔记）才会把对应标签带到前台。 */}

@@ -36,7 +36,7 @@ export function StatusBar({ right }: { right?: ReactNode }) {
   const [transfer, setTransfer] = useState<TransferMode>(null)
 
   return (
-    <footer className="flex h-8 shrink-0 items-center gap-0.5 bg-sidebar px-1">
+    <footer className="px-2 flex h-8 shrink-0 items-center gap-0.5 bg-sidebar">
       <MenuButton onTransfer={setTransfer} />
 
       {/* 右侧区域：由外部按当前上下文注入（无内容时不留白） */}
@@ -217,7 +217,9 @@ function MenuButton({ onTransfer }: { onTransfer: (mode: TransferMode) => void }
         type="text"
         title="菜单"
         icon={<Menu className="size-4" />}
-        className={STATUS_ITEM_CLASS + ' relative'}
+        // 图标按钮要方形：antd text 按钮自带 `padding: 4px 15px`，不吃 Tailwind 的 px/py
+        //（cssinjs 不在 @layer 里，优先级更高），必须靠 index.css 的 .status-square-btn 覆盖。
+        className="status-square-btn relative"
       >
         {updateState === 'available' ? (
           <span

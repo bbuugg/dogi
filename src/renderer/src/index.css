@@ -145,6 +145,26 @@
   min-width: 0;
 }
 
+/* 状态栏里的方形图标按钮（全局菜单）。
+ * antd text 按钮自带 `padding: 4px 15px`（cssinjs，不在 @layer utilities 里，
+ * Tailwind 的 px-* / py-* 压不住），所以宽高与内边距都在这里用 !important 锁死。 */
+.status-square-btn.ant-btn {
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  padding: 0 !important;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted-foreground);
+  border-radius: 4px;
+}
+
+.status-square-btn.ant-btn:hover {
+  color: var(--foreground);
+  background-color: var(--sidebar-accent);
+}
+
 /* 自定义标题栏：拖拽区域（窗口控制按钮等交互元素需用 app-no-drag 排除） */
 @utility app-drag {
   -webkit-app-region: drag;
