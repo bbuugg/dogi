@@ -1,11 +1,13 @@
-import { useAppStore } from '@/stores/app-store'
+import { conversationKind, useAppStore } from '@/stores/app-store'
 import {
   selectConversationListMeta,
   type ConversationListMeta
 } from '@/features/agent/conversation-list-meta'
 import { AcpImportDialog } from '@/features/agent/AcpImportDialog'
+import { AgentUsageDrawer } from '@/features/agent/AgentUsageDrawer'
+import { GitCloneDialog } from '@/features/agent/GitCloneDialog'
 import type { AgentWorkspace } from '@shared/types'
-import { Button, Checkbox, Dropdown, Input, Modal, message } from 'antd'
+import { Button, Checkbox, Dropdown, Input, Modal, Tooltip, message } from 'antd'
 import type { MenuProps } from 'antd'
 import { cn } from 'cn'
 import {
@@ -16,13 +18,18 @@ import {
 import {
   Archive,
   ArchiveRestore,
+  BarChart3,
   Bot,
+  Check,
   ChevronRight,
   CirclePause,
+  FileDown,
   Folder,
   FolderPlus,
+  GitBranch,
   Import,
   Loader2,
+  MessageSquare,
   MessageSquarePlus,
   MoreHorizontal,
   Pencil,
@@ -31,6 +38,7 @@ import {
   Trash2
 } from 'lucide-react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { revealTruncatedName, resetTruncatedName } from '@/shared/lib/hover-reveal'
 
 /** 「没登记任何 ACP agent」时的稳定空数组：selector 必须每次返回同一引用（见 zustand 快照比较） */
 const EMPTY_ACP_AGENTS: { id: string; name: string }[] = []
@@ -55,7 +63,8 @@ const ConversationRow = memo(function ConversationRow({
   onOpen,
   onRename,
   onDelete,
-  onToggleArchive
+  onToggleArchive,
+  onExport
 }: {
   /** 列表投影条目（结构共享：只有列表可见字段变了才会换引用，见 selectConversationListMeta） */
   meta: ConversationListMeta
@@ -66,13 +75,48 @@ const ConversationRow = memo(function ConversationRow({
   onRename: (meta: ConversationListMeta) => void
   onDelete: (meta: ConversationListMeta) => void
   onToggleArchive: (meta: ConversationListMeta) => void
+  /** 导出成 JSON 文件（带走 / 分享 / 当模板） */
+  onExport: (meta: ConversationListMeta) => void
 }) {
   const { id, title } = meta
+  /** 有效形态：走 `conversationKind` 兼容缺 `kind` 的老存档（别各处自己判 kind） */
+  const kind = conversationKind(meta)
+  /** 外部 ACP agent 管理的会话（行首图标、行尾菜单都按它分叉） */
+  const isAcp = kind === 'acp'
+  /**
+   * 「更多」下拉里的动作：**导出**（低频）+ **删除**（收在菜单最下方，危险色）。
+   * 归档 / 重命名仍然常驻行尾 —— 它们是高频轻动作，藏进菜单反而多一次点击。
+   *
+   * 「从此签出」**不在这里**：签出是「从会话里某条消息分出一条新会话」，
+   * 入口挂在那条消息的 hover 操作行上（见 AgentPage 的消息级签出）。
+   *
+   * ⚠️ **ACP 会话没有「导出」**：它的消息在 agent 那边，本地一个字节都没有，
+   * 导出只会得到一份空壳。但**删除照给** —— 那是每个会话都要有的动作，
+   * 只是被收进了菜单，不能因为类型不同就整个菜单都不给。
+   */
+  const canExport = kind !== 'acp'
+  /**
+   * 归档的**就地二次确认**（对齐 fishwork）：第一次点只把按钮变成「确认归档」的勾
+   * （amber 高亮，提示「再点一次才生效」），再点才真归档；鼠标移开该行即反悔。
+   *
+   * 为什么不用弹窗：归档完全可逆（恢复按钮就在同一个位置），弹窗把一个轻动作做重了；
+   * 也为什么「恢复」不走这套 —— 取回本来就是一键直达，再拦一道是添乱。
+   */
+  const [confirmingArchive, setConfirmingArchive] = useState(false)
+  const moreItems: MenuProps['items'] = canExport
+    ? [
+        { key: 'export', label: '导出会话…', icon: <FileDown className="size-3.5" /> },
+        { type: 'divider' },
+        { key: 'delete', label: '删除会话', icon: <Trash2 className="size-3.5" />, danger: true }
+      ]
+    : [{ key: 'delete', label: '删除会话', icon: <Trash2 className="size-3.5" />, danger: true }]
   return (
     <div
       /* data-conversation-id：探针用来数「列表里到底有几条会话」
          （草稿不进列表，光看 store 里的条数是看不出来的） */
       data-conversation-id={id}
+      /* 形态：探针据此断言「行首那枚图标确实跟着形态变」（不必去猜图标是哪个组件） */
+      data-conversation-kind={isAcp ? 'acp' : 'mastra'}
       onClick={() => onOpen(workspaceId, id)}
       className={cn(
         // 缩进交给下面那个「图标槽」占位（不再写 pl-*），标题才能和工作区名称同列
@@ -83,18 +127,31 @@ const ConversationRow = memo(function ConversationRow({
           : 'text-muted-foreground hover:bg-foreground/5 hover:text-foreground'
       )}
       title={title}
+      /* 名字被行尾浮层挤到截断时，hover 让它自己滑到行尾（见 shared/lib/hover-reveal.ts）：
+         移开即复位。归档确认态也在这里一起反悔 —— 确认按钮本来就是 hover 浮层的一部分 */
+      onMouseEnter={(e) => revealTruncatedName(e.currentTarget)}
+      onMouseLeave={(e) => {
+        resetTruncatedName(e.currentTarget)
+        setConfirmingArchive(false)
+      }}
     >
       {/*
-        状态图标槽：**始终占位**（静止时是空的）—— 等待处理 > 运行中。
+        行首图标槽：**始终占位**（16px）—— 优先级与 fishwork 一致：
+        **等你回答 / 确认 > 运行中 > 已归档 > ACP > 内置**。
+
         占位而不是「有图标才渲染」是为了两列对齐：
         槽左边 = 行的 px-1.5、宽度 size-4，于是
           ① 运行中的转圈 / 等待图标与工作区那一行的**展开箭头**同列
             （工作区自己那枚「文件夹 / 运行中」图标在箭头右边一格）；
           ② 标题从 px-1.5 + 16 + gap-1.5 = 28px（pl-7）起，
             与工作区**名称同列**，也不会因为当前有没有图标而左右跳。
+
+        停下来时这个槽显示**形态图标**：会话列表里内置 Mastra 会话与外部 ACP 会话混在一起，
+        光看标题分不清点下去是谁在干活（ACP 的消息既不在本地、也不能签出 / 导出）。
+        形态判定一律 `kind === 'acp'`，缺省 / 旧存档落进 else 分支即内置。
       */}
       <span
-        className="flex size-4 shrink-0 items-center justify-center"
+        className="flex size-4 shrink-0 items-center justify-center text-muted-foreground"
         title={
           status === 'ask'
             ? '等待你回答提问'
@@ -102,7 +159,11 @@ const ConversationRow = memo(function ConversationRow({
               ? '等待你确认操作'
               : status === 'running'
                 ? '正在运行'
-                : undefined
+                : meta.archived
+                  ? '已归档会话'
+                  : isAcp
+                    ? '外部 ACP Agent 管理的会话'
+                    : '内置 Agent 的会话'
         }
       >
         {status === 'ask' || status === 'confirm' ? (
@@ -111,25 +172,56 @@ const ConversationRow = memo(function ConversationRow({
           <CirclePause className="size-4 text-amber-500" />
         ) : status === 'running' ? (
           <Loader2 className="size-4 animate-spin text-primary" />
-        ) : null}
+        ) : meta.archived ? (
+          // 归档的会话在「已归档」分组里，行首也换一枚图标，扫一眼就知道这行是折起来的
+          <Archive className="size-4" />
+        ) : isAcp ? (
+          <Bot className="size-4" />
+        ) : (
+          <MessageSquare className="size-4" />
+        )}
       </span>
-      {/* hover 时才把右侧三格让给「归档 / 重命名 / 删除」浮层（pe-* 按按钮个数取） */}
-      <span className={SIDEBAR_ROW_NAME.three}>{title}</span>
+      {/* hover 时才把右侧让给「归档 / 重命名 / 更多」浮层（pe-* 按按钮个数取）。
+          三种会话行都是三格（删除收进「更多」，不再单独占一格）。
+          `data-name-text`：被挤成省略号时由 hover-reveal 滑到行尾（见行上的 onMouseEnter） */}
+      <span data-name-text className={SIDEBAR_ROW_NAME.three}>
+        {title}
+      </span>
       <SidebarRowActions
         hoverClass="group-hover:pointer-events-auto group-hover:opacity-100 max-md:pointer-events-auto max-md:opacity-100"
       >
         <button
           type="button"
-          title={meta.archived ? '恢复会话' : '归档会话'}
-          aria-label={`${meta.archived ? '恢复' : '归档'}会话 ${title}`}
+          title={
+            meta.archived
+              ? '恢复会话'
+              : confirmingArchive
+                ? `再点一次确认归档「${title}」`
+                : '归档会话'
+          }
+          aria-label={
+            meta.archived ? `恢复会话 ${title}` : confirmingArchive ? '确认归档' : `归档会话 ${title}`
+          }
           onClick={(e) => {
             e.stopPropagation()
-            onToggleArchive(meta)
+            // 归档走「点两次就地确认」：第一次点变成确认图标（勾），再点才真归档
+            //（鼠标移开该行即反悔，见行上的 onMouseLeave）。恢复可逆，保持一键直达。
+            if (meta.archived || confirmingArchive) {
+              setConfirmingArchive(false)
+              onToggleArchive(meta)
+            } else {
+              setConfirmingArchive(true)
+            }
           }}
-          className={SIDEBAR_ROW_ACTION}
+          className={cn(
+            SIDEBAR_ROW_ACTION,
+            confirmingArchive && 'bg-amber-500/10 text-amber-500 hover:bg-amber-500/20'
+          )}
         >
           {meta.archived ? (
             <ArchiveRestore className="size-3.5" />
+          ) : confirmingArchive ? (
+            <Check className="size-3.5" />
           ) : (
             <Archive className="size-3.5" />
           )}
@@ -146,18 +238,31 @@ const ConversationRow = memo(function ConversationRow({
         >
           <Pencil className="size-3.5" />
         </button>
-        <button
-          type="button"
-          title="删除会话"
-          aria-label={`删除会话 ${title}`}
-          onClick={(e) => {
-            e.stopPropagation()
-            onDelete(meta)
+        {/* 「更多」：低频动作（导出）+ 删除收在这里，行尾才不至于排满图标。
+            ⚠️ 必须 stopPropagation —— 这一行整体可点（打开会话），
+            不拦的话点菜单会顺手把会话也打开。 */}
+        <Dropdown
+          trigger={['click']}
+          placement="bottomRight"
+          menu={{
+            items: moreItems,
+            onClick: ({ key, domEvent }) => {
+              domEvent.stopPropagation()
+              if (key === 'export') onExport(meta)
+              else if (key === 'delete') onDelete(meta)
+            }
           }}
-          className={cn(SIDEBAR_ROW_ACTION, 'hover:bg-destructive/10 hover:text-destructive')}
         >
-          <Trash2 className="size-3.5" />
-        </button>
+          <button
+            type="button"
+            title="更多操作"
+            aria-label={`更多操作 ${title}`}
+            onClick={(e) => e.stopPropagation()}
+            className={SIDEBAR_ROW_ACTION}
+          >
+            <MoreHorizontal className="size-3.5" />
+          </button>
+        </Dropdown>
       </SidebarRowActions>
     </div>
   )
@@ -182,7 +287,9 @@ function defaultName(path: string): string {
  *
  * 一个工作区（绑定的本地目录）下可以有多个会话，每个会话是独立的消息历史与
  * Agent 上下文（ACP 后端的 agent session 也按会话隔离）。
- * 工作区行可展开/收起，展开后列出该工作区的会话：点击即切换，行尾可重命名 / 删除。
+ * 工作区行可展开/收起，展开后列出该工作区的会话：点击即切换，
+ * 行尾可归档 / 重命名，低频动作（导出、删除）收在「更多」菜单里。
+ * 「从此签出」不在这一层 —— 它是对**某条消息**的动作，入口在对话流里。
  *
  * 布局与交互对齐「主机 / 脚本」侧边栏，但这里只有两层、不需要拖拽排序。
  */
@@ -209,6 +316,8 @@ export function AgentPanel() {
   const renameAgentConversation = useAppStore((s) => s.renameAgentConversation)
   const deleteAgentConversation = useAppStore((s) => s.deleteAgentConversation)
   const setAgentConversationArchived = useAppStore((s) => s.setAgentConversationArchived)
+  const exportAgentConversation = useAppStore((s) => s.exportAgentConversation)
+  const importAgentConversation = useAppStore((s) => s.importAgentConversation)
   const saveAgentWorkspace = useAppStore((s) => s.saveAgentWorkspace)
   const deleteAgentWorkspace = useAppStore((s) => s.deleteAgentWorkspace)
 
@@ -225,7 +334,11 @@ export function AgentPanel() {
   const [archivesExpanded, setArchivesExpanded] = useState<string[]>([])
   /** 正在为哪个工作区导入会话（null = 弹窗关闭） */
   const [importTarget, setImportTarget] = useState<AgentWorkspace | null>(null)
+  /** 「从 Git 克隆新工作区」弹窗 */
+  const [cloning, setCloning] = useState(false)
   const [picking, setPicking] = useState(false)
+  /** AI 用量统计抽屉（跨会话的 token 汇总） */
+  const [usageOpen, setUsageOpen] = useState(false)
 
   /**
    * 切换到**另一个**工作区时把它展开（从别处切过来也能立刻看到它的会话）。
@@ -322,6 +435,27 @@ export function AgentPanel() {
         ? prev.filter((x) => x !== workspaceId)
         : [...prev, workspaceId]
     )
+  /** 导出成 JSON 文件：从主进程读真源（渲染端这份可能正处在流式中途） */
+  const exportConversation = useCallback(
+    async (meta: ConversationListMeta) => {
+      const result = await exportAgentConversation(meta.id)
+      // 用户自己按的取消不算失败 —— 弹红字会让人以为哪里坏了
+      if (result.canceled) return
+      if (!result.ok) message.error(`导出失败：${result.reason ?? '未知原因'}`)
+      else message.success(`已导出到 ${result.path}`)
+    },
+    [exportAgentConversation]
+  )
+  /** 从文件导入一条会话到某个工作区（导入即落盘，成功后自动选中） */
+  const importConversationFile = useCallback(
+    async (workspaceId: string) => {
+      const result = await importAgentConversation(workspaceId)
+      if (result.canceled) return
+      if (!result.ok) message.error(`导入失败：${result.reason ?? '未知原因'}`)
+      else message.success(`已导入会话「${result.conversation?.title ?? ''}」`)
+    },
+    [importAgentConversation]
+  )
 
   const toggleExpand = (id: string) =>
     setExpanded((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
@@ -437,7 +571,11 @@ export function AgentPanel() {
    * 导入会话 / 重命名 / 删除（原先连重命名、删除也是平铺按钮，行一窄就把工作区名挤没了）。
    */
   const workspaceMenuItems = (): MenuProps['items'] => [
-    { key: 'import', label: '导入会话', icon: <Import className="size-3.5" /> },
+    // 两个「导入」是不同的东西，标签里必须写清：
+    // - ACP 会话：从**外部 agent** 那边拉它自己的会话列表（session/list）回来绑定；
+    // - 会话文件：读一份导出的 JSON（可以是从别的机器带过来的）。
+    { key: 'import', label: '导入 ACP 会话…', icon: <Import className="size-3.5" /> },
+    { key: 'importFile', label: '导入会话文件…', icon: <FileDown className="size-3.5" /> },
     { type: 'divider' },
     { key: 'rename', label: '重命名工作区', icon: <Pencil className="size-3.5" /> },
     {
@@ -454,6 +592,7 @@ export function AgentPanel() {
       // 菜单挂在会切换展开状态的行上：不拦住冒泡的话，点「重命名」会顺手把列表收起
       domEvent.stopPropagation()
       if (key === 'import') setImportTarget(w)
+      else if (key === 'importFile') void importConversationFile(w.id)
       else if (key === 'rename') setEdit({ id: w.id, name: w.name, path: w.path })
       else if (key === 'delete') setPendingDelete(w)
     }
@@ -464,14 +603,45 @@ export function AgentPanel() {
         <span className="text-sm font-medium text-muted-foreground">
           工作区 ({workspaces.length})
         </span>
-        <Button
-          type="text"
-          size="small"
-          className="px-0.5 text-muted-foreground"
-          title="新建工作区"
-          icon={<Plus className="size-3.5" />}
-          onClick={() => setEdit({ name: '', path: '' })}
-        />
+        {/* 右侧按钮组必须**收进一个子容器**：外层是 justify-between，三个直接子元素时
+            中间那个会被摆到正中间 —— 用量按钮就因此浮在标题和加号之间（像孤儿）。
+            包一层之后左侧只剩标题、右侧只剩按钮组，两边各归各位。 */}
+        <div className="flex shrink-0 items-center gap-0.5">
+          {/* 用量统计（跨会话）：放在工作区列表头上 —— 统计的数据源就是这些会话，
+              从这里打开上下文是连贯的（看一眼总量 → 想看看哪条会话烧的 → 点进去）。
+              与「新建工作区」加号同侧成组，都是这颗头上的全局动作 */}
+          <Tooltip title="AI 用量统计">
+            <Button
+              type="text"
+              size="small"
+              className="px-0.5 text-muted-foreground"
+              icon={<BarChart3 className="size-3.5" />}
+              onClick={() => setUsageOpen(true)}
+            />
+          </Tooltip>
+          {/* 新建工作区有两条路：选一个已有目录 / 从 Git 克隆一个出来（克隆完自动建好工作区） */}
+          <Dropdown
+            trigger={['click']}
+            menu={{
+              items: [
+                { key: 'pick', label: '选择已有目录…', icon: <Folder className="size-3.5" /> },
+                { key: 'clone', label: '从 Git 克隆…', icon: <GitBranch className="size-3.5" /> }
+              ],
+              onClick: ({ key }) => {
+                if (key === 'pick') setEdit({ name: '', path: '' })
+                else setCloning(true)
+              }
+            }}
+          >
+            <Button
+              type="text"
+              size="small"
+              className="px-0.5 text-muted-foreground"
+              title="新建工作区"
+              icon={<Plus className="size-3.5" />}
+            />
+          </Dropdown>
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
@@ -652,6 +822,7 @@ export function AgentPanel() {
                           onRename={startConvRename}
                           onDelete={startConvDelete}
                           onToggleArchive={toggleConvArchive}
+                          onExport={exportConversation}
                         />
                       ))}
 
@@ -689,6 +860,7 @@ export function AgentPanel() {
                                   onRename={startConvRename}
                                   onDelete={startConvDelete}
                                   onToggleArchive={toggleConvArchive}
+                                  onExport={exportConversation}
                                 />
                               ))}
                             </div>
@@ -811,6 +983,8 @@ export function AgentPanel() {
         />
       )}
 
+      {cloning && <GitCloneDialog open onClose={() => setCloning(false)} />}
+
       {/* 删除工作区确认 */}
       <Modal
         open={pendingDelete !== null}
@@ -828,6 +1002,18 @@ export function AgentPanel() {
           「{pendingDelete?.name}」及其全部会话都将被移除（不会删除目录中的文件）。
         </p>
       </Modal>
+
+      {/* AI 用量统计：点某条会话直接跳过去（先切工作区再选会话，否则会话在别的
+          工作区下会「选中了但侧边栏没展开」） */}
+      <AgentUsageDrawer
+        open={usageOpen}
+        onClose={() => setUsageOpen(false)}
+        onOpenConversation={(id, workspaceId) => {
+          setUsageOpen(false)
+          if (workspaceId) selectAgentWorkspace(workspaceId)
+          selectAgentConversation(id)
+        }}
+      />
     </div>
   )
 }

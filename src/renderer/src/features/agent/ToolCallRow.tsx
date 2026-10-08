@@ -1,4 +1,5 @@
 import {
+  Camera,
   CircleCheck,
   CircleQuestionMark,
   CircleSlash,
@@ -9,6 +10,7 @@ import {
   FileSearch,
   FileText,
   FolderTree,
+  GitBranch,
   Keyboard,
   Loader2,
   MonitorDot,
@@ -21,7 +23,7 @@ import {
   type LucideIcon
 } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Tooltip } from 'antd'
+import { Image as AntImage, Tooltip } from 'antd'
 import { cn } from 'cn'
 import { CollapsibleRow } from '@/features/agent/CollapsibleRow'
 import { ACP_KIND_LABELS, ACP_UNNAMED_TOOL } from '@shared/acp-tools'
@@ -43,6 +45,9 @@ export const TOOL_LABELS: Record<string, string> = {
   edit_file: '编辑文件',
   delete_file: '删除文件',
   execute_command: '执行命令',
+  git_read: '查看 Git',
+  screenshot: '网页截图',
+  browser_screenshot: '页面截图',
   read_skill: '读取技能',
   // 终端 AI 助手
   run_in_terminal: '执行终端命令',
@@ -63,12 +68,40 @@ const TOOL_ICONS: Record<string, LucideIcon> = {
   edit_file: FilePenLine,
   delete_file: Trash2,
   execute_command: Terminal,
+  git_read: GitBranch,
+  screenshot: Camera,
+  browser_screenshot: Camera,
   read_skill: Sparkles,
   run_in_terminal: Terminal,
   send_keys: Keyboard,
   read_terminal_output: ScrollText,
   list_terminal_sessions: MonitorDot,
   'ask_followup_question': CircleQuestionMark
+}
+
+/** 会产出「可查看图片地址」的截图类工具（结果里带 dogi-ws:// 时卡片渲染缩略图） */
+const SHOT_TOOLS = new Set(['screenshot', 'browser_screenshot'])
+
+function isShotTool(name: string): boolean {
+  return SHOT_TOOLS.has(name)
+}
+
+/**
+ * **可单条停止**的工具（卡片上给一颗「停止」，只杀这一条命令的进程树）。
+ *
+ * 只有工作区的 `execute_command` 在主进程登记了杀手（见 command-stop.ts）——
+ * 终端页的 `run_in_terminal` 是把命令送进用户自己的终端会话，进程归那个终端管，
+ * 停它要走终端自己的 Ctrl-C，这里不接。ACP agent 的命令更是完全在它自己的进程里。
+ */
+const STOPPABLE_TOOLS = new Set(['execute_command'])
+
+/**
+ * 从工具结果里抠出第一个 `dogi-ws://` 图片地址（主进程拼好放在结果文本里）。
+ * 只在截图类工具上调用 —— 别的工具结果里出现这个 scheme 的概率极低，不误伤。
+ */
+function firstWorkspaceMediaUrl(text: string): string | null {
+  const m = /dogi-ws:\/\/[^\s)"'<>]+/.exec(text)
+  return m ? m[0] : null
 }
 
 /**
@@ -332,7 +365,8 @@ export function ToolCallRow({
   className,
   title,
   acpKind,
-  inputText
+  inputText,
+  onStop
 }: {
   toolName: string
   /** 工具入参（tool-call 的 input） */
@@ -356,6 +390,14 @@ export function ToolCallRow({
    * 变成「肉眼可见在打字」。完整 tool-call 到达后该字段被摘掉，自动回到 diff / 参数形态。
    */
   inputText?: string
+  /**
+   * 「停止这条命令」的回调。只在**可单条停止**的工具（见 `STOPPABLE_TOOLS`）处于
+   * `running` 时才会渲染出按钮 —— 调用方无脑传即可，是否显示由本组件判定。
+   *
+   * ⚠️ 与调用方的「停止整轮」是两回事：那个掐掉整个回合（含还没跑的步骤），
+   * 这个只杀这一条命令、本轮继续（见主进程 command-stop.ts）。
+   */
+  onStop?: () => void
 }) {
   const [open, setOpen] = useState(status === 'pending')
 
@@ -400,13 +442,20 @@ export function ToolCallRow({
   const hideParams = Boolean(fileDiff) || bareOutput
   const paramsText = hideParams || input == null ? '' : clip(formatJson(input))
   const errorText = isError ? clip(formatJson(output)) : ''
-  const outputText = fileDiff || isError || output === undefined ? '' : clip(formatJson(output))
+  /** 结果全文（未截断）：截图地址在文本末尾，截断后再抠可能抠不到 */
+  const outputFull = fileDiff || isError || output === undefined ? '' : formatJson(output)
+  const outputText = clip(outputFull)
+  // 截图类工具的产物：结果里带 `dogi-ws://` 图片地址时直接渲染缩略图（可点击放大），
+  // 否则用户只看到一个文件路径，等于没截
+  const shotUrl = isShotTool(toolName) ? firstWorkspaceMediaUrl(outputFull) : null
   // 工具名后面的明细：优先取入参里最能说明「在干什么」的主参数（路径 / 命令 / 查询…），
   // ACP 工具入参偏薄（或压根没有）时回退到 agent 给的 title（路径 / 命令描述）。
   // 入参还在生成时没有可用的 input，改从半截 JSON 里抠（抠出路径 / 命令就显示）。
   // ⚠️ title 只进这里、绝不进工具名（见 toolLabelOf）：否则脚本 / 命令类会把整段命令顶替工具名。
   const preview = (streaming?.detail || toolArgPreview(input) || title || '').replace(/\s+/g, ' ')
   const hasBody = Boolean(fileDiff || streamingText || paramsText || errorText || outputText || confirm)
+  /** 这条命令还在跑、且调用方接了单条停止 → 横条上给一颗「停止」（见 STOPPABLE_TOOLS） */
+  const canStop = status === 'running' && Boolean(onStop) && STOPPABLE_TOOLS.has(toolName)
 
   return (
     <CollapsibleRow
@@ -442,6 +491,16 @@ export function ToolCallRow({
           {paramsText && (
             <ToolSection title="参数" text={paramsText} copyTitle="复制参数" />
           )}
+          {shotUrl && (
+            <div className="w-fit overflow-hidden rounded-md border border-border">
+              <AntImage
+                src={shotUrl}
+                alt="截图"
+                className="max-h-80 w-auto"
+                preview={{ mask: <div className="text-xs text-white/90">点击放大</div> }}
+              />
+            </div>
+          )}
           {errorText && (
             <ToolSection title="错误" text={errorText} copyTitle="复制错误" error />
           )}
@@ -476,6 +535,28 @@ export function ToolCallRow({
           >
             {preview}
           </span>
+        </Tooltip>
+      )}
+      {canStop && (
+        // 「停止」在状态图标**之前**：状态图标是这一行固定的收尾记号（与展开箭头一起
+        // 贴右端），中间插一个会动的按钮会让它在有/无之间来回跳。
+        <Tooltip title="停止这条命令（本轮其它步骤照常继续）">
+          <button
+            type="button"
+            aria-label="停止这条命令"
+            onClick={(e) => {
+              // 横条整行可点（展开/收起），别让这次点击顺带把它折起来
+              e.stopPropagation()
+              onStop?.()
+            }}
+            className={cn(
+              'shrink-0 rounded border border-border px-1.5 text-[11px] leading-4',
+              'text-muted-foreground transition-colors',
+              'hover:border-destructive/50 hover:bg-destructive/10 hover:text-destructive'
+            )}
+          >
+            停止
+          </button>
         </Tooltip>
       )}
       <Tooltip title={meta.label}>

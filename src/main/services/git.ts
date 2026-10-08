@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
-import { readdir, rm, stat, unlink } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, readdir, rm, stat, unlink } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import type {
   GitAction,
   GitBranchesResult,
@@ -11,7 +11,7 @@ import type {
 } from '@shared/types'
 
 /** 一次 git 调用的原始结果 */
-interface GitRun {
+export interface GitRun {
   code: number
   stdout: string
   stderr: string
@@ -27,7 +27,11 @@ interface GitRun {
  * 中文文件名于是变成 `"\344\270\255\346\226\207.txt"` 这种东西（面板里就是这么显示的）。
  * 关掉之后中文 / emoji 都按原样输出（含空格的路径仍会被 `"` 包起来，见 unquotePath）。
  */
-function runGit(cwd: string, args: string[]): Promise<GitRun> {
+function runGit(
+  cwd: string,
+  args: string[],
+  opts?: { timeoutMs?: number }
+): Promise<GitRun> {
   return new Promise((resolve) => {
     const proc = spawn('git', ['-c', 'core.quotepath=false', ...args], {
       cwd,
@@ -41,11 +45,52 @@ function runGit(cwd: string, args: string[]): Promise<GitRun> {
     })
     let stdout = ''
     let stderr = ''
+    /**
+     * 超时兜底：网络类命令（push / pull / fetch / clone）没配凭据、SSH 卡在交互、
+     * 代理黑洞时可能永远不结束。超时后 kill 掉，错误信息里带上「超时」两个字，
+     * 别让面板停在一个转圈的按钮上（挂死比失败难查）。
+     */
+    let timedOut = false
+    const timer =
+      opts?.timeoutMs !== undefined
+        ? setTimeout(() => {
+            timedOut = true
+            proc.kill()
+          }, opts.timeoutMs)
+        : null
     proc.stdout.on('data', (d) => (stdout += d))
     proc.stderr.on('data', (d) => (stderr += d))
     proc.on('error', (e) => (stderr += String(e)))
-    proc.on('close', (code) => resolve({ code: code ?? 0, stdout, stderr }))
+    proc.on('close', (code) => {
+      if (timer) clearTimeout(timer)
+      resolve({
+        code: code ?? 0,
+        stdout,
+        stderr: timedOut ? `git ${args[0] ?? ''} 超时（${opts?.timeoutMs}ms）已终止` : stderr
+      })
+    })
   })
+}
+
+/**
+ * **只读** git 命令的执行入口，给 Agent 的 `git_read` 工具用（见 services/ai/git-read.ts）。
+ *
+ * ⚠️ 与 `runAction` 的写路径分开：这里只负责跑命令，**不碰仓库状态**。
+ * 参数白名单在调用方（git-read.ts）把关 —— 这个函数不做校验，别把它当安全边界。
+ * 固定 30s 超时：只读命令都是本地操作，跑不完基本是仓库损坏或巨量 diff。
+ */
+export async function runGitRead(cwd: string, args: string[]): Promise<GitRun> {
+  return runGit(cwd, args, { timeoutMs: 30_000 })
+}
+
+/** 路径是否存在（clone 前判目标目录用） */
+async function exists(path: string): Promise<boolean> {
+  try {
+    await stat(path)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** 是否是 git 仓库（在 cwd 里能找到工作树与仓库根） */
@@ -54,39 +99,70 @@ export async function isGitRepo(cwd: string): Promise<boolean> {
   return r.stdout.trim() === 'true'
 }
 
+/**
+ * 这台机器上有没有装 git（面板的「未安装」引导用）。
+ *
+ * 判据用 `git --version` 的**退出码**而不是 stdout 内容：没装时 spawn 触发 `error`
+ * 事件（ENOENT），stderr 里是 node 的一段报错；装了但输出异常（老版本 / 别的实现）
+ * 只要退出码 0 就算能用。
+ */
+export async function gitVersion(): Promise<{ installed: boolean; version: string | null }> {
+  const r = await runGit(process.cwd(), ['--version'])
+  return r.code === 0
+    ? { installed: true, version: r.stdout.trim() || null }
+    : { installed: false, version: null }
+}
+
+/**
+ * 从仓库地址推导默认目录名：取路径最后一段、去掉 `.git` 后缀。
+ * `https://host/owner/repo.git`、`git@host:owner/repo.git` 都适用；推不出来返回空串。
+ */
+export function repoNameFromUrl(url: string): string {
+  const cleaned = url.trim().replace(/\/+$/, '').replace(/\.git$/, '')
+  return cleaned.split(/[/:]/).filter(Boolean).pop() ?? ''
+}
+
+/**
+ * 仓库地址的基本合法性：非空、不以 `-` 开头（git 会把以 `-` 开头的参数当选项解析）、
+ * 不含换行。ssh / https / git:// / 本地路径都放行。
+ */
+export function assertSafeRepoUrl(url: string): void {
+  const trimmed = url.trim()
+  if (!trimmed) throw new Error('仓库地址不能为空')
+  if (trimmed.startsWith('-')) throw new Error('仓库地址不能以「-」开头')
+  if (/[\r\n]/.test(trimmed)) throw new Error('仓库地址不能包含换行')
+}
+
+/** clone 缺省超时：大仓库走慢网也要给足（10 分钟） */
+const CLONE_TIMEOUT_MS = 10 * 60 * 1000
+
+/**
+ * 克隆远端仓库到 `destDir`（完整目标路径），返回克隆后的仓库根（即 destDir）。
+ *
+ * 两条防线叠着挡参数注入：`assertSafeRepoUrl` 显式拒绝 `-` 开头的地址，
+ * 命令行再加 `--` 截断选项解析（即使地址被拼成 `-xxx` 也只当 URL 看）。
+ * 目标目录**必须不存在**（git 自己也会拒）—— 克隆进一个非空目录是用户最容易踩的坑，
+ * 早一步报错比让 git 报一屏 log 清楚。
+ */
+export async function cloneRepo(input: { url: string; destDir: string }): Promise<string> {
+  assertSafeRepoUrl(input.url)
+  if (await exists(input.destDir)) {
+    throw new Error(`目标目录已存在：${input.destDir}（换一个空目录，或先把已有的挪走）`)
+  }
+  await mkdir(dirname(input.destDir), { recursive: true })
+  const res = await runGit(process.cwd(), ['clone', '--', input.url.trim(), input.destDir], {
+    timeoutMs: CLONE_TIMEOUT_MS
+  })
+  if (res.code !== 0) {
+    throw new Error(res.stderr.trim() || res.stdout.trim() || 'git clone 失败')
+  }
+  return input.destDir
+}
+
 /** 仓库根目录（非仓库返回空串） */
 export async function gitRoot(cwd: string): Promise<string> {
   const r = await runGit(cwd, ['rev-parse', '--show-toplevel'])
   return r.code === 0 ? r.stdout.trim() : ''
-}
-
-/** 解析 `git status --porcelain=v1 -b` 的首行 `## ...` 头部（分支 / 上游 / ahead-behind） */
-function parseHeader(
-  header: string
-): Pick<GitStatusResult, 'branch' | 'detached' | 'upstream' | 'ahead' | 'behind'> {
-  const body = header.slice(3).trim()
-  if (body.startsWith('HEAD (no branch)') || body === 'HEAD') {
-    return { branch: null, detached: true, upstream: null, ahead: 0, behind: 0 }
-  }
-  const arrow = body.indexOf('...')
-  if (arrow === -1) {
-    return { branch: body, detached: false, upstream: null, ahead: 0, behind: 0 }
-  }
-  const branch = body.slice(0, arrow)
-  const rest = body.slice(arrow + 3)
-  const bracket = rest.indexOf('[')
-  let upstream: string | null = rest.trim()
-  let ahead = 0
-  let behind = 0
-  if (bracket >= 0) {
-    upstream = rest.slice(0, bracket).trim()
-    const inside = rest.slice(bracket + 1, rest.indexOf(']'))
-    const a = inside.match(/ahead (\d+)/)
-    const b = inside.match(/behind (\d+)/)
-    ahead = a ? Number(a[1]) : 0
-    behind = b ? Number(b[1]) : 0
-  }
-  return { branch, detached: false, upstream, ahead, behind }
 }
 
 /** 转义表：porcelain 可能用到的 C 风格单字符转义 */
@@ -146,21 +222,92 @@ function unquotePath(raw: string): string {
   return Buffer.from(bytes).toString('utf8')
 }
 
-/** 解析单条改动（XY + 路径；重命名/复制带 `old -> new`） */
-function parseChange(line: string): GitChange {
-  const index = line[0]
-  const worktree = line[1]
-  const rest = line.slice(3)
-  if ((index === 'R' || index === 'C') && rest.includes(' -> ')) {
-    const idx = rest.indexOf(' -> ')
-    return {
-      index,
-      worktree,
-      path: unquotePath(rest.slice(idx + 4)),
-      origPath: unquotePath(rest.slice(0, idx))
+/**
+ * 解析 `git status --porcelain=v2 --branch` 的输出（移植自 fishwork 的 status route）。
+ *
+ * ⚠️ **必须是 v2、不能用 v1**：v1 在「刚 init、还没有任何提交」时首行给的是
+ * `## No commits yet on master` —— 那句话会被当成**分支名**，面板头部就会显示
+ * 「No commits yet on master」而不是分支名与「先提交一次」的提示（实测 git 输出如此）。
+ * v2 把头部拆成 `# branch.head <name>` 这样的独立字段，没有这个坑。
+ *
+ * v2 的行型（`--branch` 会额外给 `#` 开头的头部行）：
+ * - `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>`：普通改动，路径在**下标 8**；
+ * - `2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <X><score> <path>\t<origPath>`：
+ *   重命名 / 复制，`<X><score>` 在下标 8、路径在下标 9，原路径用 **制表符**分隔；
+ * - `u <XY> ... <path>`：未合并（冲突），共 10 个字段，路径在下标 10；
+ * - `? <path>`：未跟踪；`! <path>`：被忽略（面板不显示）。
+ */
+function parseStatusV2(
+  stdout: string
+): Pick<GitStatusResult, 'branch' | 'detached' | 'upstream' | 'ahead' | 'behind' | 'changes' | 'truncated'> {
+  let branch: string | null = null
+  let detached = false
+  let upstream: string | null = null
+  let ahead = 0
+  let behind = 0
+  let truncated = false
+  const changes: GitChange[] = []
+  const collect = (change: GitChange): void => {
+    if (changes.length >= MAX_CHANGES) {
+      truncated = true
+      return
     }
+    changes.push(change)
   }
-  return { index, worktree, path: unquotePath(rest) }
+
+  for (const line of stdout.split('\n')) {
+    if (!line) continue
+    if (line.startsWith('# branch.head ')) {
+      const value = line.slice('# branch.head '.length).trim()
+      if (value === '(detached)') detached = true
+      else branch = value || null
+      continue
+    }
+    if (line.startsWith('# branch.upstream ')) {
+      const value = line.slice('# branch.upstream '.length).trim()
+      upstream = value || null
+      continue
+    }
+    if (line.startsWith('# branch.ab ')) {
+      const m = /\+(\d+)\s+-(\d+)/.exec(line)
+      if (m) {
+        ahead = Number(m[1])
+        behind = Number(m[2])
+      }
+      continue
+    }
+    if (line.startsWith('#')) continue // branch.oid 之类的头部字段，面板不用
+
+    if (line.startsWith('1 ') || line.startsWith('2 ')) {
+      const parts = line.split(' ')
+      const xy = parts[1] ?? '..'
+      const pathIndex = line.startsWith('2 ') ? 9 : 8
+      const [rawPath, rawOrigPath] = parts.slice(pathIndex).join(' ').split('\t')
+      if (!rawPath) continue
+      collect({
+        path: unquotePath(rawPath),
+        origPath: rawOrigPath ? unquotePath(rawOrigPath) : undefined,
+        index: xy[0] ?? '.',
+        worktree: xy[1] ?? '.'
+      })
+      continue
+    }
+    if (line.startsWith('u ')) {
+      const parts = line.split(' ')
+      const xy = parts[1] ?? '..'
+      const rawPath = parts.slice(10).join(' ')
+      if (rawPath) {
+        collect({ path: unquotePath(rawPath), index: xy[0] ?? 'U', worktree: xy[1] ?? 'U' })
+      }
+      continue
+    }
+    if (line.startsWith('? ')) {
+      collect({ path: unquotePath(line.slice(2)), index: '?', worktree: '?' })
+    }
+    // `! `（被忽略）不收集：面板不显示忽略文件
+  }
+
+  return { branch, detached, upstream, ahead, behind, changes, truncated }
 }
 
 /** 列出已配置的远端（去重；只取 fetch 行） */
@@ -177,8 +324,13 @@ function parseRemotes(out: string): GitStatusResult['remotes'] {
   return [...map.entries()].map(([name, url]) => ({ name, url }))
 }
 
-/** 改动列表上限：超过这个数就截断，避免巨型仓库（没配 .gitignore）把列表卡死 */
-const MAX_CHANGES = 200
+/**
+ * 改动列表上限：超过这个数就截断，避免巨型仓库（没配 .gitignore）把列表卡死。
+ *
+ * 取 2000（与 fishwork 一致）：200 太紧，稍脏一点的仓库（比如装完依赖忘了 gitignore）
+ * 就会撞上限，面板只能显示「已截断」而用户什么也定位不了。
+ */
+const MAX_CHANGES = 2000
 
 /** 贮藏栈最多回这么多条（真到几十条的时候，用户要的多半是最近几条） */
 const MAX_STASHES = 50
@@ -229,17 +381,23 @@ export async function getGitStatus(cwd: string): Promise<GitStatusResult> {
    * all 会把目录下的每个文件各列一行，渲染端再按路径把它们折成目录树。
    */
   const [statusRes, remoteRes, stashRes] = await Promise.all([
-    runGit(repo, ['status', '--porcelain=v1', '-b', '--untracked-files=all']),
+    runGit(repo, ['status', '--porcelain=v2', '--branch', '--untracked-files=all']),
     runGit(repo, ['remote', '-v']),
     runGit(repo, ['stash', 'list', '--format=%gd%x1f%gs'])
   ])
 
-  const lines = statusRes.stdout.split('\n')
-  const headerLine = lines.find((l) => l.startsWith('## ')) ?? ''
-  const head = parseHeader(headerLine)
-  const changeLines = lines.filter((l) => l && !l.startsWith('## '))
-  const truncated = changeLines.length > MAX_CHANGES
-  const changes = changeLines.slice(0, MAX_CHANGES).map(parseChange)
+  const parsed = parseStatusV2(statusRes.stdout)
+  const { changes: allChanges, ...head } = parsed
+  /**
+   * 工作区可能只是仓库的一个**子目录**（用户挑的是 packages/app，不是仓库根）。
+   * 这时 `git status` 给出的是整个仓库的改动，面板里会出现一堆与当前工作区无关的文件；
+   * 用 `rev-parse --show-prefix` 拿到工作区相对仓库根的前缀，只留它下面的（与 fishwork 一致）。
+   * ⚠️ 未跟踪项的路径本来就是仓库根相对，同样按这个前缀过滤才不会漏。
+   */
+  const prefixRes =
+    repo === cwd ? null : await runGit(cwd, ['rev-parse', '--show-prefix']).catch(() => null)
+  const prefix = prefixRes && prefixRes.code === 0 ? prefixRes.stdout.trim() : ''
+  const changes = prefix ? allChanges.filter((c) => c.path.startsWith(prefix)) : allChanges
 
   return {
     isRepo: true,
@@ -247,7 +405,6 @@ export async function getGitStatus(cwd: string): Promise<GitStatusResult> {
     remotes: parseRemotes(remoteRes.stdout),
     stashes: parseStashes(stashRes.stdout),
     changes,
-    truncated,
     ...head
   }
 }
@@ -416,6 +573,24 @@ async function runAction(repo: string, action: GitAction): Promise<string> {
     case 'init':
       res = await runGit(repo, ['init'])
       break
+    case 'init-commit': {
+      // 三步一步到位：init → 暂存全部（含未跟踪）→ 首次提交。
+      // `git add -A` 在 unborn HEAD 上完全合法，不需要先有一个提交。
+      const init = await runGit(repo, ['init'])
+      if (init.code !== 0) {
+        res = init
+        break
+      }
+      const add = await runGit(repo, ['add', '-A'])
+      if (add.code !== 0) {
+        res = add
+        break
+      }
+      const message = (action.message ?? '').trim() || 'Initial commit'
+      if (message.startsWith('-')) throw new Error('提交信息不能以 - 开头')
+      res = await runGit(repo, ['commit', '-m', message])
+      break
+    }
     case 'stage':
       res = await runGit(repo, ['add', '--', ...action.paths])
       break

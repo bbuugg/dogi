@@ -16,6 +16,7 @@ import {
   ChevronRight,
   ClipboardPaste,
   Copy,
+  CopyMinus,
   File as FileIcon,
   FileAudio,
   FileCode,
@@ -41,6 +42,7 @@ import {
 import MonacoEditor, { disposeUnusedModels, syncModelEol } from '@/shared/components/MonacoEditor'
 import { FilePreview, UnsupportedPreview } from '@/features/agent/FilePreview'
 import { ResizeHandle } from '@/shared/components/ResizeHandle'
+import { notifyWorkspaceFsChanged } from '@/shared/lib/fs-changed'
 import {
   modelUri,
   modelUriPrefix,
@@ -253,36 +255,57 @@ interface DirState {
  */
 function TreeRow({
   depth,
+  path,
   icon,
   label,
   active,
+  selected,
   expandable,
   open,
   onClick,
+  onContextMenu,
   menu
 }: {
   depth: number
+  /** 相对工作区根的路径：键盘导航按它定位 DOM 行（见 handleTreeKeyDown） */
+  path: string
   icon: ReactNode
   label: string
   active?: boolean
+  /** 多选态（与 active「正在编辑」不同，两条底色要能分辨） */
+  selected?: boolean
   expandable?: boolean
   open?: boolean
-  onClick: () => void
+  onClick: (e: ReactMouseEvent<HTMLButtonElement>) => void
+  onContextMenu?: () => void
   menu?: MenuProps
 }) {
   const longPress = useLongPressMenu()
+  // 长按那条 onContextMenu（触屏唤出菜单）不能被我们自己写的那个覆盖掉：
+  // 拆出来手动串起来 —— 先同步选择（右键/长按都要保留「多点的一组」），再交给长按逻辑
+  const { onContextMenu: longPressContextMenu, ...longPressHandlers } = longPress.rowHandlers
   const row = (
     <button
       type="button"
+      data-tree-path={path}
       onClick={onClick}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        onContextMenu?.()
+        longPressContextMenu(e)
+      }}
       title={label}
       style={{ paddingLeft: 8 + depth * 14 }}
       className={cn(
         'flex w-full items-center gap-1.5 py-1 pr-2 text-left text-sm',
-        active ? 'bg-primary/15 text-foreground' : 'text-muted-foreground',
+        active
+          ? 'bg-primary/15 text-foreground'
+          : selected
+            ? 'bg-foreground/10 text-foreground'
+            : 'text-muted-foreground',
         'hover:bg-foreground/10'
       )}
-      {...longPress.rowHandlers}
+      {...longPressHandlers}
     >
       {expandable ? (
         open ? (
@@ -315,6 +338,9 @@ function TreeRow({
 const TREE_DEFAULT_WIDTH = 240
 const TREE_MIN_WIDTH = 160
 const TREE_MAX_WIDTH = 520
+
+/** 文件树列宽的 localStorage 键（跨面板实例共享一份偏好） */
+const TREE_WIDTH_KEY = 'dogi.agent.files.treeWidth'
 
 /** 标签条把激活标签滚进可视区时，标签与可视边缘留出的空隙（px） */
 const TAB_SCROLL_CLEAR = 8
@@ -356,7 +382,29 @@ export function AgentFilesPanel({
   workspaceName: string
 }) {
   const [dirs, setDirs] = useState<Record<string, DirState>>({})
-  const [treeWidth, setTreeWidth] = useState(TREE_DEFAULT_WIDTH)
+  /**
+   * 文件树列宽：懒初始化从 localStorage 读（对齐 fishwork 的 `files-pane-width`）。
+   * ⚠️ 必须用 lazy initializer —— 直接 `useState(read())` 会先按默认值渲染一帧再跳回去，
+   * 那一帧的观感就是「面板宽度闪了一下」。
+   * 读出来还要夹一次上下限：窗口变窄 / 上次存的值超出当前可用范围时不能让它把编辑区挤没。
+   */
+  const [treeWidth, setTreeWidth] = useState(() => {
+    try {
+      const raw = Number(localStorage.getItem(TREE_WIDTH_KEY))
+      if (Number.isFinite(raw) && raw >= TREE_MIN_WIDTH && raw <= TREE_MAX_WIDTH) return raw
+    } catch {
+      // localStorage 不可用（隐私模式等）：退回默认宽度即可
+    }
+    return TREE_DEFAULT_WIDTH
+  })
+  const setTreeWidthAndPersist = useCallback((w: number) => {
+    setTreeWidth(w)
+    try {
+      localStorage.setItem(TREE_WIDTH_KEY, String(w))
+    } catch {
+      // 存不进去不是错误：本次会话仍然生效，只是下次不留存
+    }
+  }, [])
   /**
    * 面板状态（打开的文件 + 当前标签）。**整对象自带 workspaceId**，切换工作区时不做搬运 ——
    * props 变了就直接读新工作区的那份快照，旧的早已按自己的 id 存好（理由见 file-panel-state.ts）。
@@ -374,9 +422,21 @@ export function AgentFilesPanel({
    * 刻意不碰系统剪贴板：往那里写文件路径会污染用户自己复制的内容，而这里的粘贴
    * 只在同一个工作区内有意义。
    */
-  const [clipboard, setClipboard] = useState<{ entry: AgentFsEntry; cut: boolean } | null>(null)
+  const [clipboard, setClipboard] = useState<{ entries: AgentFsEntry[]; cut: boolean } | null>(
+    null
+  )
   /** 重命名 / 新建的弹窗状态 */
   const [renaming, setRenaming] = useState<{ entry: AgentFsEntry; text: string } | null>(null)
+  /** 键盘导航的锚点（方向键上下移动的就是它，与「当前打开的文件」不是一回事） */
+  const [treeFocusPath, setTreeFocusPath] = useState<string | null>(null)
+  /**
+   * 树里的**多选**（对齐 fishwork）：`Ctrl/⌘ + 点` 加减选、`Shift + 点` 选区间、点空白处清空。
+   *
+   * 与「键盘锚点」和「当前打开的文件」是三件独立的事，别混：
+   * 锚点给方向键用，选择给批量操作（复制 / 剪切 / 删除）用，活动文件决定右半边显示谁。
+   * 存储的是路径数组（第一项是 Shift 区间的锚点），不做渲染投影 —— 树不是长列表。
+   */
+  const [selectedPaths, setSelectedPaths] = useState<string[]>([])
   const [creating, setCreating] = useState<{ dir: string; type: 'file' | 'dir'; text: string } | null>(
     null
   )
@@ -666,6 +726,71 @@ export function AgentFilesPanel({
     opts?.onDone?.()
   }
 
+  /**
+   * 批量关标签（标签右键菜单的「关闭其他 / 左侧 / 右侧 / 全部」共用）。
+   *
+   * 逐个走 `closeFile`：有未保存改动的那些会各自弹确认，用户可以只放弃其中一个。
+   * 刻意**不**做成「一次确认全部丢弃」—— 那等于替用户决定扔掉哪几份改动。
+   * 标签顺序会随每次关闭变化，所以按当前下标倒序关（关掉的正是在动的那个，避免下标错位）。
+   */
+  const closeFiles = (paths: string[]): void => {
+    const set = new Set(paths)
+    const ordered = files
+      .map((f) => f.path)
+      .filter((p) => set.has(p))
+      .reverse()
+    for (const p of ordered) closeFile(p)
+  }
+
+  /** 某个标签的右键菜单项（antd MenuProps，图标统一 size-3.5） */
+  const tabMenuItems = (path: string, label: string): MenuProps['items'] => {
+    const idx = files.findIndex((f) => f.path === path)
+    const others = files.filter((f) => f.path !== path).map((f) => f.path)
+    return [
+      { key: 'close', icon: <X className="size-3.5" />, label: '关闭', onClick: () => closeFile(path) },
+      {
+        key: 'close-others',
+        icon: <CopyMinus className="size-3.5" />,
+        label: '关闭其他',
+        disabled: others.length === 0,
+        onClick: () => closeFiles(others)
+      },
+      {
+        key: 'close-right',
+        icon: <ChevronRight className="size-3.5" />,
+        label: '关闭右侧',
+        disabled: idx < 0 || idx >= files.length - 1,
+        onClick: () => closeFiles(files.slice(idx + 1).map((f) => f.path))
+      },
+      {
+        key: 'close-left',
+        icon: <ChevronLeft className="size-3.5" />,
+        label: '关闭左侧',
+        disabled: idx <= 0,
+        onClick: () => closeFiles(files.slice(0, Math.max(idx, 0)).map((f) => f.path))
+      },
+      { type: 'divider' },
+      {
+        key: 'close-all',
+        icon: <X className="size-3.5" />,
+        label: '关闭全部',
+        disabled: files.length === 0,
+        onClick: () => closeFiles(files.map((f) => f.path))
+      },
+      {
+        key: 'copy-path',
+        icon: <Copy className="size-3.5" />,
+        label: '复制完整路径',
+        onClick: () => {
+          void navigator.clipboard
+            .writeText(path)
+            .then(() => message.success(`已复制 ${label} 的完整路径`))
+            .catch(() => message.error('复制失败'))
+        }
+      }
+    ]
+  }
+
   /** 保存某个标签（缺省 = 当前标签） */
   const save = async (path: string | null = activeFilePath): Promise<void> => {
     const file = files.find((f) => f.path === path)
@@ -676,6 +801,8 @@ export function AgentFilesPanel({
     const saved = file.content
     try {
       await window.api.agent.fs.write(ws, file.path, saved)
+      // 文件面板改了盘 → 通知关心这个工作区的人（目前是 git 面板刷新改动列表）
+      notifyWorkspaceFsChanged(ws, 'write')
       mutatePanelFor(ws, (p) => ({
         ...p,
         files: p.files.map((f) => (f.path === file.path ? { ...f, savedContent: saved } : f))
@@ -710,8 +837,14 @@ export function AgentFilesPanel({
    * 反过来把标签路径改到新位置要连 model 一起迁移（撤销栈 / 行尾 / 光标全得搬），
    * 所以选「关掉标签」这条路 —— 与手动关标签完全同一套确认，未保存的改动不会悄悄消失。
    */
-  const withTabsClosed = (path: string, next: () => void, onAbort?: () => void): void => {
-    const affected = tabsUnder(path)
+  const withTabsClosed = (
+    pathOrPaths: string | string[],
+    next: () => void,
+    onAbort?: () => void
+  ): void => {
+    const roots = Array.isArray(pathOrPaths) ? pathOrPaths : [pathOrPaths]
+    // 多项时**并集**去重：批量剪切里两个目录可能都含同一个已打开文件，关两次会白问一遍
+    const affected = [...new Set(roots.flatMap((p) => tabsUnder(p)))]
     if (!affected.length) {
       next()
       return
@@ -742,63 +875,114 @@ export function AgentFilesPanel({
     void loadDir(dir)
   }
 
-  /** 删除（目录递归删）。相关标签关不掉（用户在确认框取消）就不删 */
-  const runDelete = (entry: AgentFsEntry): void => {
+  /** 某路径的父目录（顶层返回空串 = 工作区根） */
+  const dirOf = (path: string): string =>
+    path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''
+
+  /**
+   * 删除（目录递归删）。相关标签关不掉（用户在确认框取消）就不删。
+   *
+   * 批量（对齐 fishwork）：确认框一次说明删几项，逐项串行删除，**中途失败不打断后面**，
+   * 最后一起汇报。删完清空选择 —— 那些路径已经不存在了，留着会让后续菜单动作指向空气。
+   */
+  const runDelete = (entries: AgentFsEntry[]): void => {
+    if (!entries.length) return
+    const multi = entries.length > 1
+    const dirs = entries.filter((e) => e.type === 'dir').length
     Modal.confirm({
-      title: entry.type === 'dir' ? '删除目录？' : '删除文件？',
-      content:
-        entry.type === 'dir'
-          ? `「${entry.name}」及其全部子项会被永久删除，无法恢复。`
-          : `「${entry.name}」会被永久删除，无法恢复。`,
+      title: multi ? `删除 ${entries.length} 项？` : entries[0].type === 'dir' ? '删除目录？' : '删除文件？',
+      content: multi
+        ? `其中 ${dirs} 个目录会连同子项一起删除，共 ${entries.length} 项全部永久删除，无法恢复。`
+        : entries[0].type === 'dir'
+          ? `「${entries[0].name}」及其全部子项会被永久删除，无法恢复。`
+          : `「${entries[0].name}」会被永久删除，无法恢复。`,
       okText: '删除',
       okButtonProps: { danger: true },
       cancelText: '取消',
       onOk: () =>
-        withTabsClosed(entry.path, () => {
-          void (async () => {
-            try {
-              await window.api.agent.fs.delete(workspaceId, entry.path)
-              message.success(`已删除${entry.type === 'dir' ? '目录' : '文件'}「${entry.name}」`)
+        withTabsClosed(
+          entries.map((e) => e.path),
+          () => {
+            void (async () => {
+              const failed: string[] = []
+              let ok = 0
+              for (const entry of entries) {
+                try {
+                  await window.api.agent.fs.delete(workspaceId, entry.path)
+                  ok++
+                } catch (err) {
+                  failed.push(`${entry.name}：${describeError(err)}`)
+                }
+              }
+              if (ok) notifyWorkspaceFsChanged(workspaceId, 'delete')
+              if (failed.length) {
+                message.error(`已删除 ${ok} 项，${failed.length} 项失败：\n${failed.join('\n')}`)
+              } else {
+                message.success(
+                  multi ? `已删除 ${ok} 项` : `已删除${entries[0].type === 'dir' ? '目录' : '文件'}「${entries[0].name}」`
+                )
+              }
+              setSelectedPaths([])
+              setTreeFocusPath(null)
               refresh()
-            } catch (err) {
-              message.error(`删除失败：${describeError(err)}`)
-            }
-          })()
-        })
+            })()
+          }
+        )
     })
   }
 
-  /** 复制 / 剪切：只记剪贴板，不碰盘 */
-  const runCopy = (entry: AgentFsEntry, cut: boolean): void => {
-    setClipboard({ entry, cut })
-    message.info(`已${cut ? '剪切' : '复制'}「${entry.name}」，到目标目录粘贴（右键 / 长按）`)
+  /** 复制 / 剪切：只记剪贴板，不碰盘（剪贴板是**一组**条目，见 ClipboardState） */
+  const runCopy = (entries: AgentFsEntry[], cut: boolean): void => {
+    if (!entries.length) return
+    setClipboard({ entries, cut })
+    message.info(
+      `已${cut ? '剪切' : '复制'} ${entries.length} 项，到目标目录粘贴（右键 / 长按）`
+    )
   }
 
-  /** 粘贴到 toDir（为空 = 工作区根）。剪切 = 移动，源会消失，同样要先关它的标签 */
+  /**
+   * 粘贴到 toDir（为空 = 工作区根）。剪切 = 移动，源会消失，同样要先关它的标签。
+   *
+   * 批量：逐项串行（不能并发 —— 同一次粘贴里两项可能撞到同一个目标名，并发报错会互相盖掉），
+   * **中途某项失败不打断后面**：最后一起汇报成功数与失败明细。全成功才清空剪切剪贴板
+   * （还有失败项时留着，用户能只重试失败的）。
+   */
   const runPaste = (toDir: string): void => {
     const clip = clipboard
-    if (!clip) return
+    if (!clip || !clip.entries.length) return
+    const mode = clip.cut ? 'move' : 'copy'
     const apply = (): void => {
       void (async () => {
-        try {
-          const created = await window.api.agent.fs.copy(
-            workspaceId,
-            clip.entry.path,
-            toDir,
-            clip.cut ? 'move' : 'copy'
-          )
-          // 剪切一次即失效：留着会让用户以为还能再粘一次（源已经没了）
-          if (clip.cut) setClipboard(null)
-          message.success(`已${clip.cut ? '移动' : '复制'}到 ${created.path}`)
-          refresh()
-          expandDir(toDir)
-        } catch (err) {
-          message.error(`${clip.cut ? '移动' : '复制'}失败：${describeError(err)}`)
+        const failed: string[] = []
+        let ok = 0
+        for (const entry of clip.entries) {
+          try {
+            await window.api.agent.fs.copy(workspaceId, entry.path, toDir, mode)
+            ok++
+          } catch (err) {
+            failed.push(`${entry.name}：${describeError(err)}`)
+          }
         }
+        if (ok) notifyWorkspaceFsChanged(workspaceId, mode)
+        // 剪切只在**全部**成功后失效：源都还在时清掉剪贴板，用户就没法重试失败的那些
+        if (clip.cut && failed.length === 0) setClipboard(null)
+        if (failed.length) {
+          message.error(
+            `${clip.cut ? '移动' : '复制'}完成 ${ok} 项，${failed.length} 项失败：\n${failed.join('\n')}`
+          )
+        } else if (ok > 1) {
+          message.success(`已${clip.cut ? '移动' : '复制'} ${ok} 项到 ${toDir || '工作区根'}`)
+        } else {
+          message.success(`已${clip.cut ? '移动' : '复制'}到 ${toDir || '工作区根'}`)
+        }
+        refresh()
+        expandDir(toDir)
       })()
     }
-    if (clip.cut) withTabsClosed(clip.entry.path, apply)
-    else apply()
+    if (clip.cut) {
+      // 剪切要关的标签是**所有源**（不是第一项）：漏一个就留下一个指向旧路径的标签
+      withTabsClosed(clip.entries.map((e) => e.path), apply)
+    } else apply()
   }
 
   /** 重命名提交 */
@@ -817,6 +1001,7 @@ export function AgentFilesPanel({
         void (async () => {
           try {
             await window.api.agent.fs.rename(workspaceId, target.entry.path, name)
+            notifyWorkspaceFsChanged(workspaceId, 'move')
             message.success(`已重命名为「${name}」`)
             setRenaming(null)
             refresh()
@@ -840,6 +1025,7 @@ export function AgentFilesPanel({
     void (async () => {
       try {
         const created = await window.api.agent.fs.create(workspaceId, draft.dir, name, draft.type)
+        notifyWorkspaceFsChanged(workspaceId, draft.type === 'dir' ? 'mkdir' : 'create')
         message.success(`已新建${draft.type === 'dir' ? '目录' : '文件'}「${created.name}」`)
         setCreating(null)
         refresh()
@@ -853,8 +1039,62 @@ export function AgentFilesPanel({
     })()
   }
 
-  /** 某一行的右键菜单（触屏长按复用同一份 menu，见 TreeRow） */
-  const rowMenu = (entry: AgentFsEntry): MenuProps => ({
+  /**
+   * 把选择集解析成条目列表（菜单项、批量操作都靠它）。
+   * 过滤掉已经不在树里的路径（刷新 / 删除之后旧选择可能指空）。
+   */
+  const selectedEntries = useMemo((): AgentFsEntry[] => {
+    const out: AgentFsEntry[] = []
+    for (const p of selectedPaths) {
+      const parent = dirs[dirOf(p)]?.entries?.find((x) => x.path === p)
+      if (parent) out.push(parent)
+    }
+    return out
+  }, [selectedPaths, dirs])
+
+  /**
+   * 行点击的选择语义（对齐 fishwork 的 `targetsOf` / `handleRowClick`）：
+   * - 普通点击：单选（并打开 / 展开）
+   * - `Ctrl/⌘ + 点击`：加选 / 取消选，不打开
+   * - `Shift + 点击`：从锚点选到这一行的**区间**（限可见行）
+   * - 右键：点在**已选中**的行上时保留整组选择（否则单选它）—— 文件管理器的通行做法，
+   *   否则「选中 3 个 → 右键其中一个」会只剩 1 个，多选就白做了。
+   */
+  const applyRowSelection = (
+    path: string,
+    e: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }
+  ): void => {
+    if (e.shiftKey && treeFocusPath) {
+      const from = visibleRows.findIndex((r) => r.path === treeFocusPath)
+      const to = visibleRows.findIndex((r) => r.path === path)
+      if (from >= 0 && to >= 0) {
+        const [a, b] = from < to ? [from, to] : [to, from]
+        setSelectedPaths(visibleRows.slice(a, b + 1).map((r) => r.path))
+        return
+      }
+    }
+    if (e.ctrlKey || e.metaKey) {
+      setSelectedPaths((prev) =>
+        prev.includes(path) ? prev.filter((p) => p !== path) : [...prev, path]
+      )
+      setTreeFocusPath(path)
+      return
+    }
+    setSelectedPaths([path])
+    setTreeFocusPath(path)
+  }
+
+  /**
+   * 某一行的右键菜单（触屏长按复用同一份 menu，见 TreeRow）。
+   *
+   * 作用于**选择集**而不是这一行：菜单在多选状态下是批量的（标题也会写明「N 项」）。
+   * 重命名只能单项 —— 那是一次改名一个文件的操作。
+   */
+  const rowMenu = (entry: AgentFsEntry): MenuProps => {
+    const targets = selectedEntries.length ? selectedEntries : [entry]
+    const multi = targets.length > 1
+    const label = (single: string, batch: string) => (multi ? batch : single)
+    return ({
     items: [
       {
         key: 'open',
@@ -864,11 +1104,19 @@ export function AgentFilesPanel({
           ) : (
             <FileText className="size-3.5" />
           ),
-        label: entry.type === 'dir' ? (dirs[entry.path]?.open ? '收起' : '展开') : '打开'
+        label:
+          entry.type === 'dir'
+            ? label(dirs[entry.path]?.open ? '收起' : '展开', `${targets.length} 项`)
+            : label('打开', `打开 ${targets.length} 项`)
       },
-      { key: 'rename', icon: <Pencil className="size-3.5" />, label: '重命名' },
-      { key: 'copy', icon: <Copy className="size-3.5" />, label: '复制' },
-      { key: 'cut', icon: <Scissors className="size-3.5" />, label: '剪切' },
+      {
+        key: 'rename',
+        icon: <Pencil className="size-3.5" />,
+        label: '重命名',
+        disabled: multi
+      },
+      { key: 'copy', icon: <Copy className="size-3.5" />, label: multi ? `复制 ${targets.length} 项` : '复制' },
+      { key: 'cut', icon: <Scissors className="size-3.5" />, label: multi ? `剪切 ${targets.length} 项` : '剪切' },
       // 文件行不给「粘贴」：粘到文件上语义不明，粘到它的父目录即可（父目录那一行有）
       ...(entry.type === 'dir'
         ? [
@@ -881,25 +1129,31 @@ export function AgentFilesPanel({
           ]
         : []),
       { type: 'divider' as const },
-      { key: 'delete', icon: <Trash2 className="size-3.5" />, label: '删除', danger: true }
+      {
+        key: 'delete',
+        icon: <Trash2 className="size-3.5" />,
+        label: multi ? `删除 ${targets.length} 项` : '删除',
+        danger: true
+      }
     ],
     onClick: ({ key }) => {
       if (key === 'open') {
         if (entry.type === 'dir') toggleDir(entry.path)
-        else void openFile(entry)
+        else for (const t of targets) void openFile(t)
       } else if (key === 'rename') {
-        setRenaming({ entry, text: entry.name })
+        if (!multi) setRenaming({ entry, text: entry.name })
       } else if (key === 'copy') {
-        runCopy(entry, false)
+        runCopy(targets, false)
       } else if (key === 'cut') {
-        runCopy(entry, true)
+        runCopy(targets, true)
       } else if (key === 'paste') {
         runPaste(entry.path)
       } else if (key === 'delete') {
-        runDelete(entry)
+        runDelete(targets)
       }
     }
-  })
+  } as MenuProps)
+  }
 
   /** 树标题栏的「+」：新建 / 粘贴到根目录（放在头部而不是空白处右键 —— 触屏上有个
    * 明确的点击目标，比「长按空白处」好发现） */
@@ -921,9 +1175,159 @@ export function AgentFilesPanel({
     }
   })
 
+  /**
+   * 当前**可见**的行（扁平、含 depth），顺序与渲染顺序严格一致。
+   *
+   * 键盘导航要在「上下」之间移动焦点，就必须知道屏幕上到底有哪些行 —— 树是懒加载 +
+   * 按 `open` 展开的，扁平列表只能从同一份 `dirs` 状态现算。
+   * ⚠️ 必须与 `renderEntries` 的可见性判定保持同一套条件（目录自己算一行、
+   * 只有展开且已加载的目录才递归），否则上下移动会跳到看不见的行上。
+   */
+  const visibleRows = useMemo(() => {
+    const out: Array<{ path: string; type: 'dir' | 'file'; depth: number; open: boolean }> = []
+    const walk = (dir: string, depth: number): void => {
+      const entries = dirs[dir]?.entries
+      if (!entries) return
+      for (const entry of entries) {
+        const open = entry.type === 'dir' && !!dirs[entry.path]?.open
+        out.push({ path: entry.path, type: entry.type, depth, open })
+        if (open && dirs[entry.path]?.entries) walk(entry.path, depth + 1)
+      }
+    }
+    walk('', 0)
+    return out
+  }, [dirs])
+
+  /** 把焦点落到某个可见行上（DOM 里已经存在，直接 focus；焦点不在树上时也要落进来） */
+  const focusTreeRow = (path: string, opts?: { select?: boolean }): void => {
+    setTreeFocusPath(path)
+    // 方向键移动即**替换**选择（与文件管理器一致）：Shift+方向键才是加选，
+    // 所以键盘流里 Ctrl+A 之外不需要额外机制
+    if (opts?.select !== false) setSelectedPaths([path])
+    requestAnimationFrame(() => {
+      const el = document.querySelector<HTMLElement>(
+        `[data-tree-path="${CSS.escape(path)}"]`
+      )
+      el?.focus()
+    })
+  }
+
+  /**
+   * 文件树的键盘导航（对齐 fishwork 的 `handleTreeKeyDown`）。
+   *
+   * 上下移动、左右折叠 / 展开、回车打开、F2 重命名、Delete 删除、Ctrl/⌘ + C/X/V
+   * 复制剪切粘贴 —— 与 VS Code 一致的那套，不用鼠标也能把文件挪走。
+   *
+   * ⚠️ 焦点状态的判定是「树容器里有焦点」，不是「有选中项」：点一下行就同时是选中与聚焦，
+   * 但点完直接按方向键时若没有选中态可依，用户会以为键盘坏了。所以额外维护
+   * `treeFocusPath`，它才是方向键移动的锚点。
+   */
+  const handleTreeKeyDown = (e: ReactKeyboardEvent): void => {
+    const mod = e.ctrlKey || e.metaKey
+    if (!visibleRows.length) return
+    const current = visibleRows.findIndex((r) => r.path === treeFocusPath)
+    const row = current >= 0 ? visibleRows[current] : undefined
+    const entryOf = (p: string): AgentFsEntry | null => {
+      const parent = dirs[dirOf(p)]?.entries
+      return parent?.find((x) => x.path === p) ?? null
+    }
+
+    // 剪贴板：Ctrl/⌘ + C / X / V（与行右键菜单同一套状态，可多项）
+    if (mod && !e.shiftKey) {
+      const k = e.key.toLowerCase()
+      if ((k === 'c' || k === 'x') && row && row.type === 'file') {
+        e.preventDefault()
+        const picked = selectedEntries.length
+          ? selectedEntries
+          : ([entryOf(row.path)].filter(Boolean) as AgentFsEntry[])
+        runCopy(picked, k === 'x')
+        return
+      }
+      if (k === 'v' && clipboard) {
+        e.preventDefault()
+        runPaste(row && row.type === 'dir' ? row.path : row ? dirOf(row.path) : '')
+        return
+      }
+      if (k === 'a') {
+        // 全选可见行：树是懒加载的，「全选」只能是「当前看得见的这些」（Explorer 同义）
+        e.preventDefault()
+        setSelectedPaths(visibleRows.map((r) => r.path))
+        return
+      }
+    }
+
+    switch (e.key) {
+      case 'ArrowDown':
+      case 'ArrowUp': {
+        e.preventDefault()
+        const delta = e.key === 'ArrowDown' ? 1 : -1
+        const next = current < 0 ? (delta > 0 ? 0 : visibleRows.length - 1) : current + delta
+        const target = visibleRows[Math.min(Math.max(next, 0), visibleRows.length - 1)]
+        if (target) focusTreeRow(target.path)
+        return
+      }
+      case 'ArrowRight': {
+        if (!row) return
+        e.preventDefault()
+        if (row.type !== 'dir') return
+        if (!row.open) {
+          toggleDir(row.path)
+          return
+        }
+        // 已展开：焦点下移到第一个子项（没加载出来就先加载，展开完再落焦点）
+        if (dirs[row.path]?.entries) {
+          const child = visibleRows[current + 1]
+          if (child && child.depth > row.depth) focusTreeRow(child.path)
+        }
+        return
+      }
+      case 'ArrowLeft': {
+        if (!row) return
+        e.preventDefault()
+        if (row.type === 'dir' && row.open) {
+          toggleDir(row.path)
+          return
+        }
+        // 收起态：回到父目录（顶层就没有父目录了，什么都不做）
+        if (row.path.includes('/')) focusTreeRow(row.path.slice(0, row.path.lastIndexOf('/')))
+        return
+      }
+      case 'Enter':
+      case ' ': {
+        if (!row) return
+        e.preventDefault()
+        if (row.type === 'dir') toggleDir(row.path)
+        else {
+const info = entryOf(row.path)
+        if (info) void openFile(info)
+        }
+        return
+      }
+      case 'F2': {
+        if (!row) return
+        e.preventDefault()
+        const info = entryOf(row.path)
+        if (info) setRenaming({ entry: { path: row.path, name: info.name, type: row.type }, text: info.name })
+        return
+      }
+      case 'Delete':
+      case 'Backspace': {
+        if (!row) return
+        e.preventDefault()
+        const info = entryOf(row.path)
+        if (info) {
+          // 有选择集时按整组删（与右键菜单同一套语义），否则删锚点那一项
+          const targets = selectedEntries.length ? selectedEntries : [info]
+          runDelete(targets)
+        }
+        return
+      }
+      default:
+    }
+  }
+
   /** 递归渲染某个目录下的条目 */
-  const renderEntries = (dir: string, depth: number): ReactNode[] => {
-    const state = dirs[dir]
+  const renderEntries = (dir: string, depth: number): ReactNode[] => {    const state = dirs[dir]
     if (!state?.entries) return []
     const rows: ReactNode[] = []
     for (const entry of state.entries) {
@@ -934,6 +1338,7 @@ export function AgentFilesPanel({
           <TreeRow
             key={entry.path}
             depth={depth}
+            path={entry.path}
             expandable
             open={open}
             icon={
@@ -943,8 +1348,20 @@ export function AgentFilesPanel({
                 <Folder className="size-4 shrink-0 text-primary/80" />
               )
             }
-            label={entry.name}
-            onClick={() => toggleDir(entry.path)}
+label={entry.name}
+            selected={selectedPaths.includes(entry.path)}
+            onClick={(e) => {
+              // Ctrl/⌘ 与 Shift 是「纯选择」：不打开、不展开 —— 否则多选时文件被一个个打开
+              if (!e.ctrlKey && !e.metaKey && !e.shiftKey) toggleDir(entry.path)
+              applyRowSelection(entry.path, e)
+            }}
+            onContextMenu={() => {
+              // 右键已选中的行保留整组；右键未选中的行先单选它（文件管理器的通行做法）
+              if (!selectedPaths.includes(entry.path)) {
+                setSelectedPaths([entry.path])
+                setTreeFocusPath(entry.path)
+              }
+            }}
             menu={rowMenu(entry)}
           />
         )
@@ -969,10 +1386,21 @@ export function AgentFilesPanel({
           <TreeRow
             key={entry.path}
             depth={depth}
+            path={entry.path}
             icon={<FileTypeIcon name={entry.name} />}
             label={entry.name}
-            active={entry.path === activeFilePath}
-            onClick={() => void openFile(entry)}
+active={entry.path === activeFilePath}
+            selected={selectedPaths.includes(entry.path)}
+            onClick={(e) => {
+              if (!e.ctrlKey && !e.metaKey && !e.shiftKey) void openFile(entry)
+              applyRowSelection(entry.path, e)
+            }}
+            onContextMenu={() => {
+              if (!selectedPaths.includes(entry.path)) {
+                setSelectedPaths([entry.path])
+                setTreeFocusPath(entry.path)
+              }
+            }}
             menu={rowMenu(entry)}
           />
         )
@@ -990,6 +1418,9 @@ export function AgentFilesPanel({
       <div
         style={{ width: treeWidth }}
         className="flex min-h-0 shrink-0 flex-col border-r border-border/70"
+        // 键盘导航挂在树这一列：焦点在树里才吃方向键 / F2 / Delete / Ctrl+C·X·V，
+        // 编辑器里按方向键仍然是移动光标（不抢）
+        onKeyDown={handleTreeKeyDown}
       >
         <div className="flex h-9 shrink-0 items-center gap-1.5 px-2.5">
           <Files className="size-4 shrink-0 text-muted-foreground" />
@@ -1017,7 +1448,17 @@ export function AgentFilesPanel({
             />
           </Dropdown>
         </div>
-        <div className="min-h-0 flex-1 overflow-auto pb-2 select-none">
+        <div
+          className="min-h-0 flex-1 overflow-auto pb-2 select-none"
+          // 点空白处清空多选（文件管理器通行做法）；只在真正点到「空白」时才清，
+          // 否则在行上松手（拖选文本、点完尚未 click）会被这里吃掉选择
+          onPointerDown={(e) => {
+            if (e.target === e.currentTarget) {
+              setSelectedPaths([])
+              setTreeFocusPath(null)
+            }
+          }}
+        >
           {renderEntries('', 0)}
           {dirs['']?.loading && !dirs['']?.entries && (
             <div className="flex items-center gap-1.5 px-3 py-2 text-sm text-muted-foreground">
@@ -1032,7 +1473,9 @@ export function AgentFilesPanel({
         width={treeWidth}
         min={TREE_MIN_WIDTH}
         max={TREE_MAX_WIDTH}
-        onResize={setTreeWidth}
+        onResize={setTreeWidthAndPersist}
+        // 双击分隔线 = 恢复默认宽度（编辑器 / 资源管理器的通用习惯）
+        onDoubleClick={() => setTreeWidthAndPersist(TREE_DEFAULT_WIDTH)}
       />
 
       {/* 右：编辑区（多标签） */}
@@ -1058,23 +1501,30 @@ export function AgentFilesPanel({
                 const isActive = f.path === activeFilePath
                 const label = tabLabel(f.path, duplicatedNames)
                 return (
-                  <div
+                  <Dropdown
                     key={f.path}
                     // 标签条按这个属性定位激活项，好把它滚进可视区
                     data-file-tab={f.path}
-                    // 中键关闭：编辑器 / 浏览器的通用习惯
-                    onMouseDown={(e) => {
-                      if (e.button !== 1) return
-                      e.preventDefault()
-                      closeFile(f.path)
+                    trigger={['contextMenu']}
+                    menu={{
+                      items: tabMenuItems(f.path, label),
+                      onClick: ({ domEvent }) => domEvent.stopPropagation()
                     }}
-                    className={cn(
-                      'group/ftab flex min-w-24 shrink-0 items-center rounded-md pr-1 transition-colors',
-                      isActive
-                        ? 'bg-secondary text-foreground'
-                        : 'text-muted-foreground hover:bg-secondary/60'
-                    )}
                   >
+                    <div
+                      // 中键关闭：编辑器 / 浏览器的通用习惯
+                      onMouseDown={(e) => {
+                        if (e.button !== 1) return
+                        e.preventDefault()
+                        closeFile(f.path)
+                      }}
+                      className={cn(
+                        'group/ftab flex min-w-24 shrink-0 items-center rounded-md pr-1 transition-colors',
+                        isActive
+                          ? 'bg-secondary text-foreground'
+                          : 'text-muted-foreground hover:bg-secondary/60'
+                      )}
+                    >
                     <button
                       type="button"
                       // 标题给完整相对路径：标签上只放文件名（同名时带父目录）
@@ -1105,7 +1555,8 @@ export function AgentFilesPanel({
                     >
                       <X className="size-3.5" />
                     </button>
-                  </div>
+                    </div>
+                  </Dropdown>
                 )
               })}
             </div>

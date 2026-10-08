@@ -66,10 +66,13 @@
  *   手势会去滚消息列表，拉线就「拖不动」；
  * - **点仍渲染成 `<button>`**：指针交互由外层列统一接管，按钮留着是为了键盘 / 读屏
  *   （Tab 移动 + Enter 跳转），不然这套视觉一变就没有无障碍入口了；
- * - **定位在消息列内部、贴右缘**：壳与消息列（同 `max-w-3xl`）对齐，竖线 `justify-end`
- *   靠右内边缘。消息右侧天然空出一条缝（`max-w-[85%]`），
- *   24px 的列正好落在这个空档里，不压正文；
- * - **预览气泡开在线的左侧**：线已贴消息列右缘，再往右会顶出面板；
+ * - **定位在消息列右侧的空白带里**（对齐 fishwork）：壳**铺满整个面板**、不再与消息列同宽
+ *   居中，只用一个算出来的 `padding-right` 把竖线推到「消息列右缘 → 面板右缘」这条空白带的
+ *   中线上（见 `RAIL_PADDING_RIGHT`）—— 宽屏上竖线离正文有一大段空隙，不再贴在消息边上；
+ * - **窄面板 / 窄分栏退回贴边位置**：那条空白带的宽度是 `(面板宽 − 消息列宽) / 2`，面板一窄
+ *   它就没了 —— `max()` 的下限正好接住，竖线落在「面板右起 12~36px」这条带上，观感与旧版
+ *   逐像素接近（靠公式自然退化，不靠断点硬切）；
+ * - **预览气泡仍开在线的左侧**：线挪进空白带后，面板右缘之外没有空间了；
  * - **滚动用 `scrollIntoView` + `scroll-mt-*`**（`onJump` 由 `AgentPage` 提供），
  *   不自己算偏移 —— 消息高度是流式的，算不准。
  */
@@ -88,6 +91,19 @@ import type { AgentChatMessage } from '@shared/types'
 
 /** 点区上下各留的内缩（px）：首末点不贴边、不被裁 */
 const INSET = 24
+/**
+ * 竖线列的 `padding-right`：把它落到「消息列右缘 → 面板右缘」这条空白带的中线上。
+ *
+ * 记面板宽为 `W`（壳是铺满面板的绝对定位层），消息列宽上限 `48rem`（= `max-w-3xl`，
+ * 与 AgentPage 的消息列同值）：两侧空白各 `(W − 48rem) / 2`，所以带中线到面板右缘的距离
+ * = `(W − 48rem) / 4`。壳 `justify-end` 把 24px 的竖线列顶在自身内容盒右缘，而
+ * `padding-right: P` 让它到面板右缘的距离 = `P + 12px`（半个列宽），于是
+ * `P = (W − 48rem) / 4 − 12px`。
+ *
+ * ⚠️ `48rem` 必须与 AgentPage 里消息列的 `max-w-3xl` 保持一致，改一边要同步另一边，
+ * 否则竖线会偏（fishwork 的 ChatSurface / MessageOutline 也是这么互相咬合的）。
+ */
+const RAIL_PADDING_RIGHT = 'max(0.75rem, calc((100% - 48rem) / 4 - 0.75rem))'
 /** 激活判定半径（px）：指针离某个点多近才算「拖到了点上」 */
 const HIT_RADIUS = 18
 /** 箭头中心离气泡上 / 下边缘的最小间距（px）：再近就会戳进 `rounded-2xl` 的圆角里 */
@@ -601,19 +617,22 @@ export function MessageOutline({
 
   return (
     /*
-      壳与消息列（mx-auto max-w-3xl px-5）**逐项对齐**，
-      列 justify-end 贴右内边缘 → 竖线落在消息列内部的右缘，而不是列外侧的空白区。
+      壳**铺满整个面板**（定位上下文 = AgentPage 那层 `relative flex-1`），竖线的水平落点
+      由 `padding-right` 算出来：宽屏落在消息列右侧那条空白带的中线上（离正文一大段空隙），
+      窄面板退化成原来的贴边位置，见 `RAIL_PADDING_RIGHT`。
+      旧版壳与消息列同宽居中（`max-w-3xl`）→ 竖线贴在消息列内右缘，离正文只有一条缝，
+      读起来像贴着消息；对齐 fishwork 改成铺满 + 算 padding。
       `items-stretch` 让列撑满整高，时间轴才能贯穿消息区（不再是之前的居中短条）。
     */
     <div
       ref={shellRef}
-      className="pointer-events-none absolute inset-y-0 left-1/2 z-10 flex w-full max-w-3xl -translate-x-1/2 items-stretch justify-end px-3"
+      className="pointer-events-none absolute inset-y-0 left-0 right-0 z-10 flex items-stretch justify-end"
+      style={{ paddingRight: RAIL_PADDING_RIGHT }}
       data-outline="rail"
     >
-      {/* 交互列：指针事件 + 滚动接管都挂在这 —— 宽 24px、整高，`touch-none` 防连带滚消息。
-          `-mr-3` 把整列往右推到消息列右缘再略出一点，远离消息正文（见壳的 `px-3`） */}
+      {/* 交互列：指针事件 + 滚动接管都挂在这 —— 宽 24px、整高，`touch-none` 防连带滚消息 */}
       <div
-        className="pointer-events-auto relative -mr-3 w-6 touch-none select-none"
+        className="pointer-events-auto relative w-6 touch-none select-none"
         onPointerMove={handlePointer}
         onPointerDown={handlePointer}
         onPointerLeave={scheduleClear}

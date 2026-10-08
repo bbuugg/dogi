@@ -219,6 +219,9 @@ export async function persistConversation(
     // ACP 会话的绑定关系（agent 配置 id + agent 侧会话 id），落盘后重启仍能接回同一条会话
     acpAgentId: conversation.acpAgentId,
     acpSessionId: conversation.acpSessionId,
+    // 会话级的 MCP 允许清单同样每次显式带上（undefined = 取消限制，回到「全部启用」），
+    // 否则在输入框那个 Popover 里点开的开关下次落盘就被抹掉了
+    mcpServerIds: conversation.mcpServerIds,
     // 归档态同样每次显式带上（undefined = 取消归档），否则取消归档永远存不下去
     archived: conversation.archived
   })
@@ -284,7 +287,9 @@ export function notifyAgentFinished(conversationId: string, finishReason: string
     conversation.kind === 'acp'
       ? (state.agentAcpMessages[conversationId] ?? [])
       : conversation.messages
-  const last = messages[messages.length - 1]
+  // ⚠️ 取**最后一条助手消息**而不是最后一条消息：运行中插话（steer）会在正在流式输出的
+  // 那条助手消息之后追加一条用户消息，按「最后一条」取会拿不到回复正文（通知里只剩兜底文案）。
+  const last = [...messages].reverse().find((m) => m.role === 'assistant')
   const reply =
     last?.role === 'assistant'
       ? last.parts

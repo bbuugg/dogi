@@ -94,13 +94,11 @@ import {
   reconnectingIds,
   openSession,
   withoutTab,
-  resolveFocus,
   applyTabClose,
   attachSessionTab,
   focusTabPatch,
   closePlainTab,
   siblingTabIds,
-  closeTabsPatch,
   closeMissingPluginTabs,
   closeMissingAgentTabs,
   addOrFocusTab
@@ -791,38 +789,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
         return { groups: { ...s.groups, [groupId]: { ...g, tabIds: arr } } }
       }),
 
-    closeGroup: async (groupId) => {
-      const s = get()
-      const g = s.groups[groupId]
-      if (!g) return
-      // 组内终端会话一并结束（非终端标签只关标签）
-      const sessionIds = g.tabIds
-        .map((id) => s.ui.panelTabs.find((t) => t.id === id)?.sessionId)
-        .filter((x): x is string => Boolean(x))
-      await Promise.all(sessionIds.map((id) => window.api.terminal.kill(id)))
-      set((st) => {
-        const groups = { ...st.groups }
-        delete groups[groupId]
-        const tabs = st.ui.panelTabs.filter((t) => t.groupId !== groupId)
-        const layout = removeLeaf(st.layout, groupId)
-        const focus = resolveFocus(layout, groups, tabs, null, st.activeSessionId)
-        // 组已移除：组内各终端页面的 AI 面板开关与最小化状态一并清理
-        const aiOpenSessions = { ...st.ui.aiOpenSessions }
-        const aiMinimizedSessions = { ...st.ui.aiMinimizedSessions }
-        for (const id of sessionIds) {
-          delete aiOpenSessions[id]
-          delete aiMinimizedSessions[id]
-        }
-        return {
-          groups,
-          layout,
-          activeGroupId: focus.activeGroupId,
-          activeSessionId: focus.activeSessionId,
-          ui: { ...st.ui, panelTabs: tabs, aiOpenSessions, aiMinimizedSessions }
-        }
-      })
-    },
-
     resizeSplit: (splitId, sizes) =>
       set((s) => (s.layout ? { layout: updateSizes(s.layout, splitId, sizes) } : {})),
 
@@ -1510,8 +1476,29 @@ export const useAppStore = create<AppStore>()((set, get) => {
     },
 
     requestClosePanelTab: async (id) => {
-      // 确认框画在标签面板内部：先带到前台，再推 close-request 给页面确认
-      await requestTabCloseVisible(id)
+      const s = get()
+      const tab = s.ui.panelTabs.find((t) => t.id === id)
+      if (!tab) return true
+      // 确认框由**组级宿主**提供（见 tab-event-bus），所以这里**不必**先把标签激活、
+      // 也就不必等 React 摘掉 hidden —— 关闭非激活标签时确认框照样可见可点。
+      const result = await requestTabClose({
+        tabId: id,
+        groupId: tab.groupId,
+        title: tab.customTitle?.trim() || tab.title
+      })
+      if (result.allow) return true
+      // `rejected` 是用户自己点了取消，不用再打扰；其余都是「关不掉」，
+      // 必须让用户知道 —— 否则表现为「点了 × 没反应」。
+      // antd 按需动态引入（与本文件其它提示一致，别在顶部 import）。
+      if (result.reason !== 'rejected') {
+        const { message } = await import('antd')
+        if (result.reason === 'unmounted') {
+          message.warning('这个标签还没加载完，请稍后再试')
+        } else {
+          message.error(`关闭标签失败：${result.detail}`)
+        }
+      }
+      return false
     },
 
     requestCloseGroup: async (groupId) => {
@@ -1519,7 +1506,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       if (!group) return
       // 快照后逐个推（关闭会实时改组）；任一标签取消即中止剩余
       for (const tid of [...group.tabIds]) {
-        if (!(await requestTabCloseVisible(tid))) return
+        if (!(await get().requestClosePanelTab(tid))) return
       }
     },
 
@@ -1527,23 +1514,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
       const ids = siblingTabIds(get(), tabId, mode)
       // 该方向没有可关的标签（首/末标签的左侧/右侧）→ 什么也不做
       if (ids.length === 0) return
-      // 逐个推 close-request 确认，任一取消即中止剩余
+      // 逐个推关闭确认，任一取消即中止剩余
       for (const tid of ids) {
-        if (!(await requestTabCloseVisible(tid))) return
+        if (!(await get().requestClosePanelTab(tid))) return
       }
-    },
-
-    closeSiblingTabs: async (tabId, mode) => {
-      const ids = siblingTabIds(get(), tabId, mode)
-      if (ids.length === 0) return
-      const closing = new Set(ids)
-      // 其中的终端会话一并结束（与 closeGroup 一致：非终端标签只关标签）
-      const sessionIds = get()
-        .ui.panelTabs.filter((t) => closing.has(t.id))
-        .map((t) => t.sessionId)
-        .filter((x): x is string => Boolean(x))
-      await Promise.all(sessionIds.map((id) => window.api.terminal.kill(id)))
-      set((s) => closeTabsPatch(s, closing))
     },
 
     updatePanelTabTitle: (id, title) => {
@@ -1623,7 +1597,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       set({ aiSettings: settings })
     },
 
-    resolveAiConfirm: async (id, approved) => {
+    resolveAiConfirm: async (id, decision) => {
       // 用户直接回复：本地先移除卡片，再通知主进程（通道与工作区 Agent 共用）
       set((s) => {
         if (!(id in s.pendingConfirms)) return {}
@@ -1631,7 +1605,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         delete next[id]
         return { pendingConfirms: next }
       })
-      await window.api.agent.resolveConfirm(id, approved)
+      await window.api.agent.resolveConfirm(id, decision)
     },
 
     setTheme: async (mode) => {
@@ -1994,7 +1968,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         agentRequestConversations.delete(requestId)
         // 只清属于本次请求的确认卡
         for (const c of Object.values(get().pendingConfirms)) {
-          if (c.requestId === requestId) void get().resolveAiConfirm(c.id, false)
+          if (c.requestId === requestId) void get().resolveAiConfirm(c.id, 'reject_once')
         }
         await window.api.agent.abort(requestId)
       } else if (run.streaming) {
@@ -2456,6 +2430,19 @@ export const useAppStore = create<AppStore>()((set, get) => {
       await persistConversation(get().agentConversations, id)
     },
 
+    /**
+     * 设置这条会话用哪些 MCP server（允许清单）。
+     *
+     * ⚠️ **不动 `updatedAt`**（同归档）：它是「这条会话带哪些工具」的配置，
+     * 不是一次对话活动 —— 让它在列表里跳到最前会让人以为刚聊过。
+     */
+    setAgentConversationMcpServers: async (id, serverIds) => {
+      set((s) => ({
+        agentConversations: patchConversation(s.agentConversations, id, { mcpServerIds: serverIds }, false)
+      }))
+      await persistConversation(get().agentConversations, id)
+    },
+
     deleteAgentConversation: async (id, options = {}) => {
       // 正在流式输出就先中止，否则主进程那个会话的 agent 进程会变成孤儿
       if ((get().agentRuns[id] ?? emptyAgentRun()).requestId) await get().abortAgent(id)
@@ -2510,6 +2497,112 @@ export const useAppStore = create<AppStore>()((set, get) => {
           ...closeMissingAgentTabs(s, new Set(ensured.conversations.map((c) => c.id)))
         }
       })
+    },
+
+    /**
+     * **从此签出（分支）**：以某条会话为模板造一条新会话，原会话一字不动。
+     *
+     * 主进程造好并**已经落盘**（它才是消息真源，渲染端手里那份可能正处在流式中途），
+     * 这里只负责塞进列表 + 选中 —— 用户点「分支」就是为了接着往下聊，
+     * 还要他自己再去列表里找那条新会话是多余的。
+     */
+    forkAgentConversation: async (id, upToMessageId) => {
+      const source = get().agentConversations.find((c) => c.id === id)
+      // ACP 会话的消息在 agent 那边，本地没有可复制的东西 —— 提前拦掉，
+      // 不给用户「点了没反应」的困惑（UI 侧也按 kind 禁用了入口）
+      if (source?.kind === 'acp') return null
+      const forked = await window.api.agent.forkConversation(
+        upToMessageId ? { id, upToMessageId } : { id }
+      )
+      if (!forked) return null
+      set((s) => ({
+        agentConversations: [...s.agentConversations, forked],
+        // 分支一定属于同一个工作区（模板就是从这个工作区里来的），顺手把它切到前台
+        activeAgentWorkspaceId: forked.workspaceId ?? s.activeAgentWorkspaceId,
+        activeAgentConversationId: forked.id,
+        ...addOrFocusTab(s, agentTab(forked))
+      }))
+      return forked.id
+    },
+
+    exportAgentConversation: async (id) => {
+      try {
+        return await window.api.agent.exportConversation(id)
+      } catch (err) {
+        return { ok: false, reason: err instanceof Error ? err.message : String(err) }
+      }
+    },
+
+    importAgentConversation: async (workspaceId) => {
+      try {
+        const result = await window.api.agent.importConversation(workspaceId)
+        // 成功：主进程已经把它落盘了，这里只把它接进列表并选中（同 fork）
+        if (result.ok && result.conversation) {
+          const imported = result.conversation
+          set((s) => ({
+            agentConversations: [...s.agentConversations, imported],
+            activeAgentWorkspaceId: imported.workspaceId ?? s.activeAgentWorkspaceId,
+            activeAgentConversationId: imported.id,
+            ...addOrFocusTab(s, agentTab(imported))
+          }))
+        }
+        return result
+      } catch (err) {
+        return { ok: false, reason: err instanceof Error ? err.message : String(err) }
+      }
+    },
+
+    /**
+     * **运行中插话（steer）**：这一轮还在跑时把这句话排进「下一个工具步边界」，
+     * 让模型在**同一步里**看到 —— 而不是等本轮结束再起新一轮（那是待发送队列）。
+     *
+     * 本地这条 user 消息按**真实时序**追加（排在正在流式输出的那条助手消息之后）：
+     * 用户刷新 / 切走再回来时，得能看到自己当时插了什么话。它也会随历史进入下一轮请求。
+     *
+     * ⚠️ 两条池子都要找（工作区会话在 `agentConversations`、终端助手在
+     * `terminalConversations`）：后端按 conversationId 工作，两条线都支持插话。
+     */
+    steerAgentMessage: async (text, conversationId) => {
+      const trimmed = text.trim()
+      const cid = conversationId
+      if (!cid || !trimmed) return false
+      const accepted = await window.api.agent.steer({ conversationId: cid, text: trimmed })
+      if (!accepted) return false
+      const now = Date.now()
+      const steerMsg: AgentChatMessage = {
+        id: `u-${now}-steer`,
+        role: 'user',
+        parts: [{ type: 'text', text: trimmed }],
+        createdAt: now
+      }
+      // 先判在哪条池子里（同一时刻只会属于一条），再按对应池子追加 + 落盘
+      const inAgent = get().agentConversations.some((c) => c.id === cid)
+      if (inAgent) {
+        set((s) => {
+          const conversation = s.agentConversations.find((c) => c.id === cid)
+          if (!conversation) return {}
+          return {
+            agentConversations: patchConversation(s.agentConversations, cid, {
+              messages: [...conversation.messages, steerMsg]
+            })
+          }
+        })
+        // 立刻落盘一次（不走节流）：插话是低频的用户动作，而且此刻正处在流式期间，
+        // 节流窗口里若用户直接关掉应用，这句话就没了
+        void persistConversation(get().agentConversations, cid)
+        return true
+      }
+      set((s) => {
+        const conversation = s.terminalConversations.find((c) => c.id === cid)
+        if (!conversation) return {}
+        return {
+          terminalConversations: patchConversation(s.terminalConversations, cid, {
+            messages: [...conversation.messages, steerMsg]
+          })
+        }
+      })
+      void persistTerminalConversation(get().terminalConversations, cid)
+      return true
     },
 
     sendAgentMessage: async (text, conversationId) => {
@@ -2727,7 +2820,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         agentRequestConversations.delete(requestId)
         // 只清属于本次请求的确认卡
         for (const c of Object.values(get().pendingConfirms)) {
-          if (c.requestId === requestId) void get().resolveAgentConfirm(c.id, false)
+          if (c.requestId === requestId) void get().resolveAgentConfirm(c.id, 'reject_once')
         }
         await window.api.agent.abort(requestId)
       } else if (run.streaming) {
@@ -2755,6 +2848,18 @@ export const useAppStore = create<AppStore>()((set, get) => {
           }
         }
       }))
+    },
+
+    /**
+     * **单条命令停止**（工具卡上的「停止」）：只杀这一条 `execute_command` 的进程树，
+     * 这一轮继续跑 —— 与 `abortAgent`（中止整轮）是两条路，见主进程 command-stop.ts。
+     *
+     * 不做本地状态改动：命令结束后主进程会把 `（已被用户单独停止…）` 的结果回给模型，
+     * 工具卡随之从「调用中」变成「已完成」；这里提前置灰反而会与真实结果打架。
+     */
+    stopAgentCommand: async (toolCallId) => {
+      if (!toolCallId) return
+      await window.api.agent.stopCommand(toolCallId)
     },
 
     /**
@@ -3116,7 +3221,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         else if (!isAcp) void persistConversation(get().agentConversations, cid)
         // 兜底：该对话已结束但仍有其挂起确认时按取消处理，避免主进程工具悬挂
         for (const c of Object.values(get().pendingConfirms)) {
-          if (c.requestId === requestId) void get().resolveAgentConfirm(c.id, false)
+          if (c.requestId === requestId) void get().resolveAgentConfirm(c.id, 'reject_once')
         }
         // 自然收尾才把队列里的下一条顶上来接着跑（被中止 / 报错的那条不会走到这里 ——
         // queueHold 期间 pump 直接返回，队列留着等用户自己处理，见 pumpAgentQueue）
@@ -3168,7 +3273,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
           else void persistConversation(get().agentConversations, cid)
         }
         for (const c of Object.values(get().pendingConfirms)) {
-          if (c.requestId === requestId) void get().resolveAgentConfirm(c.id, false)
+          if (c.requestId === requestId) void get().resolveAgentConfirm(c.id, 'reject_once')
         }
         return
       }
@@ -3190,7 +3295,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       else if (pool === 'terminal') persistTerminalConversationThrottled(cid)
     },
 
-    resolveAgentConfirm: async (id, approved) => {
+    resolveAgentConfirm: async (id, decision) => {
       // 本地立即移除卡片（主进程也会广播 resolved，幂等无害）
       set((s) => {
         if (!(id in s.pendingConfirms)) return {}
@@ -3198,7 +3303,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
         delete next[id]
         return { pendingConfirms: next }
       })
-      await window.api.agent.resolveConfirm(id, approved)
+      await window.api.agent.resolveConfirm(id, decision)
     },
 
     resolveFollowup: async (toolCallId, answer) => {
@@ -3218,26 +3323,6 @@ export const useAppStore = create<AppStore>()((set, get) => {
 
 // ---- 标签关闭回执：「真正执行关闭」由本 store 提供（见 shared/lib/tab-event-bus.ts） ----
 setTabCloseExecutor((id) => useAppStore.getState().closePanelTab(id))
-
-/**
- * 把标签带到前台再推关闭请求。
- *
- * 确认框画在标签面板内部（InlineConfirm），背景标签处于 `hidden` 面板里，
- * 不先激活的话确认框渲染出来也不可见、也无法点击 —— 先 setActiveGroup +
- * activatePanelTab，等 React 摘掉 hidden 再推 close-request。
- */
-async function requestTabCloseVisible(id: string): Promise<boolean> {
-  const s = useAppStore.getState()
-  const tab = s.ui.panelTabs.find((t) => t.id === id)
-  if (!tab) return true
-  const group = s.groups[tab.groupId]
-  if (group && group.activeTabId !== id) {
-    s.setActiveGroup(tab.groupId)
-    s.activatePanelTab(id)
-    await new Promise((resolve) => setTimeout(resolve, 50))
-  }
-  return requestTabClose(id)
-}
 
 /**
  * 笔记会话落盘：打开的文件夹或笔记标签一变，就把当前状态写回主进程，

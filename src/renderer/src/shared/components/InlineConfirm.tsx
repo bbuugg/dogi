@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode
+} from 'react'
 import { Button, Modal } from 'antd'
 
 /**
@@ -8,9 +16,12 @@ import { Button, Modal } from 'antd'
  * 交给它的位置；antd 默认 `position: fixed` 会盖住整个窗口，用 `styles.mask` /
  * `styles.wrapper` 的行内样式压成 `absolute`，定位基准就是标签面板。
  *
- * 用法：`const { confirm, element } = useInlineConfirm()`，
- * 根容器加 `relative` 并渲染 `{element}`，异步流程里 `await confirm({...})`。
- * 关闭流程的消费方见 TabContentGuard（防手滑）/ NotesPage（未保存三选一）/ AgentPage（运行中）。
+ * 两种取用方式，别混：
+ * - **`useInlineConfirm()`** —— 自己持有一个确认框（**拥有者**）：返回 `confirm` 与
+ *   `element`，`element` 必须渲染在自己的 `relative` 容器里。全应用只有
+ *   **面板组**（`PanelGroupView`）用这种方式，见下面 `CloseConfirmProvider`。
+ * - **`useCloseConfirm()`** —— 取用所在组那个确认框（**消费者**）：页面组件（笔记 / Agent）
+ *   在关闭确认里用它，不再自己渲染 `element`。
  */
 export interface InlineConfirmAction {
   label: string
@@ -30,13 +41,16 @@ export interface InlineConfirmOptions {
   extra?: ReactNode
 }
 
+/** 弹一次确认框；`true` = 用户选了放行的那一档，`false` = 取消（含 Esc / 遮罩 / 卸载结算） */
+export type InlineConfirmFn = (opts: InlineConfirmOptions) => Promise<boolean>
+
 interface Pending {
   opts: InlineConfirmOptions
   resolve: (ok: boolean) => void
 }
 
 export function useInlineConfirm(): {
-  confirm: (opts: InlineConfirmOptions) => Promise<boolean>
+  confirm: InlineConfirmFn
   element: ReactNode
 } {
   const [pending, setPending] = useState<Pending | null>(null)
@@ -51,8 +65,8 @@ export function useInlineConfirm(): {
     p.resolve(ok)
   }, [])
 
-  const confirm = useCallback(
-    (opts: InlineConfirmOptions) => {
+  const confirm = useCallback<InlineConfirmFn>(
+    (opts) => {
       // 已有未决确认时先按取消结算（同一确认框不会并发，防御连点 / StrictMode 重放）
       settle(false)
       return new Promise<boolean>((resolve) => {
@@ -124,4 +138,44 @@ export function useInlineConfirm(): {
   )
 
   return { confirm, element }
+}
+
+// ---------------------------------------------------------------------------
+// 组级确认宿主
+// ---------------------------------------------------------------------------
+
+const CloseConfirmContext = createContext<InlineConfirmFn | null>(null)
+
+/**
+ * 把**组级**确认框提供给组内所有标签的页面组件。
+ *
+ * 为什么确认框挂在「组」上而不是「页面」上：关闭一个**非激活**标签时（右键「关闭其他」、
+ * 「关闭整个组」、批量关），页面自己的确认框渲染在 `hidden` 容器里 —— 用户既看不到也点不到。
+ * 旧实现为此在关闭前先把标签激活、再 `setTimeout(50)` 等 React 摘掉 `hidden`，
+ * 那是在**赌渲染时序**：慢机器上 50ms 不够，确认框留在 `hidden` 里，关闭动作静默卡死。
+ * 挂到组面板上就与「哪个标签是激活的」彻底无关了，也不必抢焦点。
+ */
+export function CloseConfirmProvider({
+  value,
+  children
+}: {
+  value: InlineConfirmFn
+  children: ReactNode
+}) {
+  return <CloseConfirmContext.Provider value={value}>{children}</CloseConfirmContext.Provider>
+}
+
+/**
+ * 没有 provider 时按「一律取消」处理（fail closed）。
+ * 正常不会走到：页面只可能渲染在面板组里。真走到了说明有人把页面挂到了面板之外，
+ * 此时宁可不关也不能让关闭流程静默走完。
+ */
+const noProvider: InlineConfirmFn = async () => {
+  console.error('[InlineConfirm] 当前页面不在面板组里（缺 CloseConfirmProvider），关闭确认按「取消」处理')
+  return false
+}
+
+/** 页面取用所在面板组的关闭确认框（见 `CloseConfirmProvider`） */
+export function useCloseConfirm(): InlineConfirmFn {
+  return useContext(CloseConfirmContext) ?? noProvider
 }

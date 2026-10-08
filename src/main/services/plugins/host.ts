@@ -15,6 +15,12 @@ import type {
 } from '@shared/plugin'
 import { storage } from '../storage'
 import { executeHttp } from '../api/http'
+import { pluginHooks } from '../ai/plugin-hooks'
+import type {
+  PluginHookEvent,
+  PluginToolCallEvent,
+  PluginToolResultEvent
+} from '@shared/plugin'
 
 /**
  * 插件宿主（主进程侧）：
@@ -121,11 +127,17 @@ class PluginHost {
     }
   }
 
-  /** 注销某插件已注册的全部主进程 handler */
+  /**
+   * 注销某插件注册的全部主进程 handler **与 AI 工具钩子**。
+   *
+   * ⚠️ 钩子必须在这里一起摘掉：禁用 / 卸载 / 重载都走这个方法，漏了的话
+   * 「已经禁用的插件还在拦 AI 的工具调用」—— 一个很难查的幽灵行为。
+   */
   private unregisterHandlers(id: string): void {
     for (const key of [...this.handlers.keys()]) {
       if (key.startsWith(id + ':')) this.handlers.delete(key)
     }
+    pluginHooks.clearPlugin(id)
   }
 
   /** 重扫插件目录，刷新 manifest 集合（新增/删除的插件、变更的元信息） */
@@ -419,6 +431,12 @@ class PluginHost {
   }
 
   private buildMainApi(manifest: PluginManifest) {
+    /** 挂 AI 工具钩子需要 `hooks` 权限（它能改变 AI 实际做了什么，比其它三个都敏感） */
+    const requireHooks = () => {
+      if (!this.permissionsOf(manifest.id).has('hooks')) {
+        throw new Error(`插件 ${manifest.id} 未声明 hooks 权限，无法注册 AI 工具钩子`)
+      }
+    }
     return {
       id: manifest.id,
       permissions: manifest.permissions ?? [],
@@ -426,6 +444,20 @@ class PluginHost {
       /** 注册命名空间化的主进程 handler（最终 channel 为 pluginId:name） */
       registerHandler: (name: string, handler: (...args: unknown[]) => unknown) => {
         this.handlers.set(`${manifest.id}:${name}`, handler)
+      },
+      /**
+       * 挂 **AI 工具钩子**（见 services/ai/plugin-hooks.ts）：
+       * - `on('tool:call', fn)`：执行前拦截，`fn` 返回 `{ block: true, reason }` 即拦下；
+       * - `on('tool:result', fn)`：执行后改写，`fn` 返回 `{ result: '…' }` 即替换结果。
+       *
+       * 同一个事件重复挂会**覆盖**前一个（一个插件一个钩子，够用且不会意外叠加）。
+       */
+      on: (
+        event: PluginHookEvent,
+        handler: ((e: PluginToolCallEvent) => unknown) | ((e: PluginToolResultEvent) => unknown)
+      ) => {
+        requireHooks()
+        pluginHooks.register(manifest.id, event, handler as never)
       },
       http: (req: PluginHttpRequest) => this.http(manifest.id, req),
       storage: {

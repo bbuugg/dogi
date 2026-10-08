@@ -6,9 +6,9 @@ import {
   MessageSquareText,
   Palette,
   Plug,
+  SlidersHorizontal,
   Sparkles,
   TerminalSquare,
-  Timer,
   type LucideIcon
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
@@ -63,7 +63,7 @@ const GROUPS: Array<{
         { value: 'acp', label: 'ACP agent', icon: Bot },
         { value: 'mcp', label: 'MCP 服务', icon: Plug },
         { value: 'skills', label: '技能', icon: Sparkles },
-        { value: 'timeouts', label: '超时', icon: Timer },
+        { value: 'timeouts', label: '运行', icon: SlidersHorizontal },
         { value: 'prompt', label: '系统提示词', icon: MessageSquareText }
       ]
     }

@@ -3,9 +3,12 @@ import { readFileSync } from 'node:fs'
 import { dirname, join, sep } from 'node:path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { dynamicTool, jsonSchema, type ToolSet } from 'ai'
-import type { McpServerConfig, McpToolInfo } from '@shared/types'
+import type { McpServerConfig, McpToolInfo, McpTransport } from '@shared/types'
 import { storage } from '../storage'
 import { detectBrowsers } from '../browser/resolver'
 
@@ -100,15 +103,24 @@ function builtinPlaywrightServer(): McpServerConfig {
 
 /**
  * 实际参与 agent 的 MCP server：内置 Playwright（**浏览器工具选了「系统浏览器」时**）
- * + 用户配置里已启用的。
+ * + 用户配置里已启用的（再按会话的允许清单收窄，见 `serverIds`）。
  *
  * 浏览器工具来源是三态（见 BrowserToolMode）：
  * - `off` / `in-app`：不挂内置 Playwright MCP（`in-app` 由应用自带的浏览器工具提供能力，
  *   无窗口运行、画面镜像到界面里的浏览器面板）；
  * - `system`：挂上内置 Playwright MCP —— 独立进程，会拉起**本机**的 Edge/Chrome 窗口。
+ *
+ * `serverIds`（会话级允许清单）：
+ * - `undefined` = 不限制（老会话 / 没动过开关的会话，行为与以前完全一样）；
+ * - `[]` = 一个自定义 server 都不挂（内置 Playwright **不受影响** —— 它由浏览器工具
+ *   那个三态开关管，跟用户自己的 MCP 配置不是一回事）；
+ * - `[...]` = 只挂清单里的（仍要求全局 `enabled`）。
  */
-function effectiveServers(): McpServerConfig[] {
-  const list = storage.listMcpServers().filter((s) => s.enabled)
+function effectiveServers(serverIds?: string[]): McpServerConfig[] {
+  const allow = serverIds === undefined ? null : new Set(serverIds)
+  const list = storage
+    .listMcpServers()
+    .filter((s) => s.enabled && (allow === null || allow.has(s.id)))
   if (storage.getPreferences().browserToolMode === 'system') {
     list.unshift(builtinPlaywrightServer())
   }
@@ -126,17 +138,28 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   ])
 }
 
-/** MCP 官方 SDK 客户端管理：按配置连接 stdio server，工具转换为 AI SDK ToolSet */
+/** MCP 官方 SDK 客户端管理：按配置连接 stdio / http / sse server，工具转换为 AI SDK ToolSet */
 class McpManager {
   private states = new Map<string, McpServerState>()
 
-  private async connect(config: McpServerConfig): Promise<McpServerState> {
-    const state: McpServerState = { config, client: null }
-    /** 子进程 stderr 的尾部若干行：连接失败时用来解释「为什么连不上」 */
-    const stderrTail: string[] = []
-    try {
-      const client = new Client({ name: 'dogi', version: '0.0.1' })
-      const transport = new StdioClientTransport({
+  /** 传输方式收敛（老配置没有这个字段 → stdio；脏值也一律按 stdio，别把非法值漏进分支） */
+  private transportOf(config: McpServerConfig): McpTransport {
+    return config.transport === 'http' || config.transport === 'sse' ? config.transport : 'stdio'
+  }
+
+  /**
+   * 按配置造一个传输。
+   *
+   * 三种传输的差别只在「怎么建立连接」，连上之后的 Client 用法完全一样 ——
+   * 所以这里只负责返回一个 Transport，其余逻辑（握手 / 列工具 / 调工具）全共用。
+   *
+   * ⚠️ http 用 `StreamableHTTPClientTransport`（新式规范端点），sse 用 `SSEClientTransport`
+   * （旧式端点）。两者**不可互推**：拿 http 客户端去连 sse 端点会一直卡在握手。
+   */
+  private createTransport(config: McpServerConfig): Transport {
+    const transport = this.transportOf(config)
+    if (transport === 'stdio') {
+      return new StdioClientTransport({
         command: config.command,
         args: config.args ?? [],
         env: config.env,
@@ -144,7 +167,32 @@ class McpManager {
         // 真正的原因（命令不存在、参数错、浏览器缺失…）都在子进程的 stderr 里
         stderr: 'pipe'
       })
-      transport.stderr?.on('data', (chunk: Buffer) => {
+    }
+    const url = (config.url ?? '').trim()
+    if (!url) throw new Error(`${transport} 传输缺少服务地址（url）`)
+    let parsed: URL
+    try {
+      parsed = new URL(url)
+    } catch {
+      throw new Error(`服务地址不是合法 URL：${url}`)
+    }
+    // 请求头是可选的（很多自建服务不开鉴权）；给空对象就是「不加任何头」
+    const requestInit: RequestInit = config.headers ? { headers: config.headers } : {}
+    return transport === 'http'
+      ? new StreamableHTTPClientTransport(parsed, { requestInit })
+      : new SSEClientTransport(parsed, { requestInit })
+  }
+
+  private async connect(config: McpServerConfig): Promise<McpServerState> {
+    const state: McpServerState = { config, client: null }
+    /** 子进程 stderr 的尾部若干行：连接失败时用来解释「为什么连不上」 */
+    const stderrTail: string[] = []
+    try {
+      const client = new Client({ name: 'dogi', version: '0.0.1' })
+      const transport = this.createTransport(config)
+      // 只有 stdio 才有子进程 stderr（http / sse 没有这个流，可选链已兜住）
+      const stderrStream = (transport as { stderr?: NodeJS.ReadableStream }).stderr
+      stderrStream?.on('data', (chunk: Buffer) => {
         const text = String(chunk).trimEnd()
         if (!text) return
         stderrTail.push(text)
@@ -192,8 +240,10 @@ class McpManager {
   /**
    * 构建合并后的 AI SDK ToolSet（工具名冲突时以 server 名为前缀）
    * 同时返回工具信息与连接错误，供 UI 展示
+   *
+   * `opts.serverIds`：会话级允许清单（见 `effectiveServers`）。
    */
-  async buildToolset(): Promise<{
+  async buildToolset(opts?: { serverIds?: string[] }): Promise<{
     tools: ToolSet
     infos: McpToolInfo[]
     errors: string[]
@@ -201,7 +251,7 @@ class McpManager {
     const tools: ToolSet = {}
     const infos: McpToolInfo[] = []
     const errors: string[] = []
-    const enabled = effectiveServers()
+    const enabled = effectiveServers(opts?.serverIds)
 
     await Promise.all(
       enabled.map(async (config) => {

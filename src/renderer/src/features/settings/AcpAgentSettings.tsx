@@ -1,5 +1,6 @@
 import { useAppStore } from '@/stores/app-store'
-import type { AcpAgentConfig, DetectedAcpAgent } from '@shared/types'
+import { ACP_AGENT_TYPE_OPTIONS, acpAgentTypeLabel } from '@shared/acp'
+import type { AcpAgentConfig, AcpAgentType, DetectedAcpAgent } from '@shared/types'
 import { Button, Input, Modal, Popconfirm, Select, Tag, message } from 'antd'
 import { CloudDownload, Pencil, Plus, ScanSearch, Trash2, X } from 'lucide-react'
 import { useState } from 'react'
@@ -9,11 +10,21 @@ interface FormState {
   name: string
   command: string
   args: string
+  /** 风格标记（见 `AcpAgentType`）：只影响界面标识，不改变行为 */
+  type: AcpAgentType
   env: Record<string, string>
   models: string[]
 }
 
-const EMPTY: FormState = { id: '', name: '', command: '', args: '', env: {}, models: [] }
+const EMPTY: FormState = {
+  id: '',
+  name: '',
+  command: '',
+  args: '',
+  type: 'generic',
+  env: {},
+  models: []
+}
 
 function toForm(config: AcpAgentConfig | null): FormState {
   if (!config) return { ...EMPTY }
@@ -22,6 +33,7 @@ function toForm(config: AcpAgentConfig | null): FormState {
     name: config.name,
     command: config.command,
     args: config.args.join(' '),
+    type: config.type ?? 'generic',
     env: config.env ? { ...config.env } : {},
     models: config.models ? [...config.models] : []
   }
@@ -173,6 +185,9 @@ export function AcpAgentSettings() {
         name: editing.name.trim(),
         command: editing.command.trim(),
         args: editing.args.trim() ? editing.args.trim().split(/\s+/) : [],
+        // 总是写死（generic 也写）：不然「把 opencode 改回通用」会因为写 undefined 而
+        // 在落盘时被丢字段 —— 值一样是 generic，但语义上用户确实做了一次修改
+        type: editing.type,
         // 丢弃空 key 的行，避免把 `=value` 这种脏数据写进配置
         env:
           Object.keys(editing.env).length > 0
@@ -205,7 +220,9 @@ export function AcpAgentSettings() {
       id: crypto.randomUUID(),
       name: item.name,
       command: item.command,
-      args: item.args
+      args: item.args,
+      // 探测时就认得的风格直接带上（opencode / pi），省得用户回头再选一次
+      type: item.type
     }
     await commit([...acpAgents, config])
   }
@@ -265,6 +282,12 @@ export function AcpAgentSettings() {
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
               <span className="truncate text-xs font-medium">{config.name}</span>
+              {/* 风格徽标：只有非「通用」才显示（通用是默认值，每行都挂一枚等于没标） */}
+              {acpAgentTypeLabel(config.type) && (
+                <span className="shrink-0 rounded bg-foreground/5 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                  {acpAgentTypeLabel(config.type)}
+                </span>
+              )}
             </div>
             <div className="truncate font-mono text-[10px] text-muted-foreground">
               {config.command}
@@ -375,6 +398,26 @@ export function AcpAgentSettings() {
                 placeholder="如 --acp"
                 value={editing.args}
                 onChange={(e) => patch({ args: e.target.value })}
+              />
+            </div>
+            {/*
+              风格标记：**只影响界面上的那枚标识**（设置列表、会话标题旁）。
+              fishwork 用它决定会话里显示哪块模式 UI，dogi 不这么做 —— 会话里显示什么完全由
+              agent 上报的 configOptions.category 驱动（见 AcpAgentType 的说明），
+              所以这里不必按 agent 逐个试错。文案里说清楚，免得以为选错了会少功能。
+            */}
+            <div className="grid gap-1.5">
+              <span className="text-xs font-medium text-foreground">
+                类型
+                <span className="ml-1 font-normal text-muted-foreground">
+                  （只作标识：设置列表与会话标题旁的那枚标记）
+                </span>
+              </span>
+              <Select
+                value={editing.type}
+                onChange={(v: AcpAgentType) => patch({ type: v })}
+                options={ACP_AGENT_TYPE_OPTIONS}
+                style={{ width: '100%' }}
               />
             </div>
             <div className="grid gap-1.5">

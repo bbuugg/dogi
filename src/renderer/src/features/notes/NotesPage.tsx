@@ -4,8 +4,7 @@ import { CircleHelp, FileText, Save } from 'lucide-react'
 import { EDITOR_SHORTCUT_GROUPS, formatEditorShortcut } from '@shared/shortcuts'
 import { MilkdownEditor } from '@/features/notes/MilkdownEditor'
 import { editorSaveKey, useAppStore } from '@/stores/app-store'
-import { useTabEventBus } from '@/shared/lib/use-tab-event-bus'
-import { useInlineConfirm } from '@/shared/components/InlineConfirm'
+import { useTabCloseGuard } from '@/shared/lib/use-tab-close-guard'
 
 /** 「延迟保存」模式下等待秒数的兜底值（偏好缺字段时用） */
 const FALLBACK_AUTOSAVE_SECONDS = 2
@@ -102,17 +101,18 @@ export function NotesPage({ filePath, active = true, tabId }: { filePath: string
   savingRef.current = saving
   /** 用户在关闭确认里选了「不保存」时置 true，卸载时据此跳过冲刷 */
   const discardingRef = useRef(false)
-  /** 关闭确认画在本标签面板内部（不再用全局 Modal.confirm） */
-  const { confirm, element } = useInlineConfirm()
-  useTabEventBus(tabId, () => {
-    if (!dirtyRef.current && !savingRef.current) return true
+  useTabCloseGuard(tabId, ({ confirm: ask }) => {
+    // ⚠️ 笔记的关闭确认**由本页全权负责**（不论脏不脏），所以每条分支都带 `owned: true` ——
+    // 干净时直接放行、不必再让 shell 兜底问一句「确定关闭标签？」（旧实现靠一个类型白名单
+    // PAGE_MANAGED_CLOSE_TYPES 来区分，新增页面漏加就弹两次窗）。
+    if (!dirtyRef.current && !savingRef.current) return { allow: true, owned: true }
     // 「关闭标签前二次确认」关掉：不弹三选一，直接走「不保存直接关闭」——
-    // 置 discardingRef 让卸载时跳过冲刷（草稿丢弃），放行后由总线 emit close
+    // 置 discardingRef 让卸载时跳过冲刷（草稿丢弃），放行后由总线真正关闭
     if (!useAppStore.getState().preferences.confirmCloseTab) {
       discardingRef.current = true
-      return true
+      return { allow: true, owned: true }
     }
-    return confirm({
+    return ask({
       title: '有未保存的修改',
       content: `「${fileName}」有未保存的修改，保存后关闭，还是直接放弃？`,
       actions: [
@@ -129,7 +129,7 @@ export function NotesPage({ filePath, active = true, tabId }: { filePath: string
         // 保存失败（ok=false）否决关闭，确认框保持原样等待用户再选
         { label: '保存并关闭', kind: 'primary', value: true, run: saveCurrentRef.current }
       ]
-    })
+    }).then((ok) => ({ allow: ok, owned: true }))
   })
 
   /** 把指定路径文件的「当前草稿」落盘；返回 false = 没写进去（关标签时据此别关） */
@@ -340,9 +340,6 @@ export function NotesPage({ filePath, active = true, tabId }: { filePath: string
           }}
         />
       </div>
-
-      {/* 关闭确认浮层（useInlineConfirm） */}
-      {element}
     </div>
   )
 }

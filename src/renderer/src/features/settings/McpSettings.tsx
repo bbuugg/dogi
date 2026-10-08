@@ -1,7 +1,8 @@
-import type { BrowserToolMode, McpServerConfig, McpToolInfo } from '@shared/types'
+import type { BrowserToolMode, McpServerConfig, McpToolInfo, McpTransport } from '@shared/types'
+import { MCP_TRANSPORT_HINTS, MCP_TRANSPORT_LABELS, mcpServerSummary, mcpTransportOf } from '@shared/mcp'
 import { Button, Input, Modal, Popconfirm, Segmented, Switch, Tag, message } from 'antd'
 import { Pencil, Plus, Trash2, Wrench } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { useAppStore } from '../../stores/app-store'
 
 interface McpStatus extends McpServerConfig {
@@ -11,22 +12,38 @@ interface McpStatus extends McpServerConfig {
 interface FormState {
   id: string
   name: string
+  transport: McpTransport
   command: string
   args: string
   env: Record<string, string>
+  url: string
+  headers: Record<string, string>
   enabled: boolean
 }
 
-const EMPTY: FormState = { id: '', name: '', command: '', args: '', env: {}, enabled: true }
+const EMPTY: FormState = {
+  id: '',
+  name: '',
+  transport: 'stdio',
+  command: '',
+  args: '',
+  env: {},
+  url: '',
+  headers: {},
+  enabled: true
+}
 
 function toForm(server: McpServerConfig | null): FormState {
   if (!server) return { ...EMPTY }
   return {
     id: server.id,
     name: server.name,
+    transport: mcpTransportOf(server),
     command: server.command,
     args: (server.args ?? []).join(' '),
     env: server.env ? { ...server.env } : {},
+    url: server.url ?? '',
+    headers: server.headers ? { ...server.headers } : {},
     enabled: server.enabled
   }
 }
@@ -68,31 +85,89 @@ export function McpSettings() {
   const patch = (partial: Partial<FormState>) =>
     setEditing((f) => (f ? { ...f, ...partial } : f))
 
-  /** 环境变量键值对编辑（与 ACP 配置一致） */
-  const setEnvKey = (oldKey: string, newKey: string) =>
+  /**
+   * 键值对编辑（环境变量 / 请求头共用一套逻辑）。
+   *
+   * 抽成按字段名参数化而不是各写一遍：两处的行为必须完全一致（改名要保持顺序、
+   * 空 key 保存时忽略），复制一份迟早会漂。
+   */
+  type KvField = 'env' | 'headers'
+  const setKvKey = (field: KvField, oldKey: string, newKey: string) =>
     setEditing((f) => {
       if (!f) return f
       const next: Record<string, string> = {}
-      for (const [k, v] of Object.entries(f.env)) next[k === oldKey ? newKey : k] = v
-      return { ...f, env: next }
+      for (const [k, v] of Object.entries(f[field])) next[k === oldKey ? newKey : k] = v
+      return { ...f, [field]: next }
     })
-  const setEnvValue = (key: string, value: string) =>
-    setEditing((f) => (f ? { ...f, env: { ...f.env, [key]: value } } : f))
-  const removeEnv = (key: string) =>
+  const setKvValue = (field: KvField, key: string, value: string) =>
+    setEditing((f) => (f ? { ...f, [field]: { ...f[field], [key]: value } } : f))
+  const removeKv = (field: KvField, key: string) =>
     setEditing((f) => {
       if (!f) return f
-      const next = { ...f.env }
+      const next = { ...f[field] }
       delete next[key]
-      return { ...f, env: next }
+      return { ...f, [field]: next }
     })
-  const addEnv = () =>
+  const addKv = (field: KvField, base: string) =>
     setEditing((f) => {
       if (!f) return f
-      let key = 'NEW_VAR'
+      let key = base
       let i = 1
-      while (key in f.env) key = `NEW_VAR_${i++}`
-      return { ...f, env: { ...f.env, [key]: '' } }
+      while (key in f[field]) key = `${base}_${i++}`
+      return { ...f, [field]: { ...f[field], [key]: '' } }
     })
+
+  /** 键值对编辑区的渲染（env 与 headers 只是文案不同） */
+  const renderKvEditor = (
+    field: KvField,
+    opts: { addBase: string; emptyHint: ReactNode; keyPlaceholder: string }
+  ) => (
+    <div className="grid gap-1.5">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-foreground">{opts.emptyHint}</span>
+        <Button
+          size="small"
+          type="text"
+          icon={<Plus className="size-3.5" />}
+          onClick={() => addKv(field, opts.addBase)}
+        >
+          添加
+        </Button>
+      </div>
+      {Object.keys(editing?.[field] ?? {}).length === 0 ? (
+        <p className="text-xs leading-4 text-muted-foreground">
+          暂无。留空的 key 保存时会忽略。
+        </p>
+      ) : (
+        <div className="space-y-1.5">
+          {Object.entries(editing?.[field] ?? {}).map(([key, value], index) => (
+            <div key={index} className="flex items-center gap-1.5">
+              <Input
+                className="min-w-0 flex-1 font-mono"
+                placeholder={opts.keyPlaceholder}
+                value={key}
+                onChange={(e) => setKvKey(field, key, e.target.value)}
+              />
+              <span className="shrink-0 font-mono text-muted-foreground">=</span>
+              <Input
+                className="min-w-0 flex-1 font-mono"
+                placeholder="VALUE"
+                value={value}
+                onChange={(e) => setKvValue(field, key, e.target.value)}
+              />
+              <Button
+                size="small"
+                type="text"
+                icon={<Trash2 className="size-3.5" />}
+                className="w-7 shrink-0 p-0"
+                onClick={() => removeKv(field, key)}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 
   const openCreate = () => {
     setEditing({ ...EMPTY })
@@ -107,21 +182,30 @@ export function McpSettings() {
 
   const handleSave = async () => {
     if (!editing) return
-    if (!editing.name.trim() || !editing.command.trim()) {
-      message.error('请填写名称与启动命令')
+    const isStdio = editing.transport === 'stdio'
+    // 两种传输的必填项不同：本地进程要命令，远端要地址 —— 别用一条「都必填」的规则
+    // 逼用户去填那个根本用不上的字段
+    if (!editing.name.trim() || (isStdio ? !editing.command.trim() : !editing.url.trim())) {
+      message.error(isStdio ? '请填写名称与启动命令' : '请填写名称与服务地址')
       return
     }
     setSaving(true)
     try {
-      const env = Object.fromEntries(
-        Object.entries(editing.env).filter(([k]) => k.trim().length > 0)
-      )
+      const clean = (kv: Record<string, string>) =>
+        Object.fromEntries(Object.entries(kv).filter(([k]) => k.trim().length > 0))
+      const env = clean(editing.env)
+      const headers = clean(editing.headers)
       await window.api.mcp.save({
         id: editing.id,
         name: editing.name.trim(),
-        command: editing.command.trim(),
-        args: editing.args.split(/\s+/).filter(Boolean),
-        env,
+        transport: editing.transport,
+        // 非 stdio 的配置里把 command / args / env 清空：留着旧值会让列表摘要与
+        // 「这个 server 到底怎么连」对不上（而且下次改回 stdio 会突然复活一份旧命令）
+        command: isStdio ? editing.command.trim() : '',
+        args: isStdio ? editing.args.split(/\s+/).filter(Boolean) : [],
+        env: isStdio ? env : undefined,
+        url: isStdio ? undefined : editing.url.trim(),
+        headers: isStdio ? undefined : headers,
         enabled: editing.enabled
       })
       setEditing(null)
@@ -160,7 +244,7 @@ export function McpSettings() {
     <div className="space-y-2">
       <div className="flex items-center justify-between">
         <p className="text-xs text-muted-foreground">
-          MCP 工具将自动提供给 AI 使用（stdio 类型）
+          MCP 工具将自动提供给 AI 使用（支持本地进程 / HTTP / SSE 三种传输）
         </p>
         <div className="flex gap-2">
           <Button type="text" icon={<Plus className="size-4" />} size="small" variant="filled" onClick={openCreate}>
@@ -219,6 +303,10 @@ export function McpSettings() {
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
               <span className="truncate text-sm font-medium">{server.name}</span>
+              {/* 传输方式必须露出来：光看名字猜不出它是本地进程还是远端服务 */}
+              <Tag variant="outlined" className="m-0 h-4 px-1.5 text-[9px] leading-4">
+                {MCP_TRANSPORT_LABELS[mcpTransportOf(server)]}
+              </Tag>
               {server.enabled ? (
                 <Tag color="default" className="m-0 h-4 border-0 bg-secondary px-1.5 text-[9px] leading-4">
                   启用
@@ -230,7 +318,7 @@ export function McpSettings() {
               )}
             </div>
             <div className="truncate font-mono text-xs text-muted-foreground">
-              {server.command} {(server.args ?? []).join(' ')}
+              {mcpServerSummary(server)}
               {server.error ? ` · ⚠ ${server.error}` : ''}
             </div>
           </div>
@@ -339,73 +427,83 @@ export function McpSettings() {
                 </label>
               </div>
             </div>
+            {/* 传输方式：决定下面填什么。默认 stdio（老配置的形态），
+                远端两种只是换了个「怎么连」 —— 连上之后行为完全一样 */}
             <div className="grid gap-1.5">
-              <span className="text-xs font-medium text-foreground">启动命令</span>
-              <Input
-                placeholder="如：npx 或 node 或 D:\tools\server.exe"
-                value={editing.command}
-                onChange={(e) => patch({ command: e.target.value })}
+              <span className="text-xs font-medium text-foreground">传输方式</span>
+              <Segmented
+                size="small"
+                block
+                value={editing.transport}
+                onChange={(v) => patch({ transport: v as McpTransport })}
+                options={(['stdio', 'http', 'sse'] as McpTransport[]).map((t) => ({
+                  label: MCP_TRANSPORT_LABELS[t],
+                  value: t
+                }))}
               />
+              <p className="text-xs leading-4 text-muted-foreground">
+                {MCP_TRANSPORT_HINTS[editing.transport]}
+              </p>
             </div>
-            <div className="grid gap-1.5">
-              <span className="text-xs font-medium text-foreground">参数（空格分隔）</span>
-              <Input
-                placeholder="如：-y @modelcontextprotocol/server-filesystem D:\data"
-                value={editing.args}
-                onChange={(e) => patch({ args: e.target.value })}
-              />
-            </div>
-            <div className="grid gap-1.5">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-medium text-foreground">
-                  环境变量
-                  <span className="ml-1 font-normal text-muted-foreground">
-                    （GUI 进程不继承 shell 变量，需在此注入 API Key 等）
-                  </span>
-                </span>
-                <Button
-                  size="small"
-                  type="text"
-                  icon={<Plus className="size-3.5" />}
-                  onClick={addEnv}
-                >
-                  添加
-                </Button>
-              </div>
-              {Object.keys(editing.env).length === 0 ? (
-                <p className="text-xs leading-4 text-muted-foreground">
-                  暂无，点「添加」注入如 <code className="font-mono">API_TOKEN</code> /
-                  <code className="font-mono">DEBUG</code>。留空的 key 保存时会忽略。
-                </p>
-              ) : (
-                <div className="space-y-1.5">
-                  {Object.entries(editing.env).map(([key, value], index) => (
-                    <div key={index} className="flex items-center gap-1.5">
-                      <Input
-                        className="min-w-0 flex-1 font-mono"
-                        placeholder="KEY"
-                        value={key}
-                        onChange={(e) => setEnvKey(key, e.target.value)}
-                      />
-                      <span className="shrink-0 font-mono text-muted-foreground">=</span>
-                      <Input
-                        className="min-w-0 flex-1 font-mono"
-                        placeholder="VALUE"
-                        value={value}
-                        onChange={(e) => setEnvValue(key, e.target.value)}
-                      />
-                      <Button
-                        size="small"
-                        type="text"
-                        icon={<Trash2 className="size-3.5" />}
-                        className="w-7 shrink-0 p-0"
-                        onClick={() => removeEnv(key)}
-                      />
-                    </div>
-                  ))}
+            {editing.transport === 'stdio' ? (
+              <>
+                <div className="grid gap-1.5">
+                  <span className="text-xs font-medium text-foreground">启动命令</span>
+                  <Input
+                    placeholder="如：npx 或 node 或 D:\tools\server.exe"
+                    value={editing.command}
+                    onChange={(e) => patch({ command: e.target.value })}
+                  />
                 </div>
-              )}
-            </div>
+                <div className="grid gap-1.5">
+                  <span className="text-xs font-medium text-foreground">参数（空格分隔）</span>
+                  <Input
+                    placeholder="如：-y @modelcontextprotocol/server-filesystem D:\data"
+                    value={editing.args}
+                    onChange={(e) => patch({ args: e.target.value })}
+                  />
+                </div>
+                {renderKvEditor('env', {
+                  addBase: 'NEW_VAR',
+                  emptyHint: (
+                    <>
+                      环境变量
+                      <span className="ml-1 font-normal text-muted-foreground">
+                        （GUI 进程不继承 shell 变量，需在此注入 API Key 等）
+                      </span>
+                    </>
+                  ),
+                  keyPlaceholder: 'KEY'
+                })}
+              </>
+            ) : (
+              <>
+                <div className="grid gap-1.5">
+                  <span className="text-xs font-medium text-foreground">服务地址</span>
+                  <Input
+                    placeholder={
+                      editing.transport === 'http'
+                        ? '如：https://example.com/mcp'
+                        : '如：https://example.com/sse'
+                    }
+                    value={editing.url}
+                    onChange={(e) => patch({ url: e.target.value })}
+                  />
+                </div>
+                {renderKvEditor('headers', {
+                  addBase: 'X-Custom-Header',
+                  emptyHint: (
+                    <>
+                      请求头
+                      <span className="ml-1 font-normal text-muted-foreground">
+                        （鉴权用，如 Authorization = Bearer xxx）
+                      </span>
+                    </>
+                  ),
+                  keyPlaceholder: 'Header'
+                })}
+              </>
+            )}
           </div>
         )}
       </Modal>

@@ -6,8 +6,64 @@
  * 但 loader 与权限模型已为后续扩展留好位置。
  */
 
-/** 插件可向宿主申请的权限（宿主按权限放行对应能力） */
-export type PluginPermission = 'http' | 'storage' | 'fs'
+/**
+ * 插件可向宿主申请的权限（宿主按权限放行对应能力）
+ *
+ * - `http`：发起网络请求；
+ * - `storage`：读写插件自己的持久化分区；
+ * - `fs`：读写文件；
+ * - `hooks`：挂 **AI 工具钩子**（`tool:call` 可在工具执行前拦截，`tool:result` 可改写结果）。
+ *   单独列一个权限是刻意的 —— 它能**改变 AI 实际做了什么**（拦下一条命令 / 换掉工具看到的结果），
+ *   比前三个都敏感，用户装插件时应该一眼看到。
+ */
+export type PluginPermission = 'http' | 'storage' | 'fs' | 'hooks'
+
+/**
+ * 插件可以挂的 AI 工具钩子。
+ *
+ * `tool:call`（执行**前**）—— 入参 `PluginToolCallEvent`，可返回 `{ block, reason }`：
+ * 任何插件拦下这一条，工具就不再执行，`reason` 原样作为工具结果回给模型
+ * （同 `guardWrite` 的拒绝语义：**不抛错**，模型能据此换个做法）。
+ *
+ * `tool:result`（执行**后**）—— 入参 `PluginToolResultEvent`，可返回 `{ result }` 改写结果
+ * （字符串才算，其它返回值忽略）。用来做脱敏、给结果补上下文之类。
+ *
+ * ⚠️ 钩子**必须**是「出错/超时就当没挂」：插件崩了绝不能把整轮对话拖死 ——
+ * 宿主侧统一 try/catch + 超时，插件作者不必自己兜底（但也别指望钩子一定跑得到）。
+ */
+export type PluginHookEvent = 'tool:call' | 'tool:result'
+
+/** `tool:call` 钩子的入参 */
+export interface PluginToolCallEvent {
+  toolName: string
+  input: unknown
+  conversationId: string
+  scope: 'workspace' | 'terminal'
+  /** workspace 作用域下的工作区目录（terminal 为 undefined） */
+  workspacePath?: string
+}
+
+/** `tool:call` 钩子的返回值 */
+export interface PluginToolCallVerdict {
+  /** true = 拦下这一条工具调用 */
+  block?: boolean
+  /** 拦下的原因（会原样作为工具结果回给模型，所以写给人看的话） */
+  reason?: string
+}
+
+/** `tool:result` 钩子的入参 */
+export interface PluginToolResultEvent {
+  toolName: string
+  input: unknown
+  result: unknown
+  conversationId: string
+  scope: 'workspace' | 'terminal'
+}
+
+/** `tool:result` 钩子的返回值：给 `result` 就替换（仅字符串生效） */
+export interface PluginToolResultVerdict {
+  result?: string
+}
 
 /**
  * 渲染端入口：插件目录内的 ESM 源码文件名。

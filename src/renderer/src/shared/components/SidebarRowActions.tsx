@@ -79,7 +79,9 @@ export const SIDEBAR_ROW_NAME = {
   /** 两个按钮（如「运行 / 删除」）：16 + 18×2 + 2 = 54px */
   two: 'min-w-0 flex-1 truncate transition-[padding] group-hover:pe-14 max-md:pe-14',
   /** 三个按钮（如会话行「归档 / 重命名 / 删除」）：16 + 18×3 + 4 = 74px */
-  three: 'min-w-0 flex-1 truncate transition-[padding] group-hover:pe-20 max-md:pe-20'
+  three: 'min-w-0 flex-1 truncate transition-[padding] group-hover:pe-20 max-md:pe-20',
+  /** 四个按钮（会话行加了「更多」）：16 + 18×4 + 6 = 94px */
+  four: 'min-w-0 flex-1 truncate transition-[padding] group-hover:pe-24 max-md:pe-24'
 } as const
 
 /**

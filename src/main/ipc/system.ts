@@ -95,7 +95,9 @@ export function registerSystemIpc(ctx: IpcContext): void {
     version: app.getVersion(),
     electron: process.versions.electron ?? '',
     node: process.versions.node ?? '',
-    platform: process.platform
+    platform: process.platform,
+    // 用户主目录：新建工作区 / 克隆仓库的默认落点（「选目录」对话框的初值）
+    homeDir: app.getPath('home')
   }))
   // 终端中点击链接时使用：按安全协议过滤后由系统默认程序打开
   ipcMain.handle('app:openExternal', (_e, url: string) => openExternalSafe(url))

@@ -2,7 +2,7 @@
  * AI 超时的**缺省值**与设置页的**可选档位**（主进程与渲染端共用一份，避免两处对不上）。
  *
  * 统一语义：`0` = 不限时；缺省值（用户没设过时生效的那个）标在选项文案里。
- * 具体实现与理由见 `main/services/ai/timeouts.ts`，用户可在「设置 → AI → 超时」覆盖。
+ * 具体实现与理由见 `main/services/ai/timeouts.ts`，用户可在「设置 → AI → 运行」覆盖。
  */
 
 /** 审批等待的缺省值：不限时（超时是静默的，比挂着一轮更让人困惑） */
@@ -13,6 +13,16 @@ export const DEFAULT_MODEL_TIMEOUT_MS = 5 * 60 * 1000
 
 /** Agent 单轮对话允许的最大工具调用步数（AI SDK 的 `maxSteps`） */
 export const DEFAULT_MAX_STEPS = 500
+
+/**
+ * 子 Agent（delegate 工具拉起的 explorer / reviewer）的**步数上限**。
+ *
+ * ⚠️ 故意远小于父 Agent 的 `DEFAULT_MAX_STEPS`：子 Agent 的输出要回填成一条工具结果，
+ * 它跑得越久，父 Agent 那一轮被卡住的时间越长（界面上只是「delegate 运行中」）。
+ * 30 步足够「把相关文件读一遍 + 给出结论」，再多通常是它在原地打转 ——
+ * 与其烧 token，不如让它带着已有信息先交一份报告。
+ */
+export const DEFAULT_SUB_AGENT_MAX_STEPS = 30
 
 /** 模型请求失败后的缺省自动重试次数 */
 export const DEFAULT_MAX_RETRIES = 2

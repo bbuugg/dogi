@@ -24,7 +24,8 @@ import {
   RefreshCw,
   RotateCcw,
   Trash2,
-  Upload
+  Upload,
+  GitCommitHorizontal
 } from 'lucide-react'
 import type {
   GitBranchesResult,
@@ -34,6 +35,8 @@ import type {
   GitStatusResult
 } from '@shared/types'
 import { buildRows, INDENT, type RowNode } from './git-tree'
+import { subscribeWorkspaceFsChanged } from '@/shared/lib/fs-changed'
+import { GitInstallDialog } from './GitInstallDialog'
 import { FileDiffView } from '@/shared/components/FileDiffView'
 import { parseUnifiedDiff, type DiffHunk } from '@/shared/lib/diff'
 
@@ -231,6 +234,9 @@ export function GitPanel({
   const [dirLists, setDirLists] = useState<Record<string, { items: string[]; loading: boolean }>>({})
   /** 未跟踪目录条目的展开态（与 collapsedDirs 分开：它是只读预览、不参与暂存 / 回退） */
   const [dirEntryOpen, setDirEntryOpen] = useState<Record<string, boolean>>({})
+  /** 「这台机器没装 git」（探测过一次就记住，不在每次刷新时重问） */
+  const [gitMissing, setGitMissing] = useState(false)
+  const [showGitInstall, setShowGitInstall] = useState(false)
 
   const onChangesRef = useRef(onChanges)
   onChangesRef.current = onChanges
@@ -269,6 +275,79 @@ export function GitPanel({
   useEffect(() => {
     void refreshRef.current()
   }, [cwd, refreshToken])
+
+  /**
+   * 「不是仓库」有两种原因，只看 `isRepo` 分不出来：机器上根本没装 git / 这个目录还没 init。
+   * 面板说「这个工作区还不是 git 仓库」会把第二种人引到第一种结论上（去装 git），
+   * 反过来也会让没装 git 的人去反复 init —— 所以这里在**确实不是仓库**时才探一次 git 是否可用。
+   * 只探一次（结果存 `gitMissing`），装完点「重新检测」要手动刷新面板。
+   */
+  useEffect(() => {
+    if (!status || status.isRepo) return
+    let cancelled = false
+    void window.api.git
+      .version()
+      .then((v) => {
+        if (!cancelled) setGitMissing(!v.installed)
+      })
+      .catch(() => {
+        // 探测本身失败：当作「有 git」（那是原行为），别凭一次失败拦掉所有 init 入口
+        if (!cancelled) setGitMissing(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [status?.isRepo, cwd])
+
+  /**
+   * 三个「该去问一次 git status」的额外触发点（移植自 fishwork 的 GitPanel）：
+   *
+   * 1. **文件面板改了盘**（`fs-changed` 通道）：文件视图保存 / 新建 / 删除 / 复制 / 移动之后，
+   *    改动列表必须跟着变 —— 否则用户在文件面板干完活切过来看到的是旧列表。
+   *    只监听当前工作区；`workspaceId` 为 null 的通知一律忽略（来源不明，别乱刷）。
+   * 2. **窗口重新可见 / 重新获得焦点**：外部工具（编辑器、构建）改的文件我们收不到信号，
+   *    这是零成本的兜底。`document.visibilityState` 判的是「窗口最小化到托盘再回来」那种。
+   * 3. **面板标签从隐藏变可见**：面板组的标签是常驻挂载的（见 6.5 第 26 条），
+   *    切回来不会重挂载、也不会重跑 effect，靠 rect 变回来判断。
+   */
+  useEffect(() => {
+    const off = subscribeWorkspaceFsChanged((change) => {
+      if (change.workspaceId && change.workspaceId !== cwd) return
+      if (change.workspaceId === null) return
+      void refreshRef.current()
+    })
+    return off
+  }, [cwd])
+
+  useEffect(() => {
+    const onWake = (): void => {
+      if (document.visibilityState !== 'visible') return
+      if (!document.hasFocus()) return
+      void refreshRef.current()
+    }
+    document.addEventListener('visibilitychange', onWake)
+    window.addEventListener('focus', onWake)
+    return () => {
+      document.removeEventListener('visibilitychange', onWake)
+      window.removeEventListener('focus', onWake)
+    }
+  }, [])
+
+  // 面板可见性：hidden 的面板 rect 全 0，突然变成非 0 就是「切回来了」
+  const hostRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const el = hostRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    let wasVisible = el.getBoundingClientRect().width > 0
+    const ro = new ResizeObserver(() => {
+      const visible = el.getBoundingClientRect().width > 0
+      if (visible === wasVisible) return
+      wasVisible = visible
+      if (visible) void refreshRef.current()
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
 
   async function run(fn: () => Promise<string>, done?: string): Promise<void> {
     setBusy(true)
@@ -1157,6 +1236,7 @@ export function GitPanel({
 
   return (
     <div
+      ref={hostRef}
       className="flex h-full min-h-0 flex-col"
       // Ctrl / ⌘ + Shift + Enter = 推送（提交是 Ctrl + Enter，见提交输入框 —— 那边刻意排除了 shift，所以两套组合不会互相触发）
       onKeyDown={(e) => {
@@ -1286,19 +1366,52 @@ export function GitPanel({
       ) : !status?.isRepo ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
           <GitBranchIcon className="size-6 text-muted-foreground/50" />
+          {gitMissing ? (
+            // 没装 git 时别把人引向「去 init 一个仓库」—— 那是另一回事
+            <>
+              <p className="text-sm text-muted-foreground">这台机器上没有可用的 git。</p>
+              <Button type="primary" size="small" onClick={() => setShowGitInstall(true)}>
+                查看安装方式
+              </Button>
+            </>
+          ) : (
+            <>
           <p className="text-sm text-muted-foreground">这个工作区还不是 git 仓库。</p>
-          <Button
-            type="primary"
-            size="small"
-            loading={busy}
-            icon={<Plus className="size-3.5" />}
-            onClick={() => void run(() => window.api.git.action(cwd, { action: 'init' }), '已初始化 git 仓库')}
-          >
-            初始化 git 仓库
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              type="primary"
+              size="small"
+              loading={busy}
+              icon={<Plus className="size-3.5" />}
+              onClick={() => void run(() => window.api.git.action(cwd, { action: 'init' }), '已初始化 git 仓库')}
+            >
+              初始化 git 仓库
+            </Button>
+            {/* 空仓库的引导闭环：init 之后还得手动暂存 + 写提交信息才能完成，那不是引导是两段劳动 */}
+            <Button
+              size="small"
+              loading={busy}
+              icon={<GitCommitHorizontal className="size-3.5" />}
+              onClick={() =>
+                void run(
+                  () =>
+                    window.api.git.action(cwd, {
+                      action: 'init-commit',
+                      ...(message.trim() ? { message: message.trim() } : {})
+                    }),
+                  '已初始化并完成首次提交'
+                )
+              }
+            >
+              初始化并首次提交
+            </Button>
+          </div>
           <p className="max-w-[280px] text-xs text-muted-foreground/70">
             初始化后所有文件都是未跟踪状态；建议先补一个 <code>.gitignore</code> 再提交。
+            「初始化并首次提交」会连暂存一起做完（提交信息留空则用默认文案）。
           </p>
+            </>
+          )}
         </div>
       ) : (
         <>
@@ -1715,6 +1828,21 @@ export function GitPanel({
               {bulkDeletes > 0 ? `，其中 ${bulkDeletes} 个会被从磁盘上删除` : ''}，此操作不可恢复。
             </p>
           </Modal>
+          <GitInstallDialog
+            open={showGitInstall}
+            onClose={() => {
+              setShowGitInstall(false)
+              // 弹窗的「我已安装，重新检测」= 重新探一次 git，并刷新面板状态
+              void window.api.git
+                .version()
+                .then((v) => {
+                  setGitMissing(!v.installed)
+                  if (v.installed) void refreshRef.current()
+                })
+                .catch(() => setGitMissing(false))
+            }}
+            detected={null}
+          />
         </>
       )}
     </div>

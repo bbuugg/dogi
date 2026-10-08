@@ -51,6 +51,8 @@ function normalizeConversation(raw: LegacyConversation): AgentConversation {
     // 用户下一次发消息触发 save → 文件被重写成没有检查点的版本 → 压缩成果**永久丢失**。
     // 加新字段时务必在这里补一行。
     contextSummary: raw.contextSummary,
+    // 每条会话的 MCP 允许清单（undefined = 不限，用全部全局启用的）
+    mcpServerIds: raw.mcpServerIds,
     archived: raw.archived,
     createdAt: raw.createdAt ?? Date.now(),
     updatedAt: raw.updatedAt ?? Date.now()
@@ -94,6 +96,12 @@ export interface SaveConversationInput {
   acpAgentId?: string
   /** 仅 acp：agent 侧的会话 id */
   acpSessionId?: string
+  /**
+   * 这条会话用哪些 MCP server（见 `AgentConversation.mcpServerIds`）。
+   * 同 kind / modelId 一样用 `'x' in input` 语义：渲染端每次落盘都显式带上，
+   * `undefined` = 清掉限制（回到「用全部全局启用的」）。
+   */
+  mcpServerIds?: string[]
   /** 归档态；同 kind / modelId 一样用 `'x' in input` 语义（undefined = 取消归档） */
   archived?: boolean
 }
@@ -235,6 +243,9 @@ export class ConversationStore {
       // 根本没有这个字段 —— 如果这里跟着重建对象不带上它，用户每发一条消息
       // 就会把手动压缩的成果悄悄抹掉。
       contextSummary: prev?.contextSummary,
+      // MCP 允许清单归渲染端（输入框那个 Popover 改的就是它），所以跟着落盘请求走：
+      // `'x' in input` 语义 —— 显式 undefined 表示「取消限制，回到全部启用」。
+      mcpServerIds: 'mcpServerIds' in input ? input.mcpServerIds : prev?.mcpServerIds,
       // 归档态与模型选择同一套语义：渲染端每次落盘都显式带上，`undefined` 即「取消归档」
       archived: 'archived' in input ? input.archived : prev?.archived,
       createdAt: prev?.createdAt ?? now,
@@ -276,6 +287,49 @@ export class ConversationStore {
     this.cache.set(id, next)
     this.writeFile(next)
     return next
+  }
+
+  /**
+   * **从此签出（分支）**：以某个会话为模板造一条**新会话**，原会话一字不动。
+   *
+   * `upToMessageId` 给了就在那条消息处截断（含它），不给就整条复制 ——
+   * 「从这一步换条路走」和「整体复制一份接着聊」是同一个动作的两种用法。
+   *
+   * 刻意**不继承**的东西：
+   * - `contextSummary`：检查点是按原会话的完整消息算出来的，截断后它引用的那些
+   *   消息可能已经不在分支里了 —— 带着它等于让模型看到一份「对不上账」的摘要。
+   *   分支从零重新攒检查点，代价只是第一次压缩晚一点。
+   * - `archived`：分支刚建出来，当然是活跃的。
+   *
+   * ACP 会话返回 undefined：它的消息在 agent 那边，本地没有可复制的东西
+   * （复制一条空壳会话对用户毫无意义，不如让调用方明确报错）。
+   */
+  fork(id: string, upToMessageId?: string): AgentConversation | undefined {
+    this.ensureLoaded()
+    const source = this.cache.get(id)
+    if (!source || source.kind === 'acp') return undefined
+    let messages = source.messages
+    if (upToMessageId) {
+      const index = messages.findIndex((m) => m.id === upToMessageId)
+      // 找不到就不截断（消息可能是渲染端本地态、还没落盘）：整体复制比抛错更有用
+      if (index >= 0) messages = messages.slice(0, index + 1)
+    }
+    const now = Date.now()
+    const forked: AgentConversation = {
+      ...source,
+      id: crypto.randomUUID(),
+      // 标题给出可辨认的来源（同名会话在列表里会分不清谁是谁）
+      title: `${source.title} · 分支`,
+      messages,
+      // 见上：检查点不继承
+      contextSummary: undefined,
+      archived: undefined,
+      createdAt: now,
+      updatedAt: now
+    }
+    this.cache.set(forked.id, forked)
+    this.writeFile(forked)
+    return forked
   }
 
   /** 工作区没了：它的会话一并删掉，避免留下永远看不到的孤儿数据 */

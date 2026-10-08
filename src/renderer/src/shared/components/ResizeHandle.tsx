@@ -20,6 +20,8 @@ interface Props {
    */
   onDragStart?: () => void
   onDragEnd?: () => void
+  /** 双击分隔线（编辑器 / 资源管理器的通用习惯：恢复默认尺寸） */
+  onDoubleClick?: () => void
   className?: string
 }
 
@@ -36,6 +38,7 @@ export function ResizeHandle({
   invert = false,
   onDragStart,
   onDragEnd,
+  onDoubleClick,
   className
 }: Props) {
   const isVertical = orientation === 'y'
@@ -65,6 +68,7 @@ export function ResizeHandle({
   return (
     <div
       onPointerDown={onPointerDown}
+      onDoubleClick={onDoubleClick}
       title={isVertical ? '拖动调整高度' : '拖动调整宽度'}
       className={cn(
         'group/resize relative z-10 shrink-0',

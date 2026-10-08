@@ -1102,6 +1102,14 @@ class StorageService {
   }
 
   /**
+   * **从此签出（分支）**：复制某条会话成一条新会话，原会话不动。
+   * 返回 undefined = 不能分支（不存在 / 是 ACP 会话，消息在 agent 那边）。
+   */
+  forkAgentConversation(id: string, upToMessageId?: string): AgentConversation | undefined {
+    return conversationStore.fork(id, upToMessageId)
+  }
+
+  /**
    * 设置 / 清除会话的上下文摘要检查点（**手动压缩的落库口**）。
    *
    * `null` = 清除，回到全文历史。原始消息一条不动，所以清除是无损、可逆的。

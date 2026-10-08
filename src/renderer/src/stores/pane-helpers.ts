@@ -232,57 +232,6 @@ export function siblingTabIds(
 }
 
 /**
- * 一次摘掉一批标签（组内批量关闭）：组因此变空则连组（及其布局叶子）一并移除，最后重算焦点。
- *
- * 与 `closeMissingPluginTabs` / `closeMissingAgentTabs` 同一套路，区别只是待关集合来自
- * 用户操作而不是对象消失。调用方负责先把其中的终端会话 kill 掉；`sessions` / `exitedSessions`
- * 等会话级状态由主进程的 closed 事件经 `applyTabClose` 收尾（与 `closeGroup` 一致）。
- */
-export function closeTabsPatch(s: AppStore, closing: Set<string>): Partial<AppStore> {
-  if (closing.size === 0) return {}
-  const tabs = s.ui.panelTabs.filter((t) => !closing.has(t.id))
-  if (tabs.length === s.ui.panelTabs.length) return {}
-  const groups: Record<string, PanelGroup> = {}
-  let layout = s.layout
-  for (const [id, g] of Object.entries(s.groups)) {
-    const tabIds = g.tabIds.filter((x) => !closing.has(x))
-    // 理论上走不到：有锚点标签兜底，组不会空。保险起见仍摘掉叶子，别留一个空组挂在布局上
-    if (tabIds.length === 0) {
-      layout = removeLeaf(layout, id)
-      continue
-    }
-    groups[id] = {
-      ...g,
-      tabIds,
-      // 激活标签被关掉就回落到组内最后一个标签（与 withoutTab 一致）
-      activeTabId:
-        g.activeTabId && closing.has(g.activeTabId)
-          ? (tabIds[tabIds.length - 1] ?? null)
-          : g.activeTabId
-    }
-  }
-  const focus = resolveFocus(layout, groups, tabs, s.activeGroupId, s.activeSessionId)
-  // 被关掉的终端标签：AI 面板开关与最小化状态一并清理（比等 closed 事件更即时，与 closeGroup 一致）
-  const sessionIds: string[] = []
-  for (const t of s.ui.panelTabs) {
-    if (closing.has(t.id) && t.sessionId) sessionIds.push(t.sessionId)
-  }
-  const aiOpenSessions = { ...s.ui.aiOpenSessions }
-  const aiMinimizedSessions = { ...s.ui.aiMinimizedSessions }
-  for (const id of sessionIds) {
-    delete aiOpenSessions[id]
-    delete aiMinimizedSessions[id]
-  }
-  return {
-    groups,
-    layout,
-    activeGroupId: focus.activeGroupId,
-    activeSessionId: focus.activeSessionId,
-    ui: { ...s.ui, panelTabs: tabs, aiOpenSessions, aiMinimizedSessions }
-  }
-}
-
-/**
  * 插件视图消失（卸载 / 禁用 / 重载）后，把指向它的插件标签一并关掉。
  *
  * 插件不再往活动栏挂条目，所以「插件没了」只剩标签这一处残留需要收拾：

@@ -19,7 +19,7 @@ export function buildReadToolOutputDef(): AiToolDef {
     name: 'read_tool_output',
     scope: 'both',
     description:
-      '读取上一次工具调用（run_in_terminal / execute_command / send_keys）因输出过长而保存下来的完整内容。' +
+      '读取上一次工具调用（run_in_terminal / execute_command / send_keys / web_fetch）因输出过长而保存下来的完整内容。' +
       '工具结果里会给出形如 {"id":"xxx","offset":12000,"length":8000} 的提示，按它传参即可。' +
       'offset 与 length 都按字符计（不是字节），把 offset 加上本次返回的长度继续读，直到 remaining 为 0。' +
       `单次最多返回 ${ARTIFACT_READ_MAX} 字符。产物只在产生它的那一轮附近有效（跨重启或超过一天会被清理），读不到时改用对应工具重新执行一次。`,

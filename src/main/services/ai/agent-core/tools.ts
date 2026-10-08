@@ -24,6 +24,8 @@ import {
   normalizeLineEndings,
   replaceContent
 } from './edit-match'
+import { isAllowDecision } from '@shared/confirm'
+import { commandStopRegistry } from '../command-stop'
 import { createIgnoreChecker, relPathOf, resolveInside } from './workspace'
 
 /**
@@ -396,17 +398,21 @@ async function runCommand(
 
   return new Promise<string>((resolve) => {
     let settled = false
-    const finish = (reason: 'exit' | 'timeout' | 'aborted', code?: number | null) => {
+    const finish = (reason: 'exit' | 'timeout' | 'aborted' | 'stopped', code?: number | null) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
       signal?.removeEventListener('abort', onAbort)
+      // 摘掉单条停止登记（不摘的话表会一直长，且已结束的命令还能被「停止」命中）
+      commandStopRegistry.unregister(call.toolCallId)
       const info =
         reason === 'exit'
           ? `（退出码 ${code}）`
           : reason === 'timeout'
             ? `（超时 ${timeoutMs}ms，已终止进程树）`
-            : '（已中止）'
+            : reason === 'stopped'
+              ? '（已被用户单独停止这条命令，未影响本轮其它步骤）'
+              : '（已中止）'
       void (async () => {
         const outR = await out.finish()
         const errR = await err.finish()
@@ -420,6 +426,15 @@ async function runCommand(
       killChild(child, isWin)
       finish('aborted')
     }
+    /**
+     * 单条停止（用户点工具卡上的「停止」）：只杀这一个进程树，这一轮继续跑。
+     * 与 onAbort 的区别仅在收尾文案与「本轮是否结束」—— 结果照常回给模型。
+     */
+    const onStop = () => {
+      killChild(child, isWin)
+      finish('stopped')
+    }
+    commandStopRegistry.register(call.toolCallId, onStop)
     const timer = setTimeout(() => {
       killChild(child, isWin)
       finish('timeout')
@@ -439,6 +454,7 @@ async function runCommand(
       settled = true
       clearTimeout(timer)
       signal?.removeEventListener('abort', onAbort)
+      commandStopRegistry.unregister(call.toolCallId)
       resolve(`$ ${command}\n（命令启动失败：${err.message}）`)
     })
     child.on('exit', (code) => finish('exit', code))
@@ -449,6 +465,11 @@ async function runCommand(
 
 /**
  * 改动类工具的**统一闸门**（与 fishwork 的 `guardWrite` 同一套语义）。
+ *
+ * 三档（`ctx.permissionMode`）：
+ * - `full`：放行；
+ * - `confirm`：弹确认卡，拿到 `allow_*` 才放行；
+ * - `readonly`：**直接回绝**，不弹卡。
  *
  * 返回 `null` = 放行；返回字符串 = 这串就是**工具结果**（回绝说明），直接 `return` 回去 ——
  * 刻意不抛错：回绝是「预期内的结果」，让模型看到原因后能向用户解释，
@@ -462,11 +483,16 @@ async function guardWrite(
   denied: string,
   req: { toolCallId: string; toolName: string; command: string }
 ): Promise<string | null> {
+  // 只读模式：**直接拒绝**，不弹卡（弹了也没用 —— 这一档的语义就是「不许改」）。
+  // 与 fishwork 的 guardWrite 同一档：让模型明确知道是模式挡的，而不是工具坏了。
+  if (ctx.permissionMode === 'readonly') {
+    return `当前权限模式为「只读」，${denied}。请只做只读的分析与说明，把需要改动的内容讲清楚由用户决定，不要反复重试写 / 执行类动作。`
+  }
   if (ctx.permissionMode !== 'confirm' || !ctx.requestConfirm) return null
-  const approved = await ctx.requestConfirm(req)
-  return approved
-    ? null
-    : `用户拒绝了这次调用（${denied}）。请询问用户接下来希望怎么做，不要擅自重试同一步。`
+  const decision = await ctx.requestConfirm(req)
+  // 「总是允许」在 service 侧被记忆：命中记忆时它直接回 once 档，不会弹卡
+  if (isAllowDecision(decision)) return null
+  return `用户拒绝了这次调用（${denied}）。请询问用户接下来希望怎么做，不要擅自重试同一步。`
 }
 
 /**

@@ -16,8 +16,11 @@ export type {
   AgentStreamEvent,
   AgentFileState,
   AgentFileSnapshot,
-  AgentSkill
+  AgentSkill,
+  AgentPermissionMode
 } from './agent'
+export { readProjectDoc, buildProjectDocSection, PROJECT_DOC_NAMES } from './project-doc'
+export type { ProjectDoc } from './project-doc'
 export { adaptMastraPart } from './mastra-stream'
 export type { MastraAdaptedEvent } from './mastra-stream'
 export { normalizeUsage, readChunkUsage } from './usage'

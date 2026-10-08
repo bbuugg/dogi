@@ -30,8 +30,10 @@ import type {
   AppShortcutAction,
   AskFollowupAnswer,
   AskFollowupRequest,
+  ConversationTransferResult,
   ColorThemeName,
   CommandHistoryEntry,
+  ConfirmDecision,
   HostLogEntry,
   MonitorUnsupportedReason,
   NoteFileContent,
@@ -572,36 +574,37 @@ export interface PanelSlice {
   splitTabToGroup: (tabId: string, targetGroupId: string, direction: SplitDirectionInput) => void
   /** 组内重排：把 tabId 移到组内 toIndex（相对重排前）位置 */
   reorderTabs: (groupId: string, tabId: string, toIndex: number) => void
-  /** 关闭整个组（含其全部标签；终端会话会被结束） */
-  closeGroup: (groupId: string) => Promise<void>
   /** 拖拽分隔条时更新某分隔节点的权重 */
   resizeSplit: (splitId: string, sizes: number[]) => void
   /** 激活 PanelView 中的指定标签 */
   activatePanelTab: (id: string) => void
-  /** 关闭 PanelView 中的指定标签 */
+  /**
+   * **无条件**关闭指定标签（不经过任何确认）。只给程序化场景用 ——
+   * 用户入口一律走 `requestClosePanelTab`。
+   */
   closePanelTab: (id: string) => void
   /**
-   * 请求关闭标签：**用户入口一律走这个**，别直接调 `closePanelTab`。
+   * 请求关闭标签：**用户入口一律走这个**（× / 右键菜单 / Ctrl+W / 关闭整个组都汇到这里）。
    *
-   * 确认框画在标签面板内部，所以先把标签带到前台，再向该标签的总线推
-   * `close-request`（`shared/lib/tab-event-bus.ts`）：页面注册的确认 handler
-   * （dirty / 防手滑 / 自定义）在页面内部完成确认，全部放行后页面侧 emit `close`，
-   * 经 `setTabCloseExecutor` 注入的回调回到 `closePanelTab`；任一拒绝则什么都不发生。
-   * （`closePanelTab` 保留为「无条件关闭」，供程序化场景使用。）
+   * 向该标签的总线推一次关闭请求（`shared/lib/tab-event-bus.ts`）：页面注册的
+   * `close-guard` 在**标签内部**完成状态确认（未保存改动 / 运行中 / 自定义），
+   * 全部放行后经 `setTabCloseExecutor` 注入的回调回到 `closePanelTab`。
+   *
+   * 确认框由**面板组**提供（组级宿主），所以关闭非激活标签时也能正常弹出 ——
+   * 不需要先把标签带到前台。
+   *
+   * @returns 是否真的关掉了。`false` = 用户取消，或关不掉（未挂载 / guard 报错，
+   *          后两种已经弹过提示）。批量关闭靠它决定要不要继续。
    */
-  requestClosePanelTab: (id: string) => Promise<void>
-  /** 请求关闭整个面板组：逐个把组内标签带到前台并推 close-request，任一取消则中止剩余 */
+  requestClosePanelTab: (id: string) => Promise<boolean>
+  /** 请求关闭整个面板组：逐个推关闭请求，任一取消则中止剩余 */
   requestCloseGroup: (groupId: string) => Promise<void>
   /**
    * 请求组内批量关闭：`others` 关闭同组其它标签，`left` / `right` 关闭锚点标签
    * 左侧 / 右侧的标签。**只在本组内生效**，锚点标签自己始终保留。
-   * 逐个推 close-request 确认，任一取消则中止剩余。
+   * 逐个推关闭请求，任一取消则中止剩余。
    */
   requestCloseSiblingTabs: (tabId: string, mode: SiblingTabsCloseMode) => Promise<void>
-  /**
-   * 无条件执行组内批量关闭。与 `closePanelTab` 一样保留为「无条件」入口，供程序化场景使用。
-   */
-  closeSiblingTabs: (tabId: string, mode: SiblingTabsCloseMode) => Promise<void>
   /** 更新 PanelView 标签标题（业务对象改名时同步自动标题用，见 ApiPage / ScriptsPage） */
   updatePanelTabTitle: (id: string, title: string) => void
   /**
@@ -910,8 +913,8 @@ export interface AiSlice {
     conversationId: string,
     patch: { configId?: string; modelId?: string }
   ) => Promise<void>
-  /** 回复确认请求：approved=true 执行，false 取消 */
-  resolveAiConfirm: (id: string, approved: boolean) => Promise<void>
+  /** 回复确认请求：四档裁决（见 ConfirmDecision） */
+  resolveAiConfirm: (id: string, decision: ConfirmDecision) => Promise<void>
   /**
    * 发送终端助手的一条消息。工具作用于发起对话的终端页面（`sessionId`），
    * 绑定按请求计算 —— 历史会话在别的终端里接着聊时，工具作用于新终端。
@@ -1063,6 +1066,11 @@ export interface AgentSlice {
    */
   setAgentConversationArchived: (id: string, archived: boolean) => Promise<void>
   /**
+   * 设置**这条会话**用哪些 MCP server（允许清单，见 `AgentConversation.mcpServerIds`）。
+   * 传 `undefined` = 取消限制（回到「用全部全局启用的」）。立即落盘。
+   */
+  setAgentConversationMcpServers: (id: string, serverIds?: string[]) => Promise<void>
+  /**
    * 删除会话；删的是当前会话时自动切到同工作区的下一个。
    * `deleteRemoteSession`（仅 ACP 会话有意义）= 连 agent 侧的会话一起删（`session/delete`），
    * 失败只提示、本地记录照删（默认不删，避免误删用户数据）。
@@ -1071,6 +1079,32 @@ export interface AgentSlice {
     id: string,
     options?: { deleteRemoteSession?: boolean }
   ) => Promise<void>
+  /**
+   * **从此签出（分支）**：以某条会话为模板造一条新会话，原会话一字不动。
+   * `upToMessageId` 给了就在那条消息处截断（含它），不给就整体复制。
+   *
+   * 成功后自动选中新会话（用户点它就是为了接着往下聊）。
+   * 返回新会话 id；`null` = 不能分支（不存在 / ACP 会话）。
+   */
+  forkAgentConversation: (
+    id: string,
+    upToMessageId?: string
+  ) => Promise<string | null>
+  /**
+   * 导出会话到用户选定的 JSON 文件（弹系统保存框）。
+   * `canceled` 与失败分开 —— 取消不该弹红字错误。
+   */
+  exportAgentConversation: (id: string) => Promise<ConversationTransferResult>
+  /** 从 JSON 文件导入一条会话到目标工作区（弹系统文件框；导入即落盘并选中） */
+  importAgentConversation: (workspaceId: string) => Promise<ConversationTransferResult>
+  /**
+   * **运行中插话（steer）**：这一轮还在跑时把这句话排进「下一个工具步边界」，
+   * 让模型在同一步里看到（而不是等本轮结束再起新一轮，见 services/ai/steer.ts）。
+   *
+   * 同时会把这句话按**真实时序**追加进本地历史（用户刷新后还看得到自己说过什么）。
+   * 返回 false = 这条会话此刻没在跑（调用方应改走普通发送）。
+   */
+  steerAgentMessage: (text: string, conversationId: string) => Promise<boolean>
   /** 清空指定会话的消息（保留会话本身）；ACP 会话清的是本地镜像 */
   clearAgentMessages: (conversationId: string) => void
   /**
@@ -1124,6 +1158,11 @@ export interface AgentSlice {
   pumpAgentQueue: (conversationId: string) => void
   /** 中止指定会话的对话（必传，理由同 `sendAgentMessage`） */
   abortAgent: (conversationId: string) => Promise<void>
+  /**
+   * **单条命令停止**（工具卡上的「停止」）：只杀这一条 `execute_command` 的进程树，
+   * 这一轮继续跑 —— 与 `abortAgent`（中止整轮）是两条路。
+   */
+  stopAgentCommand: (toolCallId: string) => Promise<void>
   handleAgentEvent: (requestId: string, event: AgentStreamEvent) => void
   /**
    * 打开 ACP 会话时回放它的历史（`session/load`）。同一会话重复调用只会真正回放一次
@@ -1134,7 +1173,7 @@ export interface AgentSlice {
    * 回复改动类工具的确认请求：approved=true 执行，false 取消。
    * 终端助手与工作区 Agent 共用（同一张 `pendingConfirms` 表、同一条通道）。
    */
-  resolveAgentConfirm: (id: string, approved: boolean) => Promise<void>
+  resolveAgentConfirm: (id: string, decision: ConfirmDecision) => Promise<void>
   /**
    * 提交 `ask_followup_question` 的回答。`toolCallId` 定位卡片（也是 followupRequests 的 key），
    * `answer` 传 null 表示跳过 —— 工具会拿到「未作答」并自行继续。

@@ -4,19 +4,23 @@ import {
   DEFAULT_MAX_RETRIES,
   DEFAULT_MAX_STEPS,
   DEFAULT_MODEL_TIMEOUT_MS,
+  DEFAULT_SUB_AGENT_MAX_STEPS,
   MODEL_TIMEOUT_OPTIONS,
   NO_RETRY
 } from '@shared/ai-timeouts'
 import { useAppStore } from '@/stores/app-store'
-import { InputNumber, Select } from 'antd'
+import { InputNumber, Select, Switch } from 'antd'
 
 /** 下拉宽度与终端设置里的一致，两个设置项看上去才是同一套 */
 const SELECT_WIDTH = 224
 
 /**
- * 超时：AI 相关的两类等待上限。
+ * 「运行」：AI 的运行参数与能力开关。
  *
- * 两者性质不同，别互相看齐：
+ * 为什么超时、步数、重试、子 Agent 挤在同一页：它们回答的是同一个问题 ——
+ * 「这一轮到底能跑多远、跑多久、跑得多贵」。分开放反而要用户在几个页之间来回对照。
+ *
+ * 各超时项性质不同，别互相看齐：
  * - **审批等待**是「停下来等你」，卡住了本来就该等，所以默认不限时；
  * - **模型请求**是「判活」，等太久说明连接已经死了，所以默认 5 分钟。
  *
@@ -30,6 +34,7 @@ export function TimeoutSettings() {
   const modelMs = aiSettings.modelTimeoutMs ?? DEFAULT_MODEL_TIMEOUT_MS
   const maxSteps = aiSettings.maxSteps ?? DEFAULT_MAX_STEPS
   const maxRetries = aiSettings.maxRetries ?? DEFAULT_MAX_RETRIES
+  const subAgents = aiSettings.subAgents === true
 
   return (
     <div className="space-y-5">
@@ -96,6 +101,28 @@ export function TimeoutSettings() {
           onChange={(v) => void saveAiSettings({ maxRetries: v ?? DEFAULT_MAX_RETRIES })}
           style={{ width: SELECT_WIDTH }}
         />
+      </div>
+
+      <div className="rounded-md">
+        <div className="flex items-center justify-between gap-4">
+          <div className="text-sm font-medium">子 Agent（delegate）</div>
+          <Switch
+            aria-label="子 Agent"
+            checked={subAgents}
+            onChange={(v) => void saveAiSettings({ subAgents: v })}
+          />
+        </div>
+        <p className="mt-1 text-xs leading-4 text-muted-foreground">
+          开启后工作区 Agent 多出一个 <code>delegate</code> 工具，可以把「翻代码找路」
+          （explorer）和「挑改动里的毛病」（reviewer）外包给一个临时的子 Agent，
+          只把它最后的报告拿回来。子 Agent **只能读**（看目录 / 读文件 / 搜索 / git），
+          改不了文件也执行不了命令。
+          <br />
+          默认关闭。关闭时这个工具**根本不出现在工具表里**，模型看不到也就不会去用。
+          开启的代价是 token：子 Agent 会独立读一遍相关文件（最多 {DEFAULT_SUB_AGENT_MAX_STEPS}{' '}
+          步），那些读取过程不会进入你的对话上下文 —— 这正是它省上下文的地方，
+          也是它多花钱的地方。
+        </p>
       </div>
     </div>
   )

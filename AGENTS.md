@@ -83,7 +83,10 @@
    超长输出落**产物文件**、给模型 id 让它续读（见 4.24）。
    **历史落盘**（独立目录，跨重启保留）、左侧可展开**会话列表**、**新开会话**（开草稿，首条消息才转正）、
    **逐条删除**（旧的「清空历史」已移除）。这些会话**不进 AI Agent 侧边栏**（靠存储边界保证，见 4.22）。
-2. **工作区 Agent**（`AgentPage` / `AgentConversationView`）：绑定本地目录，工具为 `list_files` / `find_files` / `search_files` / `read_file` / `write_file` / `edit_file` / `delete_file` / `execute_command` / `read_skill` / `browser_*`（见下），另有工作区文件树与图片 / 视频 / SVG 预览，以及可折叠的**内嵌浏览器面板**（看 Agent 正在操作哪个页面）。
+2. **工作区 Agent**（`AgentPage` / `AgentConversationView`）：绑定本地目录，工具为 `list_files` / `find_files` / `search_files` / `read_file` / `write_file` / `edit_file` / `delete_file` / `execute_command` / `git_read` / `web_fetch` / `screenshot` / `read_skill` / `browser_*`（见下）/ `delegate`（子 Agent，**默认关闭**，见 4.35），另有工作区文件树与图片 / 视频 / SVG 预览，以及可折叠的**内嵌浏览器面板**（看 Agent 正在操作哪个页面）。
+   - `git_read`：只读看仓库（status / diff / log / show）—— 写仓库仍走 `execute_command`（那边有确认闸）。
+   - `screenshot`：截当前内嵌浏览器页面，**存进工作区** `.dogi/screenshots/` 并按 `dogi-ws://` 协议回一张图（见 4.9 / 4.11）。
+   - `execute_command` 在工具行上有**单独的「停止」按钮**，只杀这条命令、不中止整轮对话（见 4.33）。
 
 **客户端工具**（渲染进程执行的能力，见 4.23）：页面用 `registerClientTool` 注册，定义随下一次请求上报，
 主进程把调用广播回渲染端执行，权限与确认按客户端的权限设置在**渲染端**判定。
@@ -102,10 +105,18 @@
 - **创建会话时就要选形态**（内置 / 某个已登记的 ACP agent），之后不可互切。
 - ACP 会话**一打开就建好 agent 侧会话**（`session/new`），把 agent 广告的 `configOptions`
   渲染成输入框上方的一排开关（思考档位等）；agent 报的 `usage_update` 会点亮输入框的上下文圆环。
-- 权限模式 `full` / `confirm`（确认模式下执行命令前弹确认卡）。
+- **权限模式三档** `full` / `confirm` / `readonly`（输入框处实时切换，见 4.33）。
+- **确认卡四档**：允许一次 / **总是允许** / 拒绝一次 / **总是拒绝** —— 「总是」按「会话 + 工具名」在**进程内**记忆（见 4.33）。
 - `ask_followup_question`：AI 在回合中途向用户发**结构化选择题**，答完同一回合继续（见 4.5）。
-- **MCP**：任意 stdio MCP server，工具自动合并给 AI。
+- **运行中插话**：流式输出期间可以直接把话插进这一轮（`⚡ 立即插话`），不必等它跑完（见 4.34）。
+- **MCP**：任意 stdio / **HTTP / SSE** MCP server，工具自动合并给 AI；**每个会话可以单独挑用哪几个 server**（见 4.36）。
 - **技能（Skills）**：发现 `SKILL.md` 目录，渐进式披露 + `read_skill` 工具按需读（见 4.7）。
+- **项目约束文档**：工作区根目录的 `AGENTS.md`（回落 `CLAUDE.md`）**全文注入**系统提示词，见 4.31。
+- **会话签出（fork）**：从任意一条助手消息处**签出一条新会话**（不动原会话）；**导出 / 导入**单条会话为 `.dogi.json`（见 4.34）。
+- **形态标识**：侧边栏会话行**行首图标**把 ACP（机器人）/ 内置（对话气泡）/ 已归档（归档盒）分开；
+  会话页标题**后面**给 ACP 会话挂一枚「绑定 agent 名 + 风格标记（opencode / pi）」的胶囊（见 4.18）。
+- **用量统计**：AI Agent 侧边栏标题栏的柱状图按钮打开抽屉 —— 总 token / 输入 / 输出 / 缓存命中 / 轮数、近 14 天柱状图、按模型分组、最费 token 的会话（见 4.37）。
+- **插件可以拦 / 改写 AI 工具调用**：`tool:call` / `tool:result` 两个钩子（需声明 `hooks` 权限，见 4.38）。
 - 思考内容（reasoning）与工具调用渲染成**可折叠横条**，不是卡片（见 6.5 第 18 条）。
 - 一轮结束且应用不在前台时发系统通知。
 
@@ -131,7 +142,8 @@
 - **命令面板**（`Ctrl+Shift+P`）：命令 / 脚本 / 主机 / 插件的统一入口；插件可注册命令。
 - **应用内快捷键**可改（偏好 → 快捷键），带冲突检测。
 - 自定义标题栏、状态栏（保存状态 / 监控条 / AI 开关 / 传输托盘 / 左下角全局菜单）、标签关闭确认
-  （确认框画在标签面板内部、页面确认后 emit 关闭，机制见 6.5 第 32 条）。
+  （**每个标签页面自己判断**能否关闭、页面判断完才放行；确认框画在**面板组**里，与「哪个标签是激活的」无关，
+  机制见 6.7 第 35 条）。
 - 主题：明暗 + 强调色方案 + 终端独立配色；**首帧不闪**（见 4.6）。
 - 文件视图（Agent 工作区）：左侧文件树 + 右侧多标签编辑区，树上**右键 / 触屏长按**菜单支持
   打开 / 重命名 / 复制 / 剪切 / 粘贴 / 删除 / 新建文件与文件夹（见 4.21）。
@@ -151,6 +163,11 @@ src/
   shared/                  # 三端共享的纯类型 / 纯逻辑（不得引 electron、不得引 DOM）
     types.ts               # 全部跨端类型（Preferences / SshProfile / AgentConversation / …）
     shortcuts.ts theme.ts workspace-config.ts workspace-media.ts sftp-path.ts plugin.ts ask-followup.ts
+    acp.ts                 # ACP agent 风格标记的文案与判定（设置页与会话页共用，见 4.18）
+    confirm.ts             # 确认卡四档的文案与 ACP 收窄（三端共用，见 4.33）
+    ai-timeouts.ts         # AI 超时 / 步数 / 重试的缺省值与档位（主进程与设置页共用）
+    agent-usage.ts         # 用量汇总纯函数 buildUsageReport / formatTokens（见 4.37）
+    mcp.ts                 # MCP 传输判定与摘要文案（主进程与设置页共用，见 4.36）
     browser.ts             # 浏览器会话 id 推导（主进程与渲染端必须算出同一个 id）
   main/
     index.ts               # 窗口 / 托盘 / 菜单 / 单实例锁 / 生命周期
@@ -164,6 +181,10 @@ src/
                            # terminal-tools.ts（终端组工具 + 提示词）client-tools.ts（客户端工具 broker）
                            # mcp.ts skills.ts resolve-model.ts ask-followup.ts context.ts
                            # workspace-config.ts workspace-fs.ts workspace-media.ts
+                           # git-read.ts（只读 git 工具）sub-agent.ts（delegate 子 Agent，见 4.35）
+                           # steer.ts（运行中插话）command-stop.ts（单条命令的停止表，见 4.33）
+                           # conversation-transfer.ts（会话导出 / 导入，见 4.34）
+                           # plugin-hooks.ts（插件 tool:call / tool:result 钩子，见 4.38）
                            # agent-core/（工作区工具 / 系统提示词 / 事件适配 / 路径与忽略规则）
       api/                 # http.ts ws.ts
       browser/             # session.ts（Playwright 会话 + screencast）resolver.ts input.ts
@@ -333,7 +354,12 @@ Session.onData → sessionManager.emit('data') → ipc/terminal.ts broadcast →
   模型下拉按形态换内容：
   - **ACP：只列 `AcpAgentConfig.models`（设置 → ACP agent 里拉取并勾选的模型）**，
     走 `session/set_config_option` 切换、**不重建会话**；
-  - mastra：列全部模型配置。
+  - mastra：列全部模型配置，**每条配置一个顶层分组**（组头 = 配置名，组内 = 裸模型 id，
+    构建在 `features/agent/model-options.ts` 的 `configModelGroups`；没有可用模型的配置
+    **不产出空分组**）。收起后横条上只显示裸模型名（配置名在组头里，塞进这点宽度会把
+    模型名挤掉）。⚠️ 解析选中值用 `parseCfgModelValue`（**按第一个冒号切**）——
+    模型 id 自己常带冒号（Ollama 的 `llama3:8b`、OpenRouter 的 `…:beta`），用
+    `split(':')` 取第 3 段会把 id 静默截断。
   下拉**不再承担「顺带定型」的职责**。`setAgentConversationModel` 只服务 mastra，
   ACP 走 `setAcpConversationModel`（签名带 `acpAgentId`）。
 - **ACP 的 agent 侧会话在「打开会话页」时就建好**（`agent:acp:prepare` → `session/new`，
@@ -464,6 +490,9 @@ Session.onData → sessionManager.emit('data') → ipc/terminal.ts broadcast →
   `plugin:webviewInfo` 通道、`build:plugins` / `create:plugin` 脚本、`webviewTag: true` 都没了。
   `rg -i webview src scripts plugins` 应零命中。
 - 参考实现：`plugins/redis-client/`（`plugin.json` + `main.js` + `renderer.js`）。
+- 插件的能力按 `manifest.permissions` 声明（`'http'` / `'storage'` / `'fs'` / `'hooks'`），
+  **没声明就用不了** —— 主进程侧 `buildMainApi` 的每个能力入口都先 `requireXxx()`。
+  其中 `'hooks'`（拦 / 改写 AI 工具调用）见 4.38。
 - 内置插件 `plugins/port-killer/`（端口占用）：跨平台按端口找占用进程 + 结束进程。
   Windows 走 `netstat -ano` + `tasklist`，Linux 走 `ss` → `netstat` → `lsof` 逐级回退，macOS 只信 `lsof`。
   结束进程统一用 Node 原生 `process.kill`（Windows 等价 `taskkill /F`、POSIX 是 `kill -9`）——
@@ -738,6 +767,21 @@ ACP 是「别人的 agent 在别人的进程里管自己的会话」。本应用
     成功后 agent 通常回一条 `config_option_update`，主进程整组刷新并重新广播
     （**拿到空数组时按脏数据处理、不动本地**，免得一次异常抹光整组）。
   - 渲染端点一下先**乐观更新** `acpStates`，否则 IPC 往返那几百毫秒里控件会弹回旧值。
+- **风格标记（`AcpAgentType` = `generic` / `opencode` / `pi`）**：`AcpAgentConfig.type`，
+  **只是一枚给人看的标识，不参与任何分支逻辑**。fishwork 拿它决定会话里显示哪块模式 UI
+  （opencode → 权限档、pi → 思考档），dogi 不这么做 —— 显示什么完全由 agent 上报的
+  `configOptions.category` 驱动（见上一条），任何 agent 都能用，不必先在这张表里登记风格。
+  它出现的地方：**设置 → ACP agent** 的新建 / 编辑弹窗（下拉）、列表行的徽标、
+  **会话页标题后面的那枚胶囊**（文案与判定在 `src/shared/acp.ts`，主进程与渲染端共用一份）。
+  探测 PATH 时认得出来的候选（opencode / pi-acp）在 `acp-detect.ts` 里直接带上它，
+  用户不必再选一次；其余候选缺省 = `generic`（**generic 不显示徽标** —— 默认值挂出来等于没标）。
+- **会话形态的标识**（ACP 与内置「除了消息流看不出区别」，而这决定了历史在谁手上、
+  能不能签出 / 导出，所以要标出来）：
+  - 侧边栏会话行的**行首图标槽**按 `等你回答 / 确认 > 运行中 > 已归档 > ACP > 内置` 渲染
+    （ACP = `Bot`、内置 = `MessageSquare`，归档 = `Archive`；槽宽固定 size-4，见 `ConversationRow`）。
+    行上另带 `data-conversation-kind`（`acp` / `mastra`）供探针断言。
+  - 会话页标题**后面**给 ACP 会话挂一枚胶囊（`Bot` + 绑定的 agent 名 + 风格徽标；
+    agent 配置被移除时显示「ACP Agent 已移除」）。**内置会话不给** —— 每屏都挂一枚等于没标。
 - **回放（`session/load`）**：打开会话（会话标签 `visible`）时让 agent 把历史作为 `session/update`
   重放，主进程的 `HistoryAssembler`（`services/ai/acp-history.ts`，纯逻辑、可单独验证）
   按 `ContentChunk.messageId` 把 chunk 拼成消息列表，作为**一条 `history` 事件整段下发**
@@ -881,8 +925,37 @@ ACP 是「别人的 agent 在别人的进程里管自己的会话」。本应用
 不先关的话：标签还指着旧路径、Monaco 的 model 还按旧 URI 建，之后一次保存就**写到不复存在的路径上**。
 反过来把标签路径改到新位置要连 model 一起迁移（撤销栈 / 行尾 / 光标全得搬），所以选「关掉」。
 
-剪贴板是**渲染进程内存态、一次一项**（树上没有多选），刻意不碰系统剪贴板（会污染用户自己复制的内容）；
-剪切粘贴成功后立即清空（留着会让人以为还能再粘一次）。
+剪贴板是**渲染进程内存态、一组条目**（多选时可以一次带走几个），刻意不碰系统剪贴板
+（会污染用户自己复制的内容）；剪切粘贴成功后立即清空（留着会让人以为还能再粘一次）。
+⚠️ **剪切只在全部成功后清空**：还有失败项时源都还在，清掉剪贴板用户就没法只重试失败的。
+批量粘贴/删除**逐项串行、中途失败不打断后面**，最后一起汇报成功数与失败明细 —— 并发会在
+「两项粘到同一个名字」时互相盖掉报错，且磁盘状态不可预测。
+
+**多选（对齐 fishwork）**：`selectedPaths`（第一项是 Shift 区间的锚点）与「键盘锚点
+`treeFocusPath`」「当前打开的文件」是三件独立的事。`Ctrl/⌘ + 点` 加减选、`Shift + 点` 选
+**可见行**区间、点空白处清空、`Ctrl/⌘ + A` 全选可见行（树是懒加载的，全选只能是看得见的这些）。
+- **右键已选中的行保留整组选择**，右键未选中的行先单选它 —— 否则「选中 3 个 → 右键其中一个」
+  会把多选压回 1 个，多选就白做了（触屏长按走同一条路径）。
+- 行菜单作用于**选择集**（文案会写「N 项」），重命名单项、粘到文件行仍不给（粘父目录）。
+- 方向键移动即**替换**选择（与文件管理器一致），`selected` 的底色与 `active`（正在编辑）
+  要能分辨。
+
+**树宽可拖 + 持久化**：`ResizeHandle`（双击复位到 `TREE_DEFAULT_WIDTH`），宽度存
+`localStorage['dogi.agent.files.treeWidth']`，**必须用 lazy initializer 读**（直接
+`useState(read())` 会先按默认值渲染一帧再跳回去，现象是「面板宽度闪了一下」），
+读完还要夹一次 `TREE_MIN_WIDTH..TREE_MAX_WIDTH`（窗口变窄时存的值不能把编辑区挤没）。
+
+**标签右键菜单**（对齐 fishwork）：关闭 / 关闭其他 / 关闭右侧 / 关闭左侧 / 关闭全部 / 复制完整路径。
+⚠️ 批量关闭逐个走 `closeFile`（有未保存改动的各自弹确认），**别做成「一次确认全部丢弃」** ——
+那等于替用户决定扔掉哪几份改动；因为标签顺序会随关闭变化，要按当前下标**倒序**关，
+否则下标错位。
+
+**树的键盘导航**（对齐 fishwork 的 `handleTreeKeyDown`）：↑/↓ 移动、→ 展开或进子项、
+← 收起或回父目录、Enter/空格 打开（目录=折叠切换）、F2 重命名、Delete/Backspace 删除、
+Ctrl/⌘+C/X/V 复制剪切粘贴。锚点是 `treeFocusPath`（**不是**「当前打开的文件」——
+点完行直接按方向键时若没有独立锚点，用户会以为键盘坏了）；可见行扁平表 `visibleRows`
+必须与 `renderEntries` 用**同一套可见性判定**（目录自己一行、只有展开且已加载才递归），
+否则上下移动会跳到看不见的行上。事件挂在**树那一列**上，编辑器里按方向键仍然是移动光标。
 
 ### 4.22 两条 AI 线合并成一台引擎：终端助手走 `scope:'terminal'`
 
@@ -894,7 +967,7 @@ ACP 是「别人的 agent 在别人的进程里管自己的会话」。本应用
 | 维度 | `scope: 'workspace'` | `scope: 'terminal'` |
 | --- | --- | --- |
 | 工具 | `list_files` / `read_file` / `write_file` / `edit_file` / `search_files` / `find_files` / `execute_command` / `delete_file` / `browser_*` / `read_skill` | `run_in_terminal` / `send_keys` / `read_terminal_output` / `list_terminal_sessions` / `ask_followup_question` |
-| 共有工具 | `read_tool_output`（`scope:'both'`）：读超长工具输出落下的产物文件（见 4.24） | 同左 |
+| 共有工具 | `read_tool_output`（`scope:'both'`）：读超长工具输出落下的产物文件（见 4.24）；`web_fetch`（`scope:'both'`）：抓网页转 Markdown（见 4.32） | 同左 |
 | 系统提示词 | `agent-core` 的工作区提示词 | `terminal-tools.ts` 的 `buildTerminalSystemPrompt`（含平台提示） |
 | 归属 | `requestMeta` 按 `conversationId` 记 `workspace` | 记 `targetSessionId`（**来自发起消息的那个终端页面**） |
 | 会话存储 | `conversations/` 目录 | `terminal-conversations/` 目录（第二个 `ConversationStore` 实例） |
@@ -921,8 +994,8 @@ ACP 是「别人的 agent 在别人的进程里管自己的会话」。本应用
 **注册表**（`services/ai/tool-registry.ts`）：`AiToolDef` = `{ name, description（字符串或按 ctx 现算的函数）,
 inputSchema, scope: 'workspace'|'terminal'|'both', available?, execute(input, call, ctx) }`。
 `builtin-tools.ts` 的 `ensureBuiltinToolsRegistered()` 在启动时一次性登记
-终端组 + 工作区组 + `read_skill` + `ask_followup_question` + 浏览器组（浏览器组要渠道，
-所以传的是 `() => BrowserChannel` 的延迟读取）。
+终端组 + 工作区组 + `read_tool_output` + `read_skill` + `ask_followup_question` + `web_fetch` +
+浏览器组（浏览器组要渠道，所以传的是 `() => BrowserChannel` 的延迟读取）。
 
 `buildToolset({ ctx, extra?, clientTools? })` 的顺序与让位规则：
 
@@ -1145,6 +1218,27 @@ inputSchema, scope: 'workspace'|'terminal'|'both', available?, execute(input, ca
 
 面板 = 头部一行（分支下拉 + 刷新 / 树状↔平铺 / 更多）+ 中部变更与历史 + 底部提交框。
 
+- ⚠️ **status 必须用 `--porcelain=v2`，不能用 v1**（2026-10 对齐 fishwork 时修掉的真 bug）：
+  v1 在「刚 init、还没有任何提交」时首行给的是 `## No commits yet on master`，
+  按 `## ` 头解析就会把**那句话当成分支名**，面板头部显示成「No commits yet on master」。
+  v2 把头部拆成 `# branch.head <name>` 之类的独立字段，没有这个坑。
+  v2 的行型与下标（`1`/`2`/`u`/`?`）都写在 `parseStatusV2` 的注释里，别凭印象改：
+  `2`（重命名）多一个 `<X><score>` 字段，路径在下标 9 且**原路径用制表符分隔**。
+- **改动列表上限 2000**（不是 200）：装完依赖忘了 gitignore 的仓库轻松过千条，
+  200 太紧会让用户只看到「已截断」而定位不到任何东西。
+- **工作区指向仓库子目录时按前缀过滤**（`rev-parse --show-prefix`）：`git status` 给的是整个
+  仓库的改动，用户挑的是 `packages/app` 就不该把根目录一堆无关文件列进来。
+- **`init-commit`**：`init` + `add -A` + 首次提交一步到位。空仓库的引导天然是两步，
+  而第二步在 unborn HEAD 上完全合法（`add -A` 合法、提交也合法）—— 拆成两次点击不是引导，
+  是重复劳动。
+- ⚠️ **`GIT_TERMINAL_PROMPT=0` 挂在每条 git 命令的 env 上**：面板没有 TTY，缺凭据时 git 会一直等
+  用户输密码，表现为「点推送没反应」。让它立刻失败，用户去补远端凭据 —— 比挂死好。
+- ⚠️ **刷新触发点有三个，缺一个用户就会看到过期的列表**：
+  ① 面板自己的写操作跑完；② **文件面板改了盘**（`shared/lib/fs-changed.ts` 的
+  `notifyWorkspaceFsChanged` 通道，只报「变了」不带内容 —— 变更清单的真源永远是 `git status`，
+  它只是「什么时候该去问一次」的信使）；③ **窗口重新可见 / 重新获得焦点 / 面板标签从隐藏变可见**
+  （面板组标签是常驻挂载的，切回来不会重跑 effect，靠 ResizeObserver 看 rect 从 0 变非 0）。
+  外部工具改文件只能靠 ③ 兜底 —— 主进程没做文件监听。
 - ⚠️ **分支下拉占头部标题位**，不再单独占一行状态条 —— 标签条上已经写着「源代码管理」，
   再摆一行分支名是重复表达。分离头指针 / ↑↓ / 上游 / 「未配置远端」的指示一并搬进那个按钮里。
 - **行尾垃圾桶删分支**（本地与远端分支各一颗，当前分支那颗禁用）。⚠️ antd `Dropdown` 的
@@ -1165,6 +1259,24 @@ inputSchema, scope: 'workspace'|'terminal'|'both', available?, execute(input, ca
 - **贮藏栈放在 `GitStatusResult.stashes` 里**而不是单开接口：它跟改动列表一样是「每次刷新都
   该是最新的」，而贮藏 / 弹出 / 删除都会改工作区。解析 `git stash list --format=%gd%x1f%gs`
   用 `\x1f` 而不是 `:` —— 说明里本来就有冒号（`WIP on main: …`）。上限 50 条。
+- ⚠️ 贮藏栈是**独立折叠分组**，不塞进「更多操作」菜单：贮藏是有历史的东西（用户会回来找它）。
+- **树状 / 平铺**只影响两组变更列表的排布（选择记在 `localStorage`，用 lazy initializer，
+  否则会先按默认值渲染一帧再跳回去）。两种排布共用同一个 `renderRows` —— diff 展开、
+  暂存、回退因此只有一份实现，不会出现「某项操作在一种视图下失效」。
+- **推送快捷键绑在提交输入框上**（Ctrl/⌘+Shift+Enter），不进全局快捷键表：推送的作用对象是
+  「当前这个工作区的仓库」，全局快捷键那一刻不一定知道哪个面板是活的 —— 推错仓库比推不了更糟。
+- **没装 git 与「不是仓库」要分开说**（`git:version` 看 `git --version` 的**退出码**）：
+  两者都表现为 `isRepo === false`，混起来会把没装 git 的人引去反复 `init`。
+  `GitInstallDialog` 只给各平台一条可复制的安装命令与官网链接，**不代跑安装**（改系统必须用户自己敲）。
+- **克隆仓库为新工作区**（`git:clone`）：侧边栏「新建工作区」下拉的第二项。安全边界在主进程
+  —— `assertSafeRepoUrl`（拒绝空 / `-` 开头 / 含换行）+ `git clone -- <url> <dir>` 双保险，
+  且**目标目录必须不存在**（不做「合并进已有目录」）。渲染端的 `GitCloneDialog` 只收集输入与展示
+  进度条，⚠️ 进度**不解析 git 的进度输出**（它写 stderr 且格式不保证，硬解析出来的数字会骗人）。
+  克隆成功后自动建工作区并切过去；私有仓库凭据仍走用户自己的 git（SSH agent / credential helper）。
+- **刻意不提供**：worktree（`.fishwork/worktrees` 那套服务的是 fishwork 的 task / flow 编排，
+  本项目没有那条产品线）。
+- 验证：`scripts/verify-git-changes.ts`（直接跑 `services/git.ts` 真源码）覆盖分支增删的拦截、
+  远端增删、贮藏 push/pop/apply/drop 与非法 ref；`scripts/verify-git-tree.ts` 覆盖折树纯函数。
   ⚠️ 贮藏列表是**有历史的东西**（用户会回来找它），所以是独立折叠分组，别塞进「更多」菜单。
 - **树状 / 平铺**只影响两组变更列表的排布（选择记在 `localStorage`，用 lazy initializer，
   否则会先按默认值渲染一帧再跳回去）。两种排布共用同一个 `renderRows` —— diff 展开、
@@ -1175,6 +1287,288 @@ inputSchema, scope: 'workspace'|'terminal'|'both', available?, execute(input, ca
   远端增删、贮藏 push/pop/apply/drop 与非法 ref；`scripts/verify-git-tree.ts` 覆盖折树纯函数。
 
 ---
+
+### 4.31 项目约束文档（`AGENTS.md`）：**全文注入**，且排在提示词最后
+
+工作区根目录的 `AGENTS.md`（回落 `CLAUDE.md`）是**项目维护者写给 AI 的规则**
+（构建命令、验证方式、代码约定、禁止事项、踩过的坑）。实现是 `agent-core/project-doc.ts`
+（移植自 fishwork），由 `services/ai/agent.ts` 的 `prepareWorkspaceTurn` **每轮现读**（磁盘即真源，
+用户改完下一轮就生效，与技能扫描同一做法），非空时经 `buildProjectDocSection` 拼进
+`buildAgentSystemPrompt(...)` 的最后一段。
+
+- **为什么全文注入而不是「给路径让模型自己 read_file」**：约束要在模型**动手之前**就生效，
+  等它想起来去读时第一版改动往往已经写歪。渐进式披露适合「技能」这种按任务触发的东西，
+  不适合全程适用的规则。
+- **为什么只读工作区根目录、不向上找父目录**：向上递归会在 monorepo 里把无关的父级文档
+  一起吸进来，稀释真正的项目约束。
+- **为什么放提示词最后**：段落里声明了「优先级高于本提示词里其它通用约定」，
+  紧接着的一段在提示词里权重更高 —— 放最后才不会被前面的通用约定稀释。
+- 注入上限 64K 字符，**按 `## ` 边界截断**（宁可少给一条完整规则，也不要把规则切成半句话；
+  最后一个 `## ` 不足上限一半说明没按二级标题分节，那就硬截），截断时明确写「前百分之多少 +
+  先用 read_file 补全」。
+- 单独校验：`空文件 / 纯空白`跳过（不注入空文档）、剥 UTF-8 BOM（否则模型把开头 `#` 当内容）、
+  超过 4MB 的文件不读（防误命名成 AGENTS.md 的巨型文件）、0 字节跳过。
+- **同段的兄弟机制**：系统提示词里还有**权限模式段落**（`buildPermissionSection`，同为移植自
+  fishwork）：让模型**预先知道**哪些动作会被拦下来 —— 不写这段的实际后果是 confirm 模式下
+  工具被拒只被当成普通失败，换个写法再试一遍，反复弹确认卡。
+- ⚠️ 别把这段接进**终端 AI 助手**那条线（`scope: 'terminal'`）：它常挂 SSH 远端，
+  本地工作区的 AGENTS.md 与那条会话无关（技能也是同样的取舍，见 4.7）。
+- 验证：`scripts/verify-agent-project-doc-web-fetch.ts`（见 5.2）。
+
+### 4.32 `web_fetch`：只做 fetch 引擎，长输出走产物机制
+
+`services/ai/web-fetch.ts`（移植自 fishwork 的 `packages/tools/src/web-fetch.ts`），
+`scope: 'both'`（只读、无副作用，两条线都能用），注册在 `builtin-tools.ts`。
+抓静态 HTML → 抽标题 / 正文链接 → `turndown` 转 Markdown → 返回给模型。
+
+- ⚠️ **刻意不带 fishwork 的 `engine: 'browser'`**：那条分支自己 `playwright.chromium.launch()`，
+  而本项目已有整套浏览器基础设施（`services/browser/`：系统浏览器解析、持久 profile、
+  内嵌面板、`browser_*` 工具），再引第二套启动逻辑等于把 4.11 的坑（channel / executablePath /
+  screencast）复制一遍。**需要 JS 渲染 / 登录态时模型改用 `browser_navigate` + `browser_snapshot`** ——
+  工具描述里写明了这条分工，别再加 browser 分支。
+- **长输出不落 fishwork 的 `output-log` / `read_log`，走本项目的产物机制**（4.24）：
+  `OutputArtifactWriter` + `read_tool_output`（内联给「开头 + 结尾 + 产物 id + 续读参数」）。
+- 协议白名单只放 `http:` / `https:`（挡掉 `file:` / `data:` / `javascript:`）；非法 URL、
+  抓取失败、已中止**都返回一句能据此改道的话而不是抛错** —— 那是可预期结果，抛错会打断整轮。
+- 依赖 `turndown`（`dependencies`，`@types/turndown` 为 devDep）。它�� CJS 的 `export =`，
+  在 ESM 产物里靠**动态 import + default 解包**拿构造器；`vite.main.mts` 的 external 规则
+  把它留成裸 import，运行时要打进安装包（顶层 `files` 白名单默认含生产 node_modules，
+  别为此改 `build.files`）。
+- 验证：`scripts/verify-agent-project-doc-web-fetch.ts`（本地 HTTP 服务器真抓）。
+
+### 4.33 权限三档 + 确认卡四档 + 单条命令的停止
+
+**权限三档**（`AiPermissionMode`，输入框处实时切换，存在 `aiSettings.permissionMode`）：
+
+| 档 | 语义 | 改动类工具的行为 |
+| --- | --- | --- |
+| `full` | 完全放开 | 直接执行，不弹卡 |
+| `confirm` | 确认 | 弹确认卡，等用户裁决 |
+| `readonly` | 只读 | **直接拒绝**（不弹卡）—— 弹了也没用，这一档的语义就是「不许改」 |
+
+- 闸门是 `agent-core/tools.ts` 的 **`guardWrite(ctx, denied, req)`**，**每个改动类工具在自己
+  `execute` 里调用**，返回 `null` = 放行、返回字符串 = 拒绝理由。
+  ⚠️ **拒绝是「当工具结果返回」而不是抛错**：抛错会打断整轮对话，而「用户拒绝了这一步」本来
+  只是这一步没做成，模型应该据此换方案（抛错它只会当成工具坏了）。
+- ⚠️ 闸门**不能包在工具注册层**（`tool-registry.ts`）：`guardWrite` 排在「确认也会失败」的预检
+  **之后**（比如 `edit_file` 的 oldString 匹配不上时就该直接报错，不该先打扰用户点一次允许）。
+  包在注册层会让用户为一次注定失败的调用白点一次卡。
+- `readonly` 的文案要**明确告诉模型「是模式挡的」**（「当前权限模式为「只读」，…请只做只读的
+  分析与说明」）—— 不说清它会以为是工具坏了，换个写法反复重试。
+- 系统提示词里也有对应的 `buildPermissionSection()`（`agent-core/agent.ts`，移植自 fishwork）：
+  让模型**预先知道**哪类动作会被拦，否则它会反复弹确认卡。改档位文案时两处都要改。
+
+**确认卡四档**（`ConfirmDecision`，文案见 `@shared/confirm.ts` 的 `BUILTIN_CONFIRM_OPTIONS`）：
+
+| 档 | 语义 |
+| --- | --- |
+| `allow_once` | 允许这一次 |
+| `allow_always` | 总是允许（本会话 + 本工具） |
+| `reject_once` | 拒绝这一次 |
+| `reject_always` | 总是拒绝（本会话 + 本工具） |
+
+- **「总是」的记忆是进程内的**（`AgentService.alwaysDecisions`，key = 会话 id → 工具名 → `'allow' | 'reject'`）。
+  命中记忆时 `requestConfirm` **直接回一个 once 档、不弹卡也不排队** —— 用户已经表过态了。
+  ⚠️ **刻意不落盘**：把「永远允许」写进磁盘意味着一次误点永久放行某类动作（`rm -rf` 也在里面），
+  代价远大于重启后再问一遍。会话被删除时要 `forgetConfirmMemory(conversationId)`，否则同 id 复用会串味。
+- 确认请求**全局串行**（`confirmChain`）：同一时刻只等一张卡。中止 / 一轮结束时
+  `clearPendingConfirms(requestId)` 把挂起的卡按 `reject_once` 收尾 —— 确认卡默认不限时（`confirmTimeoutMs = 0`），
+  全靠它兜底，否则执行流会永远挂着。
+- 无 UI 接入（`confirmSink` 为 null，探针场景）时**直接放行**，避免流程卡死。
+- ACP 会话的档位按 agent 在 `session/request_permission` 里广告的 `option.kind` **收窄**
+  （`confirmOptionsFromAcpKinds`）：硬塞一个 agent 不认的 option 会被静默丢弃，界面上就会出现
+  一颗点了没反应的按钮（见 4.18）。
+
+**单条命令的停止**（`services/ai/command-stop.ts` + `agent:command:stop`）：
+
+- 一轮里模型可能连跑好几条 `execute_command`，其中一条卡住（`npm run dev` / `tail -f` / 不返回的构建）。
+  用户此时只有「停止整轮」一个把手 —— 那会把还没跑的步骤和已经想好的后续一起掐掉。
+- 所以每条 `execute_command` 跑起来时按 `toolCallId` 登记一个「杀手」（`commandStopRegistry.register`），
+  工具行上单独给一颗「停止」，只杀这一个子进程树；命令返回「已被用户停止」，**模型继续往下跑**。
+- ⚠️ **与整轮停止是两条路，别混**：整轮停止走 abort signal（所有工具一起收尾、这一轮结束）；
+  单条停止只 kill 子进程，对话不受影响。
+- ⚠️ 只有工作区的 `execute_command` 登记杀手。终端的 `run_in_terminal` **不能**停 ——
+  它把命令写进用户自己的终端，进程属于那个终端；ACP 的命令整个活在外部 agent 进程里，更无从下手。
+  渲染端用 `ToolCallRow.tsx` 的 `STOPPABLE_TOOLS` 白名单控制按钮出现的位置，**别按「看起来像命令」判断**。
+- `unregister` 必须在命令收尾的 `finally` 里调用（成功 / 失败 / 中止都要摘），否则表会一直长。
+- 验证：`verify-agent-file-tools.mjs`（guardWrite 在确认模式下的拒绝 / 放行）、
+  `verify-terminal-chat.mjs` 第 4 节（确认由渲染端弹框、拒绝是正常结果）。
+
+### 4.34 运行中插话（steer）+ 会话签出 / 导入导出
+
+**运行中插话**（`services/ai/steer.ts`）：
+
+- 用户在流式输出期间想到一句话（「别改那个文件」「顺便把测试也跑了」），不必等这一轮跑完再发。
+- 机制：`steerRegistry` 按 **`conversationId`**（**不是 requestId**）存一句话，
+  在**下一个工具步的边界**由 `tool-registry.ts` 的统一包装 `appendSteer()` 拼到工具结果末尾 ——
+  模型最可能立刻照做的位置就是「刚看到工具结果」的那一刻。
+- ⚠️ **准入只看「这条会话此刻有没有在跑的一轮」，不看准备阶段是否结束**
+  （`AgentService.steer` → `isConversationRunning`）。准备阶段（启动 MCP / 压缩上下文）动辄好几秒，
+  那正是用户最想插话的时刻；按 requestId 判准入会让它「最需要的时候用不了」。
+- ⚠️ **`appendSteer` 是「取走」语义**（drain）：取到了就从注册表里删掉。因此
+  **子 Agent 组装工具集时必须 `allowSteer: false`**（见 4.35），否则子 Agent 内部某一步把用户的插话
+  吞进自己的流程，父 Agent 就永远等不到了。
+- ⚠️ **插话不是「只此一次」**：渲染端同时把它当成一条**普通 user 消息**按**真实时间顺序**落进历史
+  （`u-<ts>-steer`，紧跟在正在流的那条助手消息之后）。所以「没赶上工具步」也不会丢 ——
+  下一轮照样看得到。代价是几十个 token 的重复，换「两个方向都正确」。
+- ⚠️ 正因为插话会把 user 消息插到**正在流的助手消息之后**，两处都不能再用
+  `messages[messages.length - 1]` 判断「最后一条助手消息」：
+  - `AgentPage.tsx` / `AiPanel.tsx` 用 `lastAssistantIndex`（从后往前找 `role === 'assistant'`）
+    决定流式光标与「重试」按钮挂在哪一条上；
+  - `stores/agent-helpers.ts` 的 `notifyAgentFinished` 同理（否则通知正文会取到那条插话）。
+- `steer()` 返回 `false` = 这条会话没在跑 → 渲染端回退成**普通发消息**（`submitAgentMessage`），
+  不是报错。
+- 一轮结束（`runStreamWithRetry` 的 `finally`）与准备阶段早退（`forgetRequest`）都要
+  `steerRegistry.clear(conversationId)`，防止残留的插话串到下一轮。
+
+**会话签出 / 导出 / 导入**：
+
+- **签出（fork）**：`conversationStore.fork(id, upToMessageId?)` —— 复制成一条新会话（新 UUID，
+  标题加「 · 分支」），在 `upToMessageId`（含）处截断。⚠️ **不继承 `contextSummary`**（检查点属于
+  原会话的压缩历史，带到分支上会让分支少掉一段它其实有的原文）**也不继承 `archived`**。
+- **导出**：`services/ai/conversation-transfer.ts`，外壳 `{ format: 'dogi-conversation', version: 1,
+  exportedAt, conversation }`，后缀 `.dogi.json`。`withWindowOnTop()` 是 electron#32857 的绕法
+  （不把窗口提到前面，Windows 上系统对话框可能被压在后面）。
+- **导入**：新分配 UUID、**强制 `kind: 'mastra'`**，并丢掉 `configId` / `modelId` / `acpAgentId` /
+  `acpSessionId` / `contextSummary` / `archived` —— 这些绑的是**导出方的机器与账号**，照搬过来
+  只会得到一个指向不存在配置的坏会话。`parseImport` 同时接受带外壳和裸会话两种文件；
+  上限 `MAX_IMPORT_BYTES = 50MB`。
+- **签出的入口在「消息」上，不在侧边栏的会话行上**（`MessageForkButton`，挂在每条消息 hover
+  才露出的操作行里，与复制 / 删除同列）：签出的粒度本来就是「到这条为止的历史」，挂在会话上只能
+  整条复制，用户还得自己去想从哪一步分叉。`upToMessageId` 传的就是那条消息的 id。
+  侧边栏的「更多」菜单里只剩**导出**（低频）+ **删除**（收在菜单最下方，危险色、有分隔线）。
+- ⚠️ **签出与导出都拒绝 ACP 会话**（消息不在我们这儿，导出去是个空壳）：签出按钮对 ACP 会话
+  不渲染（`canFork`），侧边栏的「更多」菜单也只给**删除**、不给**导出**（`canExport`）——
+  但仍要渲染菜单，再渲染一个全灰或干脆没有的菜单都只会让人反复去点。
+- ⚠️ 导出 / 导入都从**主进程的会话存储**读，不用渲染端那份：渲染端可能正握着一个流到一半的会话。
+- 验证：`verify-agent-conversation-model.mjs`（落盘的 `in` 语义：不带某字段再存时保留旧值、
+  显式 `undefined` 才清空 —— 与本节同一套语义，见 6.6 第 37 条）+ 手工清单
+  （插话在流式期间发出 → 工具结果末尾带上它且历史里多一条 user 消息；签出一条分支后原会话不变；
+  导出 → 换个工作区导入 → 能继续对话）。
+
+### 4.35 子 Agent（`delegate` 工具）
+
+`services/ai/sub-agent.ts`（对齐 fishwork 的 explorer / reviewer）。**默认关闭**
+（`aiSettings.subAgents`，设置 → AI → 运行）。
+
+- 形态与 fishwork 不同：dogi 的子 Agent **没有独立会话**，它就是父 Agent 的一次工具调用 ——
+  父 Agent 拿到的是一段可继续推理的文本。好处是不需要新会话类型 / 新存储 / 侧边栏多一堆条目；
+  代价是中间过程（读了哪些文件、跑了多少步）界面上看不到，只有一行「delegate 运行中」。
+- **怎么开启**：`prepareWorkspaceTurn` 里 `if (settings.subAgents) ctx.subAgent = createSubAgentRunner(...)`。
+  `delegate` 的 `available` 只看 `!!ctx.subAgent` —— 没注入则**工具根本不出现在工具表里**
+  （比给一个恒失败的工具干净：模型看不到就不会去用）。
+- ⚠️ `model` / `modelSettings` 因此**必须在 `ctx` 之前算好**（`prepareWorkspaceTurn` 里
+  `resolveModel` 已提前到 ctx 上方）。这一步是纯同步的，提前没有副作用。
+- **三条硬约束**（改这个文件时别破坏）：
+  1. **只读**：工具白名单写死为 `SUB_AGENT_TOOL_NAMES`（`list_files` / `find_files` / `read_file` /
+     `search_files` / `git_read` / `read_tool_output`），且子 Agent 的 `permissionMode` 强制 `'readonly'`、
+     `requestConfirm` 一律回 `'reject_once'` —— 三重保险，任何一层被改坏还有两层挡着（fail closed）；
+  2. **不吞插话**：`buildToolset({ only, allowSteer: false })`（见 4.34 的 drain 语义）；
+  3. **不抛错**：失败一律返回说明性文本 —— 抛错会让整轮以 error 收场，而子 Agent 失败本来只是
+     「这一步没做成」，父 Agent 完全可以自己接着干。
+- 每个子 Agent 各造**独立的 `fileState`**：让子 Agent 的读取去满足父 Agent 的「先读后改」会
+  悄悄削弱那道闸（父 Agent 明明没读过却能直接改）。
+- 步数上限 `DEFAULT_SUB_AGENT_MAX_STEPS = 30`（`@shared/ai-timeouts`），**故意远小于**父 Agent 的
+  500：子 Agent 的输出要回填成一条工具结果，它跑得越久父 Agent 那一轮被卡住的时间越长；
+  30 步足够「把相关文件读一遍 + 给出结论」，再多通常是它在原地打转。
+- 报告回填上限 `REPORT_INLINE_MAX = 12_000` 字符，**超了直接截断、不落产物**：子 Agent 的报告是
+  「结论」不是可续读的原始输出，留一个产物 id 反而诱导父 Agent 去读一堆它本就不该关心的细节。
+- `tool-registry.buildToolset` 为此加了两个选项：`only?: readonly string[]`（内置工具白名单，
+  只过滤内置定义，不影响 MCP / 客户端工具）与 `allowSteer?: boolean`（缺省 true）。
+- 提示词里刻意写了「**不要反问**，信息不足就按最合理的假设继续，并在末尾用「假设」一节列出」——
+  子 Agent 没有人可以对话，反问等于空转。
+- 验证：`scripts/verify-sub-agent.mjs`（47 条断言：白名单只读、available 门、三种失败路径不抛错、
+  `only` / `allowSteer` 语义、提示词约束、步数上限）。
+
+### 4.36 MCP：三种传输 + 每会话的允许清单
+
+**三种传输**（`services/ai/mcp.ts` 的 `createTransport`）：
+
+| `transport` | 传输类 | 必填 |
+| --- | --- | --- |
+| `stdio`（缺省） | `StdioClientTransport` | `command` + `args` |
+| `http` | `StreamableHTTPClientTransport` | `url` |
+| `sse` | `SSEClientTransport` | `url` |
+
+- `transportOf()` 把缺失 / 脏值一律归一到 `stdio`（旧存档没有这个字段，不能因此连不上）。
+- `headers` 只在 http / sse 生效，透传成 `requestInit.headers`。
+- ⚠️ `connect()` 里读子进程 stderr 必须写成
+  `(transport as { stderr?: NodeJS.ReadableStream }).stderr?.on(...)` —— http / sse 的 transport
+  **没有 `stderr`**，直接 `.stderr.on` 会在远程 server 上崩。
+- URL 为空 / 不是合法 URL 时**抛明确的中文错误**（「http 传输缺少服务地址（url）」/「服务地址不是合法 URL：…」），
+  不要丢给 SDK 报一句看不懂的话。
+- 传输相关的**纯逻辑放 `@shared/mcp.ts`**（`mcpTransportOf` / `MCP_TRANSPORT_LABELS` /
+  `mcpServerSummary`），主进程与设置页共用一份 —— 否则「列表里显示的是 url 还是 command」这种
+  小事会在两处漂移。
+
+**每会话的 MCP 允许清单**（`AgentConversation.mcpServerIds`，与「全局启用」是**两件事**）：
+
+- `undefined` = **不限制**（用全部全局启用的）—— 这是旧会话的取值，行为与加这个字段之前**完全一致**；
+- `[]` = 这个会话**一个 MCP 都不用**；
+- `['a','b']` = 只用这两个（仍要与全局 `enabled` 求交）。
+
+| 层 | 在哪 | 作用 |
+| --- | --- | --- |
+| `McpServerConfig.enabled` | 设置 → MCP 服务 | 这台机器上**有没有**这个 server |
+| `AgentConversation.mcpServerIds` | 会话输入框上方的 MCP 弹层 | **这条会话用不用**它 |
+
+- ⚠️ **`undefined` 与 `[]` 语义相反，别写反**。落盘走 `conversation-store.ts` 的
+  `'mcpServerIds' in input` 语义（`undefined` 是「显式清空」），所以
+  `normalizeConversation` 的重建列表、`SaveConversationInput`、`persistConversation` 三处
+  都必须**显式带上这个字段** —— 漏一处就是「在界面上点了保存，重开会话又变回全部启用」。
+- 组装时 `mcpManager.buildToolset({ serverIds })` → `effectiveServers()` 过滤。
+  ⚠️ **内置 Playwright MCP 不受这个清单管辖**：它由浏览器工具的 `browserToolMode === 'system'`
+  决定，属于另一套开关（见 4.11）。
+- 会话记录在主进程侧**只读一次**（`prepareWorkspaceTurn` 里的 `conversationRecord`），
+  同时供 MCP 允许清单与检查点切片使用 —— 别为了图方便读两遍盘。
+- 弹层改清单时**不 bump `updatedAt`**（`setAgentConversationMcpServers`）：这只是个开关，
+  不该把一条老会话顶到列表最前面。
+- 验证：手工清单 —— 设置页加一个 http / sse server 能连上并列进工具表；把 `transport` 删掉
+  （旧存档）仍按 stdio 连；url 留空给出中文报错而不是 SDK 的原始异常；会话弹层取消勾选后
+  该 server 的工具当轮就不在（重开会话仍是取消勾选状态）；全局 `enabled` 关掉时即便清单里有它也不出现；
+  内置 Playwright MCP 不受清单影响（由 `browserToolMode` 决定）。
+
+### 4.37 用量统计（`AgentUsageDrawer`）
+
+- 入口：AI Agent 侧边栏标题栏的柱状图按钮 → 抽屉。**刻意不做成活动栏的一个功能区**：
+  用量统计没有自己的对象，它是对**已有会话**的一个汇总视图。
+- 数据**全部来自渲染端已持有的会话**（`ConversationUsage` 落在每条会话上），所以
+  `@shared/agent-usage.ts` 里是**一个纯函数 `buildUsageReport(conversations, { days, topN })`**，
+  **没有新 IPC 通道** —— 主进程那份反而可能比屏幕上的更旧。
+- ⚠️ 只统计**真的上报过 `usage` 的轮次**：provider 没回 usage 的轮次不计入（估算出来的数字
+  比缺失更糟 —— 它会让人以为「这个月花得不多」）。**ACP 会话整体排除**（token 在 agent 侧管理，见 4.18）。
+- ⚠️ 分日按**本地时区**（`localDayKey()` 手工拼 `YYYY-MM-DD`，**不能用 `toISOString()`** ——
+  那会按 UTC 切，东八区用户晚上 8 点之后的用量会被算到第二天）。窗口内的天**零填充**，
+  所以没有用量的日子在柱状图上是一根空柱而不是被跳过。
+- 落在这个窗口之外的会话**不计入柱状图但计入总计**（总计是「全部历史」，见抽屉脚注）。
+- 模型归组键是 `modelId ?? configId ?? ''`（空串显示「跟随配置默认模型」）。
+  ⚠️ 解析可读名时注意 **`AiModelConfig.models` 是 `string[]`（模型 id 列表），不是对象数组** ——
+  它只有 id、没有单独的展示名，命中就直接显示这个 id。
+- 验证：`scripts/verify-context-compression.mjs`（与本节同跑 `@shared/agent-usage` 真源码，
+  覆盖累计 token 的累加语义）+ 手工清单（造几条会话后开抽屉，数字与各会话用量之和一致；
+  跨零点后柱状图落在新的一天）。
+
+### 4.38 插件的 AI 工具钩子（`tool:call` / `tool:result`）
+
+- 权限：插件的 `manifest.permissions` 里必须有 `'hooks'`，否则 `on()` 直接抛
+  （「插件 X 未声明 hooks 权限，无法注册 AI 工具钩子」）—— **能力与声明绑定**，不给隐式权限。
+- 注册表：`services/ai/plugin-hooks.ts` 的 `pluginHooks`。
+  - `tool:call` → `{ block?: true, reason?: string }`：**任一插件说拦就拦、立即短路**，
+    理由当成**工具结果**回给模型（同 `guardWrite` 的拒绝语义，不抛错）。适合做「危险命令黑名单」这类硬闸。
+  - `tool:result` → `{ result?: string }`：**链式**改写（每个插件看到上一个改完的结果），
+    且**只有字符串返回值生效**。适合做脱敏 / 打码。
+- ⚠️ 钩子注册在**唯一的那一层**：`tool-registry.buildToolset` 里的 `invokeTool` 包装，
+  内置 / 客户端 / MCP 三种来源都走它 —— 实现一次，不会在三处漂移。
+- ⚠️ **顺序不能换**：`tool:call` 钩子 → 执行 → `tool:result` 钩子 → `appendSteer`。
+  钩子看到的是**原始结果**（脱敏类插件不该被插话文本污染），插话在最后加
+  （它是要模型**立刻照做**的，放最前面容易被前面的长文本淹掉）。
+- ⚠️ 钩子**超时 / 抛错一律当没挂**（`HOOK_TIMEOUT_MS = 5000`，内部 try/catch 并 warn）：
+  一个写坏的第三方插件不能把整轮对话卡死。
+- 插件被停用 / 卸载 / 重载时，`plugins/host.ts` 的 `unregisterHandlers(id)` 会
+  `pluginHooks.clearPlugin(id)` —— 漏了这一步会让「已经卸掉的插件还在拦工具调用」。
+- 界面：插件管理页的权限标签里有 `hooks: 'AI 工具钩子'`。
+- 验证：`scripts/verify-sub-agent.mjs` 第 6 节（`tool:call` 拦下即不执行且理由当结果 /
+  `tool:result` 改写生效 / 钩子抛错当没挂 / **钩子看到的是原始结果、插话拼在最末尾**）。
 
 ## 五、验证工具链
 
@@ -1224,7 +1618,8 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 | `scripts/verify-agent-browser-tools.mjs` | Agent 浏览器工具行为：**直接跑 `services/browser/agent.ts` 真源码**（本地假站点），覆盖 navigate → ref 点击 → evaluate 验状态 → 中文输入 → press → wait_for → 截图落盘 → close → 关闭后能重建 |
 | `scripts/verify-browser-persistent-profile.mjs` | 浏览器会话持久化 profile：**直接跑 `services/browser/session.ts` 真源码**（本地假站点发持久 cookie）—— 登录态（cookie + localStorage）跨会话重启存活、关会话不删 profile 目录、`purge` 连目录一起清、未注入 profilesRoot 回退临时上下文且不落盘 |
 | `scripts/verify-builtin-playwright-mcp.mjs` | 内置 Playwright MCP（`browserToolMode: system` 用的那个）stdio 冒烟：真实子进程跑 CLI —— initialize → tools/list → **真实 browser_navigate**（headless Edge 打开页面）→ browser_snapshot 看到内容。防的是 overrides 强制 mcp 用顶层 playwright 1.63 稳定版后，某次升级 mcp 引入了 1.64+ 才有的 API |
-| `scripts/verify-tool-registry.mjs` | 工具注册表与客户端工具（`tool-registry.ts` + `client-tools.ts` 真源码，不起 Electron）—— 同名重复注册抛错、`names()`、`scope` 过滤、`available` 谓词（MCP 带 browser_* 时让位）、MCP 覆盖内置、描述函数按 ctx 现算、**随请求携带的客户端工具进工具集且与内置同名时让位**、confirm 模式下主进程**不**请示（权限在渲染端）、broker 的广播载荷 / 回填 / 执行失败 / `cancel(requestId)` / 通道未就绪 |
+| `scripts/verify-tool-registry.mjs` | 工具注册表与客户端工具（`tool-registry.ts` + `client-tools.ts` 真源码，不起 Electron）—— 同名重复注册抛错、`names()`、`scope` 过滤、`available` 谓词（MCP 带 browser_* 时让位）、MCP 覆盖内置、描述函数按 ctx 现算、**随请求携带的客户端工具进工具集且与内置同名时让位**、confirm 模式下主进程**不**请示（权限在渲染端）、broker 的广播载荷 / 回填 / 执行失败 / `cancel(requestId)` / 通道未就绪。⚠️ `tool-registry.ts` 有运行时依赖（`./steer` / `./plugin-hooks`），复制清单里少一个就 `ERR_MODULE_NOT_FOUND`（见 6.6 第 36 条） |
+| `scripts/verify-sub-agent.mjs` | 子 Agent（`delegate`）+ `buildToolset` 的 `only` / `allowSteer` + 插件钩子（`sub-agent.ts` / `tool-registry.ts` / `steer.ts` / `plugin-hooks.ts` 真源码，不起 Electron；`agent-core` 用桩替掉，只需要 `createAgentFileState`）—— 只读白名单**不含任何改动 / 执行类工具**且全为 `read_*`/`list_*`/`find_*`/`search_*`/`git_read`、`delegate` 未注入执行器时**整体不暴露**（available=false）、`scope` 是 workspace、三种失败路径（无执行器 / 空 task / runner 抛错）都**回说明文本而不抛错**、runner 返回空与超长报告的处理、`only` 只组装白名单里的内置工具、**`allowSteer:false` 不吞插话**（插话仍在注册表里等父 Agent）而缺省档会拼在结果末尾且只注入一次、钩子四条语义（`tool:call` 拦下即不执行且理由当结果 / `tool:result` 改写生效 / 钩子抛错当没挂 / **钩子看到原始结果、插话拼在最末尾**）、两种角色的提示词都声明只读与「不要反问」、步数上限远小于父 Agent 的 500 |
 | `scripts/verify-terminal-chat.mjs` | 终端助手并入统一引擎的全链路（隔离实例 + CDP + **进程内 mock LLM**：OpenAI 兼容 SSE，按脚本逐次应答并记录每次请求的工具清单）—— `scope:'terminal'` 工具集含 `run_in_terminal` 且不含工作区工具、客户端工具随请求上报并在**同一请求内**回填续跑、full 不弹确认框 / confirm 由**渲染端**弹框且拒绝对模型是正常结果、`run_in_terminal` 真写进 PTY、终端会话落 `terminal-conversations/` 且不进 agent 列表、草稿转正 / 左侧列表 / 逐条删除 / **面板里没有「清空历史」**、重启后仍在、客户端工具注册表重启后为空、**超长输出落产物**（第 3b 节，见 4.24：`run_in_terminal` 跑 3000 行 → 结果给出产物 id 与精确的下一次读取参数、开头结尾保留在中段之外、再发一轮 `read_tool_output({id, offset, length})` 把中段读回来且读取头给出下一个 offset）。需先 `npm run build`。⚠️ 第 3b 节的命令是**终端 PowerShell 的原生命令**，别再套 `powershell -Command "…"`：双引号里 `$_` 被外层先展开、单引号里的 `"` 又在组装原生参数行时被剥掉，两层壳各吃掉一层引号（两种写法都产不出内容，报错信息长得像工具坏了）；断言产物 id 也要注意 `inlineText` 是 **JSON 字符串**（引号长成 `\"`，正则两边都得容错） |
 | `scripts/verify-output-artifact.mjs` | 工具输出的「产物」机制（`services/ai/output-artifact.ts` 真源码，`.artifacttest` 包装跑，**不需要 Electron**，见 4.24）—— 短输出**不建文件**、超限落盘且文本里带 id / 总量 / 续读指引、内联的滚动结尾**确实是真正的末尾**（用 `MIDDLE_UNIQUE_MARK` 哨兵区分头尾中）、**第一块就超内联上限时开头照样填**、按 offset 分段读能逐字拼回全文、`AnsiStripper` 跨块不吞半截转义序列（CSI / OSC 都被劈开过）、非法 id（含 `../`、绝对路径、Windows 保留名）一律拒绝、4MB 上限标 `truncated`、`purgeArtifacts` 只删本会话、**回归：>256KB 输出不再变成空串** |
 | `scripts/verify-agent-posix-command.mjs` | Agent `execute_command` 的 Windows POSIX 执行环境（`agent-core/tools.ts` 真源码，**按 `buildWorkspaceToolDefs()` + 假 ctx** 调用，见 4.23 的静态定义 API）：注入 Git Bash 后 `ls` / 管道 + 通配 / `grep -n` / for 循环 / `$HOME` 按 POSIX 语义工作；不注入时回退 PowerShell 且仍可执行；工具描述如实声明环境。⚠️ 复制清单里有 `output-artifact.ts`（`execute_command` 现在用它落盘，见 4.24）—— 删掉那一行会 `ERR_MODULE_NOT_FOUND`；需 `DOGI_TEST_BASH=<bash.exe>` 指定 Git Bash，**不指定时 POSIX 用例会失败**（回退 PowerShell 跑 `ls` 只能得到报错，属环境问题不是回归） |
@@ -1235,6 +1630,7 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 | `scripts/verify-agent-list-projection.ts` | 会话列表投影的结构共享（`features/agent/conversation-list-meta.ts` 真源码，`node --experimental-strip-types`，**不需要 Electron**）—— 500 次流式增量后投影数组与条目对象**引用不变**（= 不重渲染）、会话内容确实在变（防「修成不更新」）、改名 / `updatedAt` 变化 / 草稿转正 / ACP 绑定回填 / 删除 / 顺序变化才换引用 |
 | `scripts/verify-agent-outline-scroll-cost.mjs` | 消息流滚动的每帧开销（隔离实例 + CDP，先 `npm run build`）：页内**打桩计数** `getBoundingClientRect` / `querySelector`，造 50 / 300 轮提问各滚 30 帧 —— 每帧布局读取必须是**对数级**（实测比值 1.34，线性会是 6）、`querySelector` 不再逐条（每帧 1 次而不是几百次）。修复前那段线性扫在 1200 个消息元素上是**每帧 621 次** |
 | `scripts/verify-agent-error-parts.mjs` | 错误文案 part 的追加语义（`stores/agent-helpers.ts` 真源码，只桩掉 `app-store` / `types` 两条 import）—— 同一轮连着多个 `error` 事件（模型级重试每次尝试失败都发一个）**只留最后一条**、错误文案之后的正文增量另起一段、正文不会被接在 `⚠️ …` 后面；Agent 会话与终端 AI 助手两条路径都验 |
+| `scripts/verify-agent-project-doc-web-fetch.ts` | 项目约束文档注入（4.31）+ `web_fetch`（4.32）：**真源码**（`project-doc.ts` / `agent.ts` / `web-fetch.ts` / `output-artifact.ts`），**不起 Electron**。⚠️ 源文件之间是无扩展名相对导入，Node 的 `--experimental-strip-types` 解析不了 —— 先 `npx esbuild scripts/verify-agent-project-doc-web-fetch.ts --bundle --platform=node --format=esm --outfile=tmp/verify-web-fetch.mjs` 再 `node tmp/verify-web-fetch.mjs`。覆盖：无文档返回 null / BOM 剥离 / 空文件跳过回落 `CLAUDE.md` / 超长按 `## ` 边界截断并给 section 名、段落声明优先级 + 截断时给 `read_file` 指引、提示词里权限段落按模式切换且**项目文档排在最后**、本地 HTTP 服务器真抓（标题 / 正文 / script·style·nav·footer 剔除 / 链接绝对化）、`file:` 被拒、非法 URL、长页面落产物并能 `readArtifact` 按 offset **读回中段**（不是开头） |
 | `scripts/verify-quick-actions.mjs` | `.dogi/workspace.json` 自动建目录、脏数据降级、下拉入口与顶栏同排、执行命令开终端、弹窗开关 |
 | `scripts/verify-host-logs.mjs` | 主机日志全链路：隔离实例 + 进程内 ssh2 测试服务器 —— SSH 四类来源标签与实时推送（`logs:entry`）、TOFU 指纹、隧道强断（error 级）/ 改名重启 / 停止、SFTP 失败路径、JSONL 落盘与清空归零、面板单例标签 / 过滤 / 搜索 |
 | `scripts/verify-windows-host.mjs` | Windows 主机支持全链路：三台进程内 ssh2 假服务器（Windows / GBK / Linux）—— `cmd /c ver` 平台探测、Windows 会话 0 条 `monitor:data` + `monitor:unsupported(windows)` + 徽标「不支持监控」、GBK 输出 xterm 渲染与输入字节=GBK 编码比对、Linux UTF-8 透传 + `monitor:data` 回归 |
@@ -1248,8 +1644,9 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 | `scripts/verify-command-history.ts` | 终端命令历史的服务层（`services/terminal/history.ts` 真源码，`node --experimental-strip-types`，不需要 Electron）—— 空启动、add 落盘、去重置顶（重复执行刷新时间）、trim / 空串拒绝、超长截断、上限 1000 丢最旧、「重启」再 init 读回一致、单条删除（不存在静默）、清空归零、损坏 / 非数组 / 坏条目文件逐条校验降级。⚠️ 落盘是异步链，断言文件内容前必须 `flush()` |
 | `scripts/verify-command-history-ui.mjs` | 命令历史的界面链路（隔离实例 + CDP，先 `npm run build`）：真实键盘在终端执行命令 → 回车记入全局 store → **第二个终端标签**的预测下拉出现跨标签历史 → 设置 → 终端管理卡片（条数 / 搜索过滤 / 最新在前 / 行内删除 / Popconfirm 清空）→ 再真实记录一条 → 杀进程重启 → bootstrap 灌回且已删除条目不再出现。⚠️ Modal 底部的版本号 `v0.0.12` 也是 `font-mono`，行断言要选 `span.font-mono[title]`（管理行才有 title）；antd 两字按钮按去空白 textContent 匹配 |
 | `tmp/verify-terminal-drop-upload.mjs` | 终端拖拽上传（SFTP）：进程内假 sshd（pty + shell + SFTP 子系统，REALPATH 固定回家目录）+ 隔离实例，`Input.dispatchDragEvent` 注入**真实原生拖拽**（`data.files` 传绝对路径 → `webUtils.getPathForFile` 拿得到）——拖入文件 + 子目录 → 确认条默认 = 家目录 → 改目录上传 → 远端逐层 MKDIR + 每文件 WRITE 内容逐字节一致、终端「已上传 N 项到 …」、传输托盘 2 笔 done → 再次拖入默认目录被记住 → 本地会话拖入被拒且不建连不传文件。⚠️ CDP 对终端 DOM 刚挂载后的**首次** drop 可能整串被忽略（非代码问题），探针带最多 3 次真实重试 |
-| `tmp/verify-tab-close-confirm.mjs` | 标签关闭确认（页面内确认 + emit 关闭，机制见 6.5 第 32 条）：隔离实例 + CDP，`createLocalSession` 开真实本地终端 + `openNoteTab` 开真实笔记（Milkdown 编辑器 `execCommand('insertText')` 输入变脏）—— 通用防手滑确认出现在**可见标签面板内**（`[role=dialog]` 且 `offsetParent` 非空、根节点挂在 `relative` 容器、遮罩非全窗宽）→ 取消不动 / 关闭生效 → 勾「以后都不再提示」落盘 `confirmCloseTab` → 偏好关闭后直接关 → `requestCloseGroup` 逐个确认（自动激活下一个标签）、取消即中止整批 → 笔记**开关开**弹「未保存三选一」（不保存 = 丢弃且文件不动）、**开关关**不问直接丢弃关闭。⚠️ **`cdp.eval` 是 `awaitPromise:true`：`requestClosePanelTab` / `requestCloseGroup` / `createLocalSession` 这类返回 Promise 的动作必须 `void` 掉再 eval，否则 eval 会等到用户点按钮才返回（探针第一次跑就是这样死锁超时的）**；⚠️ antd 给两个汉字按钮插空格，「取消 / 关闭」要按去空白后的 `textContent` 匹配（同 6.5 第 20 条） |
-| `scripts/verify-git-changes.ts` | 源代码管理「更改」列表的数据层：**直接跑 `services/git.ts` 真源码**（`node --experimental-strip-types`，不需要打包 / 不起 Electron）—— 临时仓库里验证未跟踪目录被 `-uall` 摊平成目录下的每个文件、列表里没有「以 `/` 结尾的折叠目录」条目、未跟踪文件用 `--no-index` 拿到「整份新增」的 diff、已跟踪文件的 diff 不受影响、未跟踪的**嵌套仓库**输出成带尾斜杠的目录条目（`nested/`，取 diff 返回空）、回退能**递归**删掉整个目录、`listGitDir` 能列出目录条目里的文件（跳过 `.git`，只读展示）且**预览上限 20 项** |
+| `scripts/verify-tab-close-ui.mjs` | 标签关闭协议的**界面链路**（隔离实例 + CDP，先 `npm run build`；机制见 6.7 第 35 条）—— ①**关非激活标签**：确认框照样出现且**可见**（宽高非 0、`getContainer={false}` 内联渲染即 `parentElement !== body`、遮罩只盖面板 `maskWidth < innerWidth`）、**且不抢焦点**（`groups[gid].activeTabId` 前后不变 —— 旧实现要先 activate 再 `setTimeout(50)` 赌渲染时序）；②通用防手滑：取消 → 标签与激活态都不动、关闭 → 只关那一个且仍不抢焦点、勾「以后都不再提示」→ `confirmCloseTab` 落盘 `false`、开关关掉后**不再弹**直接关；③**批量关闭逐个问**：`requestCloseGroup` 给两个标签起 `BATCH-A` / `BATCH-B` 可区分名字，断言**按顺序**各问一次（`body` 里是各自标题），中途取消一次 → 整批中止且 `BATCH-B` 从未被问；④**笔记页面接管**（`owned` 让位）：干净笔记**不弹**通用防手滑直接关、改脏后弹的是页面自己的三选一（标题「有未保存的修改」、按钮 `取消 / 不保存 / 保存并关闭`、**没有**「以后都不再提示」勾选框）、选「不保存」→ 关闭且磁盘文件保持原样（草稿真被丢弃）、选「取消」→ 标签留着。⚠️ **`cdp.eval` 是 `awaitPromise:true`：`requestClosePanelTab` / `requestCloseGroup` 这类要等用户点按钮才 resolve 的动作必须 `void` 掉再 eval，否则 eval 会挂到用户点完（第一次跑就是这么死锁超时的）**；⚠️ antd 关掉 Modal 后 **DOM 不移除**（只是 `.ant-modal-wrap` 变 `display:none`），所以「有没有确认框」必须看**可见性**，只看节点在不在会把取消后的残留当「还开着」；⚠️ 改脏笔记要用 **CDP `Input.dispatchKeyEvent` 真键盘**（合成 `execCommand('insertText')` 在后台窗口里被忽略，编辑不脏 → guard 直接放行 → 探针卡在等确认框）；⚠️ 本探针 `launch()` 会**删掉 `ELECTRON_RUN_AS_NODE` / `NODE_OPTIONS`**：沙箱 / CI 里这两个变量会让 `electron.exe` 退化成纯 Node 跑 `out/main/index.js`（报 `does not provide an export named 'BrowserWindow'`），表现为「CDP page not found」的假超时 |
+| `scripts/verify-tab-close-bus.ts` | 标签关闭协议的**纯逻辑**（`shared/lib/tab-event-bus.ts` 真源码，**不起 Electron**）—— ①**fail closed**：guard 抛错 / 返回非法裁决（缺 `allow`）都拦下报 `guard-error` 且 executor 一次不调；②**`owned` 让位**：页面接管（`owned:true`）→ shell 防手滑不问两遍，未带 `owned` / 完全没注册 guard → 兜底问一次，兜底自己拦下 → `rejected`，**拦下时（哪怕带 owned）兜底也不跑**；③**顺序与短路**：guard 按注册顺序跑、拦下即停（后续 guard 与兜底都不跑），兜底只在全部 guard 放行后跑；④**快照迭代**：请求进行中新增的 guard 不参与本轮、下一轮才参与，`onGuard` 的注销函数生效；⑤**`unmounted`**：没有总线 / 没有组级确认宿主都不静默放行（注销宿主后回到 `unmounted`）；⑥**组级宿主注册表**：组重建时旧清理函数按实例比对，不误删新注册的宿主；⑦`ctx.confirm` 就是组级宿主的确认框、`ctx.title` 透传、executor 全放行才调且**恰好一次**；⑧**批量关闭逐个独立**：复刻 store 的循环形状（快照 + 逐个 await + 任一取消即 `break`），第 2 个拦下后第 3 个不再推、只有放行的被关掉。⚠️ 源文件用了 TS **参数属性**（`constructor(private readonly tabId: string)`），Node 的 strip-only 模式不支持（`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`）—— 先 `npx esbuild scripts/verify-tab-close-bus.ts --bundle --platform=node --format=esm --outfile=tmp/verify-tab-close-bus.mjs` 再 `node tmp/verify-tab-close-bus.mjs`（type-only 的 `@/…` import 会被 esbuild 直接丢掉，不需要别名配置） |
+| `scripts/verify-git-changes.ts` | 源代码管理「更改」列表的数据层：**直接跑 `services/git.ts` 真源码**（`node --experimental-strip-types`，不需要打包 / 不起 Electron）—— 临时仓库里验证未跟踪目录被 `-uall` 摊平成目录下的每个文件、列表里没有「以 `/` 结尾的折叠目录」条目、未跟踪文件用 `--no-index` 拿到「整份新增」的 diff、已跟踪文件的 diff 不受影响、未跟踪的**嵌套仓库**输出成带尾斜杠的目录条目（`nested/`，取 diff 返回空）、回退能**递归**删掉整个目录、`listGitDir` 能列出目录条目里的文件（跳过 `.git`，仅只读展示）且**预览上限 20 项**；**`--porcelain=v2`** 的重命名条目带 `origPath`、工作区在**仓库子目录**时只列该前缀下的改动、**空仓库**（unborn HEAD）的分支名不是「No commits yet on …」、`init-commit` 一步到位；分支增删的拦截、远端增删、贮藏 push/pop/apply/drop 与非法 ref |
 | `scripts/verify-git-tree.ts` | 源代码管理列表的折树纯函数（`features/agent/git-tree.ts`，`node --experimental-strip-types` 直接跑）—— 多级 / 中文目录名取**路径末段**且非空、不含问号，根目录文件显示文件名，同一目录的多个文件合并成一个节点，完整路径留在 `path`（tooltip 用），重命名按新路径折树且 `origPath` 仍可读，git 的**目录条目**（`nested/`，尾斜杠）取到末段名而不是空串、目录节点带上其下**全部变更路径**（整目录暂存 / 回退用） |
 | `scripts/verify-acp-config-options.ts` | ACP 会话配置项与 usage_update 的映射（`services/ai/acp-config-options.ts` 真源码，`node --experimental-strip-types`，**纯逻辑不需要 Electron**）—— select / boolean 的收下与丢弃规则（没 id、没候选项、未知 type 都丢掉）、**分组拍平**、缺 name 退回 value、**未知 / 缺失 category 一律放过**（协议要求优雅处理，自定义项天然可用）、模型项提取（category=model）、`usage_update` → `context-usage` 且**数字缺失时返回 null**（不用 0 冒充「上游报的 0」，圆环会因此显示「没占过」） |
 | `scripts/verify-acp-fs.ts` | ACP 客户端文件访问（`services/ai/acp-fs.ts`，`node --experimental-strip-types`）—— 工作区内读写（相对 / 绝对路径、父目录自动创建、覆盖写）、`line` / `limit` 按行截取、越界一律拒绝（`../`、工作区外绝对路径、工作区根、前缀相同的兄弟目录、`sub/../../`） |
@@ -1441,7 +1838,8 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   需要分组用 `{ label: '组名', options: [...] }`。⚠️ **Dropdown 的 menu items 里 divider 仍受支持**，两者别混。
 - **只支持一层分组**：`@rc-component/select` 的 `flattenOptions` 递归时子层一律按 option 处理，
   嵌套分组的内层会变成 `value: undefined` 的选项 —— 真实条目一个都不渲染，点它 `onChange` 拿到 `undefined`。
-  从属关系写进 label（`配置名 · 模型id`）或拆成多个顶层分组；`onChange` 也要防御 `undefined`。
+  从属关系用**顶层分组**表达（模型下拉：每条配置一个分组，组头 = 配置名、组内 = 裸模型 id，
+  见 `features/agent/model-options.ts` 的 `configModelGroups`）；`onChange` 也要防御 `undefined`。
 - **内部结构变了**：边框画在**根节点 `.ant-select`** 上（自带 `1px solid transparent`），内层是 `.ant-select-content`
   （`border-width: 0`）。**antd 5 的 `.ant-select-selector` 已经不存在** —— 照旧写法改它不报错也不生效。
 - **`variant="borderless"` 的 Select「按下才多出的边框」其实是 `outline` 不是 `border`**：
@@ -1998,6 +2396,58 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   `/^[a-z0-9-]{6,80}$/` 再拼路径，**任何地方都不要把 `dir` 或真实路径交给模型**（同 `resolveInside`）。
 - **验证**：`scripts/verify-output-artifact.mjs`（最后一条就是 >256KB 的回归用例）、`verify-terminal-chat.mjs` 第 3b 节。
 
+**36. 插话 / 子 Agent / 插件钩子都挤在工具结果的出口上 —— 顺序与 drain 语义是硬约束**
+
+- **触发信号**：给工具加了一层统一包装（插话 / 钩子 / 脱敏）之后出现这些**互相看起来无关**的现象：
+  用户插的话没人理；子 Agent 跑起来之后父 Agent 再也收不到插话；脱敏插件漏掉了一段文本；
+  插件卸掉了还在拦工具调用。
+- **根因**：`tool-registry.buildToolset` 里的 `invokeTool` 是**所有工具的唯一出口**
+  （内置 / 客户端 / MCP 都走它），三件事挤在同一个位置，各有各的隐含约束：
+  - `appendSteer` 是 **drain（取走）** 语义 —— 谁先取谁拿走。子 Agent 若没关掉插话
+    （`allowSteer: false`），它内部的某一步就把用户的插话吞了，父 Agent 永远等不到；
+  - 钩子的**顺序**：`tool:call` → 执行 → `tool:result` → `appendSteer`。
+    把 `appendSteer` 挪到 `tool:result` **之前**，脱敏插件就会看到（并可能改写）插话文本；
+  - `pluginHooks.clearPlugin(id)` 必须挂在 `unregisterHandlers` 上（停用 / 卸载 / 重载三条路都经它）。
+- **正确做法**：见 4.34 / 4.35 / 4.38。改这一层时**先想清楚这三件事各自的顺序要求**，别只测自己那一件。
+- ⚠️ 相关的第二个坑：插话会在**正在流的助手消息之后**插一条 user 消息，于是
+  `messages[messages.length - 1]` 不再等于「最后一条助手消息」—— 所有这么写的地方都要改成
+  「从后往前找第一条 `role === 'assistant'`」（`lastAssistantIndex` / `notifyAgentFinished`）。
+  漏改的症状很隐蔽：流式光标消失、重试按钮挂错位置、系统通知正文取到那条插话。
+
+**37. 会话新加的字段必须在三处同时登记，否则「界面改了、重开又变回去」**
+
+- **触发信号**：在会话上加了个新字段（`mcpServerIds` 就是这么来的），界面上改得动、看着也生效了，
+  **关掉会话再打开又回到旧值**；或者反过来 —— 显式设成空数组，重开后变成「全部启用」。
+- **根因**：会话落盘走 `conversation-store.ts`，它是**显式白名单**（`normalizeConversation` 重建对象、
+  `SaveConversationInput` 声明入参、`save()` 里逐字段 `'x' in input ? input.x : prev?.x`）。
+  新字段漏在任一处，就会被静默丢掉 —— **不报错、不告警**，表现就是「改了没记住」。
+- ⚠️ `'x' in input` 这套语义下 **`undefined` 是「显式清空」而不是「不改」**。
+  所以「可选字段」的空值必须想清楚代表什么：`mcpServerIds` 用 `undefined` 表示「不限制（全部）」、
+  `[]` 表示「一个都不用」，两者语义相反，写反了不会报错但行为完全错。
+- **正确做法**：新增字段时按 `normalizeConversation` → `SaveConversationInput` → `save()`
+  → preload 的类型 → 渲染端 `persistConversation` 这条链**一路查下去**，一处都不能跳。
+
+**38. `AiModelConfig.models` 是 `string[]`，不是对象数组**
+
+- 它只装**模型 id**（含主键 `model`），**没有单独的展示名**。所以「按模型 id 反查可读名」时，
+  命中就只能显示这个 id 本身 —— 别写 `cfg.models.find((m) => m.id === key)`，
+  那在类型上直接报错（`Property 'id' does not exist on type 'string'`），
+  运行期也只会得到 `undefined`（`'abc'.id` 是 undefined）。
+- 上下文窗口那份配置（`contextWindows`）也是按**模型 id** 作键 —— 一个配置下可以挂很多模型，
+  窗口是模型自己的属性，不是网关的属性（见 `@shared/context-budget`）。
+
+**39. 子 Agent 的 `model` / `modelSettings` 必须在 `ctx` 之前算好**
+
+- **触发信号**：加子 Agent 时想「顺手」把 `ctx.subAgent` 塞进现有的 `ctx` 字面量里，
+  却发现 `model` 是在 `ctx` **之后**才 `resolveModel` 的 —— 于是要么写不出这个字段，
+  要么在 `execute` 里临时再解析一次模型（那时 `req` 已经不在手上了）。
+- **正确做法**：`prepareWorkspaceTurn` 里把 `const model = resolveModel(config, req.modelId)` 与
+  `this.mastraModelSettings(config, settings)` **提到 `ctx` 上方**。两者都是纯同步计算、
+  不依赖 `ctx` / `tools`，提前没有任何副作用（`ctx.subAgent` 必须在组装工具集**之前**存在，
+  因为 `available` 是**组装期**判定的）。
+- ⚠️ 顺带：`resolveModel` 的注释说明「必须带上 `req.modelId`」—— 会话在同一配置下切换具体模型时，
+  漏传会静默回退到配置默认模型，表现为「切换模型不生效」。
+
 ### 6.7 数据与文件
 
 **29. 导入 / 导出：zip 是自己实现的，凭据不导出**
@@ -2084,37 +2534,83 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   纯工具轮次没有复制按钮）。⚠️ 断言要量「正文在不在折叠体里」（`bar.nextElementSibling`），
   只看 `innerText` 是看不出被折没折的 —— 折叠体收起时内容仍在 DOM 里。
 
-**32. 标签关闭确认是「页面内确认 + emit 关闭」，别改回全局 Modal 或单槽位 guard**
+**35. 标签关闭确认是「页面主导的裁决 + 回执」，别改回全局 Modal、单槽位 guard，或「先激活再赌 50ms」**
 
 - **触发信号**：给某类标签加关闭确认时不知道往哪加；或关笔记 / Agent 标签只弹「确定关闭标签？」
   通用确认，页面自己的确认（未保存三选一 / Agent 运行中）永远不出现 —— 后者就是单槽位事故的现象。
 - **根因（旧实现事故）**：旧 `ui.tabCloseGuards` 是 `Record<tabId, guard>` 单槽位，`TabContentGuard`
   （父组件）与页面（子组件）注册**同一个 tabId** —— React 子组件 effect 先跑、父组件后写，
   页面级 guard 被通用 guard **覆盖成死代码**，而注释还写着「按注册顺序逐一调用」（从未存在过）。
-- **正确做法**：关闭走「推送 + 回执」（`shared/lib/tab-event-bus.ts`，总线按 tabId 一条、多 handler）：
-  `requestClosePanelTab` 先把标签带到前台（`requestTabCloseVisible`：确认框画在面板内部，
-  背景标签不激活就在 `hidden` 面板里，确认框渲染出来也不可见）→ 推 `close-request`，页面 handler
-  （`useTabEventBus` 注册）与防手滑 handler 在**标签内部**依次确认，任一 false 即中止；
-  全过 emit `close`，经 `setTabCloseExecutor` 注入的回调回到 `closePanelTab`。总线由 `TabContentGuard`
-  持有（mount 创建 / unmount 释放）；防手滑只对 `PAGE_MANAGED_CLOSE_TYPES`（note / agent）以外的标签注册，
-  避免双重确认。本模块**不反向 import store**（会与 app-store 成环），关闭回执靠 executor 注入。
-  确认框本体是 **antd Modal**（`shared/components/InlineConfirm.tsx`）：`getContainer={false}` 内联渲染
+- **协议（`shared/lib/tab-event-bus.ts`，按 tabId 一条总线、多 handler）**：用户入口一律走
+  `store.requestClosePanelTab`（× / 右键菜单 / `Ctrl+W` / 关整组都汇到它）→ `requestTabClose({ tabId, groupId, title })`
+  → 总线依次 `await` 页面注册的 `close-guard`（`useTabCloseGuard`）→ 全放行才经
+  `setTabCloseExecutor` 注入的回调回到 `closePanelTab`。页面 guard 返回**结构化裁决**：
+
+  | 返回值 | 含义 |
+  | --- | --- |
+  | `{ allow: false }` | 拦下，标签原样留着（用户取消 / 未保存且选了不关） |
+  | `{ allow: true, owned: true }` | 放行，且**这次确认由页面负责** → shell 的通用防手滑**让位** |
+  | `{ allow: true }`（无 `owned`） | 放行，页面没接管 → shell 兜底问一句「确定关闭标签「x」？」 |
+
+- **`owned` 是「谁负责这次确认」，不是「有没有弹过窗」**：笔记 / Agent 无论脏不脏都返回 `owned: true`
+  （干净时直接放行、不再问一句）；终端 / 脚本 / 插件不注册 guard，于是由 `TabContentGuard` 注册的
+  `onFallback` 兜底防手滑。旧实现用**写死的类型白名单** `PAGE_MANAGED_CLOSE_TYPES`（note / agent）来区分
+  这两类页面，新增页面漏加就弹两次窗 —— 现在这个事实由页面自己在返回值里声明，白名单已删除。
+- **四条硬约束（改这个模块时别破坏）**：
+  1. **fail closed**：guard 抛错 / 返回非法裁决（缺 `allow`）→ 拦下并回报 `guard-error`，
+     **绝不静默放行**。旧实现在 catch 里 `return true`，笔记保存一出错就静默丢草稿 —— 方向反了。
+     所以 `useTabCloseGuard` 刻意**不 try/catch**，让总线统一处理。
+  2. **没有总线就不关**：总线由 `TabContentGuard` 在标签内容挂载时创建（`releaseTabBus` 在卸载时释放）。
+     查不到总线 = 没有任何页面能对这次关闭表态，放行等于绕过全部确认 → 按 `unmounted` 拒掉。
+     正常不会发生（`PaneTree` 递归渲染每个叶子组、组内标签**全部保活挂载**，见 PanelView）。
+  3. **不抢焦点**：确认框由**组级宿主**提供（`registerCloseHost` / `getCloseHost`，按 `groupId` 存），
+     与「哪个标签是激活的」无关。旧实现要先 `activatePanelTab` 再 `setTimeout(50)` 等 React 摘掉 `hidden`
+     —— 那是**赌渲染时序**：慢机器上 50ms 不够，确认框留在 `hidden` 里既不可见也不可点，
+     `await` 永不落地 → 关闭**静默卡死**；批量关闭时标签条还会挨个闪过去。
+  4. **本模块不 import store**（会与 app-store 成环）：注册表都是模块级 Map，「真正执行关闭」由 store 经
+     `setTabCloseExecutor` 注入。
+- **`useInlineConfirm` 的两种取用方式别混**：`useInlineConfirm()` 是**拥有者**（返回 `confirm` + `element`，
+  `element` 必须渲染在自己的 `relative` 容器里）—— 全应用只有 `PanelGroupView` 用，它把 `confirm` 经
+  `CloseConfirmProvider` 发给组内所有标签；页面（笔记 / Agent）用 `useCloseConfirm()` **消费**那个确认框，
+  自己不再渲染 `element`。缺 provider 时按「一律取消」处理（fail closed，正常不会走到）。
+- **确认框本体是 antd Modal**（`shared/components/InlineConfirm.tsx`）：`getContainer={false}` 内联渲染
   在标签面板里（**别省略它** —— 缺省 portal 到 body，`styles.mask/wrapper` 的 absolute 就会以视口为
   包含块、遮罩盖满整窗），`styles.mask/wrapper` 行内样式把 antd 的 `position: fixed` 压成
   `absolute`，定位基准 = 消费方的 `relative` 根容器。
-- **`confirmCloseTab` 是所有关闭确认的总开关**（含页面级）：通用防手滑与笔记「未保存三选一」/
+- **`confirmCloseTab` 是所有关闭确认的总开关**（含页面级）：兜底防手滑与笔记「未保存三选一」/
   Agent「运行中」确认都在各自 handler 里读它 —— 关掉后笔记**直接走「不保存直接关闭」**
-  （置 `discardingRef` 丢弃草稿、跳过卸载冲刷）再 emit close，Agent 直接放行中断关闭。
+  （置 `discardingRef` 丢弃草稿、跳过卸载冲刷），Agent 直接放行中断关闭。
   开关只决定「要不要确认」：干净的笔记 / 空闲的 Agent 开着开关也是直接关（没有可确认的状态）。
-- **验证**：`npm run typecheck` + 手工清单 —— 通用确认出现在该标签面板内（取消不动 / 关闭生效 /
-  其他分屏不受影响）、勾「以后都不再提示」落盘 `confirmCloseTab`、笔记三选一（保存失败不关、
-  「不保存」关闭且跳过冲刷）、Agent 流式中确认、右键关背景标签先激活再弹、批量关闭逐个确认且
-  取消即中止、接口草稿的程序化关闭不受影响。
+- **批量关闭逐个独立判断**（`requestCloseGroup` / `requestCloseSiblingTabs`）：快照后 `for` 循环
+  `await requestClosePanelTab`，**任一取消即中止剩余**。按用户明确要求**不引入**「全部应用」批量勾选，
+  保持每个标签单独问；但确认框挂在组上，所以不再逐个激活标签、标签条不再闪。
+  `requestClosePanelTab` 返回 `Promise<boolean>`，`false` = 取消或失败（后者已弹 message，
+  `unmounted` 提示「这个标签还没加载完」，`guard-error` 提示原因），**静默失败会表现成「点了 × 没反应」**。
+- **验证**：`npm run typecheck` +
+  **协议纯逻辑** `npx esbuild scripts/verify-tab-close-bus.ts --bundle --platform=node --format=esm --outfile=tmp/verify-tab-close-bus.mjs && node tmp/verify-tab-close-bus.mjs`
+  （26 项：fail closed / `owned` 让位 / 顺序短路 / 快照迭代 / `unmounted` / 宿主注册表 /
+  executor 恰好一次 / 批量逐个独立且取消即中止）+ **界面链路** `node scripts/verify-tab-close-ui.mjs`
+  （38 项：关非激活标签时确认框可见**且不抢焦点**、内联渲染与遮罩非全窗宽、取消 / 关闭 /
+  「以后都不再提示」落盘、开关关掉后不弹、批量按顺序逐个问且取消即中止、笔记干净直接关 /
+  改脏弹页面自己的三选一 / 「不保存」不写脏磁盘 / 「取消」标签留着）+ 手工清单 ——
+  Agent 流式中确认、保存失败不关、其他分屏不受影响、接口草稿的程序化关闭不受影响。
 
 ## 七、已知限制与待办
 
 - **未实现**：批量命令下发、终端会话恢复（重启后不保留 scrollback）、
   本地终端与远程终端统一的历史搜索。
+- **子 Agent（`delegate`，见 4.35）**：
+  - 中间过程**在界面上看不到** —— 子 Agent 没有独立会话，只有一行「delegate 运行中」；
+    它跑了多少步、读了哪些文件都不显示。这是「不引入新会话类型」的直接代价。
+  - 因此**默认关闭**（设置 → AI → 运行）；开启前要清楚它会让同一份代码被独立读第二遍。
+  - 只支持工作区 Agent；终端助手没有工作区，`delegate` 对它无意义（`scope: 'workspace'`）。
+  - 种类只有 `explorer` / `reviewer` 两种，且都是只读白名单（见 4.35 的三条硬约束）。
+- **会话签出 / 导入导出（见 4.34）**：
+  - **不支持 ACP 会话** —— 消息在外部 agent 手上，导出去是个空壳（签出按钮与菜单里的「导出」
+    都不给 ACP 会话；删除照常给）。
+  - 导出**不含**模型配置与凭据（`configId` / `apiKey` 都不带），导入后要自己重新选模型。
+- **MCP（见 4.36）**：每会话允许清单**只管用户自己加的 server**；内置 Playwright MCP 由
+  `browserToolMode` 单独管辖，不受它约束。
 - **ACP**：
   - agent 未声明 `loadSession` 时，导入的会话**看不到历史**（打开会话即报错，发消息会退回
     `session/new` 并重绑，见 4.18）；这是协议限制，不是可修的实现缺陷。

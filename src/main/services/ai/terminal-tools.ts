@@ -16,13 +16,14 @@
  * 等待窗口内订阅 `sessionManager` 的 `data` 边收边喂给产物写入器（见 output-artifact.ts）。
  */
 import { z } from 'zod'
-import type { AiPermissionMode, HostPlatform } from '@shared/types'
+import type { AiPermissionMode, ConfirmDecision, HostPlatform } from '@shared/types'
+import { isAllowDecision } from '@shared/confirm'
 import { sessionManager } from '../terminal/sessions'
 import { storage } from '../storage'
 import { OutputArtifactWriter, stripAnsi } from './output-artifact'
 import type { AiToolDef, ToolRunContext } from './tool-registry'
 
-/** 确认模式下的请示入口（agentService 注入并串行化），探针可替换 */
+/** 确认模式下的请示入口（agentService 注入并串行化），探针可替换；返回四档裁决 */
 export type TerminalConfirmFn = (req: {
   requestId: string
   toolCallId: string
@@ -30,11 +31,12 @@ export type TerminalConfirmFn = (req: {
   command: string
   sessionId?: string
   sessionTitle?: string
-}) => Promise<boolean>
+}) => Promise<ConfirmDecision>
 
-/** 当前的命令执行权限模式：每次执行时实时读取，支持对话中途切换 */
+/** 当前的命令执行权限模式：每次执行时实时读取，支持对话中途切换（三档直传） */
 function currentPermissionMode(): AiPermissionMode {
-  return storage.getAiSettings().permissionMode === 'confirm' ? 'confirm' : 'full'
+  const mode = storage.getAiSettings().permissionMode
+  return mode === 'confirm' || mode === 'readonly' ? mode : 'full'
 }
 
 /**
@@ -94,9 +96,11 @@ export function buildTerminalSystemPrompt(input: {
   mcpErrors: string[]
 }): string {
   const modeHint =
-    input.permissionMode === 'confirm'
-      ? '\n当前处于「确认模式」：执行任何终端命令都会先请求用户确认，用户可能拒绝。被拒绝时不要反复重试同一条命令，先询问用户的意见。'
-      : ''
+    input.permissionMode === 'readonly'
+      ? '\n当前处于「只读模式」：任何终端命令都会被系统**直接拒绝**（不弹确认、没有例外）。请只用 read_terminal_output / list_terminal_sessions 了解现状，把要执行的命令讲清楚由用户自己动手，不要反复重试。'
+      : input.permissionMode === 'confirm'
+        ? '\n当前处于「确认模式」：执行任何终端命令都会先请求用户确认，用户可能拒绝。被拒绝时不要反复重试同一条命令，先询问用户的意见。'
+        : ''
   const bound = input.boundSession
   const boundPlatformHint = bound ? sessionPlatformHint(bound.platform) : ''
   const boundHint = bound
@@ -156,14 +160,20 @@ async function captureDuring(
   }
 }
 
-/** 确认模式的统一入口：读实时设置 + 走 ctx 的请示入口（requestId 由 service 补） */
+/** 改动类命令的统一入口：读实时设置 + 走 ctx 的请示入口（requestId 由 service 补） */
 async function confirmIfNeeded(
   ctx: ToolRunContext,
   req: { toolCallId: string; toolName: string; command: string; sessionId?: string; sessionTitle?: string }
 ): Promise<string | null> {
-  if (currentPermissionMode() !== 'confirm') return null
-  const approved = await ctx.requestConfirm(req)
-  return approved
+  const mode = currentPermissionMode()
+  // 只读模式：直接回绝（不弹卡）—— 与工作区 Agent 的 guardWrite 同一档语义
+  if (mode === 'readonly') {
+    return '当前权限模式为「只读」，命令未运行。请只做只读的分析与说明，把需要执行的命令讲清楚由用户决定，不要反复重试。'
+  }
+  if (mode !== 'confirm') return null
+  const decision = await ctx.requestConfirm(req)
+  // 「总是允许 / 总是拒绝」由 service 记忆：命中时直接回 once 档，不会弹卡
+  return isAllowDecision(decision)
     ? null
     : '用户取消了本次命令执行（命令未运行）。请询问用户接下来希望怎么做，不要擅自重试。'
 }
@@ -255,6 +265,11 @@ export function buildTerminalToolDefs(): AiToolDef[] {
       }),
       execute: async (rawInput, call, ctx) => {
         const { keys, sessionId } = rawInput as { keys: string; sessionId?: string }
+        // 只读模式：连按键也不许发 —— send_keys 直接驱动终端，等同于执行命令。
+        // 刻意**不**套 confirmIfNeeded：确认模式本来就不拦 send_keys（它多是退出交互程序的 q / C-c）。
+        if (currentPermissionMode() === 'readonly') {
+          return '当前权限模式为「只读」，按键未发送。请把需要发送的内容说明给用户，由用户自己操作。'
+        }
         return ctx.queueToolExecution!(async () => {
           const id = resolveTarget(ctx, sessionId)
           if (!id) throw new Error('当前没有打开的终端会话')

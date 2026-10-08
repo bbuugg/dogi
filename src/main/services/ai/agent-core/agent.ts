@@ -8,6 +8,7 @@ import type { ModelMessage, TextPart, ToolCallPart, ToolResultPart } from 'ai'
 type ToolResultOutput = ToolResultPart['output']
 import { type AgentFileState, type AgentFileSnapshot } from './tools'
 import { buildSkillsPromptSection, type AgentSkill } from './skills'
+import { buildProjectDocSection, type ProjectDoc } from './project-doc'
 import type { ContextCompression, TurnUsage } from '@shared/types'
 import { describeError } from '../error-utils'
 
@@ -53,15 +54,30 @@ export type AgentStreamEvent =
   | { type: 'error'; message: string }
 
 /**
+ * 权限模式（与 ToolRunContext.permissionMode 同口径，取值即 `AiPermissionMode`）。
+ * 三档：full 全放开 / confirm 改动前确认 / readonly 只读（改动类工具直接拒绝）。
+ */
+export type AgentPermissionMode = 'full' | 'confirm' | 'readonly'
+
+/**
  * 构建 Agent 系统提示词：说明工作区、工具约定与安全边界。
  *
  * `skills` 非空时追加「可用技能」段落（只有名称 + 描述，正文由 read_skill 按需加载，
  * 见 skills.ts 的渐进式披露说明）。
+ *
+ * `permissionMode` 追加「权限模式」段落（移植自 fishwork）：**让模型预先知道哪些动作会被
+ * 拦下来** —— 否则它只知道「工具失败了」，不知道是被用户拒绝，容易反复重试同一个动作。
+ *
+ * `projectDoc` 是工作区根目录的 `AGENTS.md`（由 readProjectDoc 读出），
+ * 非空时注入且**声明优先级高于本提示词里其它通用约定**，见 project-doc.ts
+ *「为什么全文注入」「为什么只读工作区根目录」。
  */
 export function buildAgentSystemPrompt(
   workspacePath: string,
   workspaceName: string,
-  skills: AgentSkill[] = []
+  skills: AgentSkill[] = [],
+  permissionMode: AgentPermissionMode = 'full',
+  projectDoc?: ProjectDoc | null
 ): string {
   const lines = [
     `你是一个运行在 Dogi 中的 AI Agent（编程与运维助手），工作区是「${workspaceName}」（${workspacePath}）。`,
@@ -74,9 +90,13 @@ export function buildAgentSystemPrompt(
     '- write_file：只用于新建文件或有意的整体重写；覆盖已有文件前必须先读过，优先用 edit_file 做局部修改；',
     '- delete_file：删除文件（目录必须显式 recursive=true）；不可恢复，删前先确认路径；',
     '- execute_command：在工作区目录执行命令（构建、测试、git、安装依赖、启动服务等）。',
+    '- git_read：只读查看 git 仓库（status 改动 / diff 差异 / log 历史 / show 某个提交）——「改了什么」「最近谁动过这里」优先用它；提交 / 回滚 / 切分支等写操作才用 execute_command；',
+    '- web_fetch：抓取网页并整理成结构化 Markdown 返回（只取静态 HTML，不跑 JavaScript）；页面需要登录或 JS 渲染时改用 browser_navigate + browser_snapshot；',
+    '- read_tool_output：读回上一次工具调用（run_in_terminal / execute_command / web_fetch）因输出过长而落盘的内容，按结果里给出的 id + offset 续读；',
     '使用约定：',
     '- 需要工具时直接调用工具，不要在正文里用「[调用工具 xxx]」「[工具 xxx 返回]」这类文字复述调用过程或结果 —— 写出来只会让用户看到一串假动作；',
     '- 所有路径一律使用相对工作区根目录的路径；',
+    '- 工具结果被压成「开头 + 结尾 + 产物提示」时**那不是全部**：关键信息（报错行 / 配置项 / 中段条目）可能就在被省略的部分，按结果里给的参数用 read_tool_output 补齐；不要为同一段内容反复重跑同一条命令，也不要为同一文件反复小窗口读取；',
     '- 执行命令前先简要说明意图；命令输出是事实依据，失败时结合输出排查原因，不要盲目反复重试同一条命令；',
     '- 删除文件、覆盖文件、危险命令（rm -rf、git push --force、DROP TABLE 等）先说明影响再执行；',
     '- 修改文件前必须先 read_file 看清原文，编辑基于最新内容；编辑后如可能，用 execute_command 验证 —— 优先跑项目自带的类型检查 / lint（如 npm run typecheck、npm run lint），这是最快的静态验证手段；',
@@ -84,7 +104,35 @@ export function buildAgentSystemPrompt(
   ]
   const skillsSection = buildSkillsPromptSection(skills)
   if (skillsSection) lines.push('', skillsSection)
+  lines.push('', buildPermissionSection(permissionMode))
+  // ⚠️ 项目约束文档放在**最后**：它声明「优先级高于其它通用约定」，
+  // 紧接着的一段在提示词里权重更高，放最后才不会被前面的通用约定稀释。
+  if (projectDoc) lines.push('', buildProjectDocSection(projectDoc))
   return lines.join('\n')
+}
+
+/**
+ * 权限模式说明段落：让模型**预先知道**哪些动作会被系统真的执行、哪些会被拦下来。
+ *
+ * 移植自 fishwork 的 prompt.ts。不写这段的实际后果：confirm 模式下模型看不到
+ * 「这一类动作需要用户点头」，工具被拒后只会当成普通失败，于是换个写法再试一遍，
+ * 反复弹确认卡 —— 描述清楚它才知道该停下来说明、换个方案。
+ */
+function buildPermissionSection(mode: AgentPermissionMode): string {
+  if (mode === 'readonly') {
+    return [
+      '权限模式：**只读**。写文件 / 改文件 / 删文件 / 执行命令会被系统**直接拒绝**（不弹确认、也没有例外）。',
+      '你只能使用只读工具（list_files / read_file / search_files / find_files / git_read 等）了解现状，',
+      '然后把「需要改什么、为什么」讲清楚让用户自己动手 —— 不要反复尝试写 / 执行，那只会拿到同一份拒绝。'
+    ].join('\n')
+  }
+  if (mode === 'confirm') {
+    return [
+      '权限模式：**确认**。写文件 / 改文件 / 删文件 / 执行命令前会向用户弹出确认请求，',
+      '用户拒绝时会明确告诉你原因。请据此调整方案（改用别的做法、或停下来问用户），不要原样重试。'
+    ].join('\n')
+  }
+  return '权限模式：**完全放开**。写文件 / 改文件 / 删文件 / 执行命令会直接执行，不弹确认（rm -rf、git push --force 等破坏性命令仍要在动手前说明）。'
 }
 
 /** 历史里工具结果回传时的字符上限：太小模型看不到内容（会反复重读同一个文件），太大撑爆上下文 */

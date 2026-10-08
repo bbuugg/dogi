@@ -4,6 +4,7 @@ import { z } from 'zod'
 import type { Page } from 'playwright'
 import type { BrowserChannel } from '@shared/types'
 import { agentBrowserSessionId } from '@shared/browser'
+import { buildWorkspaceMediaUrl } from '@shared/workspace-media'
 import { resolveInside } from '../ai/agent-core/workspace'
 import type { AiToolDef, ToolRunContext } from '../ai/tool-registry'
 import { createBrowserSessionHandlers } from './handlers'
@@ -112,6 +113,36 @@ export function buildBrowserToolDefs(opts: BrowserToolRegistration): AiToolDef[]
   /** MCP 带了同名 browser_* 工具时整组让位（两套同名会静默互相覆盖，见 agent.ts 的历史注释） */
   const yieldToMcp = ({ mcpToolNames }: { mcpToolNames: string[] }): boolean =>
     mcpToolNames.some((n) => n.startsWith('browser_'))
+
+  /**
+   * 把截图写进工作区，并返回一段**带可查看图片地址**的结果文本。
+   *
+   * 为什么要带 `dogi-ws://` 地址：只给一个文件路径的话，用户得自己开文件面板翻到
+   * `.dogi/screenshots/` 才看得到 —— 等于没截。`dogi-ws://` 是工作区媒体协议
+   * （见 services/ai/workspace-media.ts，已登记为 standard/secure/stream），
+   * 渲染端的 `<img>` 能直接加载：模型把它写进 Markdown 引用、工具卡也会据此渲染缩略图
+   * （见 ToolCallRow 的 shotUrl 分支）。
+   *
+   * 协议白名单 / URL 校验在调用方（截图工具）做，这里只负责落盘与拼结果。
+   */
+  async function saveScreenshot(
+    ctx: ToolRunContext,
+    buf: Buffer,
+    rel?: string
+  ): Promise<string> {
+    const relPath = rel?.trim() || `.dogi/screenshots/shot-${Date.now()}.png`
+    const abs = ctx.workspace?.path ? resolveInside(ctx.workspace.path, relPath) : relPath
+    await fs.mkdir(dirname(abs), { recursive: true })
+    await fs.writeFile(abs, buf)
+    const kb = (buf.length / 1024).toFixed(1)
+    if (!ctx.workspace) return `截图已保存：${relPath}（${kb} KB）`
+    const url = buildWorkspaceMediaUrl(ctx.workspace.id, relPath)
+    return [
+      `截图已保存：${relPath}（${kb} KB）`,
+      '图片地址（可在回复里用 Markdown 图片语法引用，让用户直接看到）：',
+      `![截图](${url})`
+    ].join('\n')
+  }
 
   return [
     {
@@ -269,7 +300,8 @@ export function buildBrowserToolDefs(opts: BrowserToolRegistration): AiToolDef[]
       scope: 'workspace',
       available: yieldToMcp,
       description:
-        '给当前页面截图并保存成 PNG 文件（默认存到工作区的 .dogi/screenshots/ 下），返回文件路径。用于留证或让用户查看当时的页面。注意：返回的是路径，不是图片内容。',
+        '给**当前**页面截图并保存成 PNG 文件（默认存到工作区的 .dogi/screenshots/ 下），返回文件路径与一张可直接查看的图片地址。' +
+        '适合在 browser_* 操作过程中留证或让用户查看当时的页面。要「打开某个网址并截图」用 screenshot 一步到位。',
       inputSchema: z.object({
         path: z.string().optional().describe('保存路径（相对工作区），缺省自动命名'),
         fullPage: z.boolean().optional().describe('截整页（含滚动区域），默认 false 只截可视区')
@@ -279,11 +311,44 @@ export function buildBrowserToolDefs(opts: BrowserToolRegistration): AiToolDef[]
         const session = await ensureSession(ctx)
         const page = session.getPage()
         const buf = await page.screenshot({ fullPage, type: 'png' })
-        const rel = path?.trim() || `.dogi/screenshots/shot-${Date.now()}.png`
-        const abs = ctx.workspace?.path ? resolveInside(ctx.workspace.path, rel) : rel
-        await fs.mkdir(dirname(abs), { recursive: true })
-        await fs.writeFile(abs, buf)
-        return `截图已保存：${rel}（${(buf.length / 1024).toFixed(1)} KB）`
+        return saveScreenshot(ctx, buf, path)
+      }
+    },
+
+    {
+      name: 'screenshot',
+      scope: 'workspace',
+      available: yieldToMcp,
+      description:
+        '打开一个网页并截图（一步到位），存到工作区（默认 .dogi/screenshots/）并返回一张可直接查看的图片地址。' +
+        '适合让用户「看到」某个页面 / 报表长什么样。只往工作区写这一张图，不修改其它文件。' +
+        '已经在用 browser_* 操作某个页面时，直接给当前页截图用 browser_screenshot。',
+      inputSchema: z.object({
+        url: z.string().describe('要截图的网址，必须是 http(s)，如 https://example.com'),
+        fullPage: z.boolean().optional().describe('截整页（含滚动区域），默认 false 只截可视区'),
+        path: z.string().optional().describe('保存路径（相对工作区），缺省自动命名')
+      }),
+      execute: async (rawInput, _call, ctx) => {
+        const { url, fullPage = false, path } = rawInput as {
+          url: string
+          fullPage?: boolean
+          path?: string
+        }
+        // 协议白名单：只允许 http(s)，挡掉 file: / data: / javascript:
+        let target: URL
+        try {
+          target = new URL(url)
+        } catch {
+          return `截图收到非法 URL：${url}。请传入完整地址如 https://example.com`
+        }
+        if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+          return `截图拒绝非 http(s) 地址：${url}（协议：${target.protocol}）`
+        }
+        const session = await ensureSession(ctx)
+        await session.navigate(target.toString())
+        const page = session.getPage()
+        const buf = await page.screenshot({ fullPage, type: 'png' })
+        return saveScreenshot(ctx, buf, path)
       }
     },
 
@@ -309,8 +374,9 @@ export const BROWSER_PROMPT_SECTION = [
   '- browser_navigate：打开网址；browser_snapshot：拿页面的可访问性快照（元素带 [ref=eN]）；',
   '- browser_click / browser_type / browser_press：按 ref 点击 / 输入 / 按键；',
   '- browser_wait_for：等元素、文本出现或网络空闲；browser_evaluate：在页面里跑 JS 取数据；',
-  '- browser_screenshot：截图存到工作区；browser_close：用完关闭浏览器。',
+  '- browser_screenshot：给当前页面截图；screenshot：打开某个网址并截图（一步到位）；browser_close：用完关闭浏览器。',
   '浏览器使用约定：',
+  '- 截图结果里带一个 `dogi-ws://` 图片地址：要让用户「看到」页面时，把它用 Markdown 图片语法写进回复（`![截图](地址)`）；',
   '- 操作页面前**先 browser_snapshot 拿 ref**，再用 ref 点击 / 输入；页面一变 ref 就失效，要重新 snapshot；',
   '- 浏览器是真实运行的，点击 / 输入会真的作用在网页上（可能提交表单、下单、删数据）—— 不可逆的操作前先向用户说明；',
   '- 需要看页面长什么样时用 browser_snapshot（文字快照），它比截图更适合你理解结构。'

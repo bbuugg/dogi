@@ -32,7 +32,7 @@ import {
 } from 'lucide-react'
 import { cn } from 'cn'
 import type { SessionInfo } from '@shared/types'
-import { groupTerminalSessionId, useAppStore, type PanelTab, type PanelTabType } from '@/stores/app-store'
+import { groupTerminalSessionId, useAppStore, type PanelTab } from '@/stores/app-store'
 import { TerminalView } from '@/features/terminal/TerminalView'
 import { AiPanel } from '@/features/agent/AiPanel'
 import { AgentPage } from '@/features/agent/AgentPage'
@@ -49,8 +49,8 @@ import { Dropdown, Input, Modal } from 'antd'
 import { useDrag, useDrop } from 'react-dnd'
 import type { PaneNode, SplitDirection, SplitDirectionInput } from '@/app/layout/pane-layout'
 import { resolveSshColor } from '@/features/hosts/ssh-color'
-import { getTabBus, releaseTabBus } from '@/shared/lib/tab-event-bus'
-import { useInlineConfirm } from '@/shared/components/InlineConfirm'
+import { getTabBus, registerCloseHost, releaseTabBus } from '@/shared/lib/tab-event-bus'
+import { CloseConfirmProvider, useCloseConfirm, useInlineConfirm } from '@/shared/components/InlineConfirm'
 import { tintText } from '@/shared/lib/color'
 
 /** react-dnd 拖拽标签的 item 类型与载荷（带来源组，drop 端据此判断跨组移动） */
@@ -301,6 +301,16 @@ function PanelGroupView({ groupId }: { groupId: string }) {
     return sid ? !!s.ui.aiOpenSessions[sid] : false
   })
 
+  /**
+   * **组级关闭确认宿主**：本组所有标签的关闭确认框都画在这里（而不是各标签自己的
+   * `hidden` 容器里）。关闭一个**非激活**标签时（右键「关闭其他」/「关闭整个组」），
+   * 确认框若挂在标签内部就渲染在 `hidden` 里 —— 用户看不到也点不到，旧实现只能先
+   * 激活标签再 `setTimeout(50)` 赌 React 提交。挂到组上就与激活状态无关了。
+   * 见 `shared/lib/tab-event-bus.ts` 的模块头第 3 条。
+   */
+  const { confirm: closeConfirm, element: closeConfirmElement } = useInlineConfirm()
+  useEffect(() => registerCloseHost(groupId, closeConfirm), [groupId, closeConfirm])
+
   /** 当前悬停的分屏落区（null = 没有拖拽悬停） */
   const [zone, setZone] = useState<DropZone | null>(null)
   const bodyRef = useRef<HTMLDivElement | null>(null)
@@ -453,20 +463,24 @@ function PanelGroupView({ groupId }: { groupId: string }) {
       {/* 内容区：组内所有标签都保持挂载（切走用 hidden），终端输出与编辑器状态不丢 */}
       <div ref={bodyRef} className="relative flex min-h-0 flex-1">
         <div className="min-h-0 min-w-0 flex-1">
-          {group.tabIds.map((tid) => {
-            const tab = tabs.find((t) => t.id === tid)
-            if (!tab) return null
-            const isActive = group.activeTabId === tid
-            return (
-              // 内容宿主必须是 flex 列：面板根的 flex-1 才有定义高度可言 ——
-              // 否则列表页（日志 / 隧道 / 插件）会长到内容高度，内部 overflow-auto 永远不触发滚动。
-              // relative：标签内确认框（InlineConfirm）的遮罩以它定位，只盖住本标签
-              <div key={tid} className={isActive ? 'relative flex h-full flex-col' : 'hidden'}>
-                <TabContentGuard tab={tab} active={active && isActive} />
-              </div>
-            )
-          })}
+          {/* 组内所有标签共享本组的关闭确认框（页面组件经 useCloseConfirm 取用） */}
+          <CloseConfirmProvider value={closeConfirm}>
+            {group.tabIds.map((tid) => {
+              const tab = tabs.find((t) => t.id === tid)
+              if (!tab) return null
+              const isActive = group.activeTabId === tid
+              return (
+                // 内容宿主必须是 flex 列：面板根的 flex-1 才有定义高度可言 ——
+                // 否则列表页（日志 / 隧道 / 插件）会长到内容高度，内部 overflow-auto 永远不触发滚动。
+                <div key={tid} className={isActive ? 'relative flex h-full flex-col' : 'hidden'}>
+                  <TabContentGuard tab={tab} active={active && isActive} />
+                </div>
+              )
+            })}
+          </CloseConfirmProvider>
         </div>
+        {/* 组级关闭确认框：盖住整个组面板（含标签条以外的内容区），与激活标签无关 */}
+        {closeConfirmElement}
         {/* AI 助手浮窗叠在终端之上（absolute 定位，不占布局）：只在「激活标签是终端且该页面开了 AI」时出现 */}
         {aiOpen && aiSessionId && <AiPanel sessionId={aiSessionId} />}
 
@@ -832,24 +846,24 @@ function PanelTabItem({
   )
 }
 
-/** 有自带关闭确认的页面（经 useTabEventBus 注册 close-request handler）：防手滑不再叠加，避免双重弹窗 */
-const PAGE_MANAGED_CLOSE_TYPES: ReadonlySet<PanelTabType> = new Set(['note', 'agent'])
-
 /**
- * 包装 TabContent 的关闭确认层：标签关闭总线的**所有者**（mount 创建、unmount 释放，
- * 见 `shared/lib/tab-event-bus.ts`），并给没有自带确认的页面注册防手滑通用确认
- * （受 confirmCloseTab 偏好控制）。
+ * 包装 TabContent 的关闭协议层：标签关闭总线的**所有者**（mount 创建、unmount 释放，
+ * 见 `shared/lib/tab-event-bus.ts`），并注册 shell 侧的**兜底防手滑**确认。
  *
- * Dirty 确认（未保存改动）/ 运行中确认由各页面自己经 useTabEventBus 注册
- * close-request handler 负责 —— 只有页面自己最清楚自己的保存状态。两类 handler
- * 在同一条总线上依次执行、任一 false 即阻止；确认框一律画在标签面板内部
- * （InlineConfirm），不再用 portal 到 body 的全局 Modal.confirm。
+ * 分工（谁负责哪一段，别混）：
+ * - **页面级状态确认**（未保存改动 / Agent 运行中）由各页面经 `useTabCloseGuard`
+ *   注册 `close-guard` 负责 —— 只有页面自己最清楚自己的状态；
+ * - **通用防手滑**是本组件注册的 `close-fallback`，只在**没有任何页面接管**这次确认
+ *   时才跑（由总线内部判断 `owned`）。
+ *
+ * 所以这里不再需要「哪些类型由页面自己管」的白名单（旧的 `PAGE_MANAGED_CLOSE_TYPES`）：
+ * 页面在返回值里用 `owned: true` 自己声明，新增页面漏声明的后果只是多问一句，
+ * 不会像白名单那样「漏加 → 弹两次窗」。
  */
 function TabContentGuard({ tab, active }: { tab: PanelTab; active: boolean }) {
-  const { confirm, element } = useInlineConfirm()
+  const confirm = useCloseConfirm()
   /** 通用确认里「以后都不再提示」勾选（uncontrolled，点「关闭」时读一次） */
   const dontAskRef = useRef(false)
-  const pageManagedClose = PAGE_MANAGED_CLOSE_TYPES.has(tab.type)
   // 确认框里用标签**当前显示**的名字：用户重命名过（customTitle）时不能还报自动标题
   const shownTitle = tab.customTitle?.trim() || tab.title
 
@@ -861,11 +875,10 @@ function TabContentGuard({ tab, active }: { tab: PanelTab; active: boolean }) {
   }, [tab.id])
 
   useEffect(() => {
-    if (pageManagedClose) return
-    const off = getTabBus(tab.id).on('close-request', () => {
+    return getTabBus(tab.id).onFallback(() => {
       const s = useAppStore.getState()
       // 防手滑确认（受偏好控制）
-      if (!s.preferences.confirmCloseTab) return true
+      if (!s.preferences.confirmCloseTab) return { allow: true }
       dontAskRef.current = false
       return confirm({
         title: '关闭标签',
@@ -888,17 +901,11 @@ function TabContentGuard({ tab, active }: { tab: PanelTab; active: boolean }) {
             }
           }
         ]
-      })
+      }).then((ok) => ({ allow: ok }))
     })
-    return off
-  }, [tab.id, shownTitle, pageManagedClose, confirm])
+  }, [tab.id, shownTitle, confirm])
 
-  return (
-    <>
-      <TabContent tab={tab} active={active} />
-      {element}
-    </>
-  )
+  return <TabContent tab={tab} active={active} />
 }
 
 /** 单个标签的内容 */

@@ -22,7 +22,8 @@ function errText(e: unknown): string {
 const PERMISSION_LABEL: Record<string, string> = {
   http: '网络请求',
   storage: '本地存储',
-  fs: '文件读写'
+  fs: '文件读写',
+  hooks: 'AI 工具钩子'
 }
 
 /** 渲染端入口的可读描述 */

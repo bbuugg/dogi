@@ -21,12 +21,18 @@ import {
 import { storage } from '../services/storage'
 import { browserSessions } from '../services/browser/session'
 import { purgeArtifacts } from '../services/ai/output-artifact'
+import { commandStopRegistry } from '../services/ai/command-stop'
+import {
+  exportConversation,
+  importConversation
+} from '../services/ai/conversation-transfer'
 import { agentBrowserSessionId } from '@shared/browser'
 import type {
   AgentBackend,
   AgentChatMessage,
   AgentChatRequest,
-  AgentStreamEvent
+  AgentStreamEvent,
+  ConfirmDecision
 } from '@shared/types'
 import type { WorkspaceConfig } from '@shared/workspace-config'
 import type { IpcContext } from './shared'
@@ -130,12 +136,45 @@ export function registerAgentIpc(ctx: IpcContext): void {
   ipcMain.handle('agent:conversations:delete', async (_e, id: string) => {
     // 会话没了，它的常驻 agent 进程也该收掉（否则外部 agent 变成孤儿进程）
     acpAgentService.disposeConversation(id)
+    // 「总是允许 / 总是拒绝」的记忆跟着会话走：会话删了就不该再影响任何后续对话
+    agentService.forgetConfirmMemory(id)
     storage.deleteAgentConversation(id)
     // 会话没了，它的浏览器 profile（登录态等）跟着删 —— 见 session.ts 的 purge 说明
     await browserSessions.purge(agentBrowserSessionId(id))
     // 长输出产物同理：会话删了，产物也没人再读回去
     await purgeArtifacts(id)
   })
+  /**
+   * **从此签出（分支）**：以某条会话为模板造一条新会话，原会话一字不动。
+   * `upToMessageId` 给了就在那条消息处截断（含它），不给就整体复制。
+   *
+   * 返回 null = 这条会话不能分支（不存在 / 是 ACP 会话 —— 它的消息在 agent 那边，
+   * 本地没有可复制的东西）。渲染端据此提示，而不是静默什么都不发生。
+   */
+  ipcMain.handle(
+    'agent:conversations:fork',
+    (_e, payload: { id: string; upToMessageId?: string }) =>
+      storage.forkAgentConversation(payload.id, payload.upToMessageId)
+  )
+  /** 导出会话到用户选定的 JSON 文件（从主进程读真源，不信任渲染端那份可能在流式中的副本） */
+  ipcMain.handle('agent:conversations:export', (_e, id: string) =>
+    exportConversation(ctx.win(), id)
+  )
+  /** 从 JSON 文件导入一条会话到目标工作区（导入即落盘，渲染端只负责塞进列表并选中） */
+  ipcMain.handle('agent:conversations:import', (_e, workspaceId: string) =>
+    importConversation(ctx.win(), workspaceId)
+  )
+  /**
+   * **运行中插话（steer）**：这一轮还在跑时用户又说了句话，排进「下一个工具步边界」，
+   * 让模型在同一步里看到（见 services/ai/steer.ts）。
+   *
+   * 返回 false = 这条会话此刻没在跑 —— 渲染端当普通消息发即可（不会丢）。
+   */
+  ipcMain.handle(
+    'agent:steer',
+    (_e, payload: { conversationId: string; text: string }) =>
+      agentService.steer(payload.conversationId, payload.text)
+  )
 
   // ---------- 终端 AI 助手会话（独立目录存储，绝不进工作区会话列表） ----------
   // 会话模型与工作区会话同构（AgentConversation），但物理分目录 ——
@@ -156,6 +195,7 @@ export function registerAgentIpc(ctx: IpcContext): void {
     ) => storage.saveTerminalConversation(input)
   )
   ipcMain.handle('agent:terminal-convs:delete', async (_e, id: string) => {
+    agentService.forgetConfirmMemory(id)
     storage.deleteTerminalConversation(id)
     await purgeArtifacts(id)
   })
@@ -324,6 +364,16 @@ export function registerAgentIpc(ctx: IpcContext): void {
     agentService.abort(requestId)
     acpAgentService.abort(requestId)
   })
+  /**
+   * **单条命令停止**（工具卡上的「停止」）：只杀这一条 `execute_command` 的进程树，
+   * 这一轮继续跑 —— 与 `agent:abort`（中止整轮）是两条路，见 command-stop.ts。
+   *
+   * 返回 false = 这条已经跑完 / 不存在（渲染端据此决定要不要提示），
+   * 不做成抛错：用户点晚了属于正常时序，不该在界面上变成一条红字报错。
+   */
+  ipcMain.handle('agent:command:stop', (_e, toolCallId: string) =>
+    commandStopRegistry.stop(toolCallId)
+  )
   agentService.on('chat-event', broadcastAgentEvent)
   acpAgentService.on('chat-event', broadcastAgentEvent)
 
@@ -341,9 +391,9 @@ export function registerAgentIpc(ctx: IpcContext): void {
   })
   ipcMain.handle(
     'agent:confirm:resolve',
-    (_e, payload: { id: string; approved: boolean }) => {
-      agentService.resolveConfirm(payload.id, payload.approved)
-      acpAgentService.resolveConfirm(payload.id, payload.approved)
+    (_e, payload: { id: string; decision: ConfirmDecision }) => {
+      agentService.resolveConfirm(payload.id, payload.decision)
+      acpAgentService.resolveConfirm(payload.id, payload.decision)
     }
   )
 }

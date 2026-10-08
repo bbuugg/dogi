@@ -967,12 +967,33 @@ export interface SkillListResult {
   settings: SkillSettings
 }
 
+/**
+ * MCP 服务的**传输方式**（对齐 MCP 规范的三种客户端传输）：
+ * - `stdio`：本地子进程，用 `command` + `args` 起（缺省值，兼容老配置）；
+ * - `http`：远端「Streamable HTTP」端点，用 `url` 连（**新式远端服务首选**）；
+ * - `sse`：远端旧式 SSE 端点，用 `url` 连（老服务仍在用，保留兼容）。
+ *
+ * ⚠️ 为什么 http 与 sse 要分开：两者是**规范里两个不同的端点约定**，不能互推 ——
+ * 拿 http 客户端去连 sse 端点会一直卡在握手，报出来的错还很难懂。
+ * 所以让用户明确选，别猜。
+ */
+export type McpTransport = 'stdio' | 'http' | 'sse'
+
 export interface McpServerConfig {
   id: string
   name: string
+  /** 传输方式；缺省 = stdio（老配置里没有这个字段，读出来按 stdio 处理） */
+  transport?: McpTransport
+  /** 仅 stdio：要执行的命令。http / sse 下不使用（留空） */
   command: string
+  /** 仅 stdio：命令参数 */
   args: string[]
+  /** 仅 stdio：注入给子进程的环境变量 */
   env?: Record<string, string>
+  /** 仅 http / sse：服务地址（如 https://example.com/mcp） */
+  url?: string
+  /** 仅 http / sse：附加请求头（如 Authorization / X-Api-Key） */
+  headers?: Record<string, string>
   enabled: boolean
 }
 
@@ -980,11 +1001,32 @@ export interface McpServerConfig {
  * AI **改动**的权限模式（可在对话输入框处实时切换，工作区 Agent 与终端 AI 助手共用一份）：
  * - full：全部访问，AI 可直接执行命令、读写文件
  * - confirm：变更前确认，AI 每次执行命令 / 写入 / 编辑 / 删除前都要用户确认，用户可取消
+ * - readonly：只读，任何会改动磁盘 / 进程的动作（写 / 编辑 / 删除 / 执行命令）一律**直接拒绝**，
+ *   不弹确认卡（对齐 fishwork 的 `guardWrite` 三档）。适合「只想让 AI 读代码 / 查日志」的场景。
  *
  * 终端 AI 助手只有「执行命令」会被拦（它的工具就是终端操作）；工作区 Agent 还会拦
  * 写文件 / 编辑 / 删除 —— 见 agent-core/tools.ts 的 guardWrite。
  */
-export type AiPermissionMode = 'full' | 'confirm'
+export type AiPermissionMode = 'full' | 'confirm' | 'readonly'
+
+/**
+ * 确认卡上的**四种裁决**（对齐 fishwork 的 `BUILTIN_CONFIRM_OPTIONS`）：
+ * - allow_once：这一次放行；
+ * - allow_always：放行，且**本会话内**同名的后续调用不再询问（按「会话 + 工具名」记忆）；
+ * - reject_once：这一次拒绝；
+ * - reject_always：拒绝，且本会话内同名的后续调用不再询问。
+ *
+ * 历史接口用的是布尔 `approved`，已整体替换成这四档 —— 别在调用方再折回布尔，
+ * 「总是允许 / 总是拒绝」的语义折成布尔就丢了。
+ */
+export type ConfirmDecision = 'allow_once' | 'allow_always' | 'reject_once' | 'reject_always'
+
+/** 确认卡上可用的裁决（主进程按来源给出：内置工具恒为四档，ACP 按 agent 广告的 option 收窄） */
+export interface ConfirmOption {
+  value: ConfirmDecision
+  /** 展示文案（渲染端直接用，避免各端各写一份） */
+  label: string
+}
 
 /**
  * AI Agent 的两种形态（**一个会话固定是其中一种，创建后不可互切**）：
@@ -996,6 +1038,21 @@ export type AiPermissionMode = 'full' | 'confirm'
  */
 export type AgentBackend = 'mastra' | 'acp'
 
+/**
+ * ACP agent 的「风格」标记（opencode / pi / 通用）。
+ *
+ * ⚠️ **在 dogi 里它只是一枚给人看的标签，不参与任何分支逻辑**。
+ *
+ * fishwork 拿它决定会话里显示哪块模式 UI（opencode → 权限档、pi → 思考档），
+ * dogi 不这么做：会话里显示什么**完全由 agent 上报的 `configOptions.category` 驱动**
+ * （`mode` → 权限档、`thought_level` → 思考档，其余照原样列出来，见 `AcpConfigItems`），
+ * 任何 agent 都能用，不必先在这张表里登记。
+ *
+ * 所以它只服务一件事：会话列表 / 会话标题旁的那枚标识（见 `shared/acp.ts` 的
+ * `acpAgentTypeLabel`），让人一眼看出这条会话跑的是哪个风格的 agent。
+ */
+export type AcpAgentType = 'generic' | 'opencode' | 'pi'
+
 /** ACP 后端的外部 agent 启动配置（stdio 通信） */
 export interface AcpAgentConfig {
   id: string
@@ -1004,6 +1061,11 @@ export interface AcpAgentConfig {
   /** 可执行文件（绝对路径或 PATH 可解析名；Windows 下 npm 脚本需 .cmd 后缀） */
   command: string
   args: string[]
+  /**
+   * 风格标记（见 `AcpAgentType`）。**缺省 = `generic`**（老存档、手动添加的条目都是它）。
+   * 只影响界面上的标识文案，不改变任何行为 —— 原因见 `AcpAgentType` 的说明。
+   */
+  type?: AcpAgentType
   /**
    * 启动 agent 时注入的环境变量。
    * GUI 应用的主进程不会继承 shell 里的变量（尤其 macOS 上 `.zshrc`/`.bashrc` 不生效），
@@ -1029,6 +1091,11 @@ export interface DetectedAcpAgent {
   args: string[]
   /** 解析到的绝对路径 */
   path: string
+  /**
+   * 探测时就认得出来的风格（OpenCode / Pi，见 `AcpAgentType`）；
+   * 其余候选为 `undefined`（= 通用）。加进配置时带上它，用户就不用手动再选一次。
+   */
+  type?: AcpAgentType
 }
 
 /**
@@ -1127,7 +1194,7 @@ export interface AiSettings {
   maxSteps?: number
   /**
    * 模型请求失败后的自动重试次数。`0` = **不重试**；缺省 = 2。
-   * 生效值见 `@shared/ai-timeouts` 的 `resolveMaxRetries`，界面在「设置 → AI → 超时」。
+   * 生效值见 `@shared/ai-timeouts` 的 `resolveMaxRetries`，界面在「设置 → AI → 运行」。
    *
    * 由主进程**自己驱动**（不再走 mastra 的 `modelSettings.maxRetries`）：每次重试都会发一条
    * `retry` 事件，界面据此显示「第 N 次重试」。只对可重试的网络类错误生效；失败的那一次
@@ -1141,6 +1208,15 @@ export interface AiSettings {
    * 不再有独立的设置页。ACP 会话创建时绑定其中之一，之后不可切换。
    */
   acpAgents?: AcpAgentConfig[]
+  /**
+   * 是否启用**子 Agent**（工作区 Agent 的 `delegate` 工具：explorer / reviewer）。
+   *
+   * 缺省关闭。关闭时 `delegate` 工具**根本不出现在工具表里**（不是给了再拒绝）——
+   * 模型看不到就不会去用，也就不会因为「派了个子 Agent 却什么也没查出来」白烧一轮 token。
+   *
+   * ⚠️ 只影响工作区 Agent；终端 AI 助手没有工作区，子 Agent 对它无意义。
+   */
+  subAgents?: boolean
 }
 
 /**
@@ -1159,6 +1235,12 @@ export interface AiConfirmRequest {
   toolName: string
   /** 待执行的命令（或动作说明：写入文件 xxx / 编辑文件 xxx …） */
   command: string
+  /**
+   * 这张卡上可用的裁决（至少两项：放行 + 拒绝）。
+   * 内置工具恒为四档；ACP 按 agent 广告的 `option.kind` 收窄（它只给 allow_once / reject_once 时，
+   * 界面上就不会出现「总是」那一档 —— 硬塞一个 agent 不认的 option 会被静默丢弃）。
+   */
+  options: ConfirmOption[]
   /** 工作区来源：所属工作区 */
   workspaceId?: string
   workspaceName?: string
@@ -1431,6 +1513,19 @@ export interface AgentConversation {
   /** 仅 `kind: 'acp'`：agent 侧的会话 id（`session/new` 或导入时绑定），**不可切换** */
   acpSessionId?: string
   /**
+   * **这条会话用哪些 MCP server**（`McpServerConfig.id` 的允许清单）。
+   *
+   * - `undefined`（缺省 / 老存档）= **不限制**，用上所有「全局已启用」的 server
+   *   （这样老会话、以及从没动过这个开关的用户，行为和以前完全一样）；
+   * - `[]` = 这条会话**一个都不用**（用户明确全关了，是表态，不是没设置）；
+   * - `[...]` = 只用清单里的（与全局 enabled 取交集，全局停用的不会因为在这里被勾上就复活）。
+   *
+   * 为什么要有它：MCP server 一多，工具清单会明显撑大系统提示词（每个工具都占 token），
+   * 而且模型容易被无关工具带偏。让「这条会话只需要文件系统」的用户关掉其余的，
+   * 比在设置里反复全局开关现实得多。
+   */
+  mcpServerIds?: string[]
+  /**
    * 上下文摘要检查点（手动「压缩上下文」的产物，见 `ConversationContextSummary`）。
    * 存在时，组装发往模型的历史 = 摘要消息 + 检查点之后的原文。
    *
@@ -1453,6 +1548,24 @@ export interface AgentConversation {
   archived?: boolean
   createdAt: number
   updatedAt: number
+}
+
+/**
+ * 会话**导入 / 导出**的结果（见 services/ai/conversation-transfer.ts）。
+ *
+ * `canceled` 与 `reason` 分开：用户自己按了「取消」不该弹一条红字错误，
+ * 而真失败（文件坏了 / 写不进去）必须说清楚原因。
+ */
+export interface ConversationTransferResult {
+  ok: boolean
+  /** 成功时：实际写入 / 读入的路径 */
+  path?: string
+  /** 成功导入时：新会话（渲染端直接塞进 store 并选中） */
+  conversation?: AgentConversation
+  /** 失败时的人话原因（可直接展示） */
+  reason?: string
+  /** 用户主动取消（不算失败，不提示错误） */
+  canceled?: boolean
 }
 
 export type AgentMessagePart =
@@ -1617,6 +1730,8 @@ export interface AppInfo {
   electron: string
   node: string
   platform: string
+  /** 用户主目录：新建工作区 / 克隆仓库的默认落点 */
+  homeDir: string
 }
 
 /**
@@ -1754,6 +1869,19 @@ export interface GitCommit {
  * 它必须由用户在确认框里勾选。
  */
 export type GitAction =
+  /**
+   * `git init`：把**当前目录**变成仓库（面板只在这里提供这一种，`worktree` 那条路不存在）。
+   * 只在「还没初始化仓库」时出现。
+   */
+  | { action: 'init' }
+  /**
+   * `git init` + 暂存全部改动 + **首次提交**，一步到位。
+   *
+   * 与 `init` 分开是因为空仓库的引导流程天然是两步，而第二步（提交）在 unborn HEAD 上
+   * 是完全合法的 —— 用户点一次「初始化仓库」之后如果还得再手动暂存 + 写提交信息才能完成，
+   * 那就不是引导，是两段重复劳动。
+   */
+  | { action: 'init-commit'; message?: string }
   | { action: 'stage'; paths: string[] }
   | { action: 'unstage'; paths: string[] }
   | { action: 'rollback'; path: string; mode: 'worktree' | 'all' }
@@ -1803,7 +1931,6 @@ export type GitAction =
   | { action: 'stash-apply'; ref?: string }
   /** 删除一次贮藏（`git stash drop [<ref>]`）。**破坏性**，界面要确认 */
   | { action: 'stash-drop'; ref?: string }
-  | { action: 'init' }
 
 /** 单块磁盘/分区的使用情况 */
 export interface DiskUsage {

@@ -1,5 +1,6 @@
 import { AiMarkdown } from '@/features/agent/AiMarkdown'
 import { AskFollowupCard } from '@/features/agent/AskFollowupCard'
+import { ConfirmActions } from '@/features/agent/ConfirmActions'
 import { MessageCopyButton } from '@/features/agent/MessageCopyButton'
 import { MessageDeleteButton } from '@/features/agent/MessageDeleteButton'
 import { MessageEditButton } from '@/features/agent/MessageEditButton'
@@ -15,7 +16,7 @@ import {
   ConversationContent,
   ConversationScrollButton
 } from '@/features/agent/Conversation'
-import { configModels, hasUsableConfig, modelNameOnly } from '@/features/agent/model-options'
+import { cfgModelValue, configModelGroups, configModels, hasUsableConfig, parseCfgModelValue } from '@/features/agent/model-options'
 import { Button, Dropdown, Input, Popconfirm, Select } from 'antd'
 import { useAppStore } from '@/stores/app-store'
 import { cn } from 'cn'
@@ -39,17 +40,20 @@ import {
   Settings2,
   ShieldAlert,
   ShieldCheck,
+  ShieldOff,
   Sparkles,
   Square,
   Trash2,
   X,
   PanelLeftClose,
-  PanelLeftOpen
+  PanelLeftOpen,
+  Zap
 } from 'lucide-react'
 import {
   memo,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ComponentRef,
@@ -81,6 +85,12 @@ const PERMISSION_MODES: Array<{
       label: '变更前确认',
       icon: ShieldCheck,
       hint: '改之前问我'
+    },
+    {
+      value: 'readonly',
+      label: '只读',
+      icon: ShieldOff,
+      hint: '只能读，改动一律拒绝'
     }
   ]
 
@@ -142,28 +152,9 @@ function buildRenderUnits(parts: AgentMessagePart[]): RenderUnit[] {
   return units.map((u) => (u.kind === 'reasoning' ? { ...u, text: u.text.trimEnd() } : u))
 }
 
-/** 待批准的确认区（插在工具横条的展开体里）：终端命令必须先过这一关 */
+/** 待批准的确认区（插在工具横条的展开体里）：终端命令必须先过这一关（四档裁决） */
 function AiConfirmActions({ confirm }: { confirm: AgentConfirmRequest }) {
-  const resolveAiConfirm = useAppStore((s) => s.resolveAiConfirm)
-  return (
-    <div className="flex gap-2 pt-0.5">
-      <Button
-        size="small"
-        type="primary"
-        className="h-8 flex-1 text-[13px]"
-        onClick={() => void resolveAiConfirm(confirm.id, true)}
-      >
-        执行
-      </Button>
-      <Button
-        size="small"
-        className="h-8 flex-1 text-[13px]"
-        onClick={() => void resolveAiConfirm(confirm.id, false)}
-      >
-        取消
-      </Button>
-    </div>
-  )
+  return <ConfirmActions confirm={confirm} className="pt-0.5" />
 }
 
 function MessageBubbleImpl({
@@ -380,10 +371,11 @@ const NO_MESSAGES: AgentChatMessage[] = []
  * 正在输入的当前行原地更新、不重挂载、不淡入，避免逐 token 替换造成的闪烁。
  */
 function buildCollapsedText(messages: AgentChatMessage[]): string {
-  const last = messages[messages.length - 1]
-  if (!last) return ''
-  // 最后一条还是用户消息（助手还没开口）：对齐 Codex 的「思考中」文案
-  if (last.role === 'user') return '思考中…'
+  // ⚠️ 取**最后一条助手消息**而不是最后一条消息：运行中插话（steer）会在正在流式输出的
+  // 那条助手消息之后追加一条用户消息，按「最后一条」取会一直停在「思考中…」。
+  const last = [...messages].reverse().find((m) => m.role === 'assistant')
+  // 一条助手消息都还没有（刚发出提问）：对齐 Codex 的「思考中」文案
+  if (!last) return messages.length > 0 ? '思考中…' : ''
   let text = ''
   for (const p of last.parts) {
     if (p.type === 'text') text += p.text
@@ -486,6 +478,19 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const messages = conversation?.messages ?? NO_MESSAGES
   const cid = conversation?.id ?? null
   const aiStreaming = run?.streaming ?? false
+  /**
+   * 最后一条**助手**消息的下标（可能不是 `messages.length - 1`）。
+   *
+   * ⚠️ 运行中插话（steer）会在正在流式输出的那条助手消息**之后**追加一条用户消息
+   * —— 真实时序就是这样。所以「最后一条消息」可能是用户消息，按它判会把流式指示器
+   * 整条丢掉（表现为还在跑却像跑完了）。
+   */
+  const lastAssistantIndex = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i].role === 'assistant') return i
+    }
+    return -1
+  }, [messages])
   const aiError = run?.error ?? null
   const deleteTerminalMessagesFrom = useAppStore((s) => s.deleteTerminalMessagesFrom)
   // 本会话待批准的确认请求：多实例下各会话独立，显示在对应工具卡内
@@ -496,6 +501,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     return null
   })
   const sendTerminalMessage = useAppStore((s) => s.sendTerminalMessage)
+  const steerAgentMessage = useAppStore((s) => s.steerAgentMessage)
   const resendTerminalMessage = useAppStore((s) => s.resendTerminalMessage)
   const abortTerminal = useAppStore((s) => s.abortTerminal)
   const newTerminalConversation = useAppStore((s) => s.newTerminalConversation)
@@ -503,7 +509,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const deleteTerminalConversation = useAppStore((s) => s.deleteTerminalConversation)
   const setTerminalConversationModel = useAppStore((s) => s.setTerminalConversationModel)
   const setAiPermissionMode = useAppStore((s) => s.setAiPermissionMode)
-  const resolveAiConfirm = useAppStore((s) => s.resolveAiConfirm)
+  // 确认回复统一走 ConfirmActions（内部用 resolveAgentConfirm；两条线实现一致）
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const setSessionAiOpen = useAppStore((s) => s.setSessionAiOpen)
   const aiPanelWidth = useAppStore((s) => s.ui.aiPanelWidth)
@@ -576,7 +582,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
   const effectiveConfigId = usable(conversation?.configId) ?? usable(aiSettings.activeConfigId)
   const hasConfig = Boolean(effectiveConfigId)
 
-  // ---------- 模型下拉：按「模型配置 / 模型 id」两级分组（结构同 Agent 页） ----------
+  // ---------- 模型下拉：按「模型配置」分组（结构同 Agent 页，见 model-options.ts） ----------
   // 终端助手只有内置 Mastra 引擎 —— ACP 会话是 AI Agent 页的形态（每个会话绑定一个外部 agent），
   // 终端助手既不能挂上去也没有意义，所以这里不再出现 ACP 分组。
   const modelSelectValue = (() => {
@@ -585,39 +591,35 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     const models = configModels(config)
     if (models.length === 0) return undefined
     if (conversation?.modelId && models.includes(conversation.modelId)) {
-      return `cfg:${config.id}:${conversation.modelId}`
+      return cfgModelValue(config.id, conversation.modelId)
     }
-    return `cfg:${config.id}:${models[0]}`
+    return cfgModelValue(config.id, models[0])
   })()
   /**
-   * 下拉选项：**只能有一层分组**。
+   * 下拉选项：**每条模型配置一个顶层分组**（组头 = 配置名，组内 = 裸模型 id）。
    *
    * ⚠️ antd 6 的 Select（@rc-component/select）flattenOptions 会把「组的子项」一律当作
-   * 可选 option（取 data.value），不再继续下钻 —— 两层嵌套分组时内层分组会变成
-   * `value: undefined` 的选项，模型 id 根本不渲染、点了也没反应。
-   * 所以「配置 / 模型 id」的从属关系用组内条目的 label 前缀表达。
+   * 可选 option（取 data.value），不再继续下钻 —— 再套一层「AI 模型 > 配置 > 模型」会让
+   * 内层分组变成 `value: undefined` 的选项，模型 id 根本不渲染、点了也没反应。
+   * 所以配置**直接就是顶层分组**（见 6.5 第 11 条）。
    */
-  const modelOptions = [
-    ...(aiConfigs.length > 0
-      ? [
-        {
-          label: 'AI 模型',
-          options: aiConfigs.flatMap((c) =>
-            configModels(c).map((m) => ({ value: `cfg:${c.id}:${m}`, label: `${c.name} · ${m}` }))
-          )
-        }
-      ]
-      : [])
-  ]
+  const modelOptions = configModelGroups(aiConfigs)
   const handleModelSelect = (value?: string): void => {
     if (!cid || !value) return
-    if (value.startsWith('cfg:')) {
-      const [, cfgId, cfgModel] = value.split(':')
-      void setTerminalConversationModel(cid, { configId: cfgId, modelId: cfgModel })
+    // ⚠️ 解析交给 parseCfgModelValue（按第一个冒号切）—— 模型 id 自己可能带冒号
+    const picked = parseCfgModelValue(value)
+    if (picked) {
+      void setTerminalConversationModel(cid, {
+        configId: picked.configId,
+        modelId: picked.modelId
+      })
     }
   }
+  // ⚠️ 三档直传（别写 `=== 'confirm' ? 'confirm' : 'full'`）—— 那会把 readonly 悄悄降成放开
   const permissionMode: AiPermissionMode =
-    aiSettings.permissionMode === 'confirm' ? 'confirm' : 'full'
+    aiSettings.permissionMode === 'confirm' || aiSettings.permissionMode === 'readonly'
+      ? aiSettings.permissionMode
+      : 'full'
   const permissionMeta =
     PERMISSION_MODES.find((m) => m.value === permissionMode) ?? PERMISSION_MODES[1]
   const PermissionIcon = permissionMeta.icon
@@ -873,6 +875,22 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
     setInput('')
   }, [sessionId, cid])
 
+  /**
+   * **运行中插话**：这一轮还在跑时把输入框里的话直接递给模型，在**下一个工具步**生效。
+   *
+   * 终端助手没有待发送队列（`handleSend` 在运行中直接返回），所以插话在这里不是
+   * 「队列之外的另一条路」，而是**运行中唯一能说话的方式**。
+   */
+  const handleSteer = async () => {
+    if (!input.trim() || !cid) return
+    const text = input
+    setInput('')
+    setScrollResetSeq((s) => s + 1)
+    const accepted = await steerAgentMessage(text, cid)
+    // 递晚了（本轮刚好结束）：此时已经没有在跑的一轮，按普通发送递出去
+    if (!accepted && sessionId) void sendTerminalMessage(text, sessionId)
+  }
+
   // 会话列表（最新在前）：历史会话跨终端页面共享，草稿不进列表
   const convList = [...terminalConversations].sort((a, b) => b.updatedAt - a.updatedAt)
 
@@ -920,8 +938,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
               open={modelSelectOpen}
               onOpenChange={setModelSelectOpen}
               options={modelOptions}
-              // 选中态只显示模型名（列表里仍是「提供商 · 模型」，方便区分同名模型）
-              labelRender={(opt) => modelNameOnly(opt.label)}
+              // 收起后只留模型名（配置名已在展开时的组头上），不再需要剥前缀
             />
             <Button
               type="text"
@@ -1082,9 +1099,7 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
                         <MessageBubble
                           role={msg.role}
                           parts={msg.parts}
-                          streaming={
-                            aiStreaming && index === messages.length - 1 && msg.role === 'assistant'
-                          }
+                          streaming={aiStreaming && index === lastAssistantIndex}
                           canEdit={!aiStreaming && msg.role === 'user'}
                           editing={editing?.id === msg.id}
                           onEdit={() => startEdit(msg)}
@@ -1123,21 +1138,8 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
             <span className="min-w-0 flex-1 truncate text-sm font-medium text-amber-500">
               {TOOL_LABELS[pendingConfirm.toolName] ?? pendingConfirm.toolName}
             </span>
-            <Button
-              size="small"
-              type="primary"
-              className="h-6 shrink-0 px-2 text-xs"
-              onClick={() => void resolveAiConfirm(pendingConfirm.id, true)}
-            >
-              执行
-            </Button>
-            <Button
-              size="small"
-              className="h-6 shrink-0 px-2 text-xs"
-              onClick={() => void resolveAiConfirm(pendingConfirm.id, false)}
-            >
-              取消
-            </Button>
+            {/* 折叠态同样给全四档（窄条里靠 flex-wrap 换行，别只留两颗把「总是」藏掉） */}
+            <ConfirmActions confirm={pendingConfirm} className="shrink-0" />
           </div>
           <pre className="mt-1 max-h-24 overflow-y-auto whitespace-pre-wrap break-all rounded bg-secondary/50 px-1.5 py-1 font-mono text-xs leading-4 text-muted-foreground">
             {pendingConfirm.command}
@@ -1278,15 +1280,29 @@ export function AiPanel({ sessionId }: { sessionId: string | null }) {
           />
         </span>
         {aiStreaming ? (
-          <Button
-            type="text"
-            danger
-            size="small"
-            icon={<Square className="size-4" />}
-            title="停止"
-            className="shrink-0"
-            onClick={() => sessionId && void abortTerminal(sessionId)}
-          />
+          <>
+            {/* 运行中且输入框里有字：给一颗「插话」（终端助手没有待发送队列，
+                这是运行中唯一能跟模型说话的方式）。输入框为空时只剩「停止」。 */}
+            {input.trim() && (
+              <Button
+                type="text"
+                size="small"
+                icon={<Zap className="size-4" />}
+                title="立即插话：本轮还没结束就递给模型，在下一个工具步生效"
+                className="shrink-0 text-amber-500!"
+                onClick={() => void handleSteer()}
+              />
+            )}
+            <Button
+              type="text"
+              danger
+              size="small"
+              icon={<Square className="size-4" />}
+              title="停止"
+              className="shrink-0"
+              onClick={() => sessionId && void abortTerminal(sessionId)}
+            />
+          </>
         ) : (
           <Button
             type="text"

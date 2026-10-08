@@ -25,6 +25,7 @@ import {
   createAgentFileState,
   normalizeUsage,
   readChunkUsage,
+  readProjectDoc,
   toModelMessages,
   type AgentFileState,
   type RawUsage
@@ -35,8 +36,10 @@ import type {
   AgentStreamEvent,
   AgentWorkspace,
   AiModelConfig,
-  AiSettings
+  AiSettings,
+  ConfirmDecision
 } from '@shared/types'
+import { BUILTIN_CONFIRM_OPTIONS } from '@shared/confirm'
 import { resolveModel } from './resolve-model'
 import { compressContext, estimateBaseTokens, withSummaryPrefix } from './context'
 import { sliceByCheckpoint } from './context-summary'
@@ -47,11 +50,13 @@ import { DEFAULT_MAX_STEPS, resolveMaxRetries } from '@shared/ai-timeouts'
 import { describeError, isRetryableNetworkError } from './error-utils'
 import { retryDelayMs, sleepWithSignal } from './retry'
 import { createToolInputThrottle } from './tool-input-throttle'
+import { steerRegistry } from './steer'
 import { skillsForAgent } from './skills'
 import { findGitBash } from '../terminal/shells'
 import { BROWSER_PROMPT_SECTION } from '../browser/agent'
 import { buildTerminalSystemPrompt } from './terminal-tools'
 import { toolRegistry, type ToolRunContext } from './tool-registry'
+import { createSubAgentRunner } from './sub-agent'
 import { clientToolBroker } from './client-tools'
 import { ensureBuiltinToolsRegistered } from './builtin-tools'
 import { mcpManager } from './mcp'
@@ -69,6 +74,13 @@ function agentBashPath(): string | null {
   return cachedBashPath
 }
 
+/** 把设置里的权限模式收敛到三档（老存档 / 脏值一律按 full 处理，别让非法值漏进工具闸） */
+function asPermissionMode(
+  mode: AiSettings['permissionMode'] | undefined
+): 'full' | 'confirm' | 'readonly' {
+  return mode === 'confirm' || mode === 'readonly' ? mode : 'full'
+}
+
 /** 由 ipc 层注入：把确认请求与其最终结果广播给渲染进程 */
 export interface AgentConfirmSink {
   request(req: AgentConfirmRequest): void
@@ -77,7 +89,7 @@ export interface AgentConfirmSink {
 
 interface PendingConfirm {
   requestId: string
-  resolve: (approved: boolean) => void
+  resolve: (decision: ConfirmDecision) => void
   /** 兜底定时器；按默认配置（不限时）时是 undefined（见 timeouts.ts） */
   timer?: ReturnType<typeof setTimeout>
 }
@@ -86,6 +98,8 @@ interface PendingConfirm {
 interface RequestMeta {
   scope: 'workspace' | 'terminal'
   targetSessionId?: string | null
+  /** 这一轮属于哪条会话：判断「这条会话现在有没有在跑」用（插话的准入） */
+  conversationId: string
 }
 
 /**
@@ -108,6 +122,18 @@ class AgentService extends EventEmitter {
   private static readonly MAX_FILE_STATES = 64
   /** terminal 作用域的工具执行串行队列（key = requestId；与旧终端助手的语义一致） */
   private toolQueues = new Map<string, { chain: Promise<unknown>; aborted: boolean }>()
+  /**
+   * 「总是允许 / 总是拒绝」的记忆：key = 会话 id → 工具名 → 记忆的裁决。
+   *
+   * ⚠️ 只在**进程内**记忆（重启即忘，与 fishwork 的 confirm-gate 一致）：把「永远允许」
+   * 落盘意味着一次误点会永久放行某类动作，代价太大。命中记忆时直接回一个 once 档、不再弹卡。
+   */
+  private alwaysDecisions = new Map<string, Map<string, 'allow' | 'reject'>>()
+
+  /** 会话删除时清掉记忆，避免旧会话的「总是允许」泄漏到别处（同 id 复用 / 内存残留） */
+  forgetConfirmMemory(conversationId: string): void {
+    this.alwaysDecisions.delete(conversationId)
+  }
 
   private fileStateFor(conversationId: string): AgentFileState {
     let state = this.fileStates.get(conversationId)
@@ -126,18 +152,30 @@ class AgentService extends EventEmitter {
     this.confirmSink = sink
   }
 
-  /** 等待用户确认；无 UI 接入时放行，避免流程卡死 */
+  /**
+   * 等待用户确认；无 UI 接入时放行，避免流程卡死。
+   *
+   * 返回**四档裁决**（见 `ConfirmDecision`）。「总是允许 / 总是拒绝」的记忆在这里短路：
+   * 命中就回一个 once 档（allow_once / reject_once）、**不弹卡也不排队** —— 用户已经就这类工具
+   * 表过态了，再问一遍是打扰。
+   */
   private requestConfirm(req: {
     requestId: string
+    conversationId: string
     toolCallId: string
     toolName: string
     command: string
+    workspaceId?: string
     workspaceName?: string
     sessionId?: string
     sessionTitle?: string
-  }): Promise<boolean> {
+  }): Promise<ConfirmDecision> {
+    const remembered = this.alwaysDecisions.get(req.conversationId)?.get(req.toolName)
+    if (remembered === 'allow') return Promise.resolve('allow_once')
+    if (remembered === 'reject') return Promise.resolve('reject_once')
+
     const sink = this.confirmSink
-    if (!sink) return Promise.resolve(true)
+    if (!sink) return Promise.resolve('allow_once')
     const result = this.confirmChain.then(() => this.doRequestConfirm(req, sink))
     this.confirmChain = result.then(
       () => undefined,
@@ -149,45 +187,68 @@ class AgentService extends EventEmitter {
   private doRequestConfirm(
     req: {
       requestId: string
+      conversationId: string
       toolCallId: string
       toolName: string
       command: string
+      workspaceId?: string
       workspaceName?: string
       sessionId?: string
       sessionTitle?: string
     },
     sink: AgentConfirmSink
-  ): Promise<boolean> {
+  ): Promise<ConfirmDecision> {
     const id = randomUUID()
-    return new Promise<boolean>((resolve) => {
-      const settle = (approved: boolean) => {
+    return new Promise<ConfirmDecision>((resolve) => {
+      const settle = (decision: ConfirmDecision) => {
         this.pendingConfirms.delete(id)
+        // 「总是」档在这里被记住（会话 + 工具名），后续同名调用直接短路、不再弹卡
+        if (decision === 'allow_always' || decision === 'reject_always') {
+          let map = this.alwaysDecisions.get(req.conversationId)
+          if (!map) {
+            map = new Map()
+            this.alwaysDecisions.set(req.conversationId, map)
+          }
+          map.set(req.toolName, decision === 'allow_always' ? 'allow' : 'reject')
+        }
         sink.resolved(id)
-        resolve(approved)
+        resolve(decision)
       }
       const timer = armConfirmTimeout(
-        () => settle(false),
+        () => settle('reject_once'),
         storage.getAiSettings().confirmTimeoutMs
       )
       this.pendingConfirms.set(id, { requestId: req.requestId, resolve: settle, timer })
-      sink.request({ ...req, id })
+      sink.request({
+        id,
+        requestId: req.requestId,
+        toolCallId: req.toolCallId,
+        toolName: req.toolName,
+        command: req.command,
+        // 内置工具恒为四档（ACP 会按 agent 广告的 option 收窄，见 acp-agent.ts）
+        options: BUILTIN_CONFIRM_OPTIONS,
+        ...(req.workspaceId ? { workspaceId: req.workspaceId } : {}),
+        ...(req.workspaceName ? { workspaceName: req.workspaceName } : {}),
+        ...(req.sessionId ? { sessionId: req.sessionId } : {}),
+        ...(req.sessionTitle ? { sessionTitle: req.sessionTitle } : {})
+      })
     })
   }
 
-  /** 渲染进程回复确认结果 */
-  resolveConfirm(id: string, approved: boolean): void {
+  /** 渲染进程回复确认结果（四档裁决） */
+  resolveConfirm(id: string, decision: ConfirmDecision): void {
     const pending = this.pendingConfirms.get(id)
     if (!pending) return
     clearTimeout(pending.timer)
-    pending.resolve(approved)
+    pending.resolve(decision)
   }
 
-  /** 结束挂起的确认（中止对话 / 流结束兜底），按「取消」处理 —— 确认卡不限时，就靠它收尾 */
+  /** 结束挂起的确认（中止对话 / 流结束兜底），按「拒绝一次」处理 —— 确认卡不限时，就靠它收尾 */
   private clearPendingConfirms(requestId?: string): void {
     for (const pending of this.pendingConfirms.values()) {
       if (requestId && pending.requestId !== requestId) continue
       clearTimeout(pending.timer)
-      pending.resolve(false)
+      pending.resolve('reject_once')
     }
   }
 
@@ -255,7 +316,7 @@ class AgentService extends EventEmitter {
 
     const controller = new AbortController()
     this.abortControllers.set(requestId, controller)
-    this.requestMeta.set(requestId, { scope: 'workspace' })
+    this.requestMeta.set(requestId, { scope: 'workspace', conversationId: req.conversationId })
 
     /**
      * ⚠️ **准备阶段在后台跑，这里立即把 requestId 交回渲染端**（起流部分见
@@ -273,7 +334,7 @@ class AgentService extends EventEmitter {
       .then(async ({ model, tools, instructions, modelMessages }) => {
         // 准备期间用户已经叫停：controller 早就 aborted，不必再起流（省掉一次真实请求）。
         // ⚠️ 这里要自己收尾 —— 清理只写在 runStreamWithRetry 的 finally 里，早退不经它。
-        if (controller.signal.aborted) return this.forgetRequest(requestId)
+        if (controller.signal.aborted) return this.forgetRequest(requestId, req.conversationId)
         // ⚠️ 动态 import（主进程产物是 ESM，不能用 require）：与原先一致，只是挪到了后台。
         const { Agent } = await import('@mastra/core/agent')
         const agent = new Agent({
@@ -289,6 +350,7 @@ class AgentService extends EventEmitter {
         return this.runStreamWithRetry(requestId, {
           controller,
           maxRetries: resolveMaxRetries(settings.maxRetries),
+          conversationId: req.conversationId,
           start: () =>
             agent.stream(modelMessages as never, {
               maxSteps: settings.maxSteps ?? DEFAULT_MAX_STEPS,
@@ -321,8 +383,26 @@ class AgentService extends EventEmitter {
     // 技能每次对话现扫（磁盘即真源，用户随时可以往技能目录里丢东西）：
     // 清单进系统提示词，正文由 read_skill 工具按需读取
     const skills = await skillsForAgent(workspace.path)
-    const { tools: mcpTools, errors: mcpErrors } = await mcpManager.buildToolset()
+    // 项目约束文档同样每轮现读（磁盘即真源）：用户改完 AGENTS.md 下一轮就生效
+    const projectDoc = await readProjectDoc(workspace.path).catch(() => null)
+    // 会话级的 MCP 允许清单：从**磁盘上的会话记录**读（它才是真源，渲染端每次落盘都带上）。
+    // undefined = 不限制（用全部全局启用的），见 AgentConversation.mcpServerIds。
+    const conversationRecord = storage.getAgentConversation(req.conversationId)
+    const { tools: mcpTools, errors: mcpErrors } = await mcpManager.buildToolset({
+      serverIds: conversationRecord?.mcpServerIds
+    })
     if (mcpErrors.length) console.warn('[agent] MCP 工具加载异常：', mcpErrors.join('；'))
+
+    /**
+     * ⚠️ 必须带上 req.modelId：会话在「同一配置下切换具体模型」时，modelId 是用户选的，
+     * 不传就回退到配置的默认模型 —— 表现为「切换模型不生效，请求还在用旧模型」。
+     *
+     * 位置比 ctx 早是**故意的**：子 Agent 要用当前这一轮的模型与 modelSettings，
+     * 而它们要挂到 ctx 上（见下面的 subAgent）—— 两者都得在组装工具集之前算好。
+     * 这一步是纯同步的，不依赖 ctx / tools，提前没有任何副作用。
+     */
+    const model = resolveModel(config, req.modelId)
+    const modelSettings = this.mastraModelSettings(config, settings)
 
     const ctx: ToolRunContext = {
       requestId,
@@ -330,11 +410,23 @@ class AgentService extends EventEmitter {
       scope: 'workspace',
       workspace,
       signal: controller.signal,
-      permissionMode: settings.permissionMode === 'confirm' ? 'confirm' : 'full',
-      requestConfirm: (r) => this.requestConfirm({ ...r, requestId, workspaceName: workspace.name }),
+      permissionMode: asPermissionMode(settings.permissionMode),
+      requestConfirm: (r) =>
+        this.requestConfirm({
+          ...r,
+          requestId,
+          conversationId: req.conversationId,
+          workspaceId: workspace.id,
+          workspaceName: workspace.name
+        }),
       fileState: this.fileStateFor(req.conversationId),
       skills,
       bashPath: agentBashPath()
+    }
+    // 子 Agent（delegate 工具）：**只在设置里开启时**注入执行器 —— 没注入则工具不暴露。
+    // 注在工具集组装之前，因为 `available` 是组装期判定的（见 tool-registry.buildToolset）。
+    if (settings.subAgents) {
+      ctx.subAgent = createSubAgentRunner({ parent: ctx, model, modelSettings })
     }
     // 工具集从注册表组装：内置定义 + 随请求携带的客户端工具 + MCP（extra，同名覆盖内置）
     const tools: ToolSet = toolRegistry.buildToolset({
@@ -344,9 +436,6 @@ class AgentService extends EventEmitter {
     })
 
     const hasBrowser = Object.keys(tools).some((k) => k.startsWith('browser_'))
-    // ⚠️ 必须带上 req.modelId：会话在「同一配置下切换具体模型」时，modelId 是用户选的，
-    // 不传就回退到配置的默认模型 —— 表现为「切换模型不生效，请求还在用旧模型」。
-    const model = resolveModel(config, req.modelId)
     const historyLimit = config.contextMessages ?? 20
     /**
      * ⚠️ 抽成局部变量而不是内联在下面的 `new Agent({...})` 里：
@@ -354,7 +443,13 @@ class AgentService extends EventEmitter {
      * （提示条上的「压缩前后」会看着几乎没变化）。
      */
     const instructions =
-      buildAgentSystemPrompt(workspace.path, workspace.name, skills) +
+      buildAgentSystemPrompt(
+        workspace.path,
+        workspace.name,
+        skills,
+        ctx.permissionMode,
+        projectDoc
+      ) +
       (hasBrowser ? '\n\n' + BROWSER_PROMPT_SECTION : '') +
       ASK_FOLLOWUP_HINT
     const baseTokens = await estimateBaseTokens(instructions, tools)
@@ -362,8 +457,8 @@ class AgentService extends EventEmitter {
     // ① 必须在 ② 之前：反过来 slice(-historyLimit) 可能把刚注入的摘要消息本身切掉，
     // 检查点就白设了（而且是静默白设，界面看不出任何异常）。
     // ③ 只改「这一次请求怎么带上下文」，不碰落盘的历史（屏幕上的原文始终可翻可复制）。
-    const conversation = storage.getAgentConversation(req.conversationId)
-    const sliced = sliceByCheckpoint(req.history, conversation?.contextSummary)
+    // （会话记录在上面读 MCP 允许清单时已经取过一次，这里复用，别重复读盘）
+    const sliced = sliceByCheckpoint(req.history, conversationRecord?.contextSummary)
     const recent = toModelMessages(sliced.messages.slice(-historyLimit))
     const { messages: modelMessages, compressed } = await compressContext(
       sliced.summaryText ? withSummaryPrefix(recent, sliced.summaryText) : recent,
@@ -400,10 +495,12 @@ class AgentService extends EventEmitter {
    * 准备阶段就走掉（起流前抛错 / 中止）时不经那个 finally，必须显式调用，
    * 否则 abortControllers / requestMeta 留下孤儿条目（终端会话关闭时还会拿它误中止）。
    */
-  private forgetRequest(requestId: string): void {
+  private forgetRequest(requestId: string, conversationId?: string): void {
     this.abortControllers.delete(requestId)
     this.requestMeta.delete(requestId)
     this.toolQueues.delete(requestId)
+    // 这一轮根本没起流就走掉了：同样把没赶上的插话清掉（同 runStreamWithRetry 的 finally）
+    if (conversationId) steerRegistry.clear(conversationId)
   }
 
   /**
@@ -427,14 +524,18 @@ class AgentService extends EventEmitter {
 
     const controller = new AbortController()
     this.abortControllers.set(requestId, controller)
-    this.requestMeta.set(requestId, { scope: 'terminal', targetSessionId: req.targetSessionId })
+    this.requestMeta.set(requestId, {
+      scope: 'terminal',
+      targetSessionId: req.targetSessionId,
+      conversationId: req.conversationId
+    })
 
     // ⚠️ 同 chatWorkspace：准备阶段（MCP 启动 / 估算 token / 上下文压缩）在后台跑，
     // 这里立即交回 requestId —— 它是「停止」的唯一把手，迟了用户就按不住这一轮。
     void this.prepareTerminalTurn(requestId, controller, req, settings, config)
       .then(async ({ model, tools, systemPrompt, modelMessages }) => {
         // 准备期间已被叫停：不必再起流（清理只写在 runStreamWithRetry 的 finally 里，早退不经它）
-        if (controller.signal.aborted) return this.forgetRequest(requestId)
+        if (controller.signal.aborted) return this.forgetRequest(requestId, req.conversationId)
         const { Agent } = await import('@mastra/core/agent')
         const agent = new Agent({
           id: 'dogi-terminal',
@@ -446,6 +547,7 @@ class AgentService extends EventEmitter {
         return this.runStreamWithRetry(requestId, {
           controller,
           maxRetries: resolveMaxRetries(settings.maxRetries),
+          conversationId: req.conversationId,
           start: () =>
             agent.stream(modelMessages as never, {
               maxSteps: settings.maxSteps ?? DEFAULT_MAX_STEPS,
@@ -472,7 +574,7 @@ class AgentService extends EventEmitter {
     modelMessages: Awaited<ReturnType<typeof compressContext>>['messages']
   }> {
     const { tools: mcpTools, errors: mcpErrors } = await mcpManager.buildToolset()
-    const permissionMode = settings.permissionMode === 'confirm' ? 'confirm' : 'full'
+    const permissionMode = asPermissionMode(settings.permissionMode)
     const ctx: ToolRunContext = {
       requestId,
       conversationId: req.conversationId,
@@ -480,7 +582,8 @@ class AgentService extends EventEmitter {
       targetSessionId: req.targetSessionId ?? null,
       signal: controller.signal,
       permissionMode,
-      requestConfirm: (r) => this.requestConfirm({ ...r, requestId }),
+      requestConfirm: (r) =>
+        this.requestConfirm({ ...r, requestId, conversationId: req.conversationId }),
       queueToolExecution: (fn) => this.queueToolExecution(requestId, fn)
     }
     const tools: ToolSet = toolRegistry.buildToolset({
@@ -576,6 +679,8 @@ class AgentService extends EventEmitter {
       start: () => Promise<{ fullStream: AsyncIterable<unknown>; usage?: Promise<unknown> }>
       controller: AbortController
       maxRetries: number
+      /** 用于收尾时清掉「运行中插话」的残留（见 steer.ts） */
+      conversationId: string
     }
   ): Promise<void> {
     const { controller, maxRetries } = opts
@@ -718,7 +823,32 @@ class AgentService extends EventEmitter {
       this.requestMeta.delete(requestId)
       // terminal 队列对象由排队中的闭包持有，清理 Map 不影响已中止标志的感知
       this.toolQueues.delete(requestId)
+      // 本轮结束：丢掉没赶上工具步的插话（渲染端那条 user 消息仍在历史里，下一轮照样看得到）
+      steerRegistry.clear(opts.conversationId)
     }
+  }
+
+  /**
+   * **运行中插话**：把用户这句话排进「下一个工具步边界」（见 steer.ts）。
+   *
+   * 返回 false = 这条会话此刻没有在跑的一轮 —— 那就不是插话，该走正常的发消息。
+   * 渲染端据此决定提示（不会真的丢：它本来就是按普通消息发的）。
+   *
+   * ⚠️ 准入只看「有没有在跑」，**不看准备阶段是否结束**：准备阶段（MCP 启动 /
+   * 上下文压缩）正是用户最想插话的时刻，那时拒掉等于最需要它的时候用不了。
+   */
+  steer(conversationId: string, text: string): boolean {
+    if (!this.isConversationRunning(conversationId)) return false
+    steerRegistry.push(conversationId, text)
+    return true
+  }
+
+  /** 这条会话此刻有没有在跑的一轮（工作区 / 终端两条线共用 requestMeta） */
+  private isConversationRunning(conversationId: string): boolean {
+    for (const meta of this.requestMeta.values()) {
+      if (meta.conversationId === conversationId) return true
+    }
+    return false
   }
 
   private emitEvent(requestId: string, event: AgentStreamEvent): void {

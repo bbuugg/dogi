@@ -3,6 +3,7 @@ import { AgentFilesPanel } from '@/features/agent/AgentFilesPanel'
 import { AiMarkdown } from '@/features/agent/AiMarkdown'
 import { AskFollowupCard } from '@/features/agent/AskFollowupCard'
 import { BrowserPane } from '@/features/agent/BrowserPane'
+import { ConfirmActions } from '@/features/agent/ConfirmActions'
 import { ContextNoticeBar } from '@/features/agent/ContextNoticeBar'
 import { ContextRing } from '@/features/agent/ContextRing'
 import {
@@ -15,6 +16,7 @@ import { McpConfigPopover } from '@/features/agent/McpConfigPopover'
 import { MessageCopyButton } from '@/features/agent/MessageCopyButton'
 import { MessageDeleteButton } from '@/features/agent/MessageDeleteButton'
 import { MessageEditButton } from '@/features/agent/MessageEditButton'
+import { MessageForkButton } from '@/features/agent/MessageForkButton'
 import { MessageOutline } from '@/features/agent/MessageOutline'
 import { QueuedAgentMessages } from '@/features/agent/QueuedAgentMessages'
 import { ReasoningPanel } from '@/features/agent/ReasoningPanel'
@@ -24,13 +26,13 @@ import { TokenUsageRow } from '@/features/agent/TokenUsageRow'
 import { TOOL_LABELS, ToolCallRow, toolRunStatus } from '@/features/agent/ToolCallRow'
 import { TypingDots } from '@/features/agent/TypingDots'
 import { WorkspaceQuickActions } from '@/features/agent/WorkspaceQuickActions'
-import { configModels, hasUsableConfig, modelNameOnly } from '@/features/agent/model-options'
+import { cfgModelValue, configModelGroups, configModels, hasUsableConfig, parseCfgModelValue } from '@/features/agent/model-options'
 import { TurnFold, findTailStart, turnStepSummary } from '@/features/agent/turn-fold'
 import { TerminalView } from '@/features/terminal/TerminalView'
-import { useTabEventBus } from '@/shared/lib/use-tab-event-bus'
-import { useInlineConfirm } from '@/shared/components/InlineConfirm'
+import { useTabCloseGuard } from '@/shared/lib/use-tab-close-guard'
 import { conversationKind, isDraftConversation, useAppStore } from '@/stores/app-store'
 import { ASK_FOLLOWUP_TOOL } from '@shared/ask-followup'
+import { acpAgentTypeLabel } from '@shared/acp'
 import { sumUsage } from '@shared/agent-usage'
 import { resolveContextWindow } from '@shared/context-budget'
 import { DEFAULT_BROWSER_VIEWPORT, agentBrowserSessionId } from '@shared/browser'
@@ -50,9 +52,7 @@ import type { MenuProps } from 'antd'
 import { Button, Dropdown, Input, Select, Spin, Tooltip, message } from 'antd'
 import { cn } from 'cn'
 import {
-  Ban,
   Bot,
-  Check,
   ChevronDown,
   Code2,
   Files,
@@ -65,11 +65,13 @@ import {
   Send,
   ShieldAlert,
   ShieldCheck,
+  ShieldOff,
   Square,
   SquareTerminal,
   Terminal,
   X,
-  RotateCcw
+  RotateCcw,
+  Zap
 } from 'lucide-react'
 import {
   type ComponentRef,
@@ -107,6 +109,12 @@ const AGENT_PERMISSION_MODES: Array<{
       label: '变更前确认',
       icon: ShieldCheck,
       hint: '改之前问我'
+    },
+    {
+      value: 'readonly',
+      label: '只读',
+      icon: ShieldOff,
+      hint: '只能读，改动一律拒绝'
     }
   ]
 
@@ -179,32 +187,13 @@ function buildRenderUnits(parts: AgentMessagePart[]): RenderUnit[] {
  * 操作前先请示，用户点了允许才真正执行。文案里带上工作区名，避免误批到别的目录。
  */
 function AgentConfirmActions({ confirm }: { confirm: AgentConfirmRequest }) {
-  const resolveAgentConfirm = useAppStore((s) => s.resolveAgentConfirm)
   return (
     <div className="flex flex-wrap items-center gap-2 pt-0.5">
       <span className="text-xs text-muted-foreground">
         是否允许在工作区「{confirm.workspaceName}」
         {TOOL_LABELS[confirm.toolName] ?? '执行该操作'}？
       </span>
-      <div className="ml-auto flex gap-1.5">
-        <Button
-          type="text"
-          size="small"
-          danger
-          icon={<Ban className="size-3.5" />}
-          onClick={() => void resolveAgentConfirm(confirm.id, false)}
-        >
-          拒绝
-        </Button>
-        <Button
-          type="primary"
-          size="small"
-          icon={<Check className="size-3.5" />}
-          onClick={() => void resolveAgentConfirm(confirm.id, true)}
-        >
-          允许
-        </Button>
-      </div>
+      <ConfirmActions confirm={confirm} className="ml-auto" />
     </div>
   )
 }
@@ -219,7 +208,10 @@ function textOf(parts: AgentChatMessage['parts'], sep: string): string {
 
 /**
  * 单条消息：用户气泡 / 助手（Markdown + 工具横条），两者都可选中、都可一键复制。
- * 消息下方（hover 才露出）带「复制 / 编辑（仅用户消息）/ 删除」。
+ * 消息下方（hover 才露出）带「复制 / 从此签出 / 编辑（仅用户消息）/ 删除」。
+ *
+ * 「从此签出」的入口在**消息**上而不是侧栏的会话行上：签出的粒度本来就是
+ * 「到这条为止的历史」，挂在会话上只能整条复制，用户还得自己去想从哪一步分叉。
  */
 function MessageBubbleImpl({
   conversationId,
@@ -229,6 +221,8 @@ function MessageBubbleImpl({
   editing,
   onEdit,
   canDelete,
+  canFork,
+  onFork,
   tailCount,
   pendingConfirm,
   isLastAssistant
@@ -243,6 +237,9 @@ function MessageBubbleImpl({
   editing: boolean
   onEdit: (message: AgentChatMessage) => void
   canDelete: boolean
+  /** 能否从这条签出（生成中 / ACP 会话不给：前者历史还在变，后者消息不在本地） */
+  canFork: boolean
+  onFork: (message: AgentChatMessage) => void
   /** 含本条在内、会被一起删掉的消息条数 */
   tailCount: number
   pendingConfirm: AgentConfirmRequest | null
@@ -257,6 +254,10 @@ function MessageBubbleImpl({
         onConfirm={() => void deleteAgentMessagesFrom(message.id, conversationId)}
       />
     ) : null
+  // 签出：以这条为终点复制一份历史到新会话（原会话不动），并切过去
+  const fork = canFork && conversationId ? (
+    <MessageForkButton onConfirm={() => onFork(message)} />
+  ) : null
 
   if (message.role === 'user') {
     const text = textOf(message.parts, '')
@@ -275,6 +276,7 @@ function MessageBubbleImpl({
         {/* invisible 而不是不渲染：保留占位，hover 时不会把消息挤动 */}
         <div className="invisible flex items-center gap-1 group-hover/msg:visible">
           <MessageCopyButton text={text} />
+          {fork}
           {canEdit && <MessageEditButton onEdit={() => onEdit(message)} />}
           {del}
         </div>
@@ -303,6 +305,8 @@ function MessageBubbleImpl({
   // 避免历史里任何一条失败消息都冒出按钮（旧失败消息不是最后一条，自然不显示）
   const chatRetryable = useAppStore((s) => s.agentRuns[conversationId ?? '']?.retryable)
   const retryAgentTurn = useAppStore((s) => s.retryAgentTurn)
+  /** 单条命令停止（工具卡上的「停止」）；与「停止整轮」是两条路，见 stores 里的说明 */
+  const stopAgentCommand = useAppStore((s) => s.stopAgentCommand)
   const turnDone = message.role === 'assistant' && !streaming && !hasPendingFollowup
   const tailStart = turnDone ? findTailStart(units) : 0
   const foldedUnits = tailStart > 0 ? units.slice(0, tailStart) : null
@@ -359,6 +363,8 @@ function MessageBubbleImpl({
             <AgentConfirmActions confirm={pendingConfirm} />
           ) : undefined
         }
+        // 单条停止：只杀这一条命令，本轮其它步骤照常跑（按钮是否显示由 ToolCallRow 判定）
+        onStop={() => void stopAgentCommand(unit.call.toolCallId)}
       />
     )
   }
@@ -384,6 +390,7 @@ function MessageBubbleImpl({
           invisible 而不是不渲染：保留占位，hover 时不会把消息挤动 */}
       <div className="invisible flex items-center gap-1 group-hover/msg:visible">
         {!streaming && <MessageCopyButton text={rawText} title="复制原文（Markdown）" />}
+        {fork}
         {del}
       </div>
       {(isLastAssistant && chatRetryable && message.role === 'assistant') && (
@@ -506,8 +513,11 @@ export function AgentPage({
   const setAiPermissionMode = useAppStore((s) => s.setAiPermissionMode)
   /** 设置里选的本地终端（'default' 表示平台默认） */
   const preferredShellId = useAppStore((s) => s.preferences.localShell)
+  // ⚠️ 三档直传（别写 `=== 'confirm' ? 'confirm' : 'full'`）—— 那会把 readonly 悄悄降成放开
   const permissionMode: AiPermissionMode =
-    aiSettings.permissionMode === 'confirm' ? 'confirm' : 'full'
+    aiSettings.permissionMode === 'confirm' || aiSettings.permissionMode === 'readonly'
+      ? aiSettings.permissionMode
+      : 'full'
   const permissionMeta =
     AGENT_PERMISSION_MODES.find((m) => m.value === permissionMode) ?? AGENT_PERMISSION_MODES[0]
   const PermissionIcon = permissionMeta.icon
@@ -532,6 +542,19 @@ export function AgentPage({
   const replaying = isAcp && conversationId ? (acpLoading[conversationId] ?? false) : false
   const streaming = run?.streaming ?? false
   const error = run?.error ?? null
+  /**
+   * 最后一条**助手**消息的下标（可能不是 `messages.length - 1`）。
+   *
+   * ⚠️ 运行中插话（steer）会在正在流式输出的那条助手消息**之后**追加一条用户消息
+   * —— 真实时序就是这样（用户是在那一轮跑着的时候说的话）。所以「最后一条消息」
+   * 可能是用户消息，按它判会把流式指示器与重试按钮整条丢掉（表现为还在跑却像跑完了）。
+   */
+  const lastAssistantIndex = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i].role === 'assistant') return i
+    }
+    return -1
+  }, [messages])
   /** 会话累计 token（现算，不存副本）与最近一次上下文压缩通知 */
   const totalUsage = useMemo(
     () => (messages.some((m) => m.usage) ? sumUsage(messages) : null),
@@ -540,15 +563,17 @@ export function AgentPage({
   const contextNotice = run?.contextNotice
 
   // ---------- 关闭拦截 ----------
-  // Agent 正在运行（streaming）时关闭标签会丢失上下文，所以拦截后在**本标签面板内**
-  // 弹确认。streamingRef 存最新值供 guard 闭包读取（guard 注册一次，streaming 变不重注册）。
-  const { confirm, element } = useInlineConfirm()
+  // Agent 正在运行（streaming）时关闭标签会丢失上下文，所以拦截后在**组面板内**
+  // 弹确认（确认框由面板组提供，见 tab-event-bus 的组级宿主）。
+  // streamingRef 存最新值供 guard 闭包读取（guard 注册一次，streaming 变不重注册）。
   const streamingRef = useRef(streaming)
   streamingRef.current = streaming
-  useTabEventBus(tabId, () => {
-    if (!streamingRef.current) return true
+  useTabCloseGuard(tabId, ({ confirm }) => {
+    // ⚠️ 每条分支都带 `owned: true`：Agent 标签的关闭确认由本页全权负责，
+    // 空闲时直接放行、不让 shell 再兜底问一句「确定关闭标签？」。
+    if (!streamingRef.current) return { allow: true, owned: true }
     // 「关闭标签前二次确认」关掉：不弹确认，直接放行（中断运行并关闭）
-    if (!useAppStore.getState().preferences.confirmCloseTab) return true
+    if (!useAppStore.getState().preferences.confirmCloseTab) return { allow: true, owned: true }
     return confirm({
       title: 'Agent 正在运行',
       content: '关闭标签会中断当前运行，确定关闭吗？',
@@ -556,7 +581,7 @@ export function AgentPage({
         { label: '取消', value: false },
         { label: '关闭', kind: 'danger', value: true }
       ]
-    })
+    }).then((ok) => ({ allow: ok, owned: true }))
   })
 
   // ---------- 会话形态与模型 ----------
@@ -566,6 +591,11 @@ export function AgentPage({
    * 需要删除后重新导入（下拉里会给出明确提示）。
    */
   const boundAcp = acpAgents.find((a) => a.id === conversation?.acpAgentId)
+  /**
+   * 绑定 agent 的**风格标记**（opencode / pi / 通用 → 后者是 null，不渲染）。
+   * 它是给人看的标识，不参与任何逻辑（见 `AcpAgentType`），所以这里只喂标题旁那枚胶囊。
+   */
+  const acpTypeLabel = acpAgentTypeLabel(boundAcp?.type)
   /**
    * 本会话实际使用的模型配置（仅 mastra）：会话自己的选择优先，回退到设置里的默认模型。
    * 参与回退的配置必须**有可用模型**（models 被删空的配置跳过，否则下拉会出
@@ -678,8 +708,11 @@ export function AgentPage({
   })
   const submitAgentMessage = useAppStore((s) => s.submitAgentMessage)
   const resendAgentMessage = useAppStore((s) => s.resendAgentMessage)
+  const steerAgentMessage = useAppStore((s) => s.steerAgentMessage)
   const abortAgent = useAppStore((s) => s.abortAgent)
   const setSidebarCollapsed = useAppStore((s) => s.setSidebarCollapsed)
+  /** 从此签出（消息级）：以某条消息为终点造一条新会话，见 startFork */
+  const forkAgentConversation = useAppStore((s) => s.forkAgentConversation)
 
   const [input, setInput] = useState('')
   /** 正在编辑的用户消息（内容已灌进输入框；发送时先删这条及其之后，再重发） */
@@ -1241,9 +1274,9 @@ export function AgentPage({
     const models = configModels(config)
     if (models.length === 0) return undefined
     if (conversation?.modelId && models.includes(conversation.modelId)) {
-      return `cfg:${config.id}:${conversation.modelId}`
+      return cfgModelValue(config.id, conversation.modelId)
     }
-    return `cfg:${config.id}:${models[0]}`
+    return cfgModelValue(config.id, models[0])
   })()
 
   const handleModelSelect = (value?: string) => {
@@ -1259,9 +1292,13 @@ export function AgentPage({
       })
       return
     }
-    if (value.startsWith('cfg:')) {
-      const [, cfgId, cfgModel] = value.split(':')
-      void setAgentConversationModel(conversationId, { configId: cfgId, modelId: cfgModel })
+    // ⚠️ 解析交给 parseCfgModelValue（按第一个冒号切）—— 模型 id 自己可能带冒号
+    const picked = parseCfgModelValue(value)
+    if (picked) {
+      void setAgentConversationModel(conversationId, {
+        configId: picked.configId,
+        modelId: picked.modelId
+      })
     }
   }
 
@@ -1287,32 +1324,21 @@ export function AgentPage({
   }
 
   /**
-   * 下拉选项：**只能有一层分组**。
+   * 下拉选项：**每条模型配置一个顶层分组**（组头 = 配置名，组内 = 裸模型 id）。
    *
-   * ⚠️ antd 6 的 Select（@rc-component/select）在 flattenOptions 里把「组的子项」一律当成
-   * 可选 option（取 data.value），不再继续下钻 —— 写两层嵌套分组时，内层分组会变成一个
-   * `value: undefined` 的选项：模型列表整个不渲染，点它也没有任何反应。
-   * 所以「配置 / 模型 id」的从属关系用组内条目的 label 前缀表达，不再嵌套分组。
+   * ⚠️ 只能有一层分组：antd 6 的 Select（@rc-component/select）在 flattenOptions 里把
+   * 「组的子项」一律当成可选 option（取 data.value），不再继续下钻 —— 再套一层
+   * 「AI 模型 > 配置 > 模型」会让内层分组变成一个 `value: undefined` 的选项：
+   * 模型列表整个不渲染，点它也没有任何反应。所以配置**直接就是顶层分组**。
    *
-   * 只列这一类：ACP = 绑定 agent 在设置里勾选过的模型；mastra = 全部模型配置
-   * （形态在创建会话时就定了，下拉不再承担「顺带定型」的职责）。
+   * ACP 会话同理：只有一个「绑定 agent」分组（模型来源是设置里勾选的那份）。
+   * 形态在创建会话时就定了，下拉不再承担「顺带定型」的职责。
    */
   const modelOptions = isAcp
     ? boundAcp
       ? [{ label: `Agent · ${boundAcp.name}`, options: acpOptionsOf(boundAcp) }]
       : []
-    : [
-      ...(aiConfigs.length > 0
-        ? [
-          {
-            label: 'AI 模型',
-            options: aiConfigs.flatMap((c) =>
-              configModels(c).map((m) => ({ value: `cfg:${c.id}:${m}`, label: `${c.name} · ${m}` }))
-            )
-          }
-        ]
-        : [])
-    ]
+    : configModelGroups(aiConfigs)
 
   /**
    * agent 广告出来的**其它**会话配置项（思考档位、各类开关…），按它给的 name 渲染成一排。
@@ -1341,6 +1367,22 @@ export function AgentPage({
     setInput('')
   }, [])
 
+  /**
+   * 从此签出：以这条消息为终点、复制一份历史到**新会话**并切过去（原会话一字不动）。
+   *
+   * 复制由主进程做（它才是消息真源，渲染端手里的可能正处在流式中途），
+   * 这里只接结果并提示；新会话由 store 直接选中，用户落地就能接着往下聊。
+   */
+  const startFork = useCallback(
+    async (target: AgentChatMessage) => {
+      if (!conversationId) return
+      const forkedId = await forkAgentConversation(conversationId, target.id)
+      if (!forkedId) message.warning('这条会话不支持签出（外部 agent 的会话消息不在本地）')
+      else message.success('已从此签出新会话')
+    },
+    [conversationId, forkAgentConversation]
+  )
+
   const handleSend = () => {
     if (!input.trim() || !hasConfig || !conversationId) return
     // 手动压缩进行中禁发：这一轮如果也带上刚落盘的检查点，语义很难解释（用户会以为
@@ -1359,6 +1401,27 @@ export function AgentPage({
       void resendAgentMessage(id, text, conversationId)
     } else {
       // 正在跑就排进待发送队列（判定在 store 里），本轮自然结束后自动接上
+      void submitAgentMessage(text, conversationId)
+    }
+  }
+
+  /**
+   * **运行中插话**：这一轮还在跑时把输入框里的话直接递给模型，在**下一个工具步**生效
+   * （而不是像「加入队列」那样等本轮结束再起新一轮）。
+   *
+   * ⚠️ 只在 `streaming` 时有意义 —— 空闲时那就是普通发送。`steerAgentMessage` 会返回
+   * false 表示「这条会话此刻没在跑」（比如正好在这一下跑完了），那时退回普通发送，
+   * 不让用户白打一段字。
+   */
+  const handleSteer = async () => {
+    if (!input.trim() || !hasConfig || !conversationId) return
+    if (contextCompressing) return
+    const text = input
+    setInput('')
+    setScrollResetSeq((s) => s + 1)
+    const accepted = await steerAgentMessage(text, conversationId)
+    if (!accepted) {
+      // 递晚了（本轮刚好结束）：按普通消息发出去，别让这段话凭空消失
       void submitAgentMessage(text, conversationId)
     }
   }
@@ -1506,6 +1569,31 @@ export function AgentPage({
                 >
                   {conversation.title}
                 </span>
+                {/*
+                  ACP 会话在**名字后面**挂一枚胶囊：外部 agent 名（+ 风格标记）。
+                  ACP 与内置会话在界面上除了这个消息流看不出区别，而这决定了「点签出是不是
+                  有东西可签、历史在谁手上」—— 所以要在标题处就说明白。内置会话不给，
+                  否则每屏都挂一枚等于没标（侧栏的行首图标已经区分了）。
+                */}
+                {isAcp && (
+                  <span
+                    className="inline-flex shrink-0 items-center gap-1 rounded-full bg-foreground/5 px-2 py-0.5 text-xs text-muted-foreground"
+                    title={`外部 ACP Agent：${boundAcp?.name ?? '（配置已移除）'}${
+                      acpTypeLabel ? ` · 类型 ${acpTypeLabel}` : ''
+                    }`}
+                  >
+                    <Bot className="size-3 shrink-0" />
+                    <span className="max-w-40 truncate">
+                      {boundAcp?.name ?? 'ACP Agent 已移除'}
+                    </span>
+                    {/* 风格标记（opencode / pi）：只有非「通用」才有，见 shared/acp.ts */}
+                    {acpTypeLabel && (
+                      <span className="rounded bg-foreground/10 px-1 text-[10px] leading-4">
+                        {acpTypeLabel}
+                      </span>
+                    )}
+                  </span>
+                )}
               </span>
             )}
             {/* 当前工作目录：分屏后同一屏可能并排好几个会话，光看标题分不清各自作用在哪个目录。
@@ -1764,16 +1852,17 @@ export function AgentPage({
                       <MessageBubble
                         conversationId={conversationId}
                         message={m}
-                        streaming={
-                          streaming && index === messages.length - 1 && m.role === 'assistant'
-                        }
+                        streaming={streaming && index === lastAssistantIndex}
                         canEdit={!streaming && !isAcp && m.role === 'user'}
                         editing={editing?.id === m.id}
                         onEdit={startEdit}
                         canDelete={!streaming && !isAcp}
+                        // 签出与删除同一个门槛：生成中历史还在变，ACP 会话的消息不在本地
+                        canFork={!streaming && !isAcp}
+                        onFork={startFork}
                         tailCount={messages.length - index}
                         pendingConfirm={pendingConfirm}
-                        isLastAssistant={index === messages.length - 1 && m.role === 'assistant'}
+                        isLastAssistant={index === lastAssistantIndex}
                       />
                     </div>
                   ))}
@@ -1883,7 +1972,7 @@ export function AgentPage({
                             ? '这个会话绑定的 ACP agent 已被移除，请删除后重新导入'
                             : '请先在设置中配置 AI 模型'
                           : streaming
-                            ? '本轮结束后接着发这条…（Enter 加入队列 · Shift+Enter 换行）'
+                            ? '本轮结束后接着发这条…（Enter 加入队列 · ⚡ 立即插话 · Shift+Enter 换行）'
                             : `在「${active.name}」中描述你的任务…（Enter 发送 · Shift+Enter 换行）`
                     }
                     autoSize={{ minRows: 2, maxRows: 8 }}
@@ -1936,7 +2025,7 @@ export function AgentPage({
                         )}
                     </div>
                     <div className="flex min-w-0 items-center gap-1">
-                      {!isAcp && <McpConfigPopover />}
+                      {!isAcp && <McpConfigPopover conversationId={conversationId} />}
                       {/* 上下文用量圆环：紧挨模型选择左侧（同为「这个会话用什么」的开关）。
                           悬停出详情；**由数据决定显不显示**（内置要跑过一轮、ACP 要等 agent
                           报 usage_update），不再按会话形态一刀切隐藏 */}
@@ -1970,12 +2059,25 @@ export function AgentPage({
                         placeholder="选择模型"
                         popupMatchSelectWidth={false}
                         options={modelOptions}
-                        labelRender={(opt) => (
-                          <span className="block truncate">{modelNameOnly(opt.label)}</span>
-                        )}
+                        // 收起后只留模型名（配置名已在展开时的组头上）：这点宽度里
+                        // 再塞前缀会把模型名本身挤掉。truncate 兜住超长 id。
+                        labelRender={(opt) => <span className="block truncate">{opt.label}</span>}
                       />
-                      {/* 只显示一个按钮：有输入内容时优先「发送」（进行中也照发，进队列）；
-                          无输入内容且进行中才显示「停止」 */}
+                      {/* 进行中且输入框里有字时给**两颗**按钮，把「插话」和「排队」的差别摆明：
+                            - 插话（Zap）：本轮还没结束就把这句话递给模型，下一个工具步生效；
+                            - 队列（Send）：等本轮跑完再起新一轮（原来的行为）。
+                          空闲时只有一颗「发送」；进行中且输入框为空时只有一颗「停止」。 */}
+                      {streaming && input.trim() && (
+                        <Tooltip title="立即插话：本轮还没结束就递给模型，在下一个工具步生效">
+                          <Button
+                            type="text"
+                            icon={<Zap className="size-4" />}
+                            disabled={!hasConfig || contextCompressing}
+                            className="shrink-0 text-amber-500!"
+                            onClick={() => void handleSteer()}
+                          />
+                        </Tooltip>
+                      )}
                       {streaming && !input.trim() ? (
                         <Button
                           type="text"
@@ -1996,7 +2098,7 @@ export function AgentPage({
                             contextCompressing
                               ? '正在压缩上下文，请稍候'
                               : streaming
-                                ? '加入待发送队列'
+                                ? '加入待发送队列（本轮结束后发出）'
                                 : '发送'
                           }
                           className="shrink-0"
@@ -2028,9 +2130,6 @@ export function AgentPage({
           />
         )}
       </div>
-
-      {/* 关闭确认浮层（useInlineConfirm） */}
-      {element}
     </div>
   )
 }

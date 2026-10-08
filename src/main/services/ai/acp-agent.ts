@@ -45,8 +45,11 @@ import type {
   AgentChatRequest,
   AgentStreamEvent,
   AgentWorkspace,
-  AiPermissionMode
+  AiPermissionMode,
+  ConfirmDecision,
+  ConfirmOption
 } from '@shared/types'
+import { confirmOptionsFromAcpKinds } from '@shared/confirm'
 import { storage } from '../storage'
 import type { AgentConfirmSink } from './agent'
 import { HistoryAssembler, pushHistoryUpdate, toolLabelOf } from './acp-history'
@@ -200,7 +203,7 @@ function toStreamEvent(update: SessionUpdate): AgentStreamEvent | null {
 
 interface PendingConfirm {
   requestId: string
-  resolve: (approved: boolean) => void
+  resolve: (decision: ConfirmDecision) => void
   /** 兜底定时器；按默认配置（不限时）时是 undefined（见 timeouts.ts） */
   timer?: ReturnType<typeof setTimeout>
 }
@@ -282,29 +285,41 @@ class AcpAgentService extends EventEmitter {
     this.confirmSink = sink
   }
 
-  resolveConfirm(id: string, approved: boolean): void {
+  /** 渲染进程回复确认结果（四档裁决） */
+  resolveConfirm(id: string, decision: ConfirmDecision): void {
     const pending = this.pendingConfirms.get(id)
     if (!pending) return
     clearTimeout(pending.timer)
-    pending.resolve(approved)
+    pending.resolve(decision)
   }
 
-  /** 结束挂起的确认（中止 / 连接关闭兜底），按「取消」处理 —— 确认卡不限时，就靠它收尾 */
+  /** 结束挂起的确认（中止 / 连接关闭兜底），按「拒绝一次」处理 —— 确认卡不限时，就靠它收尾 */
   private clearPendingConfirms(requestId?: string): void {
     for (const pending of this.pendingConfirms.values()) {
       if (requestId && pending.requestId !== requestId) continue
       clearTimeout(pending.timer)
-      pending.resolve(false)
+      pending.resolve('reject_once')
     }
   }
 
+  /**
+   * 弹确认卡等用户裁决。
+   *
+   * `options` 按 agent 广告的 `option.kind` 收窄（见 `confirmOptionsFromAcpKinds`）——
+   * agent 只给 allow_once / reject_once 时，界面上就不会出现「总是」那一档。
+   * 「总是允许」的记忆交给 agent 自己（ACP 的 allow_always 语义就是「以后别再问」），
+   * 本地不再记一份，免得与 agent 侧的判断打架。
+   */
   private requestConfirm(
     workspaceName: string,
+    options: ConfirmOption[],
     req: { requestId: string; toolCallId: string; toolName: string; command: string }
-  ): Promise<boolean> {
+  ): Promise<ConfirmDecision> {
     const sink = this.confirmSink
-    if (!sink) return Promise.resolve(true)
-    const result = this.confirmChain.then(() => this.doRequestConfirm(workspaceName, req, sink))
+    if (!sink) return Promise.resolve('allow_once')
+    const result = this.confirmChain.then(() =>
+      this.doRequestConfirm(workspaceName, options, req, sink)
+    )
     this.confirmChain = result.then(
       () => undefined,
       () => undefined
@@ -314,18 +329,19 @@ class AcpAgentService extends EventEmitter {
 
   private doRequestConfirm(
     workspaceName: string,
+    options: ConfirmOption[],
     req: { requestId: string; toolCallId: string; toolName: string; command: string },
     sink: AgentConfirmSink
-  ): Promise<boolean> {
+  ): Promise<ConfirmDecision> {
     const id = randomUUID()
-    return new Promise<boolean>((resolve) => {
-      const settle = (approved: boolean) => {
+    return new Promise<ConfirmDecision>((resolve) => {
+      const settle = (decision: ConfirmDecision) => {
         this.pendingConfirms.delete(id)
         sink.resolved(id)
-        resolve(approved)
+        resolve(decision)
       }
       const timer = armConfirmTimeout(
-        () => settle(false),
+        () => settle('reject_once'),
         storage.getAiSettings().confirmTimeoutMs
       )
       this.pendingConfirms.set(id, { requestId: req.requestId, resolve: settle, timer })
@@ -335,6 +351,7 @@ class AcpAgentService extends EventEmitter {
         toolCallId: req.toolCallId,
         toolName: req.toolName,
         command: req.command,
+        options,
         workspaceName
       })
     })
@@ -1078,8 +1095,12 @@ class AcpAgentService extends EventEmitter {
 
   /** 每轮提问前把当前权限模式下发到 agent 档位；agent 不支持 / 切不动只记日志，不打断这一轮 */
   private async applyPermissionMode(ws: ConversationAcpSession): Promise<void> {
-    const mode: AiPermissionMode =
-      storage.getAiSettings().permissionMode === 'confirm' ? 'confirm' : 'full'
+    /**
+     * ⚠️ `readonly` 与 `confirm` 走同一条路（切到 agent 的「先问」档）——
+     * 若把 readonly 映射成「不问」档，agent 会自己就把动作做了、我们连权限请求都收不到，
+     * 只读就形同虚设。真正的拒绝在 `handlePermission` 的 readonly 分支。
+     */
+    const mode: AiPermissionMode = storage.getAiSettings().permissionMode ?? 'full'
     const targetId = this.pickModeId(ws, mode)
     if (!targetId || targetId === ws.appliedModeId || !ws.ctx || !ws.sessionId) return
     try {
@@ -1246,22 +1267,43 @@ class AcpAgentService extends EventEmitter {
         ? { outcome: { outcome: 'selected', optionId } }
         : { outcome: { outcome: 'cancelled' } }
 
+    // 只读模式：一律拒绝（不弹卡）—— 与内置工具的 guardWrite 同一档语义
+    if (settings.permissionMode === 'readonly') {
+      return selected(pick('reject_once') ?? pick('reject_always'))
+    }
     if (settings.permissionMode !== 'confirm') {
       // 自动执行：直接放行（优先 allow_always，让 agent 后续不再逐次询问）
       return selected(pick('allow_always') ?? pick('allow_once'))
     }
 
-    const approved = requestId
-      ? await this.requestConfirm(ws.workspaceName, {
-          requestId,
-          toolCallId: toolCall.toolCallId,
-          toolName: toolCall.title ?? 'tool',
-          command: toolCall.title ?? ''
-        })
-      : false
-    return approved
-      ? selected(pick('allow_once') ?? pick('allow_always'))
-      : selected(pick('reject_once') ?? pick('reject_always'))
+    // 确认卡：可用档位按 agent 广告的 kind 收窄（它没给 allow_always 就不显示「总是允许」）
+    const decision: ConfirmDecision = requestId
+      ? await this.requestConfirm(
+          ws.workspaceName,
+          confirmOptionsFromAcpKinds(options.map((o) => o.kind)),
+          {
+            requestId,
+            toolCallId: toolCall.toolCallId,
+            toolName: toolCall.title ?? 'tool',
+            command: toolCall.title ?? ''
+          }
+        )
+      : 'reject_once'
+    /**
+     * 裁决 → ACP option。⚠️ 只在**同类**里兜底（allow 退回 allow、reject 退回 reject）——
+     * 绝不跨类兜底：那会在用户点了「拒绝」之后挑到一个 allow 档，把拒绝静默反转成放行
+     * （这也是上面 `pick` 刻意不兜 `options[0]` 的原因）。
+     */
+    switch (decision) {
+      case 'allow_once':
+        return selected(pick('allow_once') ?? pick('allow_always'))
+      case 'allow_always':
+        return selected(pick('allow_always') ?? pick('allow_once'))
+      case 'reject_always':
+        return selected(pick('reject_always') ?? pick('reject_once'))
+      default:
+        return selected(pick('reject_once') ?? pick('reject_always'))
+    }
   }
 
   /**

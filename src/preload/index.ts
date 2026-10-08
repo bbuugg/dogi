@@ -33,6 +33,8 @@ import type {
   BrowserSessionState,
   BrowserViewportMode,
   CommandHistoryEntry,
+  ConfirmDecision,
+  ConversationTransferResult,
   DetectedAcpAgent,
   GitAction,
   GitBranchesResult,
@@ -383,11 +385,38 @@ const api = {
       modelId?: string
       acpAgentId?: string
       acpSessionId?: string
+      /**
+       * 这条会话用哪些 MCP server（允许清单）。`undefined` = 不限（用全部全局启用的），
+       * `[]` = 一个都不用。见 AgentConversation.mcpServerIds。
+       */
+      mcpServerIds?: string[]
       /** 归档态：true 收进「已归档」分组，false / undefined 取消归档 */
       archived?: boolean
     }): Promise<AgentConversation> => ipcRenderer.invoke('agent:conversations:save', input),
     deleteConversation: (id: string): Promise<void> =>
       ipcRenderer.invoke('agent:conversations:delete', id),
+    /**
+     * **从此签出（分支）**：以某条会话为模板造一条新会话，原会话一字不动。
+     * `upToMessageId` 给了就在那条消息处截断（含它），不给就整体复制。
+     * null = 不能分支（不存在 / 是 ACP 会话 —— 它的消息在 agent 那边）。
+     */
+    forkConversation: (payload: {
+      id: string
+      upToMessageId?: string
+    }): Promise<AgentConversation | null> =>
+      ipcRenderer.invoke('agent:conversations:fork', payload),
+    /** 导出会话到用户选定的 JSON 文件（弹保存框；从主进程读真源） */
+    exportConversation: (id: string): Promise<ConversationTransferResult> =>
+      ipcRenderer.invoke('agent:conversations:export', id),
+    /** 从 JSON 文件导入一条会话到目标工作区（弹文件框；导入即落盘） */
+    importConversation: (workspaceId: string): Promise<ConversationTransferResult> =>
+      ipcRenderer.invoke('agent:conversations:import', workspaceId),
+    /**
+     * **运行中插话（steer）**：这一轮还在跑时把这句话排进「下一个工具步边界」。
+     * 返回 false = 这条会话此刻没在跑（当普通消息发即可）。
+     */
+    steer: (payload: { conversationId: string; text: string }): Promise<boolean> =>
+      ipcRenderer.invoke('agent:steer', payload),
     /**
      * 终端 AI 助手的会话（独立目录存储，**绝不进工作区会话列表**）。
      * 与工作区会话同构（AgentConversation），但不带 workspaceId / ACP 绑定。
@@ -418,6 +447,12 @@ const api = {
     chat: (req: AgentChatRequest): Promise<{ requestId: string }> =>
       ipcRenderer.invoke('agent:chat', req),
     abort: (requestId: string): Promise<void> => ipcRenderer.invoke('agent:abort', requestId),
+    /**
+     * **单条命令停止**：只杀这一条 `execute_command` 的进程树，这一轮继续跑
+     * （与 `abort` 中止整轮是两条路）。返回 false = 这条已经跑完 / 不存在。
+     */
+    stopCommand: (toolCallId: string): Promise<boolean> =>
+      ipcRenderer.invoke('agent:command:stop', toolCallId),
     /**
      * ACP（外部 agent）：会话由 agent 自己管理，本应用只做「发现 → 导入 → 绑定」。
      * 检测 / 会话列表 / 删除都走临时连接，用完即杀。
@@ -479,9 +514,9 @@ const api = {
     /** 确认已有结论（中止 / 回合结束由主进程通知移除卡片） */
     onConfirmResolved: (cb: (payload: { id: string }) => void) =>
       subscribe('agent:confirm-resolved', cb),
-    /** 回复确认请求：approved=true 执行，false 取消 */
-    resolveConfirm: (id: string, approved: boolean): Promise<void> =>
-      ipcRenderer.invoke('agent:confirm:resolve', { id, approved }),
+    /** 回复确认请求：四档裁决（allow_once / allow_always / reject_once / reject_always） */
+    resolveConfirm: (id: string, decision: ConfirmDecision): Promise<void> =>
+      ipcRenderer.invoke('agent:confirm:resolve', { id, decision }),
     /** 工作区文件（右侧文件树 / 编辑器）：列表懒加载，一次读一层 */
     fs: {
       /** 列出某目录的直接子项；dir 为空表示工作区根 */
@@ -888,7 +923,13 @@ const api = {
       ipcRenderer.invoke('git:action', cwd, action),
     /** 列出一个目录条目（未跟踪的目录 / 嵌套仓库）里的文件，仅用于展示 */
     dirList: (cwd: string, path: string): Promise<string[]> =>
-      ipcRenderer.invoke('git:dirList', cwd, path)
+      ipcRenderer.invoke('git:dirList', cwd, path),
+    /** 这台机器装没装 git（面板据此给「未安装」引导，而不是显示 spawn ENOENT） */
+    version: (): Promise<{ installed: boolean; version: string | null }> =>
+      ipcRenderer.invoke('git:version'),
+    /** 克隆仓库到 destDir（必须不存在），返回克隆后的目录；UI 再据此建工作区 */
+    clone: (url: string, destDir: string): Promise<string> =>
+      ipcRenderer.invoke('git:clone', url, destDir)
   },
   /**
    * 自动更新（GitHub Releases，正式通道）。
