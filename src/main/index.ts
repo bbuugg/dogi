@@ -9,6 +9,7 @@ import { hostLogger } from './services/log/logger'
 import { commandHistory } from './services/terminal/history'
 import { initArtifactStore } from './services/ai/output-artifact'
 import { acpAgentService } from './services/ai/acp-agent'
+import { stopWorkspaceHealthWatch } from './services/ai/workspace-health'
 import {
   registerWorkspaceMediaScheme,
   serveWorkspaceMedia
@@ -318,6 +319,8 @@ app.on('will-quit', () => {
   tray?.destroy()
   tray = null
   acpAgentService.dispose()
+  // 工作区目录巡检的定时器（已 unref，退不退得掉都不靠它，这里只是收干净）
+  stopWorkspaceHealthWatch()
 })
 
 /**

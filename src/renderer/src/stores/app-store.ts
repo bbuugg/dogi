@@ -194,6 +194,16 @@ export const useAppStore = create<AppStore>()((set, get) => {
       if (conversationId) agentRequestConversations.set(requestId, conversationId)
       get().handleAgentEvent(requestId, event)
     })
+    /**
+     * 工作区目录巡检的结论（主进程 30s 一轮，见 services/ai/workspace-health.ts）。
+     *
+     * 只在**目录被删 / 恢复**时才来一条，payload 是改动后的全量清单 —— 整份换掉即可。
+     * 不在这里做任何「目录没了要不要切走」的决策：目录没了只是**不能往里新建**，
+     * 已有的会话历史照样能看（见 createAgentConversation 的拦截）。
+     */
+    window.api.agent.onWorkspacesChanged((workspaces) => {
+      set({ agentWorkspaces: workspaces })
+    })
     // ---------- 客户端工具（渲染端执行、渲染端确认；定义随 agent:chat 请求携带） ----------
     window.api.clientTools.onInvoke((payload) => {
       void handleClientToolInvoke(payload)
@@ -2223,10 +2233,26 @@ export const useAppStore = create<AppStore>()((set, get) => {
         }
       }),
 
-    createAgentConversation: (workspaceId, kind, acpAgentId) =>
+    createAgentConversation: (workspaceId, kind, acpAgentId) => {
+      const wid = workspaceId ?? get().activeAgentWorkspaceId
+      if (!wid) return
+      /**
+       * 目录不在了就别建：建出来也是死路 —— 首条消息发出去，主进程一定会拒
+       * （`chatWorkspace` / `acpAgentService.chat` 里都自己 stat 了一次，**那才是真拦**）。
+       * 这里先拦一道，只是让用户**当场**看到为什么，而不是白打一条消息再收到报错。
+       *
+       * ⚠️ 标记是主进程巡检的结论（30s 一轮，见 services/ai/workspace-health.ts），
+       * **可能慢半拍** —— 所以别把它当成唯一防线，也别在别处再复制一份这个判断。
+       * 打开这个工作区**已有**的会话不拦：目录没了只是不能往里放东西，历史照样能看。
+       */
+      const ws = get().agentWorkspaces.find((w) => w.id === wid)
+      if (ws?.dirMissing) {
+        void import('antd').then(({ message }) =>
+          message.error(`工作区目录不存在：${ws.path}（可能已被删除或移动），无法新建会话`)
+        )
+        return
+      }
       set((s) => {
-        const wid = workspaceId ?? s.activeAgentWorkspaceId
-        if (!wid) return {}
         const backend: AgentBackend = kind ?? 'mastra'
         /**
          * 「新建会话」= 打开**这个工作区的新建会话页**（草稿，侧边栏不列它，见 isDraftConversation）。
@@ -2268,7 +2294,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
           activeAgentConversationId: effectiveId,
           ...addOrFocusTab(s, agentTab({ id: effectiveId, title: target.title }))
         }
-      }),
+      })
+    },
 
     /**
      * 建好 ACP 会话的 agent 侧会话（`session/new`），把它广告的配置项取回来。

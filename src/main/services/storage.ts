@@ -26,6 +26,7 @@ import type {
 } from '@shared/types'
 import { DEFAULT_MAX_RETRIES } from '@shared/ai-timeouts'
 import { DEFAULT_SHORTCUTS } from '@shared/shortcuts'
+import { applyDirMissing } from './ai/workspace-health'
 import {
   conversationStore,
   terminalConversationStore,
@@ -1027,7 +1028,14 @@ class StorageService {
     return this.store.get('agentWorkspaces').find((w) => w.id === id)
   }
 
-  /** 保存工作区（upsert）；相同 path 视为同一工作区，改名即更新 */
+  /**
+   * 保存工作区（upsert）；相同 path 视为同一工作区，改名即更新。
+   *
+   * ⚠️ **`path` 也要跟着改**：这个函数是「重命名」与「换个目录」**共同的落点**
+   * （编辑对话框两者都能改，见 `AgentPanel` 的工作区编辑弹窗），而目录被删 / 被移走之后，
+   * 用户唯一的出路就是把工作区指到新位置 —— 原先更新分支只改 `name`，
+   * 路径改动被**静默丢掉**（用户改完、界面没变、也没有任何提示）。
+   */
   saveAgentWorkspace(input: {
     id?: string
     name: string
@@ -1038,26 +1046,35 @@ class StorageService {
     const byPath = workspaces.find((w) => w.path === input.path)
     const prev = input.id ? workspaces.find((w) => w.id === input.id) : undefined
     const target = byPath ?? prev
-    const next = target
-      ? workspaces.map((w) =>
-          w === target
-            ? {
-                ...w,
-                name: input.name.trim() || w.name,
-                updatedAt: now
-              }
-            : w
-        )
-      : [
-          ...workspaces,
-          {
-            id: crypto.randomUUID(),
-            name: input.name.trim(),
-            path: input.path,
-            createdAt: now,
-            updatedAt: now
-          }
-        ]
+    if (!target) {
+      const next = [
+        ...workspaces,
+        {
+          id: crypto.randomUUID(),
+          name: input.name.trim(),
+          path: input.path,
+          createdAt: now,
+          updatedAt: now
+        }
+      ]
+      this.store.set('agentWorkspaces', next)
+      return next
+    }
+    const renamed = workspaces.map((w) =>
+      w === target
+        ? { ...w, name: input.name.trim() || w.name, path: input.path, updatedAt: now }
+        : w
+    )
+    /**
+     * 换了目录 → **旧目录的结论作废**，顺手把 `dirMissing` 清掉。
+     *
+     * 不清的话侧栏要顶着一个过期的红图标等下一轮巡检（最多 30s）才恢复，
+     * 看起来就像「改路径根本没生效」。这与巡检自己发现「目录已恢复」是同一件事，
+     * 只是这里不用等 —— 用户刚刚亲手指定了一个新目录。
+     * 复用 `applyDirMissing`（它负责「本来就正常就返回原数组」），别在这里再写一遍判断。
+     */
+    const next =
+      target.path === input.path ? renamed : applyDirMissing(renamed, target.id, false)
     this.store.set('agentWorkspaces', next)
     return next
   }
@@ -1068,6 +1085,23 @@ class StorageService {
     // 工作区没了，它的会话也一并清掉，避免留下永远看不到的孤儿数据
     conversationStore.deleteByWorkspace(id)
     return next
+  }
+
+  /**
+   * 写「目录不在了」这个标记（**只由巡检调用**，见 `services/ai/workspace-health.ts`）。
+   * 返回**是否真的翻转了** —— 没变就别写：本 store 每次 `set` 都要全量读盘 + AJV 校验，
+   * 30s 一轮的巡检若每次都无脑写，等于凭空给自己加了一份周期性磁盘开销。
+   *
+   * 「什么算变化」的三条语义（幂等 / 不动 `updatedAt` / 恢复时删字段）**全在
+   * `applyDirMissing` 里**，这里只负责把结果落盘 —— 一份实现，免得存储层与巡检各判一套。
+   */
+  markAgentWorkspaceDirMissing(id: string, missing: boolean): boolean {
+    const workspaces = this.store.get('agentWorkspaces')
+    const next = applyDirMissing(workspaces, id, missing)
+    // 引用不变 = 没变化（见 applyDirMissing 的约定），这一下就是「省掉一次全量落盘」的全部
+    if (next === workspaces) return false
+    this.store.set('agentWorkspaces', next)
+    return true
   }
 
   // ---------- Agent 会话（独立文件存储，见 services/conversation-store.ts） ----------

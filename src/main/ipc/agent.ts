@@ -22,6 +22,7 @@ import { storage } from '../services/storage'
 import { browserSessions } from '../services/browser/session'
 import { purgeArtifacts } from '../services/ai/output-artifact'
 import { commandStopRegistry } from '../services/ai/command-stop'
+import { startWorkspaceHealthWatch } from '../services/ai/workspace-health'
 import {
   exportConversation,
   importConversation
@@ -395,5 +396,18 @@ export function registerAgentIpc(ctx: IpcContext): void {
       agentService.resolveConfirm(payload.id, payload.decision)
       acpAgentService.resolveConfirm(payload.id, payload.decision)
     }
+  )
+
+  /**
+   * 工作区目录巡检（幂等，见 workspace-health.ts）：登记的目录被删 / 被移走时标上
+   * `dirMissing`，侧栏变红 + 禁新建会话。
+   *
+   * 装配点放在这里而不是 `main/index.ts`：它要用 `ctx.broadcast`，而 `ctx` 只在本函数里；
+   * 巡检本身不依赖 IPC 注册顺序（只碰 storage），所以位置随意、放末尾更醒目。
+   * 只在**标记真的翻转**时才广播 —— 目录没变化的那些轮次一个字节都不推。
+   */
+  startWorkspaceHealthWatch(
+    { list: () => storage.listAgentWorkspaces(), mark: (id, missing) => storage.markAgentWorkspaceDirMissing(id, missing) },
+    () => ctx.broadcast('agent:workspaces:changed', storage.listAgentWorkspaces())
   )
 }

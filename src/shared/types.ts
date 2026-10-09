@@ -1419,6 +1419,17 @@ export interface AgentWorkspace {
   path: string
   createdAt: number
   updatedAt: number
+  /**
+   * 绑定的目录不在了（被删 / 被移走）。
+   *
+   * **不是用户改的字段**，由主进程巡检置位（见 `services/ai/workspace-health.ts`）：
+   * 工作区登记表只在「添加工作区」那一刻 stat 过磁盘，之后再不复查 —— 目录没了，
+   * 记录照旧在、界面照旧像没事一样，直到用户去新建会话才撞错。
+   *
+   * 只在 true 时写入（`undefined` = 目录正常），这样老存档不受影响。
+   * 重新登记（改路径 / 改名都走 `saveAgentWorkspace`）会重建整条记录，天然把它清掉。
+   */
+  dirMissing?: boolean
 }
 
 /** Agent 聊天消息（简化版 UIMessage，主进程与渲染进程一致；终端助手与工作区 Agent 共用这一种） */
@@ -1594,6 +1605,15 @@ export type AgentMessagePart =
        * 它也**不落盘**（`persistConversation` 里再拦一道）。
        */
       inputText?: string
+      /**
+       * **命令执行期间**的实时输出（stdout / stderr 两条流各留一份，见
+       * `AgentStreamEvent` 的 `tool-output-delta`）。对齐 fishwork 的 `liveOutput`。
+       *
+       * 与 `inputText` 同性质：**只喂渲染**。`tool-result` 到达时被清掉（命令结束，
+       * 卡片换成结果直显），也不落盘（`stripTransientParts` 再拦一道）。
+       * 两条流各自只保留尾部 `MAX_LIVE_OUTPUT` 字符，防止 `yes` 这类命令把内存吃光。
+       */
+      liveOutput?: { stdout: string; stderr: string }
     }
   | {
       type: 'tool-result'
@@ -1686,6 +1706,23 @@ export type AgentStreamEvent =
       inputTextDelta: string
     }
   | { type: 'tool-call'; toolCallId: string; toolName: string; input: unknown; title?: string; acpKind?: string }
+  /**
+   * **命令执行期间的实时输出增量**（对齐 fishwork 的 `tool-output-delta`）。
+   *
+   * 只有工作区 `execute_command` 会发：主进程在子进程 stdout / stderr 的 data 回调里
+   * 把 chunk 吐出来（经 `tool-output-throttle.ts` 节流）。渲染端把它折进**同 id tool-call**
+   * 的 `liveOutput`，运行中的命令卡就能一帧帧看到输出，而不是等命令跑完才一次性显示。
+   *
+   * ⚠️ 与 `tool-call-delta` 同性质：只喂渲染、**不落盘、不进消息历史**。
+   * 完整输出仍以 `tool-result` 为准（增量的尾部可能因节流被丢几帧，那是刻意的）。
+   */
+  | {
+      type: 'tool-output-delta'
+      toolCallId: string
+      /** 这条增量来自哪条流：stderr 会在渲染端按行首加 `[stderr] ` 前缀 */
+      stream: 'stdout' | 'stderr'
+      delta: string
+    }
   | {
       type: 'tool-result'
       toolCallId: string

@@ -88,6 +88,16 @@ export interface ToolRunContext {
   /** terminal：同一对话内工具执行的串行队列（前一条跑完下一条才开始） */
   queueToolExecution?: <T>(fn: () => Promise<T>) => Promise<T>
   /**
+   * workspace：**命令实时输出的旁路**（execute_command 用，见 `tool-output-throttle.ts`）。
+   *
+   * 子进程 stdout / stderr 每来一块就回调一次，service 侧节流后包成 `tool-output-delta`
+   * 事件下发给渲染端 —— 界面上运行中的命令卡因此能一帧帧看到输出。
+   *
+   * 不注入 = 行为与从前完全一致（只等命令跑完一次性拿到结果），所以终端作用域与子 Agent
+   * 都不需要它。
+   */
+  onToolOutput?: (toolCallId: string, stream: 'stdout' | 'stderr', chunk: string) => void
+  /**
    * workspace：子 Agent 执行器。**只在设置里开启子 Agent 时才注入** ——
    * 没注入时 `delegate` 工具不暴露（模型看不到就不会去用）。
    */

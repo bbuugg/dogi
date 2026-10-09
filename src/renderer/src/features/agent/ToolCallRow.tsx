@@ -366,6 +366,7 @@ export function ToolCallRow({
   title,
   acpKind,
   inputText,
+  liveOutput,
   onStop
 }: {
   toolName: string
@@ -391,6 +392,14 @@ export function ToolCallRow({
    */
   inputText?: string
   /**
+   * **命令执行期间**的实时输出（stdout / stderr 各一份，见 `AgentMessagePart` 的 `liveOutput`）。
+   *
+   * 只在**可单条停止**的命令（`execute_command`）处于 `running` 时渲染成「实时输出」块 ——
+   * 命令一边跑一边出结果，而不是等跑完才一次性显示。命令结束（拿到 tool-result）后
+   * 该字段被清掉、本块让位给结果直显。对齐 fishwork 的 `LiveOutputBlock`。
+   */
+  liveOutput?: { stdout: string; stderr: string }
+  /**
    * 「停止这条命令」的回调。只在**可单条停止**的工具（见 `STOPPABLE_TOOLS`）处于
    * `running` 时才会渲染出按钮 —— 调用方无脑传即可，是否显示由本组件判定。
    *
@@ -409,6 +418,15 @@ export function ToolCallRow({
   const Icon = toolIcon(toolName)
   const meta = STATUS_META[status]
   const StatusIcon = meta.Icon
+  /**
+   * 这条命令**正在跑**（已启动、还没结果）：铺实时输出区 + 自动展开。
+   *
+   * ⚠️ 判据刻意**不看 `liveOutput` 在不在**：那个字段只在**第一段输出到达**时才被创建，
+   * 而「在跑但什么都不吐」的命令（`sleep 30` / 长编译 / 等网络）整轮都没有输出 ——
+   * 拿它当判据会让这类命令退化成一行头部、用户看不到任何「它在跑」的迹象
+   * （fishwork 也踩过同一个坑，见其 `isCommandRunning` 的注释）。
+   */
+  const commandRunning = status === 'running' && STOPPABLE_TOOLS.has(toolName)
   /** 入参流式生成期的预览（null = 没在流式生成，或半截 JSON 里还抠不出可看的东西） */
   const streaming = typeof inputText === 'string' ? streamingToolPreview(inputText) : null
   /** 正在生成的内容（要有它才自动展开 / 吸底：命令类只有横条明细，展开是一片空白） */
@@ -422,8 +440,10 @@ export function ToolCallRow({
    * ⚠️ 也**不能用 useState 初值**，且收起要走 `autoOpenedRef`：上面那条「待批准就展开」
    * 的 effect 在挂载时可能已经把行撑开了（确认卡先于首次渲染到达），无条件 setOpen(false)
    * 会把确认按钮埋进收起体里 — 只收「自己撑开的那一次」。
+   *
+   * 命令运行中同样自动展开（实时输出是这块卡存在的意义，折叠起来等于白流）。
    */
-  const autoOpen = Boolean(streamingText)
+  const autoOpen = Boolean(streamingText) || commandRunning
   const autoOpenedRef = useRef(false)
   useEffect(() => {
     if (autoOpen) {
@@ -438,8 +458,12 @@ export function ToolCallRow({
   const fileDiff = streaming ? null : buildFileDiff(toolName, input)
   /** 读取类（见 NO_PARAM_TOOLS）：展开体只有内容本身，连「结果」这个标题也省掉 */
   const bareOutput = NO_PARAM_TOOLS.has(toolName)
-  /** 该工具的入参不值得展示（diff 版或白名单里的读取类） */
-  const hideParams = Boolean(fileDiff) || bareOutput
+  /**
+   * 该工具的入参不值得展示（diff 版或白名单里的读取类）。
+   * 命令**运行中**也藏参数：命令本身已经在横条明细里（`$ …`），再摆一份
+   * `{"command":"…"}` 的 JSON 纯属噪音 —— 运行中要看的只有实时输出。
+   */
+  const hideParams = Boolean(fileDiff) || bareOutput || commandRunning
   const paramsText = hideParams || input == null ? '' : clip(formatJson(input))
   const errorText = isError ? clip(formatJson(output)) : ''
   /** 结果全文（未截断）：截图地址在文本末尾，截断后再抠可能抠不到 */
@@ -453,7 +477,9 @@ export function ToolCallRow({
   // 入参还在生成时没有可用的 input，改从半截 JSON 里抠（抠出路径 / 命令就显示）。
   // ⚠️ title 只进这里、绝不进工具名（见 toolLabelOf）：否则脚本 / 命令类会把整段命令顶替工具名。
   const preview = (streaming?.detail || toolArgPreview(input) || title || '').replace(/\s+/g, ' ')
-  const hasBody = Boolean(fileDiff || streamingText || paramsText || errorText || outputText || confirm)
+  const hasBody = Boolean(
+    fileDiff || streamingText || commandRunning || paramsText || errorText || outputText || confirm
+  )
   /** 这条命令还在跑、且调用方接了单条停止 → 横条上给一颗「停止」（见 STOPPABLE_TOOLS） */
   const canStop = status === 'running' && Boolean(onStop) && STOPPABLE_TOOLS.has(toolName)
 
@@ -485,6 +511,9 @@ export function ToolCallRow({
       body={
         <>
           {streamingText && <StreamingInputBlock text={streamingText} />}
+          {commandRunning && (
+            <LiveOutputBlock live={liveOutput ?? { stdout: '', stderr: '' }} />
+          )}
           {fileDiff && (
             <FileDiffView path={fileDiff.path} hunks={fileDiff.hunks} deleted={fileDiff.deleted} />
           )}
@@ -588,6 +617,42 @@ function StreamingInputBlock({ text }: { text: string }) {
         )}
       >
         {text}
+      </pre>
+    </div>
+  )
+}
+
+/**
+ * 命令**实时输出**块（`execute_command` 运行中铺在展开体里）。
+ *
+ * 两条流合并展示：stderr 接在 stdout 之后（行首的 `[stderr] ` 前缀已在数据里，
+ * 视觉上能区分）。合并顺序与最终 `tool-result` 的拼法一致（stdout 在前、stderr 在后），
+ * 命令结束时卡片从「实时输出」平滑换成结果直显，读起来是同一份东西。
+ *
+ * ⚠️ **没有输出也要照常渲染这一块**：`live` 可能是全空（命令刚起步、或压根不吐东西）。
+ * 这块是用户「这条命令在跑」的唯一视觉反馈，撤掉的话长编译 / `sleep` 这类沉默命令
+ * 看起来就像卡死了。状态句随之换 —— 「实时输出中…」/「命令运行中，暂无输出」。
+ *
+ * ⚠️ **不设自己的 max-height / overflow**：滚动统一由 `CollapsibleRow` 的展开体承担
+ * （它已经带 `max-h-64` + `stickToBottom` 吸底），否则会出现「外层一个滚动条 + 这里
+ * 一个滚动条」的套娃（见 AGENTS 6.18）。
+ */
+function LiveOutputBlock({ live }: { live: { stdout: string; stderr: string } }) {
+  const text = live.stderr
+    ? live.stdout + (live.stdout && !live.stdout.endsWith('\n') ? '\n' : '') + live.stderr
+    : live.stdout
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-xs font-semibold tracking-wide text-muted-foreground/70">
+        {text ? '实时输出中…' : '命令运行中，暂无输出'}
+      </span>
+      <pre
+        className={cn(
+          'whitespace-pre-wrap break-all rounded border border-border/70 bg-muted/40 px-2 py-1.5',
+          'font-mono text-[13px] leading-relaxed text-muted-foreground'
+        )}
+      >
+        {text || '（这个命令还没有产生任何 stdout / stderr。它可能正在跑，也可能一直沉默。）'}
       </pre>
     </div>
   )

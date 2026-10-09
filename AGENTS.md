@@ -40,7 +40,7 @@
 | 功能区 | 侧边栏 | 主区域 |
 | --- | --- | --- |
 | **主机** | 主机列表（分组 / 拖拽 / 颜色）+ 下半区「脚本」分区（可折叠、可拖高） | 终端标签、SFTP 文件管理标签、远程桌面标签 |
-| **AI Agent** | 工作区 → 会话两层树；**工作区行的图标随其下会话状态变**（有会话进行中 = 转圈 / 等待，否则文件夹），会话行带状态图标（等回答 / 运行中 / 静止），底部有「已归档」分组 | Agent 会话页（对话流 + 内嵌终端 + 工作区文件树/预览 + 快捷功能） |
+| **AI Agent** | 工作区 → 会话两层树；**工作区行的图标随其下会话状态变**（有会话进行中 = 转圈 / 等待，否则文件夹；**目录被删 / 移走 = 红文件夹**，见 4.40），会话行带状态图标（等回答 / 运行中 / 静止），底部有「已归档」分组 | Agent 会话页（对话流 + 内嵌终端 + 工作区文件树/预览 + 快捷功能） |
 | **笔记** | 笔记列表（分组 / 拖拽 / 搜索） | Monaco 编辑器标签，语言可选 |
 | **接口请求** | 保存的请求列表（分组 / 拖拽 / 历史） | HTTP 调试页 / WebSocket 调试页 |
 | **插件管理** | 已安装插件列表 | 插件视图（以标签页打开）；内置：Redis 客户端（🔴）、端口占用（🔌） |
@@ -86,7 +86,8 @@
 2. **工作区 Agent**（`AgentPage` / `AgentConversationView`）：绑定本地目录，工具为 `list_files` / `find_files` / `search_files` / `read_file` / `write_file` / `edit_file` / `delete_file` / `execute_command` / `git_read` / `web_fetch` / `screenshot` / `read_skill` / `browser_*`（见下）/ `delegate`（子 Agent，**默认关闭**，见 4.35），另有工作区文件树与图片 / 视频 / SVG 预览，以及可折叠的**内嵌浏览器面板**（看 Agent 正在操作哪个页面）。
    - `git_read`：只读看仓库（status / diff / log / show）—— 写仓库仍走 `execute_command`（那边有确认闸）。
    - `screenshot`：截当前内嵌浏览器页面，**存进工作区** `.dogi/screenshots/` 并按 `dogi-ws://` 协议回一张图（见 4.9 / 4.11）。
-   - `execute_command` 在工具行上有**单独的「停止」按钮**，只杀这条命令、不中止整轮对话（见 4.33）。
+   - `execute_command` 跑起来时**实时吐输出**（工具卡自动展开、一帧帧出 stdout / stderr，见 4.39），
+     工具行上另有**单独的「停止」按钮**，只杀这条命令、不中止整轮对话（见 4.33）。
 
 **客户端工具**（渲染进程执行的能力，见 4.23）：页面用 `registerClientTool` 注册，定义随下一次请求上报，
 主进程把调用广播回渲染端执行，权限与确认按客户端的权限设置在**渲染端**判定。
@@ -183,6 +184,9 @@ src/
                            # workspace-config.ts workspace-fs.ts workspace-media.ts
                            # git-read.ts（只读 git 工具）sub-agent.ts（delegate 子 Agent，见 4.35）
                            # steer.ts（运行中插话）command-stop.ts（单条命令的停止表，见 4.33）
+                           # tool-input-throttle.ts / tool-output-throttle.ts（流式增量节流，见 4.39）
+                           # workspace-health.ts（工作区目录巡检，见 4.40；**不 import electron**，
+                           #                     判据与标记语义都是纯的，好让验证脚本直接跑）
                            # conversation-transfer.ts（会话导出 / 导入，见 4.34）
                            # plugin-hooks.ts（插件 tool:call / tool:result 钩子，见 4.38）
                            # agent-core/（工作区工具 / 系统提示词 / 事件适配 / 路径与忽略规则）
@@ -1188,9 +1192,29 @@ inputSchema, scope: 'workspace'|'terminal'|'both', available?, execute(input, ca
 - 折叠状态里也要算：**折叠 / 收起时看不到会话行**，工作区图标是唯一的信号；
   归档会话也一并算（它只是折起来了，仍在跑就该亮着）。
 - 槽**始终占位**（静止时渲染一个图标而不是不渲染），否则标题会在「有状态 / 无状态」之间左右跳。
+- **第四态**：工作区目录被删 / 被移走时，`Folder` 换成危险色（`text-destructive`，
+  形状不变）+ 整行 title 变成「目录不存在」提示（见 4.40）。它排在「运行中 / 等待」**之后**。
 
 ⚠️ 状态判定复用 `statusByConversation`（父组件一次遍历算成的 `Map<id, RowStatus>`），
 别在工作区行里再写一遍 `Object.values(agentRuns).some(...)` —— 那是当初会话行卡顿的同款成因。
+
+⚠️ **两列对齐契约（改任何一边都要一起改）**：工作区行是 `[展开箭头][状态图标][名称]` **三格**，
+会话行是 `[状态图标][标题]` **两格**。所以会话行必须自带 `pl-8`（= 工作区行「名称之前」的
+全部宽度：`px-1.5` 6 + 箭头按钮 `p-0.5 + size-4` 20 + `gap-1.5` 6 = 32px），两列才对得上：
+
+| 列 | x | 工作区行 | 会话行 |
+| --- | --- | --- | --- |
+| 图标列 | 32px | 状态图标（文件夹 / 转圈 / 暂停） | 状态图标（形态 / 转圈 / 暂停） |
+| 文字列 | 54px | 工作区名称 | 会话标题 |
+
+- 漏掉这 32px 的症状：会话行整行贴到最左、比工作区名称左 26px，**层级看着是平的** ——
+  完全读不出「这条会话属于上面那个工作区」。`b238062` 给工作区行加状态图标槽时就是这么漏的
+  （名称从 32px 被推到 54px，会话行没跟着补）。
+- 同一批缩进还要跟着改的两处：列表空态提示（`pl-[54px]`，对齐标题）与「已归档」分组头
+  （`pl-8`，它的折叠箭头要对齐会话行的**图标**列）。
+- ⚠️ **别照抄 fishwork**：它的工作区行是 `[图标][名称][箭头]`（箭头在名称**右边**），
+  两边都从 28px 起、天然对齐，所以那边**没有**这层缩进（它那边写 `px-1.5` 是对的）。
+  dogi 把箭头挪到了左边，是刻意的分叉 —— 照抄 fishwork 的 `px-1.5` 会把缩进又弄丢。
 
 ### 4.29 会话归档：**只改列表归属**，不是「禁用」也不是「删除」
 
@@ -1570,6 +1594,95 @@ inputSchema, scope: 'workspace'|'terminal'|'both', available?, execute(input, ca
 - 验证：`scripts/verify-sub-agent.mjs` 第 6 节（`tool:call` 拦下即不执行且理由当结果 /
   `tool:result` 改写生效 / 钩子抛错当没挂 / **钩子看到的是原始结果、插话拼在最末尾**）。
 
+### 4.39 命令的**实时输出**（`tool-output-delta` → `liveOutput`）
+
+命令一跑起来，界面上那张工具卡就一帧帧出输出，而不是等命令结束才一次性显示（对齐 fishwork
+的 `LiveOutputBlock`）。这是「单条命令停止」（4.33）的配套：**能看到它在跑，才知道该不该停**。
+
+数据链路（四段，缺一段就退化成「等命令跑完」）：
+
+| 段 | 位置 | 做什么 |
+| --- | --- | --- |
+| 1 | `agent-core/tools.ts` 的 `runCommand` | `child.stdout/stderr.on('data')` 里除了喂产物写入器，再调 `ctx.onToolOutput?.(toolCallId, 'stdout'\|'stderr', chunk)` |
+| 2 | `services/ai/tool-output-throttle.ts` | 攒够 240 字符 / 60ms 才下发一帧（首帧立刻发），stdout 与 stderr 各自保序 |
+| 3 | `services/ai/agent.ts` | 每条请求一个节流器（`outputThrottles`），flush 后包成 `tool-output-delta` 事件；**收尾只删不 flush** |
+| 4 | `stores/agent-helpers.ts` + `ToolCallRow.tsx` | 折进同 id tool-call 的 `liveOutput`；`commandRunning` 时铺实时输出块并自动展开 |
+
+- ⚠️ **节流器必须在任何非增量事件之前 flush**（`send()` 里统一做，见 2 处的注释）：
+  尾部增量若排到 `tool-result` 之后，前端那份「运行中实时输出」会永远停在收口前一刻
+  （结果已经换上了，实时块还挂着）。**别绕过 `send()` 直接 `emitEvent`**。
+- ⚠️ **收尾（`finally`）只 `delete`、不再 `flush`**：攒着的尾巴早在 `finish` 之前就被 `send()`
+  结掉了；在 finally 里再 flush 只会把增量排到 `finish` 之后 —— 那一刻 ipc 层已把 requestId
+  的归属摘掉（`chatConversations.delete`），渲染端认不出、白丢。
+- ⚠️ **判据用 `commandRunning`（`status === 'running' && STOPPABLE_TOOLS.has(toolName)`），
+  `不看 `liveOutput` 在不在**：那个字段只在**第一段输出到达**时才创建，`sleep 30` / 长编译 /
+  等网络这类**在跑但什么都不吐**的命令整轮都没有它 —— 拿它当判据会让这类命令退化成一行头部
+  （fishwork 也踩过同一个坑，见其 `isCommandRunning` 的注释）。
+- ⚠️ `liveOutput` 与 `inputText` 同性质：**只喂渲染**。`tool-result` 到达时在 `appendAgentPart`
+  里清掉（卡片换成结果直显），`stripTransientParts` 落盘前再拦一道（每 3 秒的增量落盘正好
+  可能卡在命令运行中途）。两条流各自封顶 `MAX_LIVE_OUTPUT = 64_000` 字符、**只留尾部**
+  （`yes` / `find /` 这类命令否则会把内存与 DOM 撑爆）。
+- stderr 在**渲染端**按行首加 `[stderr] ` 前缀（`appendStreamChunk`）：chunk 边界可能落在一行
+  中间，前缀只能插在「这一行的第一个非空字符」前，空行不插。
+- 展示时两条流合并成一份（stdout 在前、stderr 在后），**与最终 `tool-result` 的拼法一致** ——
+  命令结束时卡片从「实时输出」平滑换成结果直显，读起来是同一份东西。
+- 实时块**不设自己的 `max-height` / `overflow`**：滚动统一由 `CollapsibleRow` 的展开体承担
+  （它已带 `max-h-64` + `stickToBottom` 吸底），否则会出现套娃滚动条（见 6.18）。
+- 终端作用域 / 子 Agent / ACP 都**没有**这条链路：终端的 `run_in_terminal` 进程归用户终端管，
+  子 Agent 的只读白名单里没有 `execute_command`，ACP 的命令活在外部 agent 进程里。
+- 验证：`scripts/verify-tool-output-throttle.mjs`（节流 + **保序** + **零丢失**）、
+  `verify-agent-posix-command.mjs` 第 4 节（真跑一条命令，断言 stdout / stderr 都实时吐出且
+  带对的 toolCallId）、`verify-agent-error-parts.mjs`（折叠 / 前缀 / 收口清掉 / 超限留尾 / 落盘摘除）。
+
+### 4.40 工作区目录巡检：目录被删 / 被移走要自己发现（移植自 fishwork）
+
+工作区登记表（`storage` 的 `agentWorkspaces`）**只在「添加工作区」那一刻 stat 过磁盘**，
+之后再也不复查。目录被删是**外部事件**（用户在文件管理器里删的、移动硬盘拔了、盘符变了），
+应用没有任何回调能感知 —— 结果就是：记录照旧在、侧栏照旧像没事一样，直到用户发消息才撞错，
+而错得很难懂（十几个工具各报一句 `ENOENT`）。
+
+链路（四段）：
+
+| 段 | 位置 | 做什么 |
+| --- | --- | --- |
+| 1 | `services/ai/workspace-health.ts` | 30s 一轮 `sweepWorkspaces`：逐项 `stat().isDirectory()`，翻转了就写标记；**启动时立刻先扫一遍** |
+| 2 | `services/storage.ts` 的 `markAgentWorkspaceDirMissing` | 落盘 `AgentWorkspace.dirMissing`；**只把 `applyDirMissing` 的结果写下去** |
+| 3 | `ipc/agent.ts` 注册末尾 | 装配 `{ list, mark }` 两个方法 + `ctx.broadcast('agent:workspaces:changed', 全量清单)`（**只在翻转时**） |
+| 4 | `preload` → `app-store` → `AgentPanel` | 整份换掉 `agentWorkspaces`；目录没了的工作区**红图标 + 提示 + 禁新建会话** |
+
+- **判据只有一份**：`isWorkspaceDirAvailable`（`stat` 失败 / **不是目录** / 空串都算不在）。
+  巡检、内置 agent 的回合开始、ACP 的回合开始三处共用 —— 各写一遍迟早漂成不同结论。
+- **`applyDirMissing` 是纯函数**（不碰磁盘、不碰存储），三条语义全在它一处：**幂等**
+  （没翻转就返回**原数组引用**，调用方据此免掉一次全量落盘 + 一次广播）、**不动 `updatedAt`**
+  （这不是用户的改动，侧栏按它排序的话巡检一次列表就跳一下）、**恢复时删字段**
+  （而不是写 `dirMissing: false`）。
+- ⚠️ **权威判定在「发消息」，不在「存会话」**：dogi 的会话存在
+  `<userData>/agent-conversations/`，**不在工作区目录里** —— 所以「存一条会话记录」根本不需要
+  那个目录（`导入会话文件` / `导入 ACP 会话` 也走同一条路）。真正需要目录的是**跑一轮**：
+  工具要 chdir 进去、ACP 要 `spawn(..., cwd: workspace.path)`。因此校验加在
+  `chatWorkspace` 与 `acpAgentService.chat` 的 `fail()` 分支旁，**不是** `agent:conversations:save`
+  （加在那里会把「往失效工作区导入历史会话」一起误杀，而那个操作本来是无害的）。
+- 两处校验都**自己再 `stat` 一次、不看 `dirMissing`**：那个标记来自 30s 一轮的巡检，
+  可能慢半拍，而「目录刚被删、用户接着发消息」正是最该拦住的一刻。
+- 渲染端 `createAgentConversation` 的拦截（弹一句人话）只是**体验层**：让用户当场知道为什么，
+  不用白打一条消息。命令面板 / 快捷键等入口绕过去也没关系，主进程那道兜得住。
+- **打开已有会话不拦**：目录没了只是不能往里放东西，历史消息 / diff / 产物都在本地，照样能看。
+- 侧栏那枚红图标**保留 `Folder` 形状**、只换颜色（不是换个警告三角）：用户扫一眼就对得上
+  是哪一个工作区。优先级排在「运行中 / 等待确认」**之后** —— 那两个是瞬时活动态，更该抢眼。
+- 「更多」菜单里的**导入会话**不禁（同 fishwork 的取舍）：它是纯数据操作；**重命名 / 删除工作区**
+  也不禁 —— 移除是用户唯一的出路，得能把这条失效记录拿掉。
+- **恢复路径（`目录回来了` / `换个目录`）**：
+  - 目录只是暂时不在（移动硬盘拔了又插上、网络盘挂回来）→ **巡检自己会发现**，下一轮就把标记
+    清掉（日志里一条「目录已恢复」），侧栏自动变回正常色，不用用户做任何事。
+  - 目录真的没了、要指到别处 → 走工作区行的「更多 → 重命名工作区」（这个弹窗里**同时**有
+    名称与目录两个字段，`选择` 按钮能重挑目录）。⚠️ 顺带修了一个老 bug：
+    `storage.saveAgentWorkspace` 的更新分支原先**只改 `name`、把 `path` 的改动静默丢掉** ——
+    也就是「换个目录」根本改不动，用户改完界面没变、也没有任何提示。现在 `path` 会真的写下去，
+    并且**换目录时顺手清掉 `dirMissing`**（旧目录的结论对新目录不成立，不清的话侧栏要顶着
+    一个过期的红图标等下一轮巡检，看起来就像「改路径没生效」）。
+- 验证：`scripts/verify-workspace-health.mjs`（判据 / `applyDirMissing` 三条语义 / 巡检只对变化
+  写、`path` 为空跳过 / 启动即扫、`onChange` 只在翻转时来、start-stop 幂等）。
+
 ## 五、验证工具链
 
 ### 5.1 隔离实例 + CDP（无 GUI 环境下的标准做法）
@@ -1622,14 +1735,16 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
 | `scripts/verify-sub-agent.mjs` | 子 Agent（`delegate`）+ `buildToolset` 的 `only` / `allowSteer` + 插件钩子（`sub-agent.ts` / `tool-registry.ts` / `steer.ts` / `plugin-hooks.ts` 真源码，不起 Electron；`agent-core` 用桩替掉，只需要 `createAgentFileState`）—— 只读白名单**不含任何改动 / 执行类工具**且全为 `read_*`/`list_*`/`find_*`/`search_*`/`git_read`、`delegate` 未注入执行器时**整体不暴露**（available=false）、`scope` 是 workspace、三种失败路径（无执行器 / 空 task / runner 抛错）都**回说明文本而不抛错**、runner 返回空与超长报告的处理、`only` 只组装白名单里的内置工具、**`allowSteer:false` 不吞插话**（插话仍在注册表里等父 Agent）而缺省档会拼在结果末尾且只注入一次、钩子四条语义（`tool:call` 拦下即不执行且理由当结果 / `tool:result` 改写生效 / 钩子抛错当没挂 / **钩子看到原始结果、插话拼在最末尾**）、两种角色的提示词都声明只读与「不要反问」、步数上限远小于父 Agent 的 500 |
 | `scripts/verify-terminal-chat.mjs` | 终端助手并入统一引擎的全链路（隔离实例 + CDP + **进程内 mock LLM**：OpenAI 兼容 SSE，按脚本逐次应答并记录每次请求的工具清单）—— `scope:'terminal'` 工具集含 `run_in_terminal` 且不含工作区工具、客户端工具随请求上报并在**同一请求内**回填续跑、full 不弹确认框 / confirm 由**渲染端**弹框且拒绝对模型是正常结果、`run_in_terminal` 真写进 PTY、终端会话落 `terminal-conversations/` 且不进 agent 列表、草稿转正 / 左侧列表 / 逐条删除 / **面板里没有「清空历史」**、重启后仍在、客户端工具注册表重启后为空、**超长输出落产物**（第 3b 节，见 4.24：`run_in_terminal` 跑 3000 行 → 结果给出产物 id 与精确的下一次读取参数、开头结尾保留在中段之外、再发一轮 `read_tool_output({id, offset, length})` 把中段读回来且读取头给出下一个 offset）。需先 `npm run build`。⚠️ 第 3b 节的命令是**终端 PowerShell 的原生命令**，别再套 `powershell -Command "…"`：双引号里 `$_` 被外层先展开、单引号里的 `"` 又在组装原生参数行时被剥掉，两层壳各吃掉一层引号（两种写法都产不出内容，报错信息长得像工具坏了）；断言产物 id 也要注意 `inlineText` 是 **JSON 字符串**（引号长成 `\"`，正则两边都得容错） |
 | `scripts/verify-output-artifact.mjs` | 工具输出的「产物」机制（`services/ai/output-artifact.ts` 真源码，`.artifacttest` 包装跑，**不需要 Electron**，见 4.24）—— 短输出**不建文件**、超限落盘且文本里带 id / 总量 / 续读指引、内联的滚动结尾**确实是真正的末尾**（用 `MIDDLE_UNIQUE_MARK` 哨兵区分头尾中）、**第一块就超内联上限时开头照样填**、按 offset 分段读能逐字拼回全文、`AnsiStripper` 跨块不吞半截转义序列（CSI / OSC 都被劈开过）、非法 id（含 `../`、绝对路径、Windows 保留名）一律拒绝、4MB 上限标 `truncated`、`purgeArtifacts` 只删本会话、**回归：>256KB 输出不再变成空串** |
-| `scripts/verify-agent-posix-command.mjs` | Agent `execute_command` 的 Windows POSIX 执行环境（`agent-core/tools.ts` 真源码，**按 `buildWorkspaceToolDefs()` + 假 ctx** 调用，见 4.23 的静态定义 API）：注入 Git Bash 后 `ls` / 管道 + 通配 / `grep -n` / for 循环 / `$HOME` 按 POSIX 语义工作；不注入时回退 PowerShell 且仍可执行；工具描述如实声明环境。⚠️ 复制清单里有 `output-artifact.ts`（`execute_command` 现在用它落盘，见 4.24）—— 删掉那一行会 `ERR_MODULE_NOT_FOUND`；需 `DOGI_TEST_BASH=<bash.exe>` 指定 Git Bash，**不指定时 POSIX 用例会失败**（回退 PowerShell 跑 `ls` 只能得到报错，属环境问题不是回归） |
+| `scripts/verify-agent-posix-command.mjs` | Agent `execute_command` 的 Windows POSIX 执行环境 + **命令实时输出旁路**（`agent-core/tools.ts` 真源码，**按 `buildWorkspaceToolDefs()` + 假 ctx** 调用，见 4.23 的静态定义 API）：注入 Git Bash 后 `ls` / 管道 + 通配 / `grep -n` / for 循环 / `$HOME` 按 POSIX 语义工作；不注入时回退 PowerShell 且仍可执行；工具描述如实声明环境；**第 4 节：真跑 `echo L1; echo L2; echo E1 1>&2`，断言 `ctx.onToolOutput` 收到 stdout / stderr 两条流且 toolCallId 正确**（见 4.39）。⚠️ 复制清单里有 `output-artifact.ts`（落盘，见 4.24）、`command-stop.ts`、`shared/confirm.ts`（都是 `tools.ts` 的运行时依赖，见 4.33）—— 少任何一个都 `ERR_MODULE_NOT_FOUND`；需 `DOGI_TEST_BASH=<bash.exe>` 指定 Git Bash，**不指定时 POSIX 用例会失败、第 4 节会 SKIP**（回退 PowerShell 跑 `ls` 只能得到报错，属环境问题不是回归） |
+| `scripts/verify-tool-output-throttle.mjs` | 命令实时输出节流器（`tool-output-throttle.ts` 真源码，纯 Node）—— 首帧立刻下发、随后攒够字符阈值才发、`flush()` 结尾巴；**保序**（换 stream / 换 toolCallId 先把上一条结掉）、**零丢失**（500 条随机切分跨流跨工具 push 后，下发内容的拼接 == push 内容的拼接）、每帧只含单一 key（见 4.39） |
+| `scripts/verify-workspace-health.mjs` | 工作区目录巡检（`workspace-health.ts` 真源码，纯 Node —— 该模块**不 import 任何 Electron / electron-store**，只依赖注入的 `{ list, mark }`，所以一个假宿主就能全测到，见 4.40）—— 判据（真目录 / 不存在 / **路径是文件** / 空串）、`applyDirMissing` 三条语义（幂等时返回**原数组引用**、**不动 `updatedAt`**、恢复时**删字段**而不是写 false、其余项原对象引用不变）、`sweepWorkspaces`（每个有 `path` 的都问一次、`path` 为空整个跳过、返回「有没有翻转」、再扫一轮返回 false）、**目录回来时一轮就恢复**、启动即扫一遍、`onChange` 只在翻转时回调、重复 start / 重复 stop 幂等 |
 | `scripts/verify-agent-status.mjs` | 会话列表三态图标 + 系统通知三条路径（前台挡下 / 开关关闭 / 最小化后真发出 —— **会真的弹一条通知**） |
 | `scripts/verify-agent-edit-match.ts` | edit_file 匹配引擎（`agent-core/edit-match.ts`，`node --experimental-strip-types` 直接跑）—— 精确替换、找不到 / 多处 / oldString===newString 的报错、replaceAll、9 级模糊匹配链逐个触发（行 trim / 块锚点 Levenshtein / 空白归一 / 缩进弹性 / 转义归一 / 边界 trim / 上下文感知）、转义还原撑大匹配被拒、CRLF 辅助函数（换行符归一是 Windows 下编辑 CRLF 文件的前提） |
 | `scripts/verify-agent-file-tools.mjs` | Agent 文件工具行为（`tools.ts` 真源码 + 真临时工作区，包装机制同 posix-command）—— read_file 大文件分段读取（旧实现 >20 万字符连 offset/limit 都抛错的回归）、单行截断、续读 offset 提示、相似文件建议、目录 / 二进制指引；**先读后改**（edit / 覆盖写前必须本会话 read_file 过，外部改动后要求重读，写入也记快照）；edit_file 多处命中不猜 / replaceAll / **CRLF 文件用 LF 的 oldString 编辑且保留 CRLF** / 缩进不一致仍命中；确认模式 guardWrite 拒绝与放行。⚠️ 复制清单里同样有 `output-artifact.ts`（见上一行） |
 | `scripts/verify-agent-file-preview.mjs` | `dogi-ws://` 图片解码、SVG 预览↔编辑、`<video>` 的 206 Range、压缩包提示、`../` 越界 |
 | `scripts/verify-agent-list-projection.ts` | 会话列表投影的结构共享（`features/agent/conversation-list-meta.ts` 真源码，`node --experimental-strip-types`，**不需要 Electron**）—— 500 次流式增量后投影数组与条目对象**引用不变**（= 不重渲染）、会话内容确实在变（防「修成不更新」）、改名 / `updatedAt` 变化 / 草稿转正 / ACP 绑定回填 / 删除 / 顺序变化才换引用 |
 | `scripts/verify-agent-outline-scroll-cost.mjs` | 消息流滚动的每帧开销（隔离实例 + CDP，先 `npm run build`）：页内**打桩计数** `getBoundingClientRect` / `querySelector`，造 50 / 300 轮提问各滚 30 帧 —— 每帧布局读取必须是**对数级**（实测比值 1.34，线性会是 6）、`querySelector` 不再逐条（每帧 1 次而不是几百次）。修复前那段线性扫在 1200 个消息元素上是**每帧 621 次** |
-| `scripts/verify-agent-error-parts.mjs` | 错误文案 part 的追加语义（`stores/agent-helpers.ts` 真源码，只桩掉 `app-store` / `types` 两条 import）—— 同一轮连着多个 `error` 事件（模型级重试每次尝试失败都发一个）**只留最后一条**、错误文案之后的正文增量另起一段、正文不会被接在 `⚠️ …` 后面；Agent 会话与终端 AI 助手两条路径都验 |
+| `scripts/verify-agent-error-parts.mjs` | 错误文案 part 的追加语义 + **命令实时输出的折叠**（`stores/agent-helpers.ts` 真源码，只桩掉 `app-store` / `types` 两条 import）—— 同一轮连着多个 `error` 事件（模型级重试每次尝试失败都发一个）**只留最后一条**、错误文案之后的正文增量另起一段、正文不会被接在 `⚠️ …` 后面；Agent 会话与终端 AI 助手两条路径都验（后者走 `errorPrefix`，`appendAssistantPart` 是统一前的旧入口、早已不存在）；另覆盖 `tool-output-delta` 折进同 id tool-call 的 `liveOutput`、stderr 行首前缀（chunk 落在行中间不重复插）、`tool-result` 收口时清掉、孤儿增量被忽略、超 `MAX_LIVE_OUTPUT` 只留尾部、`stripTransientParts` 摘除且不改原 part（见 4.39） |
 | `scripts/verify-agent-project-doc-web-fetch.ts` | 项目约束文档注入（4.31）+ `web_fetch`（4.32）：**真源码**（`project-doc.ts` / `agent.ts` / `web-fetch.ts` / `output-artifact.ts`），**不起 Electron**。⚠️ 源文件之间是无扩展名相对导入，Node 的 `--experimental-strip-types` 解析不了 —— 先 `npx esbuild scripts/verify-agent-project-doc-web-fetch.ts --bundle --platform=node --format=esm --outfile=tmp/verify-web-fetch.mjs` 再 `node tmp/verify-web-fetch.mjs`。覆盖：无文档返回 null / BOM 剥离 / 空文件跳过回落 `CLAUDE.md` / 超长按 `## ` 边界截断并给 section 名、段落声明优先级 + 截断时给 `read_file` 指引、提示词里权限段落按模式切换且**项目文档排在最后**、本地 HTTP 服务器真抓（标题 / 正文 / script·style·nav·footer 剔除 / 链接绝对化）、`file:` 被拒、非法 URL、长页面落产物并能 `readArtifact` 按 offset **读回中段**（不是开头） |
 | `scripts/verify-quick-actions.mjs` | `.dogi/workspace.json` 自动建目录、脏数据降级、下拉入口与顶栏同排、执行命令开终端、弹窗开关 |
 | `scripts/verify-host-logs.mjs` | 主机日志全链路：隔离实例 + 进程内 ssh2 测试服务器 —— SSH 四类来源标签与实时推送（`logs:entry`）、TOFU 指纹、隧道强断（error 级）/ 改名重启 / 停止、SFTP 失败路径、JSONL 落盘与清空归零、面板单例标签 / 过滤 / 搜索 |
@@ -2447,6 +2562,45 @@ MSYS_NO_PATHCONV=1 node_modules/electron/dist/electron.exe . \
   因为 `available` 是**组装期**判定的）。
 - ⚠️ 顺带：`resolveModel` 的注释说明「必须带上 `req.modelId`」—— 会话在同一配置下切换具体模型时，
   漏传会静默回退到配置默认模型，表现为「切换模型不生效」。
+
+**40. 流式增量与「收口事件」的先后顺序：`finish` / `tool-result` 之后发出的增量全是白丢**
+
+- **触发信号**：给命令加实时输出后，出现两种「数据明明发了却看不见」的现象：
+  ① 实时输出块永远停在**收口前一刻**（结果已经换上去了，实时区还挂着最后几行没跟上）；
+  ② 一轮结束后台日志里有 `tool-output-delta`，但界面上最后几帧从来没出现过。
+- **根因**：**增量是攒着发的**（节流器），而 `tool-result` / `finish` 是**立即发**的。
+  - 攒着的尾巴若排在 `tool-result` **之后**，前端那份「运行中实时输出」就永远差最后一帧；
+  - ipc 层收到 `finish` 会 `chatConversations.delete(requestId)` —— 之后广播的事件**认不出归属**，
+    渲染端整条丢掉（同 4.2「事件必须自带归属」）。所以**任何在 `finish` 之后 flush 的增量都是白丢**。
+- **正确做法**：`agent.ts` 的 `send()` 里在**所有非增量事件之前**统一 flush（`inputDelta.flush()`
+  + `outputThrottles.get(requestId)?.flush()`），任何事件都别绕过 `send()` 直接 `emitEvent`；
+  收尾的 `finally` **只 `delete`、不 flush**（尾巴早在 `finish` 之前结掉了，在这里再 flush
+  只会把增量排到 `finish` 之后）。
+- **第二个坑（同一条链路）**：「命令在跑」的判据**不能看流式字段在不在**。`liveOutput` 只在
+  **第一段输出到达**时才被创建，`sleep 30` / 长编译 / 等网络这类**在跑但什么都不吐**的命令
+  整轮都没有它 —— 拿它当判据会让这类命令退化成一行头部，用户看不到「它在跑」、也找不到停止按钮。
+  判据用「工具名 + 还没出结果 + 入参已定型」（`commandRunning`）。fishwork 踩过同一个坑。
+- **验证**：`scripts/verify-tool-output-throttle.mjs`（保序 + 零丢失）、
+  `verify-agent-error-parts.mjs`（`tool-result` 收口时清掉 `liveOutput`）、
+  `verify-agent-posix-command.mjs` 第 4 节（真命令的 stdout / stderr 都实时吐出）。
+
+**41. 「把校验加在存会话那里」是错的 —— dogi 的会话**不**存在工作区目录里**
+
+- **症状**：想拦「工作区目录没了就别新建会话」，很自然地在 `agent:conversations:save` 里加一道
+  「创建时 stat 一下工作区目录」。结果**导入会话文件 / 导入 ACP 会话**一起被拒 —— 那两个操作
+  写的是本地存档，跟工作区目录一点关系都没有。
+- **根因**：把 fishwork 的结论直接搬过来了，但**两边的存储位置不一样**。
+  fishwork 的会话在 `<workspace>/.fizz/conversation/`，**建会话 = 往工作区目录里写**，
+  所以它把校验放在 `POST /api/conversations` 是对的。dogi 的会话在
+  `<userData>/agent-conversations/`（见 `conversation-store.ts`）—— **建会话记录不需要那个目录**。
+- **正确做法**：权威校验加在**真正需要目录的那一刻**，也就是「跑一轮」：
+  `agent.ts` 的 `chatWorkspace` 与 `acp-agent.ts` 的 `chat`，各自 `fail()` 分支旁边
+  （工具要 chdir 进去、ACP 要 `spawn(..., cwd: workspace.path)`）。
+  渲染端 `createAgentConversation` 里那道只是**体验层**（当场给一句人话，不用白打一条消息）。
+- **顺带一条**：这类「外部事件导致的状态变化」的权威判定，**都别只信巡检标记**。
+  30s 一轮的 `dirMissing` 天生慢半拍，而「目录刚被删、用户接着发消息」正是最该拦住的一刻 ——
+  两处校验都自己再 `stat` 一次（复用同一个 `isWorkspaceDirAvailable`，别再写第二份判据）。
+- **验证**：`scripts/verify-workspace-health.mjs`（判据与标记语义）。
 
 ### 6.7 数据与文件
 

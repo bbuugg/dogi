@@ -447,8 +447,18 @@ async function runCommand(
       }
     }
 
-    child.stdout.on('data', (d: Buffer) => out.append(d.toString('utf8')))
-    child.stderr.on('data', (d: Buffer) => err.append(d.toString('utf8')))
+    child.stdout.on('data', (d: Buffer) => {
+      const chunk = d.toString('utf8')
+      out.append(chunk)
+      // 实时旁路：把这一块原样吐给 service（节流后下发给渲染端）。没有它时界面上
+      // 运行中的命令卡一片空白，用户只能干等（见 tool-registry 的 onToolOutput）
+      ctx.onToolOutput?.(call.toolCallId, 'stdout', chunk)
+    })
+    child.stderr.on('data', (d: Buffer) => {
+      const chunk = d.toString('utf8')
+      err.append(chunk)
+      ctx.onToolOutput?.(call.toolCallId, 'stderr', chunk)
+    })
     child.on('error', (err) => {
       if (settled) return
       settled = true

@@ -17,6 +17,40 @@ import type {
 export const agentRequestConversations = new Map<string, string>()
 
 /**
+ * 命令**实时输出**（`liveOutput`）每条流各自的字符上限：超过只保留尾部。
+ *
+ * 与 fishwork 同口径（64k）。上限的必要性在于 `yes` / `find /` 这类命令会一直吐 ——
+ * 不封顶的话「运行中实时输出」这块会把内存与 DOM 撑爆。**只影响实时预览**：
+ * 命令真正的完整输出走 `tool-result`（超长时还会落产物文件，见 output-artifact）。
+ */
+export const MAX_LIVE_OUTPUT = 64_000
+
+/**
+ * 把一条流式 chunk 追加进某条流的缓冲，**stderr 的行首插入 `[stderr] ` 前缀**。
+ *
+ * 行首判定（关键消歧）：chunk 是流式增量，一行可能被切成多个 chunk（`err-1` /
+ * `\nerr-2\n` / `err-3`）—— 前缀必须只出现在「这一行的第一个非空字符」前，
+ * 否则半行一个前缀。空行不插（避免满屏空 `[stderr]`）。对齐 fishwork 的 `appendStreamChunk`。
+ */
+export function appendStreamChunk(
+  buf: string,
+  stream: 'stdout' | 'stderr',
+  chunk: string
+): string {
+  if (stream === 'stdout') return buf + chunk
+  // 行首 = 缓冲为空或以 \n 结尾
+  let atLineStart = buf.length === 0 || buf.endsWith('\n')
+  let out = buf
+  for (let i = 0; i < chunk.length; i += 1) {
+    const ch = chunk[i]
+    if (atLineStart && ch !== '\n') out += '[stderr] '
+    out += ch
+    atLineStart = ch === '\n'
+  }
+  return out
+}
+
+/**
  * 会话 id 集合：**用户已经点了停止，但主进程还没把 requestId 交回来**的待中止标记。
  *
  * ⚠️ 为什么需要它：`agent:chat` 的回包（requestId）要等主进程把这一轮**准备好**才回来 ——
@@ -165,11 +199,13 @@ const AGENT_PERSIST_INTERVAL = 3000
 const agentPersistAt = new Map<string, number>()
 
 /**
- * 落盘前把**只喂渲染**的字段摘掉：目前只有 `inputText`（入参流式生成期攒的半截 JSON）。
+ * 落盘前把**只喂渲染**的字段摘掉：`inputText`（入参流式生成期攒的半截 JSON）与
+ * `liveOutput`（命令执行期间的实时输出）。
  *
- * 它不属于历史 —— 完整 `tool-call` 一到就该作废（见 appendAgentPart 的收口），但流式期间
- * 每 3 秒会增量落盘一次（`persistConversationThrottled`），正好卡在生成中途时会把半截 JSON
- * 写进盘里。重新打开会话时那张卡会永远停在「正在生成…」，所以这里再拦一道。
+ * 它们都不属于历史：`inputText` 在完整 `tool-call` 一到就该作废（见 appendAgentPart 的收口），
+ * `liveOutput` 在 `tool-result` 一到就该作废；但流式期间每 3 秒会增量落盘一次
+ * （`persistConversationThrottled`），正好卡在生成 / 命令运行中途时会把它们写进盘里 ——
+ * 重新打开会话时那张卡会永远停在「正在生成…」或挂着一段早已结束的实时输出。
  *
  * 返回的是**新对象**（不改内存里的 part：屏幕上那份还要继续吃增量）。
  */
@@ -177,11 +213,12 @@ const agentPersistAt = new Map<string, number>()
 export function stripTransientParts(messages: AgentChatMessage[]): AgentChatMessage[] {
   return messages.map((message) => ({
     ...message,
-    parts: message.parts.map((part) =>
-      part.type === 'tool-call' && part.inputText !== undefined
-        ? { ...part, inputText: undefined }
-        : part
-    )
+    parts: message.parts.map((part) => {
+      if (part.type !== 'tool-call') return part
+      if (part.inputText === undefined && part.liveOutput === undefined) return part
+      const { inputText: _in, liveOutput: _live, ...rest } = part
+      return rest
+    })
   }))
 }
 
@@ -409,7 +446,38 @@ export function appendAgentPart(
         ...(event.acpKind ? { acpKind: event.acpKind } : {})
       })
     }
+  } else if (event.type === 'tool-output-delta') {
+    // 命令执行期间的 stdout / stderr 实时增量：折叠进**同 id tool-call** 的 `liveOutput`
+    // （流式期字段，与 inputText 同性质）。找不到对应 tool-call（上游没先发它）就忽略 ——
+    // tool-call 一定会先到，丢几帧增量只是少看一段过程，完整输出仍以 tool-result 为准。
+    const index = next.findIndex(
+      (p) => p.type === 'tool-call' && p.toolCallId === event.toolCallId
+    )
+    if (index >= 0) {
+      const call = next[index] as Extract<AgentChatMessage['parts'][number], { type: 'tool-call' }>
+      const prev = call.liveOutput ?? { stdout: '', stderr: '' }
+      let stdout = prev.stdout
+      let stderr = prev.stderr
+      if (event.stream === 'stdout') stdout = appendStreamChunk(prev.stdout, 'stdout', event.delta)
+      else stderr = appendStreamChunk(prev.stderr, 'stderr', event.delta)
+      // 防爆：两条流各自只留尾部（见 MAX_LIVE_OUTPUT）
+      if (stdout.length > MAX_LIVE_OUTPUT) stdout = stdout.slice(-MAX_LIVE_OUTPUT)
+      if (stderr.length > MAX_LIVE_OUTPUT) stderr = stderr.slice(-MAX_LIVE_OUTPUT)
+      next[index] = { ...call, liveOutput: { stdout, stderr } }
+    }
   } else if (event.type === 'tool-result') {
+    // 命令结束（或任意工具出结果）：把匹配的 tool-call 上的实时输出清掉 —— 卡片随即
+    // 换成结果直显，`liveOutput` 留着只是白占内存（它本来就不进历史）。
+    const index = next.findIndex(
+      (p) => p.type === 'tool-call' && p.toolCallId === event.toolCallId
+    )
+    if (index >= 0) {
+      const call = next[index] as Extract<AgentChatMessage['parts'][number], { type: 'tool-call' }>
+      if (call.liveOutput !== undefined) {
+        const { liveOutput: _live, ...rest } = call
+        next[index] = rest
+      }
+    }
     next.push({
       type: 'tool-result',
       toolCallId: event.toolCallId,

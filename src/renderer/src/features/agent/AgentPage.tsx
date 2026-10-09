@@ -348,6 +348,8 @@ function MessageBubbleImpl({
         input={unit.call.input}
         // 入参流式生成期攒下的半截 JSON：卡片据此显示「正在生成…」（见 stores/agent-helpers）
         inputText={unit.call.inputText}
+        // 命令运行中的实时输出（stdout / stderr）：卡片据此铺「实时输出」块（同 stores/agent-helpers）
+        liveOutput={unit.call.liveOutput}
         title={unit.call.title}
         acpKind={unit.call.acpKind}
         output={unit.result?.output}

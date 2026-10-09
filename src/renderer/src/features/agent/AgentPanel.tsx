@@ -119,9 +119,28 @@ const ConversationRow = memo(function ConversationRow({
       data-conversation-kind={isAcp ? 'acp' : 'mastra'}
       onClick={() => onOpen(workspaceId, id)}
       className={cn(
-        // 缩进交给下面那个「图标槽」占位（不再写 pl-*），标题才能和工作区名称同列
-        // relative：行尾「重命名 / 删除」要绝对定位在行右侧
-        'group relative flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1.5 text-sm transition-colors',
+        /**
+         * ⚠️ 左边距**不能省、也不能算错**：工作区那一行是 [展开箭头][状态图标][名称] **三格**，
+         * 会话行只有 [状态图标][标题] **两格**。会话行的左内边距必须等于工作区行「名称之前」
+         * 的全部宽度，两列才对得上：
+         *
+         *   px-1.5 (6) + 箭头按钮 (p-0.5 + size-4 = 20) + gap-1.5 (6) = **32px**
+         *
+         * 补上之后：
+         * ① 会话行的状态图标（转圈 / 等待 / 形态图标）与工作区那枚状态图标同列（32px）；
+         * ② 标题与工作区名称同列（32 + 16 + 6 = 54px），不会因为当前有没有图标而左右跳。
+         *
+         * 漏掉这 32px 的症状：会话行整行贴到最左、比工作区名称左 26px，**层级看着是平的** ——
+         * 完全读不出「这条会话属于上面那个工作区」。（`b238062` 给工作区行加状态图标槽时
+         * 就是这么漏的：名称从 32px 被推到 54px，会话行没跟着补。）
+         *
+         * ⚠️ **别照抄 fishwork**：它的工作区行是 [图标][名称][箭头]（箭头在名称**右边**），
+         * 两边都从 28px 起、天然对齐，所以那边**没有**这层缩进。dogi 把箭头挪到了左边，
+         * 是刻意的分叉 —— 抄它的 `px-1.5` 会把缩进又弄丢。
+         *
+         * relative：行尾「重命名 / 删除」要绝对定位在行右侧
+         */
+        'group relative flex cursor-pointer items-center gap-1.5 rounded-md pr-1.5 pl-8 py-1.5 text-sm transition-colors',
         isActive
           ? 'bg-primary/15 text-foreground'
           : 'text-muted-foreground hover:bg-foreground/5 hover:text-foreground'
@@ -140,10 +159,10 @@ const ConversationRow = memo(function ConversationRow({
         **等你回答 / 确认 > 运行中 > 已归档 > ACP > 内置**。
 
         占位而不是「有图标才渲染」是为了两列对齐：
-        槽左边 = 行的 px-1.5、宽度 size-4，于是
-          ① 运行中的转圈 / 等待图标与工作区那一行的**展开箭头**同列
-            （工作区自己那枚「文件夹 / 运行中」图标在箭头右边一格）；
-          ② 标题从 px-1.5 + 16 + gap-1.5 = 28px（pl-7）起，
+        槽左边 = 行的 pl-8（32px）、宽度 size-4，于是
+          ① 运行中的转圈 / 等待图标与工作区那一行的**状态图标**同列
+            （工作区那枚「文件夹 / 运行中」图标在展开箭头右边一格）；
+          ② 标题从 32 + 16 + gap-1.5 = 54px 起，
             与工作区**名称同列**，也不会因为当前有没有图标而左右跳。
 
         停下来时这个槽显示**形态图标**：会话列表里内置 Mastra 会话与外部 ACP 会话混在一起，
@@ -682,6 +701,43 @@ export function AgentPanel() {
               const hasActiveConv =
                 activeConversationId != null && list.some((c) => c.id === activeConversationId)
               const isActiveWs = isWsSelected && !hasActiveConv
+              /**
+               * 这个工作区的目录不在了（主进程巡检置位，见 `AgentWorkspace.dirMissing`）。
+               *
+               * 只影响**往这个目录里放东西**的动作（新建会话）：打开它已有的会话不拦 ——
+               * 历史消息、diff、产物都还在本地，照样能看。
+               *
+               * ⚠️ 标记由主进程 30s 一轮的巡检给出，**可能慢半拍**（目录刚被删的那几秒里
+               * 侧栏还是正常样子）。所以这里只是「体验层」的提示与禁用，**真拦在主进程**
+               * （`chatWorkspace` / `acpAgentService.chat` 跑一轮之前会自己再 stat 一次）。
+               */
+              const wsMissing = !!w.dirMissing
+              const missingHint = `工作区目录不存在：${w.path}（可能已被删除或移动）`
+              /**
+               * 行尾那枚「新建会话」按钮。**两种包装**（目录正常时包一层形态下拉、异常时裸按钮）
+               * 共用这一个元素 —— 所以抽出来，别在 JSX 里写两遍（改文案时容易只改一处）。
+               *
+               * 目录不在了时**不包 Dropdown**：包着的话点下去照样弹出形态菜单，选了形态才失败，
+               * 那还不如当场给一句人话。
+               *
+               * ⚠️ 用 `aria-disabled` 而不是 `disabled`：真 disabled 的按钮不派发指针事件，
+               * hover 提示和「为什么点不动」就都看不到了（与会话行的删除按钮同一套取舍）。
+               */
+              const newConvButton = (
+                <button
+                  type="button"
+                  title={wsMissing ? missingHint : `在 ${w.name} 中新建会话`}
+                  aria-label={`在 ${w.name} 中新建会话`}
+                  aria-disabled={wsMissing}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    if (wsMissing) message.error(missingHint)
+                  }}
+                  className={cn(rowAction, wsMissing && 'cursor-not-allowed text-muted-foreground/50')}
+                >
+                  <MessageSquarePlus className="size-3.5" />
+                </button>
+              )
               return (
                 <div key={w.id}>
                   <div
@@ -698,7 +754,7 @@ export function AgentPanel() {
                         ? 'bg-primary/15 text-foreground'
                         : 'text-muted-foreground hover:bg-foreground/5 hover:text-foreground'
                     )}
-                    title={w.path}
+                    title={wsMissing ? missingHint : w.path}
                   >
                     <button
                       type="button"
@@ -717,6 +773,11 @@ export function AgentPanel() {
                       工作区图标：**有会话在跑就换成会话的状态图标**（转圈 / 等待），
                       没有才显示安静的文件夹 —— 一眼能看出「这个项目下的 Agent 还活着吗」，
                       不用逐条会话去扫。槽宽固定 size-4，静止时也不塌，标题不会左右跳。
+
+                      目录不在了时**保留图标形状**、只把颜色换成危险色 —— 而不是换个警告三角：
+                      用户扫一眼就能对上是哪一个工作区（形状没变），只是它现在是红的。
+                      排在「运行中 / 等待」之后：那两个是**瞬时活动态**，比「目录没了」更该抢眼
+                      （正跑着的任务卡在等确认，才是此刻最要紧的事）。
                     */}
                     <span
                       className="flex size-4 shrink-0 items-center justify-center"
@@ -725,13 +786,17 @@ export function AgentPanel() {
                           ? '有会话正在运行'
                           : wsStatus
                             ? '有会话在等你回答 / 确认'
-                            : undefined
+                            : wsMissing
+                              ? missingHint
+                              : undefined
                       }
                     >
                       {wsStatus === 'running' ? (
                         <Loader2 className="size-4 animate-spin text-primary" />
                       ) : wsStatus ? (
                         <CirclePause className="size-4 text-amber-500" />
+                      ) : wsMissing ? (
+                        <Folder className="size-4 text-destructive" />
                       ) : (
                         <Folder className="size-4" />
                       )}
@@ -752,34 +817,33 @@ export function AgentPanel() {
                     <SidebarRowActions
                       hoverClass="group-hover:pointer-events-auto group-hover:opacity-100 max-md:pointer-events-auto max-md:opacity-100"
                     >
-                      {/*「新建会话」要先定形态（内置 / 某个 ACP agent），所以是下拉而不是直点 */}
-                      <Dropdown
-                        trigger={['click']}
-                        placement="bottomRight"
-                        menu={{
-                          items: newConversationItems(),
-                          onClick: ({ key, domEvent }) => {
-                            domEvent.stopPropagation()
-                            const [backend, agentId] = String(key).split(':')
-                            createAgentConversation(
-                              w.id,
-                              backend === 'acp' ? 'acp' : 'mastra',
-                              agentId || undefined
-                            )
-                            if (!isExpanded) toggleExpand(w.id)
-                          }
-                        }}
-                      >
-                        <button
-                          type="button"
-                          title={`在 ${w.name} 中新建会话`}
-                          aria-label={`在 ${w.name} 中新建会话`}
-                          onClick={(e) => e.stopPropagation()}
-                          className={rowAction}
+                      {/*
+                        「新建会话」要先定形态（内置 / 某个 ACP agent），所以平时是个下拉而不是直点；
+                        目录不在了就只渲染裸按钮（见上面 newConvButton 的注释）。
+                      */}
+                      {wsMissing ? (
+                        newConvButton
+                      ) : (
+                        <Dropdown
+                          trigger={['click']}
+                          placement="bottomRight"
+                          menu={{
+                            items: newConversationItems(),
+                            onClick: ({ key, domEvent }) => {
+                              domEvent.stopPropagation()
+                              const [backend, agentId] = String(key).split(':')
+                              createAgentConversation(
+                                w.id,
+                                backend === 'acp' ? 'acp' : 'mastra',
+                                agentId || undefined
+                              )
+                              if (!isExpanded) toggleExpand(w.id)
+                            }
+                          }}
                         >
-                          <MessageSquarePlus className="size-3.5" />
-                        </button>
-                      </Dropdown>
+                          {newConvButton}
+                        </Dropdown>
+                      )}
                       <Dropdown
                         trigger={['click']}
                         placement="bottomRight"
@@ -804,9 +868,10 @@ export function AgentPanel() {
                   {/* 会话列表：嵌在工作区下方，**只用缩进表示从属**（与 fishwork 侧栏一致，不画竖线/分隔符） */}
                   {isExpanded && (
                     <div className="mt-0.5 flex flex-col gap-0.5">
-                      {/* 一条未归档会话都没有时才提示（下方可能还有「已归档」分组） */}
+                      {/* 一条未归档会话都没有时才提示（下方可能还有「已归档」分组）。
+                          缩进到会话**标题**那一列（54px = 32 + 16 + 6），与上面的会话行对齐 */}
                       {list.length === 0 && archivedList.length === 0 && (
-                        <div className="py-1.5 pl-7 text-xs text-muted-foreground/60">
+                        <div className="py-1.5 pl-[54px] text-xs text-muted-foreground/60">
                           还没有会话：选好模型、发出第一条消息后，它会出现在这里
                         </div>
                       )}
@@ -836,7 +901,9 @@ export function AgentPanel() {
                               e.stopPropagation()
                               toggleArchivesExpanded(w.id)
                             }}
-                            className="flex w-full cursor-pointer items-center gap-1 rounded-md py-1 pl-7 pr-1.5 text-xs text-muted-foreground transition-colors hover:bg-foreground/5 hover:text-foreground"
+                            // 缩进到会话**状态图标**那一列（32px = pl-8）：这枚折叠箭头
+                            // 是这一组的把手，跟会话行的图标同列才读得出「它是这批会话的分组头」
+                            className="flex w-full cursor-pointer items-center gap-1 rounded-md py-1 pl-8 pr-1.5 text-xs text-muted-foreground transition-colors hover:bg-foreground/5 hover:text-foreground"
                           >
                             <ChevronRight
                               className={cn(

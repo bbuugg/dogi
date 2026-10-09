@@ -369,6 +369,15 @@ const api = {
     }): Promise<AgentWorkspace[]> => ipcRenderer.invoke('agent:workspaces:save', input),
     deleteWorkspace: (id: string): Promise<AgentWorkspace[]> =>
       ipcRenderer.invoke('agent:workspaces:delete', id),
+    /**
+     * 工作区清单被**主进程巡检**改动的推送（见 services/ai/workspace-health.ts）。
+     *
+     * 只在 `dirMissing` 标记真的翻转时才来一条（目录被删 / 恢复），payload 是改动后的
+     * 全量清单 —— 渲染端整份换掉即可，不用自己算差异。用户自己增删改工作区的路径不走这里
+     * （那几条 IPC 的返回值就是新清单）。
+     */
+    onWorkspacesChanged: (cb: (workspaces: AgentWorkspace[]) => void): Unsubscribe =>
+      subscribe('agent:workspaces:changed', cb),
     /** 全部会话（含 mastra 会话的消息历史），渲染端按 workspaceId 归到各工作区下 */
     listConversations: (): Promise<AgentConversation[]> =>
       ipcRenderer.invoke('agent:conversations:list'),

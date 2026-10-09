@@ -50,6 +50,7 @@ import { DEFAULT_MAX_STEPS, resolveMaxRetries } from '@shared/ai-timeouts'
 import { describeError, isRetryableNetworkError } from './error-utils'
 import { retryDelayMs, sleepWithSignal } from './retry'
 import { createToolInputThrottle } from './tool-input-throttle'
+import { createToolOutputThrottle, type ToolOutputThrottle } from './tool-output-throttle'
 import { steerRegistry } from './steer'
 import { skillsForAgent } from './skills'
 import { findGitBash } from '../terminal/shells'
@@ -60,6 +61,7 @@ import { createSubAgentRunner } from './sub-agent'
 import { clientToolBroker } from './client-tools'
 import { ensureBuiltinToolsRegistered } from './builtin-tools'
 import { mcpManager } from './mcp'
+import { isWorkspaceDirAvailable } from './workspace-health'
 import { storage } from '../storage'
 import { sessionManager } from '../terminal/sessions'
 
@@ -122,6 +124,14 @@ class AgentService extends EventEmitter {
   private static readonly MAX_FILE_STATES = 64
   /** terminal 作用域的工具执行串行队列（key = requestId；与旧终端助手的语义一致） */
   private toolQueues = new Map<string, { chain: Promise<unknown>; aborted: boolean }>()
+  /**
+   * 每条请求一个「命令实时输出」节流器（key = requestId，见 `tool-output-throttle.ts`）。
+   *
+   * 只在**工作区**准备阶段创建（只有那里的 execute_command 会吐实时输出）；终端作用域
+   * 与子 Agent 都不建。收尾（runStreamWithRetry 的 finally / forgetRequest）里清掉，
+   * 别让它随会话数一直长。
+   */
+  private outputThrottles = new Map<string, ToolOutputThrottle>()
   /**
    * 「总是允许 / 总是拒绝」的记忆：key = 会话 id → 工具名 → 记忆的裁决。
    *
@@ -309,6 +319,20 @@ class AgentService extends EventEmitter {
       fail('工作区不存在，请先选择或新建一个工作区')
       return { requestId }
     }
+    /**
+     * 目录被删 / 被移走：登记表里还在，但这一轮**必然跑不起来** —— 工具要 chdir 进去、
+     * 工作区配置 / 技能目录 / AGENTS.md 也都在里面。在这里当场拒掉，好过让十几个工具
+     * 各自报一句看不懂的 `ENOENT`。
+     *
+     * 这是「目录没了」的**权威判定**（渲染端侧栏那枚红图标与禁用只是体验层）：
+     * 它自己 `stat` 一次、**不看 `dirMissing`** —— 那个标记来自 30s 一轮的巡检，可能慢半拍，
+     * 而「目录刚被删、用户接着发消息」正是最该拦住的一刻。
+     * 判据与巡检共用同一份 `isWorkspaceDirAvailable`，免得两处迟早判得不一致。
+     */
+    if (!(await isWorkspaceDirAvailable(workspace.path))) {
+      fail(`工作区目录不存在：${workspace.path}（可能已被删除或移动）`)
+      return { requestId }
+    }
     if (!config) {
       fail('尚未配置 AI 模型，请先在设置中添加模型配置')
       return { requestId }
@@ -404,6 +428,16 @@ class AgentService extends EventEmitter {
     const model = resolveModel(config, req.modelId)
     const modelSettings = this.mastraModelSettings(config, settings)
 
+    /**
+     * 命令实时输出的节流器（见 `tool-output-throttle.ts`）：子进程每来一块输出就 push 一次，
+     * 攒够阈值才真正下发 `tool-output-delta`。`send()` 在非增量事件前会 flush 它，
+     * 保证尾部增量一定排在 `tool-result` 之前。
+     */
+    const outputThrottle = createToolOutputThrottle((d) =>
+      this.emitEvent(requestId, { type: 'tool-output-delta', ...d })
+    )
+    this.outputThrottles.set(requestId, outputThrottle)
+
     const ctx: ToolRunContext = {
       requestId,
       conversationId: req.conversationId,
@@ -421,7 +455,10 @@ class AgentService extends EventEmitter {
         }),
       fileState: this.fileStateFor(req.conversationId),
       skills,
-      bashPath: agentBashPath()
+      bashPath: agentBashPath(),
+      // 命令执行的实时输出旁路（execute_command 用）：界面上运行中的命令卡据此一帧帧出输出
+      onToolOutput: (toolCallId, stream, chunk) =>
+        outputThrottle.push({ toolCallId, stream, delta: chunk })
     }
     // 子 Agent（delegate 工具）：**只在设置里开启时**注入执行器 —— 没注入则工具不暴露。
     // 注在工具集组装之前，因为 `available` 是组装期判定的（见 tool-registry.buildToolset）。
@@ -499,6 +536,7 @@ class AgentService extends EventEmitter {
     this.abortControllers.delete(requestId)
     this.requestMeta.delete(requestId)
     this.toolQueues.delete(requestId)
+    this.outputThrottles.delete(requestId)
     // 这一轮根本没起流就走掉了：同样把没赶上的插话清掉（同 runStreamWithRetry 的 finally）
     if (conversationId) steerRegistry.clear(conversationId)
   }
@@ -705,6 +743,9 @@ class AgentService extends EventEmitter {
         return
       }
       inputDelta.flush()
+      // ⚠️ 命令实时输出也要在**任何非增量事件之前**结掉：尤其 `tool-result` ——
+      // 尾部增量排在结果之后的话，前端那份「运行中实时输出」会永远停在收口前一刻。
+      this.outputThrottles.get(requestId)?.flush()
       this.emitEvent(requestId, event)
     }
     try {
@@ -823,6 +864,9 @@ class AgentService extends EventEmitter {
       this.requestMeta.delete(requestId)
       // terminal 队列对象由排队中的闭包持有，清理 Map 不影响已中止标志的感知
       this.toolQueues.delete(requestId)
+      // 收尾时只丢节流器、**不 flush**：攒着的尾巴早在 `finish` 之前就被 `send()` 结掉了，
+      // 在这里再 flush 只会把增量排到 finish 之后（那一刻归属已摘掉，渲染端认不出、白丢）。
+      this.outputThrottles.delete(requestId)
       // 本轮结束：丢掉没赶上工具步的插话（渲染端那条 user 消息仍在历史里，下一轮照样看得到）
       steerRegistry.clear(opts.conversationId)
     }

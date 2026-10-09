@@ -58,6 +58,7 @@ import { acpToolKindOf, acpToolTitle } from '@shared/acp-tools'
 import { extractConfigOptions, extractModelOption, usageUpdateToEvent } from './acp-config-options'
 import { readWorkspaceTextFile, writeWorkspaceTextFile } from './acp-fs'
 import { armConfirmTimeout } from './timeouts'
+import { isWorkspaceDirAvailable } from './workspace-health'
 
 /** 临时连接（列表 / 删除会话）的超时：agent 30 秒没建好会话就放弃 */
 const TEMP_CONNECTION_TIMEOUT_MS = 30_000
@@ -493,6 +494,20 @@ class AcpAgentService extends EventEmitter {
     }
     if (!workspace) {
       fail('工作区不存在，请先选择或新建一个工作区')
+      return { requestId }
+    }
+    /**
+     * 目录被删 / 被移走：外部 agent 进程就是**以工作区目录为 cwd** 起来的
+     * （见 runTurn 里的 `spawnAgentProcess(acpAgent, workspace.path)`），目录没了
+     * 连 spawn 都起不来，报出来的错与「agent 没装好」长得一样、极难分辨。
+     * 在这里当场给一句人话。
+     *
+     * 判据与内置 agent / 巡检共用同一份 `isWorkspaceDirAvailable`
+     * （见 services/ai/workspace-health.ts）；自己 `stat` 而不看 `dirMissing`，
+     * 因为那个标记可能慢半拍。
+     */
+    if (!(await isWorkspaceDirAvailable(workspace.path))) {
+      fail(`工作区目录不存在：${workspace.path}（可能已被删除或移动）`)
       return { requestId }
     }
     if (!acpAgent) {

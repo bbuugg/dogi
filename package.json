@@ -1,8 +1,8 @@
 {
   "name": "dogi",
-  "version": "0.0.20",
-  "description": "AI 驱动的研发运维工作台",
-  "author": "Dogi",
+  "version": "0.0.21",
+  "description": "Dogi",
+  "author": "chengyao",
   "main": "./out/main/index.js",
   "type": "module",
   "private": true,
