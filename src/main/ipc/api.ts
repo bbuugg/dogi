@@ -1,5 +1,5 @@
 import { app, dialog, ipcMain } from 'electron'
-import { stat } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import { basename } from 'node:path'
 import { executeHttp } from '../services/api/http'
 import { wsService } from '../services/api/ws'
@@ -9,6 +9,7 @@ import type {
   ApiHttpRequest,
   ApiPickFileResult,
   ApiRequestEntry,
+  OpenApiImportSource,
   WsConnectOptions,
   WsEvent,
   WsSendPayload
@@ -31,17 +32,20 @@ export function registerApiIpc(ctx: IpcContext): void {
   ipcMain.handle('api:list', () => storage.listApiRequests())
   ipcMain.handle('api:save', (_e, entry: ApiRequestEntry) => storage.saveApiRequest(entry))
   ipcMain.handle('api:delete', (_e, id: string) => storage.deleteApiRequest(id))
-  ipcMain.handle(
-    'api:arrange',
-    (
-      _e,
-      payload: { groupIds: string[]; requests: Array<{ id: string; groupId?: string }> }
-    ) => storage.arrangeApi(payload)
-  )
-  ipcMain.handle('api:groups:list', () => storage.listApiGroups())
-  ipcMain.handle('api:groups:save', (_e, input: { id?: string; name: string }) =>
-    storage.saveApiGroup(input)
-  )
+ipcMain.handle(
+  'api:arrange',
+  (
+    _e,
+    payload: {
+      groups: Array<{ id: string; parentId?: string }>
+      requests: Array<{ id: string; groupId?: string }>
+    }
+  ) => storage.arrangeApi(payload)
+)
+ipcMain.handle('api:groups:list', () => storage.listApiGroups())
+ipcMain.handle('api:groups:save', (_e, input: { id?: string; name: string; parentId?: string }) =>
+  storage.saveApiGroup(input)
+)
   ipcMain.handle('api:groups:delete', (_e, id: string, deleteRequests?: boolean) =>
     storage.deleteApiGroup(id, deleteRequests)
   )
@@ -93,6 +97,86 @@ export function registerApiIpc(ctx: IpcContext): void {
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e)
       return { canceled: false, error: `无法读取所选文件：${filePath} —— ${reason}` }
+    }
+  })
+
+  // ---------- OpenAPI / Swagger 规格导入（取数在主进程，解析在渲染端） ----------
+  // 两条通道都只负责「取回原始 JSON / YAML 文本」，解析在渲染端的 openapi-import.ts：
+  // 主进程没有 YAML/JSON Schema 解析的必要，渲染端能直接复用界面上的解析结果预览。
+  const MAX_SPEC_BYTES = 5 * 1024 * 1024
+
+  // 从本地文件导入：弹文件框 → 读回文本。取消只回 canceled，不弹错误。
+  ipcMain.handle('api:openapi:pick', async (): Promise<OpenApiImportSource> => {
+    // 探针约定：DOGI_API_OPENAPI_FILE 指定文件跳过对话框（同 api:pickFile 的旁路）
+    let filePath = process.env.DOGI_API_OPENAPI_FILE || ''
+    if (!filePath) {
+      const window = ctx.win()
+      const options = {
+        title: '选择 OpenAPI / Swagger 文件（JSON / YAML）',
+        properties: ['openFile' as const],
+        filters: [
+          { name: 'OpenAPI / Swagger（JSON / YAML）', extensions: ['json', 'yaml', 'yml'] },
+          { name: 'JSON', extensions: ['json'] },
+          { name: 'YAML', extensions: ['yaml', 'yml'] }
+        ]
+      }
+      const result =
+        window && !window.isDestroyed()
+          ? await dialog.showOpenDialog(window, options)
+          : await dialog.showOpenDialog(options)
+      if (result.canceled || !result.filePaths.length) return { ok: false, canceled: true }
+      filePath = result.filePaths[0]
+    }
+    try {
+      const info = await stat(filePath)
+      if (!info.isFile()) return { ok: false, error: `所选路径不是文件：${filePath}` }
+      if (info.size > MAX_SPEC_BYTES) {
+        return { ok: false, error: `文件过大（${(info.size / 1024 / 1024).toFixed(1)} MB），超过 5 MB 上限` }
+      }
+      const text = await readFile(filePath, 'utf8')
+      return { ok: true, name: basename(filePath), text }
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e)
+      return { ok: false, error: `读取失败：${filePath} —— ${reason}` }
+    }
+  })
+
+  // 从 URL 抓取规格：主进程发请求（渲染进程受 CORS 限制），带超时与大小上限。
+  ipcMain.handle('api:openapi:fetch', async (_e, url: string): Promise<OpenApiImportSource> => {
+    let target: URL
+    try {
+      target = new URL(url)
+    } catch {
+      return { ok: false, error: '不是有效的 URL' }
+    }
+    // 协议白名单：挡掉 file: / data: / javascript:
+    if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+      return { ok: false, error: `只支持 http(s) 地址，实际是 ${target.protocol}//` }
+    }
+    try {
+      const res = await fetch(target, {
+        headers: { accept: 'application/json, application/yaml, text/yaml, text/plain' },
+        signal: AbortSignal.timeout(15_000),
+        redirect: 'follow'
+      })
+      if (!res.ok) {
+        return { ok: false, error: `请求失败：HTTP ${res.status} ${res.statusText}` }
+      }
+      const declared = Number(res.headers.get('content-length') ?? 0)
+      if (declared > MAX_SPEC_BYTES) {
+        return {
+          ok: false,
+          error: `文档过大（${(declared / 1024 / 1024).toFixed(1)} MB），超过 5 MB 上限`
+        }
+      }
+      const text = await res.text()
+      if (text.length > MAX_SPEC_BYTES) {
+        return { ok: false, error: '文档过大（超过 5 MB 上限）' }
+      }
+      return { ok: true, name: target.hostname, text }
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e)
+      return { ok: false, error: `抓取失败：${reason}` }
     }
   })
 

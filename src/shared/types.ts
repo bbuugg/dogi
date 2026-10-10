@@ -667,6 +667,8 @@ export interface ApiFormField {
 export interface ApiGroup {
   id: string
   name: string
+  /** 父分组 id；缺省 = 顶级分组，支持任意层级嵌套 */
+  parentId?: string
   createdAt: number
 }
 
@@ -792,6 +794,21 @@ export interface ApiPickFileResult {
     /** 字节数 */
     size: number
   }
+  error?: string
+}
+
+/**
+ * OpenAPI / Swagger 规格的取数结果（文件导入 / URL 抓取共用同一种形态）。
+ * 主进程只负责**取回原始文本**，解析在渲染端（`features/api/openapi-import.ts`）。
+ */
+export interface OpenApiImportSource {
+  ok: boolean
+  /** 文件选择被用户取消（只有文件导入会设） */
+  canceled?: boolean
+  /** 来源标识：文件名或主机名（预告 / 失败提示用） */
+  name?: string
+  /** 规格原始文本（JSON 文本） */
+  text?: string
   error?: string
 }
 

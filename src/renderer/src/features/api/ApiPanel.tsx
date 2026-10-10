@@ -7,6 +7,16 @@ import {
   StackedSections
 } from '@/shared/components/StackedSections'
 import { apiTabId, useAppStore } from '@/stores/app-store'
+import { OpenApiImportModal } from '@/features/api/OpenApiImportModal'
+import {
+  buildGroupTree,
+  collectUngrouped,
+  countSubtreeRequests,
+  flattenBlocks,
+  moveGroup,
+  subtreeOf,
+  type ApiGroupNode
+} from '@/features/api/group-tree'
 import type { ApiGroup, ApiHistoryEntry, ApiProtocol, ApiRequestEntry } from '@shared/types'
 import {
   Button,
@@ -15,15 +25,19 @@ import {
   Input,
   Modal,
   Tree,
+  TreeSelect,
   message,
   type MenuProps,
-  type TreeDataNode
+  type TreeDataNode,
+  type TreeSelectProps
 } from 'antd'
 import { cn } from 'cn'
 import {
+  Braces,
   Cable,
   ChevronDown,
   ChevronsLeft,
+  FolderInput,
   FolderPlus,
   Globe,
   Pencil,
@@ -31,7 +45,7 @@ import {
   Terminal,
   Trash2
 } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useDrag } from 'react-dnd'
 import { SidebarGroupRow } from '@/shared/components/SidebarGroupRow'
 import {
@@ -54,9 +68,12 @@ const REQUEST_KEY_PREFIX = 'r:'
 const DND_REQUEST = 'api-request'
 const DND_GROUP = 'api-group'
 
-/** 列表块：未分组块（group 为空）恒在首位，其余每块是一个分组 */
+/**
+ * 列表块：数组顺序即 DFS 前序显示顺序；未分组块（groupId 为空）恒在首位，
+ * 其余块按分组树的 DFS 前序排列（一个分组一个块，只放直接挂它名下的请求）。
+ */
 interface Block {
-  group?: ApiGroup
+  groupId?: string
   items: ApiRequestEntry[]
 }
 
@@ -163,40 +180,37 @@ function ApiRequestsSection() {
   const [pendingGroupDelete, setPendingGroupDelete] = useState<ApiGroup | null>(null)
   /** 删除分组时是否连同组内请求一起删除（默认只解散分组） */
   const [deleteGroupRequests, setDeleteGroupRequests] = useState(false)
-  /** 新建（id 为空）或重命名分组 */
-  const [groupEdit, setGroupEdit] = useState<{ id?: string; name: string } | null>(null)
-  /** 导入 cURL 弹窗 */
+  /** 新建（id 为空）或重命名分组；parentId 只在新建时生效（新建子分组） */
+  const [groupEdit, setGroupEdit] = useState<{
+    id?: string
+    name: string
+    parentId?: string
+  } | null>(null)
+  /** 「移动到…」弹窗：选择一个新父分组（undefined = 顶级分组） */
+  const [moveTarget, setMoveTarget] = useState<ApiGroup | null>(null)
+  const [moveParent, setMoveParent] = useState<string | undefined>(undefined)
+  /** 导入 cURL 弹窗；curlGroupId 非空 = 从某个分组发起（导入后落到该组） */
   const [curlOpen, setCurlOpen] = useState(false)
   const [curlText, setCurlText] = useState('')
+  const [curlGroupId, setCurlGroupId] = useState<string | undefined>(undefined)
   const [importing, setImporting] = useState(false)
+  /** 导入 OpenAPI / Swagger 弹窗 */
+  const [openApiOpen, setOpenApiOpen] = useState(false)
 
+  // 分组默认全部折叠：不自动展开任何分组（包括新建的），展开/折叠只由用户操作决定
   const [expandedKeys, setExpandedKeys] = useState<string[]>([])
-  /** 已自动展开过的分组 key：只在新分组出现时补展开，不覆盖用户的折叠操作 */
-  const knownKeys = useRef<Set<string>>(new Set())
 
-  useEffect(() => {
-    const added = apiGroups.map((g) => groupKey(g.id)).filter((k) => !knownKeys.current.has(k))
-    if (added.length === 0) return
-    for (const k of added) knownKeys.current.add(k)
-    setExpandedKeys((prev) => [...prev, ...added])
-  }, [apiGroups])
-
-  // 分组归类（groupId 指向已不存在的分组时按未分组处理），块顺序即显示顺序
-  const blocks: Block[] = []
-  const ungrouped: ApiRequestEntry[] = []
-  const byGroup = new Map<string, ApiRequestEntry[]>()
-  for (const r of apiRequests) {
-    if (r.groupId && apiGroups.some((g) => g.id === r.groupId)) {
-      const list = byGroup.get(r.groupId) ?? []
-      list.push(r)
-      byGroup.set(r.groupId, list)
-    } else {
-      ungrouped.push(r)
-    }
-  }
+  // 多级分组：先建树，再按 DFS 前序摊平成块（groupId 指向不存在分组的请求算「未分组」）
+  const groupTree = useMemo(
+    () => buildGroupTree(apiGroups, apiRequests),
+    [apiGroups, apiRequests]
+  )
+  const ungrouped = useMemo(
+    () => collectUngrouped(apiRequests, apiGroups),
+    [apiRequests, apiGroups]
+  )
   // 「未分组」块恒在首位（渲染时平铺到最后，见下面的 treeData）
-  blocks.push({ group: undefined, items: ungrouped })
-  for (const g of apiGroups) blocks.push({ group: g, items: byGroup.get(g.id) ?? [] })
+  const blocks = useMemo(() => flattenBlocks(groupTree, ungrouped), [groupTree, ungrouped])
 
   const q = search.trim().toLowerCase()
   const searching = q.length > 0
@@ -207,18 +221,22 @@ function ApiRequestsSection() {
     r.method.toLowerCase().includes(q)
 
   /**
-   * 渲染用的块结构：搜索时按命中过滤（组名命中 = 整组保留）。
+   * 搜索时按命中过滤分组树：组名命中 = 整组保留；未命中的组只保留命中的请求 / 子孙分组。
    * 拖拽的落点计算一律走**完整的** blocks —— 按 id 定位，所以即便列表被过滤，
    * 请求也会准确落到目标行旁边，隐藏的行不会被丢掉或被打乱顺序。
    */
-  const viewBlocks: Block[] = !searching
-    ? blocks
-    : blocks
-      .map((b) => {
-        const groupHit = b.group ? b.group.name.toLowerCase().includes(q) : false
-        return { group: b.group, items: groupHit ? b.items : b.items.filter(hitRequest) }
-      })
-      .filter((b) => b.items.length > 0 || (b.group && b.group.name.toLowerCase().includes(q)))
+  const filterNode = (n: ApiGroupNode): { node: ApiGroupNode; hit: boolean } => {
+    const childResults = n.children.map(filterNode)
+    const keptChildren = childResults.filter((r) => r.hit).map((r) => r.node)
+    const nameHit = n.group.name.toLowerCase().includes(q)
+    const keptItems = searching ? n.items.filter(hitRequest) : n.items
+    const hit = !searching || nameHit || keptItems.length > 0 || keptChildren.length > 0
+    return { node: { group: n.group, children: keptChildren, items: keptItems }, hit }
+  }
+  const viewTree: ApiGroupNode[] = searching
+    ? groupTree.map(filterNode).filter((r) => r.hit).map((r) => r.node)
+    : groupTree
+  const viewUngrouped = searching ? ungrouped.filter(hitRequest) : ungrouped
 
   const locate = (list: Block[], id: string): { b: number; i: number } | null => {
     for (let b = 0; b < list.length; b++) {
@@ -230,9 +248,21 @@ function ApiRequestsSection() {
 
   /** 把调整后的块结构整体写回（顺序与归属一次提交，避免中间态） */
   const commit = (next: Block[]) => {
+    // 块顺序 → 分组顺序（DFS 前序）；块重排不改层级，parentId 沿用当前树结构
+    const groupOrder: ApiGroup[] = []
+    const seen = new Set<string>()
+    for (const b of next) {
+      if (!b.groupId || seen.has(b.groupId)) continue
+      seen.add(b.groupId)
+      const g = apiGroups.find((x) => x.id === b.groupId)
+      if (g) groupOrder.push(g)
+    }
+    for (const g of apiGroups) {
+      if (!seen.has(g.id)) groupOrder.push(g)
+    }
     void arrangeApi({
-      groupIds: next.filter((b) => b.group).map((b) => b.group!.id),
-      requests: next.flatMap((b) => b.items.map((r) => ({ id: r.id, groupId: b.group?.id })))
+      groups: groupOrder.map((g) => ({ id: g.id, parentId: g.parentId })),
+      requests: next.flatMap((b) => b.items.map((r) => ({ id: r.id, groupId: b.groupId })))
     })
   }
 
@@ -243,7 +273,7 @@ function ApiRequestsSection() {
     targetGroupId: string | undefined,
     after: boolean
   ) => {
-    const next = blocks.map((b) => ({ group: b.group, items: [...b.items] }))
+    const next = blocks.map((b) => ({ groupId: b.groupId, items: [...b.items] }))
     const from = locate(next, dragId)
     if (!from) return
     const [moved] = next[from.b].items.splice(from.i, 1)
@@ -255,25 +285,38 @@ function ApiRequestsSection() {
         return
       }
     }
-    const blk = next.findIndex((b) => b.group?.id === targetGroupId)
+    const blk = next.findIndex((b) => b.groupId === targetGroupId)
     if (blk < 0) return
     next[blk].items.push(moved)
     commit(next)
   }
 
-  /** 分组拖拽落点：移到目标分组的前/后（组内请求跟着一起走） */
+  /**
+   * 分组拖拽落点：移到目标分组的前/后（同一层级内调整顺序）。
+   * 拖拽**整棵子树**一起走（子孙分组的块在 DFS 序里紧跟在它后面）；
+   * 跨层级移动走「移动到…」菜单（见 confirmMoveGroup）。
+   */
   const dropGroup = (dragId: string, targetGroupId: string, after: boolean) => {
-    const next = blocks.map((b) => ({ group: b.group, items: b.items }))
-    const from = next.findIndex((b) => b.group?.id === dragId)
+    const next = blocks.map((b) => ({ groupId: b.groupId, items: b.items }))
+    const from = next.findIndex((b) => b.groupId === dragId)
     if (from < 0) return
-    const [moved] = next.splice(from, 1)
-    let to = next.findIndex((b) => b.group?.id === targetGroupId)
+    const subtree = subtreeOf(apiGroups, dragId)
+    let runLen = 1
+    while (
+      from + runLen < next.length &&
+      next[from + runLen].groupId &&
+      subtree.has(next[from + runLen].groupId!)
+    ) {
+      runLen += 1
+    }
+    const run = next.splice(from, runLen)
+    let to = next.findIndex((b) => b.groupId === targetGroupId)
     if (to < 0) return
     if (after) to += 1
     // 「未分组」块固定首位：分组不能落到它前面
-    const firstGroup = next.findIndex((b) => b.group)
+    const firstGroup = next.findIndex((b) => b.groupId)
     if (firstGroup >= 0 && to < firstGroup) to = firstGroup
-    next.splice(to, 0, moved)
+    next.splice(to, 0, ...run)
     commit(next)
   }
 
@@ -310,38 +353,71 @@ function ApiRequestsSection() {
     const name = groupEdit?.name.trim()
     if (!name) return
     try {
-      await saveApiGroup({ id: groupEdit?.id, name })
+      await saveApiGroup({
+        id: groupEdit?.id,
+        name,
+        // 重命名时不带 parentId（saveApiGroup 会保留原父分组）；新建子分组才带
+        parentId: groupEdit?.parentId
+      })
+      // 新建子分组后把父链展开，让新分组立刻可见（分组默认全折叠）
+      if (!groupEdit?.id) expandAncestors(groupEdit?.parentId)
       setGroupEdit(null)
     } catch (e) {
       message.error(`保存分组失败：${e instanceof Error ? e.message : String(e)}`)
     }
   }
 
-  /** 待删除分组内的请求数量（用于确认框的文案与勾选项） */
-  const groupRequestCount = pendingGroupDelete
-    ? apiRequests.filter((r) => r.groupId === pendingGroupDelete.id).length
+  /** 待删除分组的**子树**内请求数量（含子孙分组，用于确认框的文案与勾选项） */
+  const pendingSubtreeRequestCount = pendingGroupDelete
+    ? countSubtreeRequests(apiGroups, apiRequests, pendingGroupDelete.id)
     : 0
 
   const confirmGroupDelete = async () => {
     const target = pendingGroupDelete
     if (!target) return
     const alsoRequests = deleteGroupRequests
+    // 多级删除：请求随子孙分组一起上移一级（被删分组是顶级时回「未分组」）
+    const fallbackName =
+      (target.parentId && apiGroups.find((g) => g.id === target.parentId)?.name) ?? '未分组'
     setPendingGroupDelete(null)
     setDeleteGroupRequests(false)
     try {
       await deleteApiGroup(target.id, alsoRequests)
       message.success(
-        `已删除分组「${target.name}」：${alsoRequests ? '组内请求已一并删除' : '组内请求已移到「未分组」'}`
+        `已删除分组「${target.name}」：${
+          alsoRequests ? '组内及子分组请求已一并删除' : `组内及子分组请求已移到「${fallbackName}」`
+        }`
       )
     } catch (e) {
       message.error(`删除分组失败：${e instanceof Error ? e.message : String(e)}`)
     }
   }
 
+  /** 把分组（含整棵子树）移动到新父分组下 */
+  const confirmMoveGroup = async () => {
+    const target = moveTarget
+    if (!target) return
+    const parentId = moveParent || undefined
+    setMoveTarget(null)
+    if (parentId === target.parentId) return
+    try {
+      const nextGroups = moveGroup(apiGroups, target.id, parentId)
+      await arrangeApi({
+        groups: nextGroups.map((g) => ({ id: g.id, parentId: g.parentId })),
+        requests: apiRequests.map((r) => ({ id: r.id, groupId: r.groupId }))
+      })
+      // 让移动后的分组可见：展开目标父链
+      if (parentId) expandAncestors(parentId)
+      message.success(`已移动「${target.name}」${parentId ? '到所选分组下' : '到顶级分组'}`)
+    } catch (e) {
+      message.error(`移动失败：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
   /** 把一个请求移出到「未分组」：只改该请求的归属，保持其它顺序不变 */
   const moveOutOfGroup = (req: ApiRequestEntry) => {
     void arrangeApi({
-      groupIds: apiGroups.map((g) => g.id),
+      groups: apiGroups.map((g) => ({ id: g.id, parentId: g.parentId })),
       requests: apiRequests.map((r) => ({
         id: r.id,
         groupId: r.id === req.id ? undefined : r.groupId
@@ -349,20 +425,56 @@ function ApiRequestsSection() {
     })
   }
 
-  /** 导入 cURL：解析成一条新的保存请求并打开它的标签 */
+  /** 导入 cURL：解析成一条新的保存请求并打开它的标签（从分组发起时落到该组） */
   const handleImportCurl = async () => {
     setImporting(true)
     try {
-      const id = await importCurlRequest(curlText)
+      const id = await importCurlRequest(curlText, curlGroupId)
       if (id) openApiTab(id)
       setCurlOpen(false)
       setCurlText('')
+      setCurlGroupId(undefined)
       message.success('已导入 cURL 命令')
     } catch (e) {
       message.error('导入失败：' + (e instanceof Error ? e.message : String(e)))
     } finally {
       setImporting(false)
     }
+  }
+
+  /** 把父链（含自己）展开，保证新建的子分组可见（分组默认全折叠） */
+  const expandAncestors = (gid?: string): void => {
+    if (!gid) return
+    const chain: string[] = []
+    const byId = new Map(apiGroups.map((g) => [g.id, g]))
+    let cur: ApiGroup | undefined = byId.get(gid)
+    const seen = new Set<string>()
+    while (cur && !seen.has(cur.id)) {
+      chain.push(groupKey(cur.id))
+      seen.add(cur.id)
+      cur = cur.parentId ? byId.get(cur.parentId) : undefined
+    }
+    if (chain.length) setExpandedKeys((prev) => [...new Set([...prev, ...chain])])
+  }
+
+  /**
+   * 分组选择器的树形选项（顶级 value = ''；新建分组 / 移动到… 复用）。
+   * exclude：要从选项里排除的节点（如「移动到…」不能选目标分组自己 / 子孙）。
+   */
+  const buildGroupOptions = (exclude?: Set<string>): NonNullable<TreeSelectProps['treeData']> => {
+    const build = (nodes: ApiGroupNode[]): NonNullable<TreeSelectProps['treeData']> => {
+      const out: NonNullable<TreeSelectProps['treeData']> = []
+      for (const n of nodes) {
+        if (exclude?.has(n.group.id)) continue
+        out.push({
+          value: n.group.id,
+          title: n.group.name,
+          children: build(n.children)
+        })
+      }
+      return out
+    }
+    return [{ value: '', title: '顶级分组', children: build(groupTree) }]
   }
 
   const requestNode = (r: ApiRequestEntry, hasGroup: boolean): TreeDataNode => ({
@@ -381,59 +493,97 @@ function ApiRequestsSection() {
     )
   })
 
-  const groupNodes: TreeDataNode[] = viewBlocks
-    .filter((b) => b.group)
-    .map((b) => {
-      const group = b.group!
-      // 计数与「是否空组」都按**完整**分组算：搜索过滤掉几行不该改变分组的规模
-      const count = blocks.find((x) => x.group?.id === group.id)?.items.length ?? 0
-      // 空分组不参与展开/折叠：不挂子节点、点击无效，避免空展开触发布局抖动
-      const isEmpty = count === 0
-      return {
-        key: groupKey(group.id),
-        title: (
-          <SidebarGroupRow
-            expanded={isEmpty ? false : expandedKeys.includes(groupKey(group.id))}
-            name={group.name}
-            onToggle={isEmpty ? () => {} : () => toggleKey(groupKey(group.id))}
-            itemType={DND_REQUEST}
-            groupType={DND_GROUP}
-            groupId={group.id}
-            onDropItem={dropRequest}
-            onDropGroup={dropGroup}
-            onNew={() => void handleCreate(group.id)}
-            newTitle="在此分组新建请求"
-            menuItems={[
-              { key: 'new', icon: <Plus className="size-3.5" />, label: '在此分组新建请求' },
-              { key: 'newWs', icon: <Cable className="size-3.5" />, label: '在此分组新建 WebSocket' },
-              { key: 'rename', icon: <Pencil className="size-3.5" />, label: '重命名' },
-              { type: 'divider' },
-              { key: 'delete', icon: <Trash2 className="size-3.5" />, label: '删除分组', danger: true }
-            ]}
-            onMenuClick={(key) => {
-              if (key === 'new') void handleCreate(group.id)
-              else if (key === 'newWs') void handleCreate(group.id, 'ws')
-              else if (key === 'rename') setGroupEdit({ id: group.id, name: group.name })
-              else {
-                setDeleteGroupRequests(false)
-                setPendingGroupDelete(group)
-              }
-            }}
-          />
-        ),
-        children: isEmpty ? undefined : b.items.map((r) => requestNode(r, true))
-      }
-    })
+  /** 悬浮「新建」按钮的下拉（与顶部新建同一套入口，动作落到本组） */
+  const groupNewMenuItems = (group: ApiGroup): NonNullable<MenuProps['items']> => [
+    { key: 'new', icon: <Plus className="size-3.5" />, label: '在此分组新建请求' },
+    { key: 'newWs', icon: <Cable className="size-3.5" />, label: '在此分组新建 WebSocket' },
+    { key: 'curl', icon: <Terminal className="size-3.5" />, label: '导入 cURL 到此分组' },
+    {
+      key: 'openapi',
+      icon: <Braces className="size-3.5" />,
+      label: '导入 OpenAPI / Swagger'
+    }
+  ]
 
-  // 分组在前，未分组的请求平铺在最后（不另设「未分组」折叠组）
-  const treeData: TreeDataNode[] = [...groupNodes]
-  const viewUngrouped = viewBlocks.find((b) => !b.group)?.items ?? []
-  treeData.push(...viewUngrouped.map((r) => requestNode(r, false)))
+  /** 分组的右键菜单（多新建方式 + 子分组 + 层级移动 + 重命名 / 删除） */
+  const groupContextMenu = (group: ApiGroup): MenuProps['items'] => [
+    ...groupNewMenuItems(group),
+    { type: 'divider' },
+    { key: 'sub', icon: <FolderPlus className="size-3.5" />, label: '在此分组新建子分组' },
+    { key: 'move', icon: <FolderInput className="size-3.5" />, label: '移动到…' },
+    { type: 'divider' },
+    { key: 'rename', icon: <Pencil className="size-3.5" />, label: '重命名' },
+    { key: 'delete', icon: <Trash2 className="size-3.5" />, label: '删除分组', danger: true }
+  ]
+
+  /** 分组的新建动作分发（下拉与右键菜单共用） */
+  const handleGroupNew = (group: ApiGroup, key: string): void => {
+    if (key === 'new') void handleCreate(group.id)
+    else if (key === 'newWs') void handleCreate(group.id, 'ws')
+    else if (key === 'curl') {
+      setCurlGroupId(group.id)
+      setCurlOpen(true)
+    } else if (key === 'openapi') setOpenApiOpen(true)
+  }
+
+  const handleGroupMenu = (group: ApiGroup, key: string): void => {
+    if (key === 'new' || key === 'newWs' || key === 'curl' || key === 'openapi') {
+      handleGroupNew(group, key)
+    } else if (key === 'sub') {
+      setGroupEdit({ name: '', parentId: group.id })
+      expandAncestors(group.id)
+    } else if (key === 'move') {
+      setMoveParent(group.parentId)
+      setMoveTarget(group)
+    } else if (key === 'rename') {
+      setGroupEdit({ id: group.id, name: group.name })
+    } else if (key === 'delete') {
+      setDeleteGroupRequests(false)
+      setPendingGroupDelete(group)
+    }
+  }
+
+  /** 递归渲染分组节点：子分组在前、直接请求在后 */
+  const renderGroupNode = (n: ApiGroupNode): TreeDataNode => {
+    const hasChildren = n.children.length > 0
+    // 「是否空组」按**完整**分组算：搜索过滤掉几行不该改变分组的规模
+    const isEmpty = n.items.length === 0 && !hasChildren
+    return {
+      key: groupKey(n.group.id),
+      title: (
+        <SidebarGroupRow
+          expanded={isEmpty ? false : expandedKeys.includes(groupKey(n.group.id))}
+          name={n.group.name}
+          onToggle={isEmpty ? () => {} : () => toggleKey(groupKey(n.group.id))}
+          itemType={DND_REQUEST}
+          groupType={DND_GROUP}
+          groupId={n.group.id}
+          onDropItem={dropRequest}
+          onDropGroup={dropGroup}
+          onNew={() => void handleCreate(n.group.id)}
+          newTitle="在此分组新建请求"
+          newMenuItems={groupNewMenuItems(n.group)}
+          onNewMenuClick={(key) => handleGroupNew(n.group, key)}
+          menuItems={groupContextMenu(n.group)}
+          onMenuClick={(key) => handleGroupMenu(n.group, key)}
+        />
+      ),
+      children: isEmpty
+        ? undefined
+        : [...n.children.map(renderGroupNode), ...n.items.map((r) => requestNode(r, true))]
+    }
+  }
+
+  // 分组树在前，未分组的请求平铺在最后（不另设「未分组」折叠组）
+  const treeData: TreeDataNode[] = [
+    ...viewTree.map(renderGroupNode),
+    ...viewUngrouped.map((r) => requestNode(r, false))
+  ]
 
   /** 搜索时把命中的分组全部展开（否则要逐个点开才看得到结果） */
-  const effectiveExpanded = searching
-    ? groupNodes.map((n) => String(n.key))
-    : expandedKeys
+  const collectGroupKeys = (nodes: ApiGroupNode[]): string[] =>
+    nodes.flatMap((n) => [groupKey(n.group.id), ...collectGroupKeys(n.children)])
+  const effectiveExpanded = searching ? collectGroupKeys(viewTree) : expandedKeys
 
   const isEmpty = apiRequests.length === 0 && apiGroups.length === 0
   const noMatch = searching && treeData.length === 0
@@ -462,12 +612,16 @@ function ApiRequestsSection() {
                 items: [
                   { key: 'blank', icon: <Plus className="size-3.5" />, label: '新建请求' },
                   { key: 'ws', icon: <Cable className="size-3.5" />, label: '新建 WebSocket' },
-                  { key: 'curl', icon: <Terminal className="size-3.5" />, label: '导入 cURL' }
+                  { key: 'curl', icon: <Terminal className="size-3.5" />, label: '导入 cURL' },
+                  { key: 'openapi', icon: <Braces className="size-3.5" />, label: '导入 OpenAPI / Swagger' }
                 ],
                 onClick: ({ key }) => {
                   if (key === 'blank') void handleCreate()
                   else if (key === 'ws') void handleCreate(undefined, 'ws')
-                  else setCurlOpen(true)
+                  else if (key === 'curl') {
+                    setCurlGroupId(undefined)
+                    setCurlOpen(true)
+                  } else setOpenApiOpen(true)
                 }
               }}
             >
@@ -475,7 +629,7 @@ function ApiRequestsSection() {
                 type="text"
                 size="small"
                 className="px-0.5 text-muted-foreground"
-                title="新建请求 / WebSocket / 导入 cURL"
+                title="新建请求 / WebSocket / 导入 cURL / OpenAPI"
                 icon={<Plus className="size-3.5" />}
               >
                 <ChevronDown className="size-3 opacity-60" />
@@ -496,12 +650,12 @@ function ApiRequestsSection() {
           />
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+        <div className="min-h-0 flex-1 overflow-y-auto p-1.5 no-scrollbar">
           {isEmpty ? (
             <div className="mx-2 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
               还没有保存的请求。
               <br />
-              点击右上角 + 新建请求 / WebSocket，或导入 cURL 命令。
+              点击右上角 + 新建请求 / WebSocket，或导入 cURL / OpenAPI 文档。
             </div>
           ) : noMatch ? (
             <div className="mx-2 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
@@ -520,11 +674,11 @@ function ApiRequestsSection() {
         </div>
       </SectionContent>
 
-      {/* 新建 / 重命名分组 */}
+      {/* 新建 / 重命名分组（新建时可选父分组 = 生成子分组） */}
       <Modal
         open={groupEdit !== null}
         onCancel={() => setGroupEdit(null)}
-        title={groupEdit?.id ? '重命名分组' : '新建分组'}
+        title={groupEdit?.id ? '重命名分组' : groupEdit?.parentId ? '新建子分组' : '新建分组'}
         okText="保存"
         cancelText="取消"
         centered
@@ -533,12 +687,55 @@ function ApiRequestsSection() {
         okButtonProps={{ disabled: !groupEdit?.name.trim() }}
         onOk={() => void submitGroupEdit()}
       >
-        <Input
-          autoFocus
-          placeholder="分组名称，如：用户服务"
-          value={groupEdit?.name ?? ''}
-          onChange={(e) => setGroupEdit((g) => (g ? { ...g, name: e.target.value } : g))}
-          onPressEnter={() => void submitGroupEdit()}
+        <div className="space-y-3">
+          {!groupEdit?.id && (
+            <TreeSelect
+              className="w-full"
+              placeholder="父分组（缺省为顶级分组）"
+              value={groupEdit?.parentId ?? ''}
+              onChange={(v) =>
+                setGroupEdit((g) =>
+                  g ? { ...g, parentId: (v as string) || undefined } : g
+                )
+              }
+              treeData={buildGroupOptions()}
+              treeDefaultExpandAll
+              allowClear
+            />
+          )}
+          <Input
+            autoFocus
+            placeholder="分组名称，如：用户服务"
+            value={groupEdit?.name ?? ''}
+            onChange={(e) => setGroupEdit((g) => (g ? { ...g, name: e.target.value } : g))}
+            onPressEnter={() => void submitGroupEdit()}
+          />
+        </div>
+      </Modal>
+
+      {/* 移动到…：分组跨层级移动（带着整棵子树），目标从树形选择器里挑 */}
+      <Modal
+        open={moveTarget !== null}
+        onCancel={() => setMoveTarget(null)}
+        title={`移动分组「${moveTarget?.name ?? ''}」`}
+        okText="移动"
+        cancelText="取消"
+        centered
+        width={420}
+        destroyOnHidden
+        onOk={() => void confirmMoveGroup()}
+      >
+        <p className="mb-2 text-xs text-muted-foreground">
+          选择新的父分组：选「顶级分组」把它移到最外层；该分组连同所有子分组一起移动。
+        </p>
+        <TreeSelect
+          className="w-full"
+          placeholder="选择父分组"
+          value={moveParent ?? ''}
+          onChange={(v) => setMoveParent((v as string) || undefined)}
+          treeData={buildGroupOptions(moveTarget ? subtreeOf(apiGroups, moveTarget.id) : undefined)}
+          treeDefaultExpandAll
+          allowClear
         />
       </Modal>
 
@@ -556,36 +753,43 @@ function ApiRequestsSection() {
         onOk={() => void confirmGroupDelete()}
       >
         <p className="text-sm text-muted-foreground">
-          「{pendingGroupDelete?.name}」将被删除
-          {groupRequestCount > 0 ? `，组内共 ${groupRequestCount} 个请求。` : '。'}
+          「{pendingGroupDelete?.name}」将被删除（连同所有子分组）
+          {pendingSubtreeRequestCount > 0
+            ? `，其中共 ${pendingSubtreeRequestCount} 个请求。`
+            : '。'}
         </p>
-        {groupRequestCount > 0 && (
+        {pendingSubtreeRequestCount > 0 && (
           <Checkbox
             className="mt-3"
             checked={deleteGroupRequests}
             onChange={(e) => setDeleteGroupRequests(e.target.checked)}
           >
-            <span className="text-sm">同时删除组内的请求</span>
+            <span className="text-sm">同时删除组内及子分组的请求</span>
           </Checkbox>
         )}
         <p className="mt-2 text-xs text-muted-foreground">
           {deleteGroupRequests
-            ? '组内请求将一并删除，该操作不可撤销。'
-            : '不勾选时，组内请求会移到「未分组」。'}
+            ? '请求将一并删除，该操作不可撤销。'
+            : '不勾选时，请求会随子孙分组一起上移一级（删除顶级分组则回到「未分组」）。'}
         </p>
       </Modal>
 
-      {/* cURL 导入：解析成新请求并打开其标签 */}
+      {/* cURL 导入：解析成新请求并打开其标签（从分组发起时落到该组） */}
       <Modal
         centered
         open={curlOpen}
-        onCancel={() => setCurlOpen(false)}
+        onCancel={() => {
+          setCurlOpen(false)
+          setCurlGroupId(undefined)
+        }}
         width={576}
         title={
           <div>
             <div className="text-sm">导入 cURL 命令</div>
             <div className="text-xs text-muted-foreground">
-              粘贴 curl 命令，解析后保存为一条新的请求并打开
+              {curlGroupId
+                ? '粘贴 curl 命令，解析后保存为一条新请求并放入当前分组'
+                : '粘贴 curl 命令，解析后保存为一条新的请求并打开'}
             </div>
           </div>
         }
@@ -614,6 +818,9 @@ function ApiRequestsSection() {
           autoFocus
         />
       </Modal>
+
+      {/* OpenAPI / Swagger 导入：文件 / URL 取数 → 解析预览 → 确认后建组 + 建请求 */}
+      <OpenApiImportModal open={openApiOpen} onClose={() => setOpenApiOpen(false)} />
 
       {/* 删除确认 */}
       <Modal

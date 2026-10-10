@@ -31,6 +31,8 @@ export function SidebarGroupRow({
   afterCount,
   onNew,
   newTitle,
+  newMenuItems,
+  onNewMenuClick,
   itemType,
   groupType,
   groupId,
@@ -48,10 +50,16 @@ export function SidebarGroupRow({
   color?: string
   /** 数量之后的附加内容（如主机分组的取色点） */
   afterCount?: ReactNode
-  /** 悬浮新建按钮的动作 */
+  /** 悬浮新建按钮的动作（未提供 newMenuItems 时直接调用） */
   onNew: () => void
   /** 悬浮新建按钮的 title */
   newTitle: string
+  /**
+   * 可选：悬浮新建按钮的「多种新建方式」菜单（各功能区自建）。
+   * 提供后，按钮点击变成弹下拉（onNew 不再触发，由 onNewMenuClick 分发菜单 key）。
+   */
+  newMenuItems?: MenuProps['items']
+  onNewMenuClick?: (key: string) => void
   /** 资源（连接 / 笔记 / 请求 / 脚本）的 react-dnd 类型 */
   itemType: string
   /** 分组的 react-dnd 类型 */
@@ -154,17 +162,34 @@ export function SidebarGroupRow({
         放在 flex 流里的话，即便 `opacity-0` 也照样占一格 —— 分组名全程被提前截断。
       */}
       <SidebarRowActions hoverClass="group-hover/grp:pointer-events-auto group-hover/grp:opacity-100">
-        <Button
-          type="text"
-          size="small"
-          className="h-5 w-5 shrink-0 p-0 opacity-0 transition-opacity group-hover/grp:opacity-100"
-          title={newTitle}
-          icon={<Plus className="size-3.5" />}
-          onClick={(e) => {
-            e.stopPropagation()
-            onNew()
-          }}
-        />
+        {newMenuItems?.length ? (
+          <Dropdown
+            trigger={['click']}
+            placement="bottomRight"
+            menu={{ items: newMenuItems, onClick: ({ key }) => onNewMenuClick?.(key) }}
+          >
+            <Button
+              type="text"
+              size="small"
+              className="h-5 w-5 shrink-0 p-0 opacity-0 transition-opacity group-hover/grp:opacity-100"
+              title={newTitle}
+              icon={<Plus className="size-3.5" />}
+              onClick={(e) => e.stopPropagation()}
+            />
+          </Dropdown>
+        ) : (
+          <Button
+            type="text"
+            size="small"
+            className="h-5 w-5 shrink-0 p-0 opacity-0 transition-opacity group-hover/grp:opacity-100"
+            title={newTitle}
+            icon={<Plus className="size-3.5" />}
+            onClick={(e) => {
+              e.stopPropagation()
+              onNew()
+            }}
+          />
+        )}
       </SidebarRowActions>
     </div>
   )

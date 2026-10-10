@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ChangeEvent as ReactChangeEvent,
@@ -7,11 +8,23 @@ import {
   type PointerEvent as ReactPointerEvent
 } from 'react'
 import { ChevronDown, ChevronUp, Globe, Send, Trash2, X } from 'lucide-react'
-import { AutoComplete, Button, Input, Modal, Segmented, Select, Tag, message } from 'antd'
+import {
+  AutoComplete,
+  Button,
+  Input,
+  Modal,
+  Segmented,
+  Select,
+  Tag,
+  TreeSelect,
+  message,
+  type TreeSelectProps
+} from 'antd'
 import { apiTabId, apiTabTitle, editorSaveKey, NEW_API_REQUEST_ID, useAppStore } from '@/stores/app-store'
 import MonacoEditor from '@/shared/components/MonacoEditor'
 import { BodyFieldsTable } from '@/features/api/BodyFieldsTable'
 import { TabButtons } from '@/features/api/TabButtons'
+import { buildGroupTree, type ApiGroupNode } from '@/features/api/group-tree'
 import {
   BODY_TYPES,
   COMMON_HEADERS,
@@ -77,6 +90,7 @@ const BODY_TYPE_OPTIONS = BODY_TYPES.map((b) => ({ label: b.label, value: b.valu
  */
 export function ApiPage({ requestId, tabId }: { requestId: string; tabId?: string }) {
   const apiRequests = useAppStore((s) => s.apiRequests)
+  const apiGroups = useAppStore((s) => s.apiGroups)
   const saveApiRequest = useAppStore((s) => s.saveApiRequest)
   const createApiRequest = useAppStore((s) => s.createApiRequest)
   const openApiTab = useAppStore((s) => s.openApiTab)
@@ -89,10 +103,23 @@ export function ApiPage({ requestId, tabId }: { requestId: string; tabId?: strin
   /** 本标签是否是「未保存的新请求」草稿（requestId 为哨兵值，不是真实存储条目） */
   const isDraft = requestId === NEW_API_REQUEST_ID
 
+  /** 分组选择器选项：顶级「未分组」 + 多级分组树（支持选择任意层级的分组） */
+  const groupTreeOptions = useMemo(() => {
+    const build = (nodes: ApiGroupNode[]): NonNullable<TreeSelectProps['treeData']> =>
+      nodes.map((n) => ({
+        value: n.group.id,
+        title: n.group.name,
+        children: n.children.length ? build(n.children) : undefined
+      }))
+    return [{ value: '', title: '未分组', children: build(buildGroupTree(apiGroups, [])) }]
+  }, [apiGroups])
+
   // ---------- 请求草稿 ----------
   // 不自动保存：改完必须按 Ctrl/Cmd+S 才落盘。标签保持挂载，所以切走再回来草稿还在；
   // 但**关掉标签**就会丢掉未保存的改动（这是「不自动保存」的必然代价）。
   const [name, setName] = useState('')
+/** 归属分组：初值来自请求（草稿来自「在分组里点新建」），改动后按 Ctrl+S 落盘 */
+const [groupId, setGroupId] = useState<string | undefined>(undefined)
   const [method, setMethod] = useState('GET')
   const [url, setUrl] = useState('')
   const [headers, setHeaders] = useState<ApiHeaderPair[]>([emptyHeader()])
@@ -183,8 +210,8 @@ export function ApiPage({ requestId, tabId }: { requestId: string; tabId?: strin
    * 不做自动保存、不在切标签 / 关标签时偷偷写盘。
    *
    * - 未保存草稿：已填名称就直接落盘，没填才弹窗要请求名（见 persistDraft）。
-   * - 已保存请求：整条覆盖写；groupId 必须从 store 里现取带回去 —— 否则按一次
-   *   Ctrl+S 就会把请求从分组里踢出去（分组归属只由侧边栏的拖拽重排改动）。
+   * - 已保存请求：整条覆盖写；groupId 从工具栏的选择器带回（初值来自该请求，
+   *   没动过选择器就原样写回，不会把请求踢出分组）。
    */
   const saveNow = async (): Promise<void> => {
     // 未保存草稿：名称是新建落盘的必需项；已填就不弹窗，没填才要用户补
@@ -200,7 +227,6 @@ export function ApiPage({ requestId, tabId }: { requestId: string; tabId?: strin
     }
     setSaving(true)
     try {
-      const current = useAppStore.getState().apiRequests.find((r) => r.id === requestId)
       await saveApiRequest({
         id: requestId,
         name: name.trim(),
@@ -211,7 +237,7 @@ export function ApiPage({ requestId, tabId }: { requestId: string; tabId?: strin
         bodyType,
         bodyUrlencoded: urlencoded,
         bodyFormFields: formFields,
-        groupId: current?.groupId,
+        groupId,
         createdAt: 0,
         updatedAt: 0
       })
@@ -228,10 +254,7 @@ export function ApiPage({ requestId, tabId }: { requestId: string; tabId?: strin
   const persistDraft = async (nm: string): Promise<void> => {
     setSaving(true)
     try {
-      // 草稿标签上记着「目标分组」：在分组里点「新建」时带过来
-      const gid = useAppStore
-        .getState()
-        .ui.panelTabs.find((t) => t.id === apiTabId(NEW_API_REQUEST_ID))?.apiGroupId
+      // 归属分组：工具栏选择器初值来自「在分组里点新建」时的目标分组（见重置 effect）
       const id = await createApiRequest({
         name: nm,
         method,
@@ -241,7 +264,7 @@ export function ApiPage({ requestId, tabId }: { requestId: string; tabId?: strin
         bodyType,
         bodyUrlencoded: urlencoded,
         bodyFormFields: formFields,
-        groupId: gid
+        groupId
       })
       // 草稿标签 → 真实标签：关掉草稿，避免残留一个空白标签
       closePanelTab(apiTabId(NEW_API_REQUEST_ID))
@@ -266,6 +289,14 @@ export function ApiPage({ requestId, tabId }: { requestId: string; tabId?: strin
   useEffect(() => {
     const req = useAppStore.getState().apiRequests.find((r) => r.id === requestId) ?? null
     setName(req?.name ?? '')
+    // 草稿的分组初值来自草稿标签上记着的「目标分组」（在分组里点新建时带过来）
+    setGroupId(
+      requestId === NEW_API_REQUEST_ID
+        ? useAppStore
+            .getState()
+            .ui.panelTabs.find((t) => t.id === apiTabId(NEW_API_REQUEST_ID))?.apiGroupId
+        : req?.groupId
+    )
     setMethod(req?.method ?? 'GET')
     setUrl(req?.url ?? '')
     setHeaders(req?.headers?.length ? normalizeHeaders(req.headers) : [emptyHeader()])
@@ -625,8 +656,23 @@ export function ApiPage({ requestId, tabId }: { requestId: string; tabId?: strin
 
   return (
     <div ref={rootRef} className="flex h-full flex-col bg-background" onKeyDown={onKeyDown}>
-      {/* 工具栏：名称 + 历史（新建与导入 cURL 在侧边栏；保存状态在底部状态栏，见 EditorSaveStatus） */}
+      {/* 工具栏：分组选择 + 名称 + 历史（新建与导入 cURL 在侧边栏；保存状态在底部状态栏，见 EditorSaveStatus） */}
       <div className="flex shrink-0 items-center gap-2 px-3 py-1.5">
+        <TreeSelect
+          className="w-40 shrink-0"
+          value={groupId ?? ''}
+          onChange={(v) => {
+            setGroupId((v as string) || undefined)
+            markDirty()
+          }}
+          treeData={groupTreeOptions}
+          treeDefaultExpandAll
+          showSearch
+          treeNodeFilterProp="title"
+          allowClear
+          placeholder="未分组"
+          title="请求所属分组（支持多级分组，改动后 Ctrl+S 落盘）"
+        />
         <Input
           value={name}
           onChange={(e) => {

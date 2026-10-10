@@ -785,23 +785,44 @@ class StorageService {
   }
 
   /**
-   * 拖拽排序 / 换组后的整体重排：数组顺序即显示顺序。
-   * - groupIds：分组的目标顺序（未列出的分组按原相对顺序附在其后）；
+   * 拖拽排序 / 换组 / 移动层级后的整体重排：数组顺序即显示顺序（DFS 前序）。
+   * - groups：全部分组按目标顺序列出，id + 目标 parentId（undefined = 顶级分组）。
+   *   数组里没出现的分组按原相对顺序附在其后；parentId 会造成环（挂到自己或自己的子孙）
+   *   时静默丢弃该 parentId（保底不破坏树形结构）；
    * - requests：请求按目标顺序列出，groupId 为最终归属（undefined = 未分组）。
-   * 只改 groupId，不碰请求内容本身，也不刷新 updatedAt（列表里显示的是「最近编辑」时间，
-   * 拖一下顺序就跳成「刚刚」会很误导）。
+   * 只改 groupId / parentId / 顺序，不碰请求内容本身，也不刷新 updatedAt
+   * （列表里显示的是「最近编辑」时间，拖一下顺序就跳成「刚刚」会很误导）。
    */
   arrangeApi(payload: {
-    groupIds: string[]
+    groups: Array<{ id: string; parentId?: string }>
     requests: Array<{ id: string; groupId?: string }>
   }): { groups: ApiGroup[]; requests: ApiRequestEntry[] } {
     const groups = this.store.get('apiGroups')
     const groupById = new Map(groups.map((g) => [g.id, g]))
-    const ordered = payload.groupIds
-      .map((id) => groupById.get(id))
-      .filter((g): g is ApiGroup => Boolean(g))
+    const parentOf = new Map(payload.groups.map((x) => [x.id, x.parentId || undefined]))
+    // 从 fromId 沿目标 parent 链往上走，能走到 stopId 就是环（不能挂）
+    const wouldCycle = (fromId: string, stopId: string): boolean => {
+      let cur: string | undefined = fromId
+      const seen = new Set<string>()
+      while (cur && cur !== stopId) {
+        if (seen.has(cur)) return true
+        seen.add(cur)
+        cur = parentOf.get(cur)
+      }
+      return cur === stopId
+    }
+    const ordered: ApiGroup[] = []
+    const placed = new Set<string>()
+    for (const item of payload.groups) {
+      const g = groupById.get(item.id)
+      if (!g || placed.has(g.id)) continue
+      placed.add(g.id)
+      const parentId = item.parentId || undefined
+      const safe = parentId && parentId !== g.id && !wouldCycle(parentId, g.id)
+      ordered.push(safe ? { ...g, parentId } : g)
+    }
     for (const g of groups) {
-      if (!payload.groupIds.includes(g.id)) ordered.push(g)
+      if (!placed.has(g.id)) ordered.push(g)
     }
     this.store.set('apiGroups', ordered)
 
@@ -826,13 +847,15 @@ class StorageService {
     return this.store.get('apiGroups')
   }
 
-  /** 保存分组（upsert）：不传 id 视为新增 */
-  saveApiGroup(input: { id?: string; name: string }): ApiGroup[] {
+  /** 保存分组（upsert）：不传 id 视为新增；parentId 缺省 = 顶级分组 */
+  saveApiGroup(input: { id?: string; name: string; parentId?: string }): ApiGroup[] {
     const groups = this.store.get('apiGroups')
     const prev = input.id ? groups.find((g) => g.id === input.id) : undefined
     const group: ApiGroup = {
       id: input.id || crypto.randomUUID(),
       name: input.name.trim(),
+      // 更新（重命名）且没传 parentId 时保留原父分组，不会被误「踢回顶级」
+      parentId: input.id ? input.parentId ?? prev?.parentId : input.parentId,
       createdAt: prev?.createdAt ?? Date.now()
     }
     this.store.set(
@@ -843,31 +866,37 @@ class StorageService {
   }
 
   /**
-   * 删除分组：默认只删分组本身，组内请求回到「未分组」；
-   * deleteRequests 为 true 时连同组内请求一起删除（由用户在弹出的确认框里勾选）。
+   * 删除分组（含多级）：删除的是**整棵子树**——被删分组的子孙分组整体上移一级，
+   * 挂到被删分组的父分组下（顶级分组被删则升为顶级）；组内请求跟着上移一级。
+   * deleteRequests 为 true 时连同子树内所有请求一起删除（由用户在弹出的确认框里勾选）。
    * 两份数据一起返回 —— 渲染端无论如何都要同时更新它们。
    */
   deleteApiGroup(
     id: string,
     deleteRequests = false
   ): { groups: ApiGroup[]; requests: ApiRequestEntry[] } {
-    const members = this.store
-      .get('apiRequests')
-      .filter((r) => r.groupId === id)
-      .map((r) => r.id)
-    const doomed = new Set(deleteRequests ? members : [])
-    this.store.set(
-      'apiGroups',
-      this.store.get('apiGroups').filter((g) => g.id !== id)
-    )
-    this.store.set(
-      'apiRequests',
-      this.store
-        .get('apiRequests')
-        .filter((r) => !doomed.has(r.id))
-        .map((r) => (r.groupId === id ? { ...r, groupId: undefined } : r))
-    )
-    return { groups: this.listApiGroups(), requests: this.listApiRequests() }
+    const groups = this.store.get('apiGroups')
+    // 收集整棵子树（被删分组 + 所有子孙分组）
+    const doomed = new Set<string>()
+    const collect = (gid: string): void => {
+      if (doomed.has(gid)) return
+      doomed.add(gid)
+      for (const g of groups) if (g.parentId === gid) collect(g.id)
+    }
+    collect(id)
+    const deleted = groups.find((g) => g.id === id)
+    const promoteTo = deleted?.parentId
+    const nextGroups = groups
+      .filter((g) => !doomed.has(g.id))
+      .map((g) => (g.parentId && doomed.has(g.parentId) ? { ...g, parentId: promoteTo } : g))
+    const requests = this.store.get('apiRequests')
+    const inDoomed = (r: ApiRequestEntry): boolean => Boolean(r.groupId && doomed.has(r.groupId))
+    const nextRequests = deleteRequests
+      ? requests.filter((r) => !inDoomed(r))
+      : requests.map((r) => (inDoomed(r) ? { ...r, groupId: promoteTo } : r))
+    this.store.set('apiGroups', nextGroups)
+    this.store.set('apiRequests', nextRequests)
+    return { groups: nextGroups, requests: nextRequests }
   }
 
   listApiHistory(): ApiHistoryEntry[] {

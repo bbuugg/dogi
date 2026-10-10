@@ -51,6 +51,7 @@ import type {
   NoteFileItem,
   NoteFileContent,
   NoteSession,
+  OpenApiImportSource,
   OpenResult,
   Preferences,
   RdpBridgeInfo,
@@ -730,14 +731,14 @@ const api = {
     save: (entry: ApiRequestEntry): Promise<ApiRequestEntry[]> =>
       ipcRenderer.invoke('api:save', entry),
     remove: (id: string): Promise<ApiRequestEntry[]> => ipcRenderer.invoke('api:delete', id),
-    /** 拖拽排序 / 换组后的整体重排（数组顺序即显示顺序） */
+    /** 拖拽排序 / 换组 / 移动层级后的整体重排（数组顺序即显示顺序，groups 带 parentId） */
     arrange: (payload: {
-      groupIds: string[]
+      groups: Array<{ id: string; parentId?: string }>
       requests: Array<{ id: string; groupId?: string }>
     }): Promise<{ groups: ApiGroup[]; requests: ApiRequestEntry[] }> =>
       ipcRenderer.invoke('api:arrange', payload),
     listGroups: (): Promise<ApiGroup[]> => ipcRenderer.invoke('api:groups:list'),
-    saveGroup: (input: { id?: string; name: string }): Promise<ApiGroup[]> =>
+    saveGroup: (input: { id?: string; name: string; parentId?: string }): Promise<ApiGroup[]> =>
       ipcRenderer.invoke('api:groups:save', input),
     /** 删除分组；deleteRequests=true 时连同组内请求一起删除 */
     removeGroup: (
@@ -758,7 +759,15 @@ const api = {
      * 为 form-data 的文件字段选本地文件（弹系统对话框，主进程顺手 stat 出名字与大小）。
      * 只是选路径：文件内容由 send 在主进程侧读。
      */
-    pickFile: (): Promise<ApiPickFileResult> => ipcRenderer.invoke('api:pickFile')
+    pickFile: (): Promise<ApiPickFileResult> => ipcRenderer.invoke('api:pickFile'),
+    /**
+     * 选 OpenAPI / Swagger 规格 JSON 文件并读回文本（主进程弹框 + 读盘）。
+     * 取消时 `canceled: true`；解析在渲染端做。
+     */
+    openApiPickFile: (): Promise<OpenApiImportSource> => ipcRenderer.invoke('api:openapi:pick'),
+    /** 从 URL 抓取 OpenAPI / Swagger 规格文本（主进程发请求，规避渲染进程 CORS） */
+    openApiFetch: (url: string): Promise<OpenApiImportSource> =>
+      ipcRenderer.invoke('api:openapi:fetch', url)
   },
   /**
    * WebSocket 调试（接口请求里的 ws 协议）。

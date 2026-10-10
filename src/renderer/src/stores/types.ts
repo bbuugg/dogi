@@ -10,6 +10,7 @@ import type { PluginInfo } from '@shared/plugin'
 import type { SshProfile } from '@shared/types'
 import type { PaneNode, SplitDirectionInput } from '@/app/layout/pane-layout'
 import type { PluginViewInstance } from '@/features/plugins/host'
+import type { OpenApiImportResult } from '@/features/api/openapi-import'
 import type {
   AcpConversationState,
   AcpSessionInfo,
@@ -794,25 +795,30 @@ export interface ApiSlice {
   refreshApiRequests: () => Promise<void>
   /** 刷新接口请求分组到 store */
   refreshApiGroups: () => Promise<void>
-  /** 新建（不传 id）或重命名（传 id）接口请求分组 */
-  saveApiGroup: (input: { id?: string; name: string }) => Promise<void>
-  /** 删除分组；deleteRequests=true 时连同组内请求一起删除，否则组内请求回到「未分组」 */
-  deleteApiGroup: (id: string, deleteRequests?: boolean) => Promise<void>
-  /** 拖拽排序 / 换组后的整体重排：数组顺序即显示顺序 */
-  arrangeApi: (payload: {
-    groupIds: string[]
-    requests: Array<{ id: string; groupId?: string }>
-  }) => Promise<void>
+/** 新建（不传 id）或重命名（传 id）接口请求分组；parentId 缺省 = 顶级分组（支持多级） */
+saveApiGroup: (input: { id?: string; name: string; parentId?: string }) => Promise<void>
+/** 删除分组；deleteRequests=true 时连同组内请求一起删除，否则组内请求随子孙分组一起上移一级 */
+deleteApiGroup: (id: string, deleteRequests?: boolean) => Promise<void>
+/** 拖拽排序 / 换组 / 移动层级后的整体重排：数组顺序即显示顺序（groups 带 parentId） */
+arrangeApi: (payload: {
+groups: Array<{ id: string; parentId?: string }>
+requests: Array<{ id: string; groupId?: string }>
+}) => Promise<void>
   /**
    * 新建一条请求并返回其 id（不自动打开标签，由调用方决定）。
    * `seed` 用于预填内容（导入 cURL 走这条路），缺省就是一条空请求。
    */
   createApiRequest: (seed?: Partial<ApiRequestEntry>) => Promise<string>
+/**
+ * 解析 cURL 命令并保存为一条新请求，返回新请求 id。
+ * 解析失败会抛错（由调用方提示），成功时也不自动打开标签。
+ */
+importCurlRequest: (curlText: string, groupId?: string) => Promise<string>
   /**
-   * 解析 cURL 命令并保存为一条新请求，返回新请求 id。
-   * 解析失败会抛错（由调用方提示），成功时也不自动打开标签。
+   * 导入 OpenAPI / Swagger 规格（`parseOpenApiSpec` 的产物）：建分组 + 逐条建请求，
+   * 返回新建请求的 id 列表（已导入的请求不自动打开标签，由调用方决定）。
    */
-  importCurlRequest: (curlText: string) => Promise<string>
+  importOpenApi: (result: OpenApiImportResult) => Promise<string[]>
   /** 刷新请求历史到 store */
   refreshApiHistory: () => Promise<void>
   /** 保存接口请求（upsert）：已有请求原地更新 */

@@ -1206,7 +1206,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       return created?.id ?? ''
     },
 
-    importCurlRequest: async (curlText) => {
+    importCurlRequest: async (curlText, groupId) => {
       // 纯文本 → 解析 → 复用 createApiRequest 落盘（解析失败直接抛给调用方）
       const parsed = parseCurl(curlText)
       return get().createApiRequest({
@@ -1216,8 +1216,42 @@ export const useAppStore = create<AppStore>()((set, get) => {
         body: parsed.body,
         // `-F` 解析出来的是 form-data 字段（见 parseCurl）；其余情况保持缺省的 raw
         bodyType: parsed.bodyType,
-        bodyFormFields: parsed.bodyFields
+        bodyFormFields: parsed.bodyFields,
+        // 从某个分组发起导入时落进该组：未指定则进「未分组」
+        groupId
       })
+    },
+
+    importOpenApi: async (result) => {
+      // 先建分组（同名复用已有分组，避免重复建组），再逐条建请求
+      const groupIdByName = new Map<string, string>()
+      for (const name of result.groups) {
+        const existed = get().apiGroups.find((g) => g.name === name)
+        if (existed) {
+          groupIdByName.set(name, existed.id)
+          continue
+        }
+        const groups = await window.api.apiClient.saveGroup({ name })
+        set({ apiGroups: groups })
+        const created = groups.find((g) => g.name === name)
+        if (created) groupIdByName.set(name, created.id)
+      }
+      const ids: string[] = []
+      for (const e of result.entries) {
+        const id = await get().createApiRequest({
+          method: e.method,
+          url: e.url,
+          name: e.name,
+          headers: e.headers.length ? e.headers : [{ key: '', value: '' }],
+          body: e.body,
+          bodyType: e.bodyType,
+          bodyUrlencoded: e.bodyUrlencoded,
+          bodyFormFields: e.bodyFormFields,
+          groupId: e.group ? groupIdByName.get(e.group) : undefined
+        })
+        if (id) ids.push(id)
+      }
+      return ids
     },
 
     refreshApiHistory: async () => {
