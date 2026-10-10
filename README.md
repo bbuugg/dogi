@@ -1,5 +1,8 @@
 # Dogi — AI 驱动的运维工作台
 
+**项目主页：<https://bbuugg.github.io/dogi/>**（单文件落地页：[`docs/index.html`](./docs/index.html)）
+下载请走 [Releases](https://github.com/bbuugg/dogi/releases/latest)：Windows `.exe` / macOS (Apple silicon) `.dmg` / Linux `.AppImage`、`.deb`。
+
 ![截图](./screenshots/image.png)
 
 Electron + React 的桌面研发运维工具：把「连机器 → 干活 → 记下来 → 调接口 → 让 AI 代办」收在一个应用里。
@@ -49,7 +52,7 @@ Electron + React 的桌面研发运维工具：把「连机器 → 干活 → �
 
 ### 笔记与脚本
 
-- **笔记**：Monaco 编辑器，语言可选，分组 / 拖拽排序 / 搜索
+- **笔记**：Markdown 编辑器（Milkdown + Crepe），分组 / 拖拽排序 / 搜索
 - **脚本**：作为「主机」侧边栏的分区管理；命令面板里可直接在当前终端运行，没有终端时选主机连上去执行
 
 ### 接口调试

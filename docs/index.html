@@ -1,0 +1,779 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Dogi — 桌面运维工作台</title>
+<meta name="description" content="Dogi 把「连机器 → 干活 → 记下来 → 调接口 → 让 AI 代办」收在一个应用里：终端 / SSH / 远程桌面 / SFTP / 服务器监控 / 接口调试 / 笔记 / 插件宿主，外加一个能读写文件、执行命令、调用技能的 AI Agent。">
+<meta property="og:title" content="Dogi — 桌面运维工作台">
+<meta property="og:description" content="连机器，干活，记下来，调接口，让 AI 代办。">
+<meta property="og:image" content="./assets/icon.png">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="./assets/icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500&family=Fragment+Mono&family=Noto+Sans+SC:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* 单文件落地页：不引任何构建工具，改文案直接改这个文件。
+   设计语言取自 DeepSeek Harness：近黑底、白底黑字胶囊按钮、mono 小标、
+   居中 Hero、1140px 容器、全站无彩色点缀。 */
+:root{
+  --bg:#0a0a0a;
+  --surface-1:hsla(0,0%,100%,.06);
+  --surface-2:hsla(0,0%,100%,.04);
+  --surface-3:hsla(0,0%,100%,.02);
+  --hover:hsla(0,0%,100%,.06);
+  --border-1:hsla(0,0%,100%,.06);
+  --border-2:hsla(0,0%,100%,.12);
+  --fg:#fff;
+  --fg-2:hsla(0,0%,100%,.8);
+  --fg-desc:hsla(0,0%,100%,.56);
+  --fg-mute:hsla(0,0%,100%,.3);
+  --radius-card:24px; --radius-panel:16px; --radius-media:12px; --radius-input:10px; --radius-pill:100px; --radius-sm:8px;
+  --font-sans:"DM Sans","Noto Sans SC",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --font-mono:"Fragment Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --container:1140px;
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --bg:#f9f8f8;
+    --surface-1:rgba(0,0,0,.03); --surface-2:rgba(0,0,0,.02); --surface-3:rgba(0,0,0,.012);
+    --hover:rgba(0,0,0,.04);
+    --border-1:rgba(0,0,0,.08); --border-2:rgba(0,0,0,.14);
+    --fg:#1e232c; --fg-2:rgba(0,0,0,.7); --fg-desc:rgba(32,33,36,.62); --fg-mute:rgba(0,0,0,.35);
+  }
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
+body{
+  margin:0;background:var(--bg);color:var(--fg);font-family:var(--font-sans);
+  font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased;
+  overflow-x:clip; /* 兜底。用 clip 不用 hidden —— hidden 会让吸顶导航失效 */
+}
+a{color:inherit;text-decoration:none}
+code{font-family:var(--font-mono);font-size:.9em}
+::selection{background:hsla(0,0%,100%,.18)}
+/* 滚动条：默认那条 15px 宽的在深色底上又宽又灰，抢视觉。改成 8px 细条、
+   轨道透明、滑块低对比，hover 才亮起来 —— 页面里真正要滚的是界面模型和代码块。 */
+*{scrollbar-width:thin;scrollbar-color:var(--border-2) transparent}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border-2);border-radius:var(--radius-pill);
+  border:2px solid transparent;background-clip:content-box}
+::-webkit-scrollbar-thumb:hover{background:var(--fg-mute);background-clip:content-box}
+::-webkit-scrollbar-corner{background:transparent}
+/* 触屏（hover:none）上滚动条不自动隐藏，给足对比度 */
+@media (hover:none){::-webkit-scrollbar-thumb{background:var(--fg-mute);background-clip:content-box}}
+.container{width:min(100% - 48px,var(--container));margin-inline:auto}
+@media(max-width:640px){.container{width:min(100% - 32px,var(--container))}}
+/* 锚点跳转时别被吸顶导航挡住 */
+section[id]{scroll-margin-top:76px}
+@media(min-width:1600px){.container{width:min(100% - 160px,1280px)}}
+
+/* ---------- 文本层级（对齐 ds-text-* 的字号字重） ---------- */
+.t-hero{font-size:40px;font-weight:500;letter-spacing:-.02em;line-height:1.5}
+.t-display{font-size:32px;font-weight:500;letter-spacing:-.02em;line-height:1.2}
+.t-h2{font-size:22px;font-weight:500;letter-spacing:-.02em;line-height:1.5}
+.t-title{font-size:18px;font-weight:500;letter-spacing:-.01em;line-height:1.5}
+.t-body{font-size:16px;line-height:1.6;color:var(--fg-desc)}
+.t-cap{font-size:14px;color:var(--fg-mute)}
+/* 桌面端固定 40 / 48 / 30；窄屏按视口缩，避免 360px 上标题溢出 */
+.t-hero{font-size:clamp(28px,7.6vw,40px)}
+.t-display{font-size:clamp(26px,6.4vw,48px)}
+.t-h2{font-size:clamp(19px,4.6vw,30px)}
+@media(min-width:768px){.t-display{font-size:48px}.t-hero{font-size:40px}}
+@media(min-width:768px){.t-h2{font-size:30px}}
+.eyebrow{
+  display:inline-flex;align-items:center;gap:7px;
+  font-family:var(--font-mono);font-size:12px;font-weight:500;
+  text-transform:uppercase;letter-spacing:.22em;line-height:1;color:var(--fg-mute);
+}
+.eyebrow svg{width:12px;height:12px;transform:translateY(-1.5px)}
+
+/* ---------- 按钮 ---------- */
+/* 波纹：hover 时一层居中扩散的圆（伪元素，z-index:-1 + isolation 把文字压在圆上面）。
+   尺寸给 150% 是为了扩散到超出按钮圆角的范围时不露边 —— 用 aspect-ratio 而不是写死高度，
+   这样 sm / lg 各种尺寸共用一套。点击波纹（从落点扩散）由 JS 追加 .ripple 元素实现。 */
+.btn{
+  position:relative;display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  height:40px;padding:0 20px;border-radius:var(--radius-pill);box-sizing:border-box;
+  font-size:15px;font-weight:500;line-height:1.2;cursor:pointer;overflow:hidden;isolation:isolate;
+  -webkit-tap-highlight-color:transparent;
+}
+.btn::after{
+  content:"";position:absolute;top:50%;left:50%;width:150%;aspect-ratio:1;border-radius:50%;
+  opacity:0;z-index:-1;transform:translate(-50%,-50%) scale(0);
+  transition:transform .36s ease-out,opacity .1s ease;
+}
+.btn:hover::after{opacity:1;transform:translate(-50%,-50%) scale(1)}
+.btn-primary{background:var(--fg);color:var(--bg);border:1px solid transparent}
+.btn-primary::after{background:color-mix(in srgb,var(--bg) 8%,transparent)}
+.btn-secondary{background:var(--surface-1);color:var(--fg);border:1px solid var(--border-2)}
+.btn-secondary::after{background:var(--hover)}
+.btn-text{color:var(--fg-desc);padding:0 10px;background:transparent;border:1px solid transparent}
+.btn-text::after{background:var(--hover)}
+.btn-sm{height:34px;padding:0 16px;font-size:14px}
+/* 点击波纹：JS 从落点扩散，动画结束即移除（.done 由脚本加回去用） */
+.ripple{position:absolute;border-radius:50%;transform:scale(0);pointer-events:none;
+  background:color-mix(in srgb,var(--bg) 18%,transparent);animation:rip .6s ease-out forwards}
+.btn-secondary .ripple,.btn-text .ripple{background:color-mix(in srgb,var(--fg) 12%,transparent)}
+@keyframes rip{to{transform:scale(2.2);opacity:0}}
+
+/* ---------- 导航 ---------- */
+header.nav{position:sticky;top:0;z-index:60;background:color-mix(in srgb,var(--bg) 72%,transparent);
+  backdrop-filter:saturate(180%) blur(20px);border-bottom:1px solid var(--border-1)}
+.nav .container{display:flex;align-items:center;gap:8px;height:60px}
+.brand{display:flex;align-items:center;gap:9px;font-size:16px;font-weight:500}
+.brand img{width:22px;height:22px;border-radius:6px}
+.brand .ver{font-family:var(--font-mono);font-size:12px;color:var(--fg-mute)}
+.nav-links{display:flex;align-items:center;gap:4px;margin-left:auto}
+.nav-links a{font-size:14px;color:var(--fg-desc);padding:8px 12px;border-radius:var(--radius-sm)}
+.nav-links a:hover{color:var(--fg);background:var(--hover)}
+.nav-cta{display:flex;align-items:center;gap:8px;margin-left:12px}
+.nav-burger{display:none;width:34px;height:34px;margin-left:8px;border:1px solid var(--border-2);
+  border-radius:var(--radius-sm);background:var(--surface-1);cursor:pointer;padding:0;
+  align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent}
+.nav-burger svg{width:16px;height:16px;stroke:var(--fg)}
+/* 移动端：链接折叠成下拉；汉堡按钮只在该断点出现 */
+@media(max-width:900px){
+  .nav-links{position:absolute;left:0;right:0;top:60px;flex-direction:column;align-items:stretch;
+    gap:0;margin:0;padding:8px;background:var(--bg);border-bottom:1px solid var(--border-1);display:none}
+  .nav-links.open{display:flex}
+  .nav-links a{padding:12px 14px;border-radius:var(--radius-sm);font-size:15px}
+  .nav-burger{display:inline-flex;order:9}
+  .nav-cta{margin-left:auto}
+}
+
+/* ---------- Hero ---------- */
+.hero{position:relative;padding:88px 0 0;overflow:hidden}
+.hero-bg{position:absolute;inset:-30% 0 auto 0;height:900px;z-index:0;pointer-events:none;
+  -webkit-mask:linear-gradient(#000 0%,rgba(0,0,0,.91) 12%,transparent 100%);
+          mask:linear-gradient(#000 0%,rgba(0,0,0,.91) 12%,transparent 100%);}
+.hero-bg canvas{position:absolute;inset:0;width:100%;height:100%;filter:blur(18px);opacity:.85}
+.hero .container{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;gap:26px;text-align:center}
+.hero-copy{max-width:720px;display:flex;flex-direction:column;gap:6px}
+.hero-copy p{margin:0;font-size:16px;line-height:1.6;color:var(--fg-desc)}
+.hero h1{margin:6px 0 0;display:flex;flex-wrap:wrap;justify-content:center;gap:0 .28em}
+.hero-cta{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:8px}
+.hero-note{font-family:var(--font-mono);font-size:12px;color:var(--fg-mute);letter-spacing:.02em}
+.hero-shot{max-width:1020px;width:100%;margin-top:26px}
+
+/* ---------- 应用窗口外壳 ---------- */
+.app{
+  position:relative;border:1px solid var(--border-2);border-radius:var(--radius-card);
+  background:var(--surface-3);overflow:hidden;
+  box-shadow:0 40px 120px -50px rgba(0,0,0,.9),0 0 0 1px var(--border-1);
+}
+.app::after{content:"";position:absolute;inset:0;border-radius:var(--radius-card);
+  box-shadow:inset 0 1px 0 hsla(0,0%,100%,.07);pointer-events:none}
+.app-bar{display:flex;align-items:center;gap:8px;height:38px;padding:0 14px;border-bottom:1px solid var(--border-1);
+  background:var(--surface-2)}
+.app-dots{display:flex;gap:6px}
+.app-dots i{width:10px;height:10px;border-radius:50%;background:var(--border-2)}
+.app-title{font-family:var(--font-mono);font-size:11px;color:var(--fg-mute)}
+.app-body{display:grid;grid-template-columns:56px 210px 1fr;min-height:420px}
+/* 宽栅格用类而不是内联 style：内联优先级高于媒体查询，会让窄屏的缩窄失效 */
+.app-body-wide{grid-template-columns:56px 1fr}
+@media(max-width:820px){
+  .app-body,.app-body-wide{grid-template-columns:48px 1fr;min-height:360px}
+  .app-side{display:none}
+}
+/* 窄屏：界面模型整体缩一档，别让 mono 文本被裁；容器左右各留一点缝 */
+@media(max-width:640px){
+  .app{margin-inline:-4px}
+  /* 窄屏折行显示：宁可换行也不要横向滚动条卡在半截命令上 */
+  .term,.tool pre{white-space:pre-wrap;overflow-wrap:anywhere}
+  .term{padding:12px 13px;font-size:12px;line-height:1.8}
+  /* 活动栏导轨在窄屏纯属占宽：48px 列 + 内边距把终端压掉三成，
+     折行后一行只剩两三个词。把整列让给内容，「这是个应用」的观感由标题栏和状态栏保留。 */
+  .app-rail{display:none}
+  .app-body,.app-body-wide{grid-template-columns:1fr}
+  .app-status{font-size:10px;gap:8px;padding:6px 10px}
+  .app-status .sp{gap:10px}
+  .app-bar{height:34px}
+  .app-tabs{padding:6px 8px 0}
+  .chat{padding:16px 14px}
+  .pad{padding:16px}
+  pre.code{font-size:11.5px;padding:14px 12px}
+  /* 代码块同理：窄屏折行，避免整块只能横向拖 */
+  pre.code{white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:visible}
+  .hero{padding:56px 0 0}
+  .hero-bg{height:620px}
+  .feature{padding:52px 0}
+}
+.app-rail{border-right:1px solid var(--border-1);padding:10px 0;display:flex;flex-direction:column;gap:4px;align-items:center}
+.app-rail i{width:32px;height:32px;border-radius:var(--radius-sm);display:grid;place-items:center;background:var(--surface-2)}
+.app-rail i.on{background:var(--surface-1);box-shadow:inset 0 0 0 1px var(--border-2)}
+.app-rail svg{width:15px;height:15px;stroke:var(--fg-desc)}
+.app-rail i.on svg{stroke:var(--fg)}
+.app-side{border-right:1px solid var(--border-1);padding:14px 12px;display:flex;flex-direction:column;gap:4px}
+.app-side .lbl{font-family:var(--font-mono);font-size:10px;text-transform:uppercase;letter-spacing:.18em;color:var(--fg-mute);margin-bottom:8px}
+.row{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:var(--radius-sm);font-size:12.5px;color:var(--fg-desc)}
+.row.on{background:var(--surface-1);color:var(--fg)}
+.row .dot{width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.55;flex:none}
+.row .tag{margin-left:auto;font-family:var(--font-mono);font-size:10px;color:var(--fg-mute)}
+.app-main{min-width:0;display:flex;flex-direction:column}
+.app-tabs{display:flex;gap:2px;padding:8px 10px 0;border-bottom:1px solid var(--border-1);overflow:hidden}
+.app-tabs span{font-size:12px;padding:6px 12px;border-radius:var(--radius-sm) var(--radius-sm) 0 0;color:var(--fg-mute);
+  border:1px solid transparent;border-bottom:none;white-space:nowrap}
+.app-tabs span.on{color:var(--fg);background:var(--surface-2);border-color:var(--border-1)}
+.app-status{display:flex;align-items:center;gap:14px;padding:7px 14px;border-top:1px solid var(--border-1);
+  font-family:var(--font-mono);font-size:11px;color:var(--fg-mute)}
+.app-status .sp{margin-left:auto;display:flex;align-items:center;gap:14px}
+
+/* ---------- 终端 ---------- */
+.term{flex:1;min-height:0;padding:16px 18px;font-family:var(--font-mono);font-size:12.5px;line-height:1.75;
+  color:var(--fg-2);overflow:auto;-webkit-overflow-scrolling:touch}
+.term .p{color:var(--fg)}
+.term .c{color:var(--fg-mute)}
+.term .g{color:#7ee2a8}
+.term .w{color:#f0c674}
+.term .cur{display:inline-block;width:7px;height:14px;background:var(--fg);vertical-align:-2px;animation:blink 1.1s steps(2) infinite}
+@keyframes blink{50%{opacity:0}}
+
+/* ---------- 卡片 / 面板 ---------- */
+.media{border:1px solid var(--border-1);border-radius:var(--radius-panel);background:var(--surface-3);overflow:hidden}
+.pad{padding:22px}
+.grid3{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(268px,1fr))}
+.grid2{display:grid;gap:20px;grid-template-columns:1fr 1fr}
+@media(max-width:900px){.grid2{grid-template-columns:1fr}}
+/* grid 子项默认 min-width:auto —— 一行长命令/长代码就会把列撑到超过视口，
+   手机上整页横向滚动。归零后由 pre 自己内部横向滚动。 */
+.grid2>*,.grid3>*,.feature.split>*{min-width:0}
+.ticks{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:9px}
+.ticks li{position:relative;padding-left:22px;font-size:14.5px;color:var(--fg-desc)}
+.ticks li::before{content:"";position:absolute;left:2px;top:.62em;width:5px;height:5px;border-radius:50%;background:var(--fg-mute)}
+.ticks li b{color:var(--fg);font-weight:500}
+.kv{display:flex;gap:8px;flex-wrap:wrap;font-family:var(--font-mono);font-size:11.5px;color:var(--fg-mute)}
+.kv span{padding:3px 9px;border:1px solid var(--border-1);border-radius:var(--radius-pill)}
+
+/* ---------- 会话模型 ---------- */
+.chat{padding:20px 22px;display:flex;flex-direction:column;gap:18px;min-height:340px}
+.msg{display:flex;gap:12px}
+.msg .av{flex:none;width:26px;height:26px;border-radius:var(--radius-sm);background:var(--surface-1);
+  display:grid;place-items:center;font-size:11px;color:var(--fg-desc)}
+.msg .tx{min-width:0;font-size:14px;color:var(--fg-2)}
+.msg.me .tx{color:var(--fg)}
+.tool{margin:8px 0;border:1px solid var(--border-1);border-radius:var(--radius-media);
+  background:var(--surface-2);overflow:hidden}
+.tool header{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--border-1);
+  font-family:var(--font-mono);font-size:11.5px;color:var(--fg-mute)}
+.tool header .n{color:var(--fg)}
+.tool pre{margin:0;padding:11px 12px;font-family:var(--font-mono);font-size:11.5px;line-height:1.7;
+  color:var(--fg-2);white-space:pre;overflow-x:auto}
+.tool .ok{color:#7ee2a8}
+
+/* ---------- 传输托盘 / 监控 ---------- */
+.meter{display:flex;flex-direction:column;gap:5px;margin-bottom:10px}
+.meter .l{display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:11px;color:var(--fg-mute)}
+.bar{height:5px;border-radius:var(--radius-pill);background:var(--surface-1);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--fg-2);border-radius:var(--radius-pill)}
+.bar i.ok{background:#7ee2a8}
+
+/* ---------- 特性区块 ---------- */
+.feature{padding:76px 0;border-top:1px solid var(--border-1)}
+.feature-head{max-width:720px;display:flex;flex-direction:column;gap:14px;margin-bottom:36px}
+.feature-head p{margin:0;color:var(--fg-desc);font-size:16px}
+.feature.flip .media{order:2}
+@media(min-width:1000px){
+  .feature.split{display:grid;grid-template-columns:1fr 1fr;gap:56px;align-items:center}
+  .feature.split.flip .media{order:2}
+}
+/* 单列堆叠时：图（界面模型）在前、文字清单在后 */
+@media(max-width:999px){
+  .feature.split.flip .app{order:-1}
+}
+
+/* ---------- 代码 ---------- */
+pre.code{margin:0;padding:18px 20px;border:1px solid var(--border-1);border-radius:var(--radius-panel);
+  background:var(--surface-3);font-family:var(--font-mono);font-size:13px;line-height:1.9;color:var(--fg-2);
+  overflow-x:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain}
+pre.code .c{color:var(--fg-mute)}
+pre.code .p{color:var(--fg)}
+
+/* ---------- CTA ---------- */
+.cta{border-top:1px solid var(--border-1);padding:88px 0;text-align:center;display:flex;
+  flex-direction:column;align-items:center;gap:18px}
+.cta p{max-width:620px;margin:0;color:var(--fg-desc)}
+.cta .row-btns{display:flex;flex-wrap:wrap;gap:10px;justify-content:center}
+
+/* ---------- 页脚 ---------- */
+footer{border-top:1px solid var(--border-1);padding:44px 0 56px;color:var(--fg-mute);font-size:13px}
+footer .cols{display:grid;grid-template-columns:1.4fr repeat(3,1fr);gap:28px}
+@media(max-width:760px){footer .cols{grid-template-columns:1fr 1fr;gap:24px}}
+@media(max-width:440px){footer .cols{grid-template-columns:1fr}}
+footer h4{margin:0 0 12px;font-size:13px;font-weight:500;color:var(--fg-2)}
+footer ul{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:8px}
+footer a:hover{color:var(--fg)}
+footer .bar{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:center;margin-top:34px;padding-top:22px;
+  border-top:1px solid var(--border-1);font-size:12.5px}
+footer .bar .sp{margin-left:auto}
+
+/* ---------- 滚动进场 ---------- */
+.reveal{opacity:0;transform:translateY(18px);transition:opacity .7s ease,transform .7s ease}
+.reveal.in{opacity:1;transform:none}
+@media (prefers-reduced-motion: reduce){
+  .reveal{opacity:1;transform:none;transition:none}
+  .term .cur{animation:none}
+}
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="container">
+    <a class="brand" href="#top"><img src="./assets/icon.png" alt="Dogi"><span>Dogi</span><span class="ver">v0.0.20</span></a>
+    <nav class="nav-links" id="navlinks">
+      <a class="nav-hide" href="#approach">设计思路</a>
+      <a class="nav-hide" href="#hosts">主机接入</a>
+      <a class="nav-hide" href="#agent">AI Agent</a>
+      <a class="nav-hide" href="#develop">开发</a>
+    </nav>
+    <div class="nav-cta">
+      <a class="btn btn-secondary btn-sm" href="https://github.com/bbuugg/dogi" target="_blank" rel="noopener">GitHub</a>
+      <a class="btn btn-primary btn-sm" href="#download">下载</a>
+    </div>
+    <button class="nav-burger" id="burger" aria-label="打开菜单" aria-expanded="false" aria-controls="navlinks">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+  </div>
+</header>
+
+<main id="top">
+  <!-- ============ Hero ============ -->
+  <section class="hero">
+    <div class="hero-bg"><canvas id="bg"></canvas></div>
+    <div class="container">
+      <div class="hero-copy">
+        <span class="eyebrow">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2l2.2 6.3L20.5 10l-5.2 3.2L15.5 20 12 16.3 8.5 20l.2-6.8L3.5 10l6.3-1.7z"/></svg>
+          开源 · v0.0.20
+        </span>
+        <h1 class="t-hero"><span>连上机器，</span><span>让 AI 干活。</span></h1>
+        <p>运维的日常本来散在好几个工具里 —— 终端一个、远程桌面一个、接口调试一个、笔记一个。</p>
+        <p>Dogi 把它们收进同一个应用，共用同一套终端、同一份主机配置、同一个 AI。</p>
+      </div>
+
+      <div class="hero-cta" id="download">
+        <a class="btn btn-primary" href="https://github.com/bbuugg/dogi/releases/download/v0.0.20/Dogi-0.0.20-setup.exe">下载桌面版</a>
+        <a class="btn btn-secondary" href="https://github.com/bbuugg/dogi/releases/latest" target="_blank" rel="noopener">其他平台</a>
+        <a class="btn btn-text" href="https://github.com/bbuugg/dogi" target="_blank" rel="noopener">GitHub ↗</a>
+      </div>
+      <!-- 资源名里带版本号，发新版时要改这里 + brand 的 v 号（见 scripts 里的提示） -->
+      <p class="hero-note">Windows x64 · macOS Apple silicon · Linux x64 — 安装包 104–157 MB</p>
+
+      <figure class="hero-shot app">
+        <div class="app-bar">
+          <div class="app-dots"><i></i><i></i><i></i></div>
+          <span class="app-title">Dogi · 主机 / AI Agent</span>
+        </div>
+        <img src="./assets/screenshot-main.png" alt="Dogi 主界面：左侧活动栏功能区，右侧 VS Code 式分屏标签组"
+             style="display:block;width:100%;height:auto">
+      </figure>
+    </div>
+  </section>
+
+  <!-- ============ 公式：工作台 = 主机 + 工具 + Agent ============ -->
+  <section class="feature" id="approach">
+    <div class="container">
+      <div class="feature-head reveal">
+        <span class="eyebrow">Why Dogi</span>
+        <h2 class="t-display">工作台 =<br>主机 + 工具 + Agent</h2>
+        <p>模型负责推理，剩下的事情由工作台负责：接进来、看得见、动得了、说得清。下面三件事就是 Dogi 的全部野心。</p>
+      </div>
+      <div class="grid3">
+        <div class="media pad reveal">
+          <div class="eyebrow" style="margin-bottom:14px">01 / 主机接入</div>
+          <h3 class="t-h2" style="margin:0 0 10px;font-size:18px">每台机器都一样接进来</h3>
+          <p class="t-body" style="margin:0">本地终端、SSH、Mosh、远程桌面 RDP 统一成「主机」一种对象；平台探测、终端编码、凭据加密都在接入时处理掉，不留给使用者。</p>
+        </div>
+        <div class="media pad reveal">
+          <div class="eyebrow" style="margin-bottom:14px">02 / 工具齐备</div>
+          <h3 class="t-h2" style="margin:0 0 10px;font-size:18px">干活的东西都在手边</h3>
+          <p class="t-body" style="margin:0">SFTP 文件管理、服务器监控、接口调试、笔记、脚本、插件 —— 不是拼链接，而是同一个窗口、同一套多标签与分屏。</p>
+        </div>
+        <div class="media pad reveal">
+          <div class="eyebrow" style="margin-bottom:14px">03 / Agent 驱动</div>
+          <h3 class="t-h2" style="margin:0 0 10px;font-size:18px">AI 直接落在真实环境上</h3>
+          <p class="t-body" style="margin:0">工具调用落到真实终端与真实文件：命令实时输出、权限确认、超长输出落产物，全在同一个会话里看得见。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 主机接入 ============ -->
+  <section class="feature" id="hosts">
+    <div class="container feature-head reveal" style="max-width:760px">
+      <span class="eyebrow">Hosts</span>
+      <h2 class="t-display">连机器这件事，管到底</h2>
+      <p>远程桌面、文件传输、监控、中文乱码、Windows 主机 —— 这些坑基本都踩过，并且在代码里处理掉了。</p>
+    </div>
+    <div class="container">
+      <div class="feature split reveal">
+        <!-- 终端 + 主机列表 模型 -->
+        <div class="app">
+          <div class="app-bar"><div class="app-dots"><i></i><i></i><i></i></div><span class="app-title">Dogi · 主机</span></div>
+          <div class="app-body">
+            <div class="app-rail">
+              <i class="on"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><polyline points="4 17 10 11 4 5"/><path d="M12 19h8"/></svg></i>
+              <i><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h6M7 13h4"/></svg></i>
+              <i><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg></i>
+            </div>
+            <div class="app-side">
+              <div class="lbl">主机</div>
+              <div class="row on"><span class="dot"></span>prod-web-01<span class="tag">ssh</span></div>
+              <div class="row"><span class="dot"></span>prod-db-02<span class="tag">ssh</span></div>
+              <div class="row"><span class="dot"></span>win-ops-03<span class="tag">ssh</span></div>
+              <div class="row"><span class="dot"></span>office-pc<span class="tag">rdp</span></div>
+              <div class="row"><span class="dot"></span>本地<span class="tag">local</span></div>
+              <div class="lbl" style="margin-top:16px">脚本</div>
+              <div class="row"><span class="dot"></span>发布后端<span class="tag">sh</span></div>
+            </div>
+            <div class="app-main">
+              <div class="app-tabs"><span class="on">prod-web-01 — ssh</span><span>SFTP</span><span>日志</span></div>
+              <div class="term">
+<span class="p">ops@prod-web-01</span>:<span class="w">~</span>$ systemctl is-active nginx
+active
+<span class="p">ops@prod-web-01</span>:<span class="w">~</span>$ uptime
+ 14:22:31 up 41 days,  3:11,  2 users,  load average: 0.31, 0.24, 0.19
+<span class="p">ops@prod-web-01</span>:<span class="w">~</span>$ df -h /
+<span class="c">Filesystem      Size  Used Avail Use% Mounted on</span>
+/dev/vda1        40G   18G   21G  47% /
+<span class="p">ops@prod-web-01</span>:<span class="w">~</span>$ <span class="cur"></span></div>
+            </div>
+          </div>
+          <div class="app-status">
+            <span>UTF-8</span><span>128×32</span>
+            <span class="sp"><span>CPU 12%</span><span>MEM 41%</span><span>↑ 2.1 MB/s</span></span>
+          </div>
+        </div>
+
+        <div>
+          <h3 class="t-h2" style="margin:0 0 14px">一个窗口把所有事情做完</h3>
+          <ul class="ticks">
+            <li><b>本地终端</b>：node-pty，自动探测 PowerShell / pwsh / CMD / Git Bash / WSL / bash / zsh / fish。</li>
+            <li><b>SSH</b>：密码或私钥，握手进度实时推送，失败自动重连，keepalive，多会话并存。</li>
+            <li><b>Mosh</b>：UDP 直连，SSH 只做引导，适合高延迟链路。</li>
+            <li><b>远程桌面</b>：内嵌 WASM 客户端，不调 mstsc；支持缩放、键盘鼠标、Ctrl+Alt+Del。</li>
+            <li><b>多标签 + 分屏</b>：上下左右拆分、拖拽调比例、标签跨组移动，换父节点后回放缓冲画面不丢。</li>
+            <li><b>SFTP</b>：上传下载（含目录递归）、远端复制移动，多任务并发进度统一进状态栏托盘。</li>
+            <li><b>zmodem</b>：终端里 <code>sz</code> / <code>rz</code> 直接传文件；拖拽到终端走 SFTP。</li>
+            <li><b>服务器监控</b>：CPU / 内存 / 负载 / 网速 / 磁盘；非 Linux 主机<b>显式显示不支持</b>，而不是静默消失。</li>
+            <li><b>中文乱码</b>：每主机可选 UTF-8 / GBK，只在 SSH 边界转码，下游恒为 UTF-8。</li>
+            <li><b>凭据</b>：密码 / 私钥用 <code>safeStorage</code> 加密，列表接口只回 <code>hasPassword</code> 这类脱敏标记。</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Agent ============ -->
+  <section class="feature" id="agent">
+    <div class="container feature-head reveal" style="max-width:760px">
+      <span class="eyebrow">The agent</span>
+      <h2 class="t-display">Agent 知道<br>自己在哪台机器上</h2>
+      <p>它不是只会聊天。下面是一次真实形态的会话：模型探到根分区快满了，顺手查了日志目录，然后停下来问你要不要继续。</p>
+    </div>
+    <div class="container">
+      <div class="feature split flip reveal">
+        <div>
+          <h3 class="t-h2" style="margin:0 0 14px">工具调用落在真实环境上</h3>
+          <ul class="ticks">
+            <li><b>两条产品线</b>：终端内嵌助手（绑定当前会话）+ 工作区 Agent（绑定本地目录），共享同一套流式事件。</li>
+            <li><b>模型自选</b>：OpenAI / Anthropic / DeepSeek / Google / 任意 OpenAI 兼容接口（Ollama、vLLM、中转网关）。</li>
+            <li><b>模型按会话独立</b>：同一个应用里可以一边跑推理模型、一边跑本地模型。</li>
+            <li><b>权限两档</b>：直接执行 / 执行前弹确认卡，输入框处实时切换；单条命令还能中途叫停。</li>
+            <li><b>技能系统</b>：按 Agent Skills 约定自建，提示词只放名称与描述，正文按需读取。</li>
+            <li><b>MCP</b>：接入任意 stdio MCP server，工具自动合并；可挂允许清单。</li>
+            <li><b>可换后端</b>：内置 ai-sdk，或连外部 ACP agent（Dogi 作为 ACP 客户端，消息在外部agent 手上）。</li>
+            <li><b>超长输出落产物</b>：写命令订阅实时流，超限只给 id，让模型自己续读。</li>
+          </ul>
+        </div>
+
+        <div class="app">
+          <div class="app-bar"><div class="app-dots"><i></i><i></i><i></i></div><span class="app-title">Dogi · AI Agent</span></div>
+          <div class="app-body app-body-wide">
+            <div class="app-rail">
+              <i><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h6M7 13h4"/></svg></i>
+              <i class="on"><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round"><path d="M12 3l1.9 5.4L19 10l-4.4 2.4L14 18l-3.4-3.3L6.6 17 7 11.4 3 9l5.1-1.9z"/></svg></i>
+              <i><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg></i>
+            </div>
+            <div class="app-main">
+              <div class="app-tabs"><span class="on">运维排查</span><span>发布脚本</span><span>接口联调</span></div>
+              <div class="chat">
+                <div class="msg me"><div class="av">你</div><div class="tx">看下这台机器是什么系统，磁盘满了就告诉我</div></div>
+                <div class="msg">
+                  <div class="av">AI</div>
+                  <div class="tx">
+                    <div class="tool">
+                      <header><span class="n">execute_command</span><span>prod-web-01</span><span style="margin-left:auto">实时输出</span></header>
+<pre>$ uname -s &amp;&amp; df -h / | tail -1
+Linux
+/dev/vda1   40G  38G  2.4G  <span class="w">95%</span>  /</pre>
+                    </div>
+                    这台是 <b>Linux</b>，根分区 <code>/dev/vda1</code> 40G 用了 95%，只剩 2.4G。
+                    <div class="tool">
+                      <header><span class="n">execute_command</span><span>prod-web-01</span><span style="margin-left:auto">实时输出</span></header>
+<pre>$ du -xh /var/log 2&gt;/dev/null | sort -h | tail -2
+612M  /var/log/journal
+188M  /var/log/docker
+<span class="ok">✓ exit 0 · 1.2s</span></pre>
+                    </div>
+                    空间主要被 journald（612M）和 docker 日志（188M）占了。执行
+                    <code>journalctl --vacuum-size=200M</code> 可以回收一部分 —— 需要我继续吗？<span class="cur"></span>
+                  </div>
+                </div>
+              </div>
+              <div class="app-status"><span>confirm</span><span>上下文 24%</span><span class="sp"><span>DeepSeek-V4 · 会话独立</span></span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 工具：接口调试 / 插件 ============ -->
+  <section class="feature" id="tools">
+    <div class="container feature-head reveal" style="max-width:760px">
+      <span class="eyebrow">Tools</span>
+      <h2 class="t-display">接口调试、<br>笔记、脚本、插件</h2>
+      <p>调接口和加工具经常是一起发生的，所以它们在同一个应用里 —— 一个请求就是一个标签，和终端同款的多标签与分屏。</p>
+    </div>
+    <div class="container grid2">
+      <div class="media reveal">
+        <div class="app-bar"><div class="app-dots"><i></i><i></i><i></i></div><span class="app-title">接口调试</span></div>
+        <div class="pad" style="display:flex;flex-direction:column;gap:14px">
+          <div class="kv"><span>POST</span><span>/api/v2/orders</span><span>application/json</span></div>
+          <pre class="code" style="background:var(--surface-2)">{
+  <span class="p">"sku"</span>: <span class="p">"A-1024"</span>,
+  <span class="p">"qty"</span>: <span class="p">2</span>,
+  <span class="p">"ship"</span>: { <span class="p">"to"</span>: <span class="p">"杭州"</span> }
+}
+<span class="c">HTTP/1.1 201 Created · 84 ms · 312 B</span></pre>
+          <ul class="ticks">
+            <li><b>HTTP</b>：请求头保留空行、四种请求体形态、超时、代理、跳过 TLS 校验、手动取消。</li>
+            <li><b>cURL 导入</b>：粘一段 curl 直接变成可执行的请求。</li>
+            <li><b>WebSocket</b>：握手头、子协议、<code>wss</code> 自签证书、文本 / 二进制帧。</li>
+            <li><b>历史</b>：留存请求历史，显示响应耗时与体积。</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="media reveal">
+        <div class="app-bar"><div class="app-dots"><i></i><i></i><i></i></div><span class="app-title">插件</span></div>
+        <div class="pad" style="display:flex;flex-direction:column;gap:14px">
+          <ul class="ticks" style="gap:11px">
+            <li><b>形态</b>：一个目录 + <code>plugin.json</code>（主进程 <code>main.js</code> + 渲染端 <code>renderer.js</code>）。</li>
+            <li><b>加载</b>：宿主读源码 → blob import → <code>activate(api)</code> 注册视图。</li>
+            <li><b>注入</b>：<code>api.antd</code> / <code>api.icons</code> / <code>api.MonacoEditor</code> / <code>api.cn</code> / <code>api.react</code>，插件不自带依赖。</li>
+            <li><b>权限</b>：storage / http 在 manifest 里声明，主进程侧可 <code>registerHandler</code> 暴露自有通道。</li>
+            <li><b>命令</b>：插件可注册命令，出现在命令面板（<code>Ctrl+Shift+P</code>）里。</li>
+          </ul>
+          <div class="kv"><span>内置：Redis 客户端</span><span>内置：端口占用</span><span>可自行扩展</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 安全 ============ -->
+  <section class="feature" id="security">
+    <div class="container grid2">
+      <div class="reveal">
+        <span class="eyebrow">Security</span>
+        <h2 class="t-display" style="margin:12px 0 16px">边界画在<br>代码里</h2>
+        <ul class="ticks">
+          <li>凭据用 <code>safeStorage</code> 加密（Windows 走 DPAPI），<b>只在主进程解密</b>。</li>
+          <li>渲染进程 <code>contextIsolation</code> + preload 白名单 IPC，严格 CSP。</li>
+          <li>Agent 的文件操作都过 <code>resolveInside</code> 做工作区越界检查。</li>
+          <li>媒体预览走受限的自定义协议 <code>dogi-ws://</code>，不把文件塞进 DOM。</li>
+          <li>数据导出打包成 zip 时<b>不含凭据</b>。</li>
+        </ul>
+      </div>
+      <div class="media pad reveal" style="display:flex;flex-direction:column;justify-content:center;gap:16px">
+        <div class="meter"><div class="l"><span>凭据存储</span><span>safeStorage / DPAPI</span></div><div class="bar"><i class="ok" style="width:100%"></i></div></div>
+        <div class="meter"><div class="l"><span>渲染进程隔离</span><span>contextIsolation</span></div><div class="bar"><i class="ok" style="width:100%"></i></div></div>
+        <div class="meter"><div class="l"><span>Agent 文件操作越界检查</span><span>resolveInside</span></div><div class="bar"><i class="ok" style="width:100%"></i></div></div>
+        <div class="meter" style="margin:0"><div class="l"><span>导出包含凭据</span><span>否</span></div><div class="bar"><i style="width:0"></i></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 开发 ============ -->
+  <section class="feature" id="develop">
+    <div class="container feature-head reveal" style="max-width:720px">
+      <span class="eyebrow">Develop</span>
+      <h2 class="t-display">从源码跑起来</h2>
+      <p>Electron 44 + React 19 + TypeScript 7 + Vite 8。没有 electron-vite —— 三个 Vite 配置各自独立，dev 编排在 <code>scripts/dev.mjs</code>。</p>
+    </div>
+    <div class="container grid2">
+      <div class="reveal">
+<pre class="code"><span class="p">$</span> git clone https://github.com/bbuugg/dogi.git
+<span class="p">$</span> cd dogi &amp;&amp; npm install
+<span class="c"># npm 12 的 install-scripts 策略：若提示脚本被阻止</span>
+<span class="p">$</span> npm install-scripts approve electron esbuild node-pty ssh2
+<span class="p">$</span> npm run dev
+<span class="c">   Vite dev server + main/preload watch + Electron 自动重启</span></pre>
+      </div>
+      <div class="reveal">
+        <ul class="ticks">
+          <li><b><code>npm run build</code></b>：类型检查 + main / preload / renderer 全量构建到 <code>out/</code>。</li>
+          <li><b><code>npm run typecheck</code></b>：node 侧与 web 侧两套 tsconfig 都过。</li>
+          <li><b><code>npm run dist:win</code></b>：打包（另有 <code>dist</code> / <code>dist:mac</code> / <code>dist:linux</code>）。</li>
+          <li><b><code>npm run check:docs</code></b>：扫文档里的文件与包名引用，逐个对磁盘核一遍。</li>
+          <li><b>AGENTS.md</b>：架构约定、关键机制与全部实测踩坑都在那里，改动前先读。</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ CTA ============ -->
+  <section class="cta">
+    <div class="container">
+      <span class="eyebrow">Get involved</span>
+      <h2 class="t-display">欢迎来提 issue</h2>
+      <p>碰到 bug、想要某个能力、或者只是想贡献一个插件，都可以直接开 issue。项目处于早期，形态还在快速调整。</p>
+      <div class="row-btns">
+        <a class="btn btn-primary" href="https://github.com/bbuugg/dogi/releases/latest" target="_blank" rel="noopener">下载最新版</a>
+        <a class="btn btn-secondary" href="https://github.com/bbuugg/dogi/issues" target="_blank" rel="noopener">提 issue</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="cols">
+      <div>
+        <a class="brand" href="#top"><img src="./assets/icon.png" alt="Dogi"><span>Dogi</span></a>
+        <p class="t-cap" style="margin:12px 0 0;max-width:34ch">连机器，干活，记下来，调接口，让 AI 代办。</p>
+      </div>
+      <div>
+        <h4>下载</h4>
+        <ul>
+          <li><a href="https://github.com/bbuugg/dogi/releases/latest" target="_blank" rel="noopener">Windows</a></li>
+          <li><a href="https://github.com/bbuugg/dogi/releases/latest" target="_blank" rel="noopener">macOS (Apple silicon)</a></li>
+          <li><a href="https://github.com/bbuugg/dogi/releases/latest" target="_blank" rel="noopener">Linux AppImage / .deb</a></li>
+          <li><a href="https://github.com/bbuugg/dogi/releases" target="_blank" rel="noopener">全部版本与校验文件</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>项目</h4>
+        <ul>
+          <li><a href="https://github.com/bbuugg/dogi" target="_blank" rel="noopener">GitHub</a></li>
+          <li><a href="https://github.com/bbuugg/dogi/issues" target="_blank" rel="noopener">Issues</a></li>
+          <li><a href="https://github.com/bbuugg/dogi/blob/master/AGENTS.md" target="_blank" rel="noopener">AGENTS.md</a></li>
+          <li><a href="https://github.com/bbuugg/dogi/tree/master/plugins" target="_blank" rel="noopener">插件目录</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>文档</h4>
+        <ul>
+          <li><a href="https://github.com/bbuugg/dogi#readme" target="_blank" rel="noopener">功能总览</a></li>
+          <li><a href="https://github.com/bbuugg/dogi#开发" target="_blank" rel="noopener">本地开发</a></li>
+          <li><a href="https://github.com/bbuugg/dogi/issues" target="_blank" rel="noopener">常见问题</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="bar">
+      <span>Dogi · 开源桌面运维工作台</span>
+      <span class="sp">感谢 <a href="https://linux.do" target="_blank" rel="noopener">linux.do</a> 论坛支持</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+/* 背景粒子场：Hero 顶部一层缓慢漂移的光点，模糊 + 渐隐遮罩。
+   深色主题才画（浅色主题是白底，画了反而脏），并且尊重 prefers-reduced-motion。 */
+(function () {
+  var c = document.getElementById('bg');
+  if (!c) return;
+  var dark = matchMedia('(prefers-color-scheme: dark)').matches;
+  var reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!dark || reduce) { c.remove(); return; }
+
+  var ctx = c.getContext('2d'), dpr = Math.min(devicePixelRatio || 1, 2);
+  var w = 0, h = 0, pts = [];
+
+  function resize() {
+    w = c.clientWidth; h = c.clientHeight;
+    c.width = w * dpr; c.height = h * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    var n = Math.round(w * h / 26000);
+    pts = Array.from({ length: n }, function () {
+      return { x: Math.random() * w, y: Math.random() * h, r: Math.random() * 1.6 + .4, vx: (Math.random() - .5) * .12, vy: (Math.random() - .5) * .12, a: Math.random() * .5 + .12 };
+    });
+  }
+
+  function frame() {
+    ctx.clearRect(0, 0, w, h);
+    for (var i = 0; i < pts.length; i++) {
+      var p = pts[i];
+      p.x += p.vx; p.y += p.vy;
+      if (p.x < -10) p.x = w + 10; if (p.x > w + 10) p.x = -10;
+      if (p.y < -10) p.y = h + 10; if (p.y > h + 10) p.y = -10;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, 6.2832);
+      ctx.fillStyle = 'rgba(255,255,255,' + p.a + ')';
+      ctx.fill();
+    }
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  addEventListener('resize', resize, { passive: true });
+  requestAnimationFrame(frame);
+})();
+
+/* 移动端菜单 + 点击波纹 */
+(function () {
+  var burger = document.getElementById('burger');
+  var links = document.getElementById('navlinks');
+  if (burger && links) {
+    burger.addEventListener('click', function () {
+      var open = links.classList.toggle('open');
+      burger.setAttribute('aria-expanded', String(open));
+    });
+    // 点链接后收起菜单，否则盖住刚跳过去的内容
+    links.addEventListener('click', function (e) {
+      if (e.target.tagName === 'A') {
+        links.classList.remove('open');
+        burger.setAttribute('aria-expanded', 'false');
+      }
+    });
+    // 点到菜单外 / Esc / 窗口变宽都收起
+    document.addEventListener('click', function (e) {
+      if (!links.contains(e.target) && !burger.contains(e.target)) links.classList.remove('open');
+    });
+    addEventListener('keydown', function (e) { if (e.key === 'Escape') links.classList.remove('open'); });
+    addEventListener('resize', function () { if (innerWidth > 900) links.classList.remove('open'); });
+  }
+
+  // 点击波纹：从落点扩散一次（hover 那层是 CSS 的居中圆，两者不冲突）
+  var reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!reduced) {
+    document.addEventListener('pointerdown', function (e) {
+      var btn = e.target.closest('.btn');
+      if (!btn) return;
+      var r = btn.getBoundingClientRect();
+      var size = Math.max(r.width, r.height);
+      var span = document.createElement('span');
+      span.className = 'ripple';
+      span.style.cssText = 'width:' + size + 'px;height:' + size + 'px;left:' +
+        (e.clientX - r.left - size / 2) + 'px;top:' + (e.clientY - r.top - size / 2) + 'px';
+      btn.appendChild(span);
+      span.addEventListener('animationend', function () { span.remove(); });
+    });
+  }
+})();
+
+/* 区块进场 */
+(function () {
+  if (!('IntersectionObserver' in window)) return;
+  var io = new IntersectionObserver(function (es) {
+    es.forEach(function (e) { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } });
+  }, { rootMargin: '0px 0px -12% 0px' });
+  document.querySelectorAll('.reveal').forEach(function (el) { io.observe(el); });
+})();
+</script>
+</body>
+</html>
