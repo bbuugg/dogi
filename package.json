@@ -33,7 +33,7 @@
     "@ai-sdk/google": "^4.0.69",
     "@ai-sdk/openai": "^4.0.66",
     "@mastra/core": "^1.71.0",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@playwright/mcp": "^0.0.82",
     "ai": "^7.0.99",
     "electron-store": "^11.0.2",
