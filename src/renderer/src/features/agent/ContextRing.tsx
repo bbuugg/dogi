@@ -245,8 +245,16 @@ export function ContextRing({
         <>
       {notice ? (
         <p className="text-muted-foreground">
-          最近一次压缩：{fmt(notice.beforeTokens)} → {fmt(notice.afterTokens)} token，摘要{' '}
-          {notice.summarizedTurns} 轮、保留 {notice.keptTurns} 轮。
+          最近一次压缩：{fmt(notice.beforeTokens)} → {fmt(notice.afterTokens)} token
+          {/* 摘要与剪枝是压缩的两段，可能只发生一段（见 agent-core/prune.ts）——
+              只剪了旧工具输出时 summarizedTurns 为 0，不要写出「摘要 0 轮」 */}
+          {notice.summarizedTurns > 0
+            ? `，摘要 ${notice.summarizedTurns} 轮、保留 ${notice.keptTurns} 轮`
+            : ''}
+          {notice.prunedToolResults
+            ? `，剪枝 ${notice.prunedToolResults} 条旧工具输出`
+            : ''}
+          。
           {notice.truncated && (
             <span className="text-destructive"> 摘要失败，旧轮已截断丢弃</span>
           )}

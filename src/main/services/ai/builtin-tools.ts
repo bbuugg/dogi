@@ -17,7 +17,7 @@ import { buildGitReadDef } from './git-read'
 import { buildDelegateDef } from './sub-agent'
 import { buildBrowserToolDefs } from '../browser/agent'
 import { storage } from '../storage'
-import type { BrowserChannel } from '@shared/types'
+import type { BrowserChannel, BrowserToolMode } from '@shared/types'
 
 let registered = false
 
@@ -38,10 +38,13 @@ export function ensureBuiltinToolsRegistered(): void {
     // 子 Agent（explorer / reviewer）：只在设置里开启时才可用（available 看 ctx.subAgent，
     // 而 subAgent 执行器由 agentService 按设置注入 —— 没开就整个工具不暴露）
     buildDelegateDef(),
-    // 浏览器来源偏好用函数注入：注册只发生一次，偏好随时可改、执行时现取
-    //（browser/agent.ts 保持与 Electron 解耦，探针可脱离应用单跑）
+    // 浏览器来源 / 工具三态偏好都用函数注入：注册只发生一次，偏好随时可改、组装 / 执行时现取
+    //（browser/agent.ts 保持与 Electron 解耦，探针可脱离应用单跑）。
+    // ⚠️ toolMode 决定这组工具暴不暴露（off 一个都不给 / system 让位内置 Playwright MCP）——
+    // 漏注入就等于「浏览器工具的关闭开关失灵」（见 browser/agent.ts 的 browserToolsAvailable）。
     ...buildBrowserToolDefs({
-      channel: () => (storage.getPreferences().browserChannel ?? 'auto') as BrowserChannel
+      channel: () => (storage.getPreferences().browserChannel ?? 'auto') as BrowserChannel,
+      toolMode: () => (storage.getPreferences().browserToolMode ?? 'in-app') as BrowserToolMode
     })
   ])
 }

@@ -227,7 +227,7 @@ npm run pack / dist / dist:win / dist:mac / dist:linux
 | SFTP / 传输 | `verify-sftp-transfers.mjs` |
 | SSH / 主机 / 日志 / 编码 | `verify-host-logs.mjs` `verify-windows-host.mjs` |
 | RDP / 浏览器 | `verify-rdp-bridge.mjs` `verify-agent-browser.mjs` `verify-builtin-playwright-mcp.mjs` |
-| Agent 工具 / 上下文 / 会话 | `verify-agent-file-tools.mjs` `verify-tool-registry.mjs` `verify-output-artifact.mjs` `verify-context-compression.mjs` `verify-agent-acp-import.mjs` |
+| Agent 工具 / 上下文 / 会话 | `verify-agent-file-tools.mjs` `verify-tool-registry.mjs` `verify-output-artifact.mjs` `verify-context-compression.mjs` `verify-context-prune.mjs` `verify-agent-acp-import.mjs` |
 | Agent 界面 | `verify-agent-outline-scroll-cost.mjs` `verify-agent-list-projection.ts` `verify-agent-file-preview.mjs` |
 | 纯函数 / 数据层 | 同名 `.ts` 脚本用 `node --experimental-strip-types` 直接跑，不需要 Electron |
 

@@ -49,6 +49,29 @@ function positiveOr(value: number | undefined, fallback: number): number {
     : fallback
 }
 
+/**
+ * 粗略 token 估算。
+ *
+ * 不用 tiktoken：它要 native deps、升级即失效，而这里只用来判「够不够」而不是精确数 ——
+ * 差 20% 不影响是否触发压缩，所以取保守值，宁可早触发也不要漏触发。
+ * 中文 1 字 ≈ 1.5 token，其余（英文 / 代码 / 符号）4 字符 ≈ 1 token。
+ *
+ * ⚠️ 放在 shared 而不是 `main/services/ai/context.ts`：主进程的上下文压缩与 agent-core 的
+ * 工具输出剪枝（`agent-core/prune.ts`）都要用它，而 agent-core 不该反向依赖 context.ts
+ * （那会把 ai SDK 与 resolve-model 一起拉进来，破坏「agent-core 可脱离 Electron 裸跑」的约束）。
+ */
+export function estimateTokens(text: string): number {
+  if (!text) return 0
+  let cjk = 0
+  let other = 0
+  for (const ch of text) {
+    const code = ch.codePointAt(0)!
+    if (code >= 0x4e00 && code <= 0x9fff) cjk++
+    else other++
+  }
+  return Math.ceil(cjk * 1.5 + other * 0.25)
+}
+
 /** 窗口 → 「200k / 1M」这类短标签（设置页模型行与圆环详情共用） */
 export function formatContextWindow(tokens: number): string {
   if (tokens >= 1_000_000) {

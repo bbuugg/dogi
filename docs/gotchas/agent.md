@@ -341,3 +341,29 @@
   30s 一轮的 `dirMissing` 天生慢半拍，而「目录刚被删、用户接着发消息」正是最该拦住的一刻 ——
   两处校验都自己再 `stat` 一次（复用同一个 `isWorkspaceDirAvailable`，别再写第二份判据）。
 - **验证**：`scripts/verify-workspace-health.mjs`（判据与标记语义）⚠️**已移除**。
+
+**42. 内置 Agent 的 token 花在哪：固定底盘每步重发 + 历史只限条数不限 token**
+
+- **触发信号**：用户反馈「内置 Agent 很费 token」。这不是某一处写错，是**结构性**的两件事叠加。
+- **根因（2026-10 实测，口径同 `estimateTokens`）**：
+  1. **固定底盘每步重发**：AGENTS.md 全文注入（本仓库 14,425 字符 ≈ **8.0K token**）
+     + 工具描述（31 条 ≈ **3.5K**）+ 工具入参 schema（≈ 2-4K）+ 系统提示词
+     （原「可用工具」逐条说明 ≈ **2.2K**）≈ **16-18K token / 步**。`DEFAULT_MAX_STEPS = 500`，
+     每一步都重发一遍。
+  2. **历史侧只限条数、不限 token**：`contextMessages`（缺省 20）限的是「消息条数」，
+     一条含 10 个工具结果的助手消息最多 4000 字符 × 10；20 条这种消息能到几十万字符。
+     唯一的兜底是 `compressContext`（超窗口 × 0.8 才触发，且是「整轮摘要」，剪不掉单条旧工具输出）。
+- **正确做法（对齐 opencode 的两段式 compaction：Prune → Summarize）**：
+  - **加剪枝那一段**（`agent-core/prune.ts`）：把超出保留预算的旧 tool-result 换成占位符。
+    预算按窗口缩放（`protect = min(40K, 窗口×25%)`、`min = min(20K, 窗口×10%)`）——
+    opencode 的 40K/20K 是 200K 级窗口的绝对值，直接套到 32K 窗口上会「永远不剪」。
+  - **工具结果改「头 + 尾」截断**（`toToolOutput`）：只留头会把报错原文 / 最终结论丢掉。
+  - **提示词不逐条复述工具用法**：工具 `description` 每轮都随请求发，提示词里再列一遍是纯重复
+    （对齐 pi 的「系统提示 + 工具定义 < 1K token」）。新增工具把用法写进它自己的 description。
+- ⚠️ **剪枝只改 `tool-result` 的 `output` 字段**，`toolCallId` / `toolName` 必须原样保留 ——
+  改了会让 assistant 里的 `tool-call` 找不到配对结果，provider 直接拒请求（同第 23 条）。
+- ⚠️ **`estimateTokens` 现在住在 `@shared/context-budget`**（剪枝与压缩共用）：
+  agent-core 不该反向依赖 `services/ai/context.ts`（那会把 ai SDK 与 resolve-model 一起拉进来，
+  破坏「agent-core 可脱离 Electron 裸跑」的约束）。`context.ts` 只是 re-export 它。
+- **验证**：`scripts/verify-context-prune.mjs`（剪枝语义，见 4.20）+ 手工：长会话里连读十几个文件后，
+  顶部提示条出现「剪枝了 N 条旧工具输出（省 X token）」，而屏幕上的历史**仍是原文**。

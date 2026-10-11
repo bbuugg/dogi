@@ -19,12 +19,17 @@ import type { AiModelConfig, ContextCompression } from '@shared/types'
 import {
   COMPRESS_TRIGGER_RATIO,
   DEFAULT_CONTEXT_WINDOW,
+  estimateTokens,
   resolveContextWindow
 } from '@shared/context-budget'
 import { resolveModel } from './resolve-model'
 
-/** 默认上下文窗口：真源在 shared（渲染端的用量圆环用同一个值算分母） */
-export { DEFAULT_CONTEXT_WINDOW, COMPRESS_TRIGGER_RATIO, resolveContextWindow }
+/**
+ * 默认上下文窗口：真源在 shared（渲染端的用量圆环用同一个值算分母）。
+ * `estimateTokens` 也住在 shared —— agent-core 的剪枝模块要用它，而 agent-core 不该依赖本文件。
+ * 这里一并 re-export，保持既有调用方（`import { estimateTokens } from './context'`）不用改。
+ */
+export { DEFAULT_CONTEXT_WINDOW, COMPRESS_TRIGGER_RATIO, resolveContextWindow, estimateTokens }
 /** 触发压缩后，保留的「近期原文」占预算的比例（其余的旧轮摘要掉） */
 export const KEEP_RECENT_RATIO = 0.5
 /** 摘要请求的最大输出 token */
@@ -41,25 +46,6 @@ const SUMMARY_SYSTEM = [
   '可以丢弃：客套话、重复的解释、中间过程的试错（除非报错本身是要点）、已经被后来的结论推翻的旧想法。',
   '不要在摘要里评价自己，也不要加「摘要如下：」这类前缀 —— 直接给摘要正文。'
 ].join('\n')
-
-/**
- * 粗略 token 估算。
- *
- * 不用 tiktoken：它要 native deps、升级即失效，而这里只用来判「够不够」而不是精确数 ——
- * 差 20% 不影响是否触发压缩，所以取保守值，宁可早触发也不要漏触发。
- * 中文 1 字 ≈ 1.5 token，其余（英文 / 代码 / 符号）4 字符 ≈ 1 token。
- */
-export function estimateTokens(text: string): number {
-  if (!text) return 0
-  let cjk = 0
-  let other = 0
-  for (const ch of text) {
-    const code = ch.codePointAt(0)!
-    if (code >= 0x4e00 && code <= 0x9fff) cjk++
-    else other++
-  }
-  return Math.ceil(cjk * 1.5 + other * 0.25)
-}
 
 /**
  * 把一条 ModelMessage 的 content 展平成文本（供 token 估算与摘要输入用）。

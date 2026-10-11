@@ -1384,6 +1384,16 @@ export interface ContextCompression {
   keptTurns: number
   /** 摘要请求失败、已回退成截断（旧轮是直接丢掉的，不是摘要） */
   truncated: boolean
+  /**
+   * 被**剪枝**（换成占位符）的旧工具结果条数。缺省 = 没剪枝。
+   *
+   * 剪枝是压缩的**第一段**（对齐 opencode 的 Prune）：把超出保留预算的旧 tool 输出换成一行
+   * 占位符，不必调模型、也不破坏 tool-call / tool-result 的配对（见 `agent-core/prune.ts`）。
+   * 它可能**单独**发生（剪完就不超阈值了，`summarizedTurns` 为 0）—— 提示条据此换一种说法。
+   */
+  prunedToolResults?: number
+  /** 剪枝省下的估算 token */
+  prunedTokens?: number
 }
 
 /**

@@ -120,6 +120,19 @@ y=368（偏 **268px**）。
 `[ref=eN]` 的可访问性快照（**公开 API**），回解析用 `page.locator('aria-ref=eN')`（公开选择器引擎）。
 ref 只在当前页面状态下有效，页面一变（导航 / 重渲染）就得重新快照。
 
+⚠️ **内置浏览器工具暴不暴露，由 `available` 谓词决定，判据方向极易写反**。
+`buildToolset` 的写法是 `if (def.available && !def.available(...)) continue` —— 即
+**`available` 返回 `true` 才进工具集**。`browser/agent.ts` 的 `browserToolsAvailable` 必须同时满足：
+
+1. `browserToolMode === 'in-app'`（`off` 一个都不给、`system` 让位给内置 Playwright MCP）；
+2. MCP **没有**带同名 `browser_*` 工具（两套同名会静默互相覆盖）。
+
+曾经这里写成 `mcpToolNames.some(...)`（漏了 `!`），方向正好反了 —— 表现是**默认的
+`in-app` 模式下 Agent 一个浏览器工具都拿不到**（谓词 false → 整组被跳过），反而是挂了
+MCP 浏览器工具时才暴露。三态偏好由 `builtin-tools.ts` 用函数注入（`toolMode`），
+**漏注入就等于「浏览器工具的关闭开关失灵」**（同 `channel` 的解耦理由）。
+回归验证：`scripts/agent-browser-tools.test.ts` 里的 4 条可用性断言。
+
 **验证**（都要跑，见 5.2）：`scripts/verify-agent-browser.mjs`（Agent 内嵌面板与 id 契约）、
 `scripts/verify-agent-browser-tools.mjs`（Agent 工具行为，直接跑 `services/browser/agent.ts` 的真源码）、
 `scripts/verify-browser-persistent-profile.mjs`（持久化 profile：登录态跨会话重启存活 / purge 清理 / 无根目录回退）、

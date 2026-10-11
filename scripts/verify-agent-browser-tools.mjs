@@ -29,7 +29,10 @@ const FILES = [
   [`${BROWSER_SRC}/resolver.ts`, 'browser/resolver.ts'],
   ['src/main/services/ai/agent-core/workspace.ts', 'ai/agent-core/workspace.ts'],
   // session.ts 现在运行时 import 了视口预设表（@shared/browser），所以它也得一起搬过来
-  ['src/shared/browser.ts', 'shared/browser.ts']
+  ['src/shared/browser.ts', 'shared/browser.ts'],
+  // agent.ts 的截图工具运行时 import 了工作区媒体协议（@shared/workspace-media）——
+  // 漏了它整份探针会以 ERR_MODULE_NOT_FOUND 直接退出，等于验证静默失效（这个坑真的踩过）
+  ['src/shared/workspace-media.ts', 'shared/workspace-media.ts']
 ]
 
 /** 每个文件要改写的 import 说明符：补上 .ts 扩展名 */
@@ -39,7 +42,9 @@ const REWRITES = {
     ["from './session'", "from './session.ts'"],
     ["from '../ai/agent-core/workspace'", "from '../ai/agent-core/workspace.ts'"],
     // 会话 id 推导（agentBrowserSessionId）是运行时 import，一并指向副本
-    ["from '@shared/browser'", "from '../shared/browser.ts'"]
+    ["from '@shared/browser'", "from '../shared/browser.ts'"],
+    // 截图结果里的 dogi-ws:// 图片地址（buildWorkspaceMediaUrl）也是运行时 import
+    ["from '@shared/workspace-media'", "from '../shared/workspace-media.ts'"]
   ],
   'browser/session.ts': [
     ["from './input'", "from './input.ts'"],

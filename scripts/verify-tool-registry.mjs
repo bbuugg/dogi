@@ -26,21 +26,39 @@ const TMP = join(ROOT, '.toolregtest')
 const AI = 'src/main/services/ai'
 const FILES = [
   [`${AI}/tool-registry.ts`, 'ai/tool-registry.ts'],
-  [`${AI}/client-tools.ts`, 'ai/client-tools.ts']
+  [`${AI}/client-tools.ts`, 'ai/client-tools.ts'],
+  // tool-registry 现在**运行时** import 了 steer（插话）与 plugin-hooks（工具钩子）——
+  // 漏一个就 ERR_MODULE_NOT_FOUND，整份探针直接退出（见 6.6 第 36 条）。
+  // 这两个文件对 @shared 的引用都是 type-only（运行时被擦除），复制即可，无需改写
+  [`${AI}/steer.ts`, 'ai/steer.ts'],
+  [`${AI}/plugin-hooks.ts`, 'ai/plugin-hooks.ts']
 ]
 
-// 两个文件对 @shared / agent-core 的引用全部是 type-only import（运行时被擦除），
-// client-tools 现在对 tool-registry 也只剩类型引用 —— 直接复制即可，无需改写
+// 对 @shared / agent-core 的引用全部是 type-only import（运行时被擦除），
+// client-tools 对 tool-registry 也只剩类型引用 —— 只需给无扩展名的相对 import 补 .ts
 const REWRITES = {
   'ai/client-tools.ts': [],
-  'ai/tool-registry.ts': []
+  'ai/tool-registry.ts': [
+    ["from './steer'", "from './steer.ts'"],
+    ["from './plugin-hooks'", "from './plugin-hooks.ts'"]
+  ],
+  'ai/steer.ts': [],
+  'ai/plugin-hooks.ts': []
 }
 
 rmSync(TMP, { recursive: true, force: true })
 for (const [from, to] of FILES) {
   const dst = join(TMP, to)
   mkdirSync(dirname(dst), { recursive: true })
-  writeFileSync(dst, readFileSync(join(ROOT, from), 'utf8'))
+  let code = readFileSync(join(ROOT, from), 'utf8')
+  for (const [find, replace] of REWRITES[to] ?? []) {
+    if (!code.includes(find)) {
+      console.error(`[verify] 改写失败：${to} 里找不到 ${find}（源码 import 写法变了？）`)
+      process.exit(1)
+    }
+    code = code.replaceAll(find, replace)
+  }
+  writeFileSync(dst, code)
 }
 
 // 探针主体。⚠️ 用数组 join 拼字符串而不是模板字面量：用例里有正则，

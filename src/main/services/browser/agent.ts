@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs'
 import { dirname } from 'node:path'
 import { z } from 'zod'
 import type { Page } from 'playwright'
-import type { BrowserChannel } from '@shared/types'
+import type { BrowserChannel, BrowserToolMode } from '@shared/types'
 import { agentBrowserSessionId } from '@shared/browser'
 import { buildWorkspaceMediaUrl } from '@shared/workspace-media'
 import { resolveInside } from '../ai/agent-core/workspace'
@@ -40,6 +40,14 @@ export interface BrowserToolRegistration {
    * 用函数而不是值：注册只在启动时发生一次，偏好随时可改，执行时现取。
    */
   channel: () => BrowserChannel
+  /**
+   * 浏览器工具来源三态（`preferences.browserToolMode`）。
+   *
+   * 同样由调用方注入（理由同 `channel`），**组装期**现取 —— 它决定这一轮
+   * 内置浏览器工具暴不暴露（`off` 一个都不给、`system` 让位给内置 Playwright MCP）。
+   * 缺省按 `in-app` 处理，别把「没注入」当成「关闭」。
+   */
+  toolMode?: () => BrowserToolMode
 }
 
 /** 模型给的定位参数：ref 优先，selector 作兜底（CSS / role= / text= / data-testid=） */
@@ -110,9 +118,23 @@ export function buildBrowserToolDefs(opts: BrowserToolRegistration): AiToolDef[]
     return session
   }
 
-  /** MCP 带了同名 browser_* 工具时整组让位（两套同名会静默互相覆盖，见 agent.ts 的历史注释） */
-  const yieldToMcp = ({ mcpToolNames }: { mcpToolNames: string[] }): boolean =>
-    mcpToolNames.some((n) => n.startsWith('browser_'))
+  /**
+   * 这一轮要不要把内置浏览器工具交给模型。
+   *
+   * ⚠️ **判据方向别写反**：`available` 返回 **true = 进工具集**
+   * （见 tool-registry.buildToolset：`if (def.available && !def.available(...)) continue`）。
+   * 这里曾经写成 `mcpToolNames.some(...)`，方向正好相反 —— 结果是**默认的 in-app 模式下
+   * Agent 一个浏览器工具都拿不到**（没有 MCP 浏览器工具 → 谓词 false → 整组被跳过），
+   * 反而是挂了 MCP 浏览器工具时才暴露。回归验证见 `scripts/agent-browser-tools.test.ts`。
+   *
+   * 两个条件缺一不可：
+   * - `in-app`：`off` 一个都不给（界面里的浏览器面板仍可手动用）；`system` 由内置
+   *   Playwright MCP 提供能力，内置组整组让位；
+   * - MCP 没带同名 `browser_*` 工具：两套同名会静默互相覆盖（MCP 最后展开、覆盖内置）。
+   */
+  const browserToolsAvailable = ({ mcpToolNames }: { mcpToolNames: string[] }): boolean =>
+    (opts.toolMode?.() ?? 'in-app') === 'in-app' &&
+    !mcpToolNames.some((n) => n.startsWith('browser_'))
 
   /**
    * 把截图写进工作区，并返回一段**带可查看图片地址**的结果文本。
@@ -148,7 +170,7 @@ export function buildBrowserToolDefs(opts: BrowserToolRegistration): AiToolDef[]
     {
       name: 'browser_navigate',
       scope: 'workspace',
-      available: yieldToMcp,
+      available: browserToolsAvailable,
       description:
         '在浏览器中打开一个网址并返回页面快照。浏览器是真实运行的（无窗口），操作会真的作用在网页上。',
       inputSchema: z.object({
@@ -166,7 +188,7 @@ export function buildBrowserToolDefs(opts: BrowserToolRegistration): AiToolDef[]
     {
       name: 'browser_snapshot',
       scope: 'workspace',
-      available: yieldToMcp,
+      available: browserToolsAvailable,
       description:
         '获取当前页面的可访问性快照（YAML）：每个元素带 role、可访问名称与 [ref=eN] 引用，可点击元素还带 [cursor=pointer]。点击 / 输入前先看它拿到 ref。页面一旦变化（导航、重渲染），旧的 ref 会失效，需要重新获取。',
       inputSchema: z.object({}),
@@ -179,7 +201,7 @@ export function buildBrowserToolDefs(opts: BrowserToolRegistration): AiToolDef[]
     {
       name: 'browser_click',
       scope: 'workspace',
-      available: yieldToMcp,
+      available: browserToolsAvailable,
       description:
         '点击页面元素。优先用 browser_snapshot 里的 ref（如 e5）；也可传 selector（CSS、role=button[name="登录"]、text=提交、data-testid=go）。',
       inputSchema: z.object({
@@ -203,7 +225,7 @@ export function buildBrowserToolDefs(opts: BrowserToolRegistration): AiToolDef[]
     {
       name: 'browser_type',
       scope: 'workspace',
-      available: yieldToMcp,
+      available: browserToolsAvailable,
       description:
         '在输入框中填入文本（会先清空原内容）。用 ref 或 selector 定位输入框；submit=true 时填完按回车（适合搜索框 / 登录表单）。',
       inputSchema: z.object({
@@ -228,7 +250,7 @@ export function buildBrowserToolDefs(opts: BrowserToolRegistration): AiToolDef[]
     {
       name: 'browser_press',
       scope: 'workspace',
-      available: yieldToMcp,
+      available: browserToolsAvailable,
       description: '按下一个键（如 Enter、Escape、Tab、ArrowDown、Control+A）。作用于页面当前焦点。',
       inputSchema: z.object({
         key: z.string().describe('键名，如 Enter / Escape / Tab / Control+A')
@@ -245,7 +267,7 @@ export function buildBrowserToolDefs(opts: BrowserToolRegistration): AiToolDef[]
     {
       name: 'browser_wait_for',
       scope: 'workspace',
-      available: yieldToMcp,
+      available: browserToolsAvailable,
       description:
         '等待条件满足：给 text 等文本出现，给 selector 等元素可见，都不给则等网络空闲（页面加载完成）。用于等异步内容渲染出来。',
       inputSchema: z.object({
@@ -274,7 +296,7 @@ export function buildBrowserToolDefs(opts: BrowserToolRegistration): AiToolDef[]
     {
       name: 'browser_evaluate',
       scope: 'workspace',
-      available: yieldToMcp,
+      available: browserToolsAvailable,
       description:
         '在页面里执行一段 JavaScript 并返回结果（自动 JSON 序列化）。适合提取数据、读取元素文本、做断言。表达式形如 "document.title" 或 "() => [...document.querySelectorAll(\'a\')].map(a => a.href)"。',
       inputSchema: z.object({
@@ -298,7 +320,7 @@ export function buildBrowserToolDefs(opts: BrowserToolRegistration): AiToolDef[]
     {
       name: 'browser_screenshot',
       scope: 'workspace',
-      available: yieldToMcp,
+      available: browserToolsAvailable,
       description:
         '给**当前**页面截图并保存成 PNG 文件（默认存到工作区的 .dogi/screenshots/ 下），返回文件路径与一张可直接查看的图片地址。' +
         '适合在 browser_* 操作过程中留证或让用户查看当时的页面。要「打开某个网址并截图」用 screenshot 一步到位。',
@@ -318,7 +340,7 @@ export function buildBrowserToolDefs(opts: BrowserToolRegistration): AiToolDef[]
     {
       name: 'screenshot',
       scope: 'workspace',
-      available: yieldToMcp,
+      available: browserToolsAvailable,
       description:
         '打开一个网页并截图（一步到位），存到工作区（默认 .dogi/screenshots/）并返回一张可直接查看的图片地址。' +
         '适合让用户「看到」某个页面 / 报表长什么样。只往工作区写这一张图，不修改其它文件。' +
@@ -355,7 +377,7 @@ export function buildBrowserToolDefs(opts: BrowserToolRegistration): AiToolDef[]
     {
       name: 'browser_close',
       scope: 'workspace',
-      available: yieldToMcp,
+      available: browserToolsAvailable,
       description: '关闭 Agent 的浏览器会话，释放浏览器进程。任务完成、不再需要浏览器时调用。',
       inputSchema: z.object({}),
       execute: async (_rawInput, _call, ctx) => {

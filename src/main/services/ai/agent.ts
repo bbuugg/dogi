@@ -18,16 +18,20 @@
  */
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import type { ToolSet } from 'ai'
+import type { ModelMessage, ToolSet } from 'ai'
 import {
   adaptMastraPart,
   buildAgentSystemPrompt,
   createAgentFileState,
   normalizeUsage,
+  PRUNE_MIN_TOKENS,
+  PRUNE_PROTECT_TOKENS,
+  pruneToolOutputs,
   readChunkUsage,
   readProjectDoc,
   toModelMessages,
   type AgentFileState,
+  type PruneResult,
   type RawUsage
 } from './agent-core'
 import type {
@@ -37,11 +41,13 @@ import type {
   AgentWorkspace,
   AiModelConfig,
   AiSettings,
-  ConfirmDecision
+  ConfirmDecision,
+  ContextCompression
 } from '@shared/types'
 import { BUILTIN_CONFIRM_OPTIONS } from '@shared/confirm'
+import { resolveContextWindow } from '@shared/context-budget'
 import { resolveModel } from './resolve-model'
-import { compressContext, estimateBaseTokens, withSummaryPrefix } from './context'
+import { compressContext, countTokens, estimateBaseTokens, withSummaryPrefix } from './context'
 import { sliceByCheckpoint } from './context-summary'
 import { askFollowupBroker } from './ask-followup'
 import { ASK_FOLLOWUP_HINT } from '@shared/ask-followup'
@@ -490,26 +496,28 @@ class AgentService extends EventEmitter {
       (hasBrowser ? '\n\n' + BROWSER_PROMPT_SECTION : '') +
       ASK_FOLLOWUP_HINT
     const baseTokens = await estimateBaseTokens(instructions, tools)
-    // 三道闸，**顺序不能换**：① 手动压缩的检查点切片 → ② 按条数截断 → ③ 按上下文窗口自动压缩。
+    // 四道闸，**顺序不能换**：
+    // ① 手动压缩的检查点切片 → ② 按条数截断 → ③ 工具输出剪枝 → ④ 按上下文窗口自动压缩。
     // ① 必须在 ② 之前：反过来 slice(-historyLimit) 可能把刚注入的摘要消息本身切掉，
     // 检查点就白设了（而且是静默白设，界面看不出任何异常）。
-    // ③ 只改「这一次请求怎么带上下文」，不碰落盘的历史（屏幕上的原文始终可翻可复制）。
+    // ③ 是压缩的第一段（对齐 opencode 的 Prune）：把超出预算的旧工具输出换成占位符，
+    // **不调模型、不动协议结构**；剪完若已不超阈值，④ 那次摘要调用就省了。
+    // ③④ 只改「这一次请求怎么带上下文」，不碰落盘的历史（屏幕上的原文始终可翻可复制）。
     // （会话记录在上面读 MCP 允许清单时已经取过一次，这里复用，别重复读盘）
     const sliced = sliceByCheckpoint(req.history, conversationRecord?.contextSummary)
     const recent = toModelMessages(sliced.messages.slice(-historyLimit))
-    const { messages: modelMessages, compressed } = await compressContext(
-      sliced.summaryText ? withSummaryPrefix(recent, sliced.summaryText) : recent,
-      {
-        model: config,
-        modelId: req.modelId,
-        baseTokens,
-        signal: controller.signal
-      }
-    )
-    if (compressed) {
+    const base = sliced.summaryText ? withSummaryPrefix(recent, sliced.summaryText) : recent
+    const pruned = pruneToolOutputs(base, this.pruneBudget(config, req.modelId))
+    const { messages: modelMessages, compressed } = await compressContext(pruned.messages, {
+      model: config,
+      modelId: req.modelId,
+      baseTokens,
+      signal: controller.signal
+    })
+    const info = this.contextNotice(compressed, pruned, base, baseTokens)
+    if (info) {
       // ⚠️ 必须延后到 invoke 回包之后（见 ipc/agent.ts 的注释）：此刻 requestId 还没登记进
       // chatConversations，广播出去的事件渲染端认不出归属、会被整条丢掉。
-      const info = compressed
       setTimeout(() => this.emitEvent(requestId, { type: 'context-compressed', info }), 0)
     }
     return { model, tools, instructions, modelMessages }
@@ -648,21 +656,21 @@ class AgentService extends EventEmitter {
     // 不计入 baseTokens 的话统计会明显偏小（提示条上「压缩前后」会看着没变化）。
     const baseTokens = await estimateBaseTokens(systemPrompt, tools)
 
-    // 与工作区同口径：先按条数截断，再按上下文窗口压缩（只影响本次请求，不动历史）。
-    // 终端会话不支持手动压缩（没有检查点），自动压缩照常生效。
-    const { messages: modelMessages, compressed } = await compressContext(
-      toModelMessages(req.history.slice(-historyLimit)),
-      {
-        model: config,
-        modelId: req.modelId,
-        baseTokens,
-        signal: controller.signal
-      }
-    )
-    if (compressed) {
+    // 与工作区同口径：先按条数截断，再剪枝旧工具输出，最后按上下文窗口压缩
+    // （只影响本次请求，不动历史）。
+    // 终端会话不支持手动压缩（没有检查点），自动压缩与剪枝照常生效。
+    const base = toModelMessages(req.history.slice(-historyLimit))
+    const pruned = pruneToolOutputs(base, this.pruneBudget(config, req.modelId))
+    const { messages: modelMessages, compressed } = await compressContext(pruned.messages, {
+      model: config,
+      modelId: req.modelId,
+      baseTokens,
+      signal: controller.signal
+    })
+    const info = this.contextNotice(compressed, pruned, base, baseTokens)
+    if (info) {
       // ⚠️ 延后到 invoke 回包之后：渲染端在 await 返回之后才登记 requestId → 会话，
       // 此刻发出的事件认不出归属会被丢掉（同 chatWorkspace / ipc/agent.ts 的说明）。
-      const info = compressed
       setTimeout(() => this.emitEvent(requestId, { type: 'context-compressed', info }), 0)
     }
     return { model, tools, systemPrompt, modelMessages }
@@ -688,6 +696,63 @@ class AgentService extends EventEmitter {
       execute: (input: unknown, call: { toolCallId: string }, runCtx: ToolRunContext) =>
         clientToolBroker.invoke(def.name, input, call, runCtx)
     }))
+  }
+
+  /**
+   * 工具输出剪枝的预算，按**模型的上下文窗口**缩放。
+   *
+   * opencode 的 40K / 20K 是按 200K 级窗口定的绝对值；直接套到 32K 窗口的模型上，
+   * 「保护 40K」比整个窗口还大 → 永远不剪。所以取窗口的 25% / 10%，并以上限封顶 ——
+   * 常见窗口（≥160K）下与 opencode 的绝对值等价，小窗口下自动收敛。
+   *
+   * 窗口口径与用量圆环一致（`resolveContextWindow` 三级回落，见 `@shared/context-budget`）。
+   */
+  private pruneBudget(
+    config: AiModelConfig,
+    modelId?: string
+  ): { protectTokens: number; minTokens: number } {
+    const window = resolveContextWindow(config.contextWindows, modelId, config.contextBudget)
+    return {
+      protectTokens: Math.min(PRUNE_PROTECT_TOKENS, Math.floor(window * 0.25)),
+      minTokens: Math.min(PRUNE_MIN_TOKENS, Math.floor(window * 0.1))
+    }
+  }
+
+  /**
+   * 组装这一轮的「上下文压缩」通知。
+   *
+   * 压缩是两段式（对齐 opencode）：**剪枝旧的工具输出**（`prune.ts`，不调模型）在前，
+   * **按轮摘要**（`compressContext`，要调一次模型）在后。两段可能只发生一段：
+   * - 都发生 → 用摘要的 before/after（口径更全），另附剪枝条数；
+   * - 只剪枝 → 自己按「全部消息 + baseTokens」算 before/after，`summarizedTurns` 记 0
+   *   （提示条据此不渲染「摘要了 N 轮」那句）；
+   * - 都没发生 → null（不打扰用户）。
+   */
+  private contextNotice(
+    compressed: ContextCompression | null,
+    pruned: PruneResult,
+    base: ModelMessage[],
+    baseTokens: number
+  ): ContextCompression | null {
+    if (!compressed) {
+      if (pruned.prunedToolResults === 0) return null
+      return {
+        beforeTokens: countTokens(base) + baseTokens,
+        afterTokens: countTokens(pruned.messages) + baseTokens,
+        summarizedTurns: 0,
+        keptTurns: 0,
+        truncated: false,
+        prunedToolResults: pruned.prunedToolResults,
+        prunedTokens: pruned.savedTokens
+      }
+    }
+    return pruned.prunedToolResults > 0
+      ? {
+          ...compressed,
+          prunedToolResults: pruned.prunedToolResults,
+          prunedTokens: pruned.savedTokens
+        }
+      : compressed
   }
 
   /** mastra 的 modelSettings：默认不限时（只设 firstChunkMs），重试由 runStreamWithRetry 自己驱动 */

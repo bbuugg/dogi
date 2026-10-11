@@ -183,9 +183,31 @@ ACP 是「别人的 agent 在别人的进程里管自己的会话」。本应用
 
 ### 4.20 上下文压缩 + 会话累计 token：压缩只改「这一次请求」，不改历史
 
-移植自 fishwork（`packages/agent/src/context.ts`）。**三道闸**，顺序固定：
-先按**条数**截断（`AiModelConfig.contextMessages`，缺省 20），再按**上下文窗口**压缩，
+移植自 fishwork（`packages/agent/src/context.ts`），并按 opencode 补上了**剪枝**那一段。
+**四道闸**，顺序固定：① 手动压缩的检查点切片 → ② 按**条数**截断
+（`AiModelConfig.contextMessages`，缺省 20）→ ③ **工具输出剪枝** → ④ 按**上下文窗口**摘要。
 统计口径把「系统提示词 + 工具 schema」也计进去。
+
+- **③④ 是「先剪枝、再摘要」两段式**（对齐 opencode 的 compaction：Prune → Summarize）：
+  - **③ 剪枝**（`agent-core/prune.ts`，不调模型）：从**最新往前**累计工具输出 token，
+    超出保留预算的旧 tool-result 换成一行占位符。省不到下限就不动手（返回**原引用**，零拷贝）。
+    它只改 `tool-result` 的 `output` 字段、`toolCallId` / `toolName` 原样保留 —— 协议结构合法，
+    不破坏 tool-call / tool-result 配对（同 6.6 第 23 条）。`read_skill` / `read_tool_output`
+    **永不剪**（技能正文是按需加载的规则，剪了会诱导模型重读）。
+  - 预算按**窗口缩放**（`agent.ts` 的 `pruneBudget`）：`protect = min(40K, 窗口×25%)`、
+    `min = min(20K, 窗口×10%)`。opencode 的 40K/20K 是 200K 级窗口的绝对值，直接套到 32K 窗口上
+    「保护 40K」比整个窗口还大 → 永远不剪，所以必须缩放。
+  - **顺序不能换**：剪枝在前，剪完若已不超阈值，④ 那次摘要调用就省了（摘要要真调一次模型）。
+  - ⚠️ 为什么必须有 ③：`contextMessages`（缺省 20）只限**消息条数**、不限 token ——
+    一条含 10 个工具结果的助手消息最多 4000 字符 × 10，20 条这种消息能到几十万字符。
+    单靠 ④「超阈值才摘要」兜不住，且 ④ 的粒度是「整轮」，剪不掉单条旧工具输出。
+- **工具结果回传是「头 + 尾」截断**（`agent-core/agent.ts` 的 `toToolOutput`，上限 4000 字符）：
+  尾部往往是报错原文 / 最终结论，只留头等于把最需要的那几行丢掉（`execute_command` 那条路
+  早就是头+尾，这里补齐）。更早的旧输出由 ③ 换成占位符。
+- **系统提示词不逐条复述工具用法**（2026-10 精简，`buildAgentSystemPrompt`）：工具自身的
+  `description` 每轮都随请求发出去，提示词里再列一遍等于每一步白烧 ~1.5-2K token
+  （对齐 pi 的「系统提示 + 工具定义 < 1K token」）。只留「工具描述里写不下、或跨多个工具」的规则。
+  **新增工具时把用法写进它自己的 description，不要加回提示词。**
 
 - **窗口按模型配，不按配置配**：`AiModelConfig.contextWindows`（`模型 id → token 数`）。
   窗口是模型自己的属性而不是网关的属性 —— 同一个 baseURL 下 128k 与 200k 的模型可以并存。
@@ -229,7 +251,10 @@ ACP 是「别人的 agent 在别人的进程里管自己的会话」。本应用
   一份配置下不同模型窗口不同，用配置级的旧值会算错百分比。
 - 验证：`scripts/verify-context-compression.mjs`（`.tooltest` 包装跑真源码，覆盖窗口解析三级回落、
   0.8 触发线、`baseTokens` 计入 before/after 与触发判定、未超阈值零拷贝、切轮边界、
-  摘要失败回退、非法窗口回退；摘要成功路径要真调模型，属集成验证）。
+  摘要失败回退、非法窗口回退；摘要成功路径要真调模型，属集成验证）
+  + `scripts/verify-context-prune.mjs`（同款 `.tooltest` 包装跑 `agent-core/prune.ts` 真源码：
+  未超预算零拷贝、从新到旧保留、省不够不动手、`read_skill` / `read_tool_output` 不剪、
+  `toolCallId` / `toolName` 原样保留、非 text 输出也能估）。
 
 ### 4.22 两条 AI 线合并成一台引擎：终端助手走 `scope:'terminal'`
 

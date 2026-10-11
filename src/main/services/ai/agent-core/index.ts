@@ -28,3 +28,10 @@ export type { RawUsage } from './usage'
 export { buildSkillsPromptSection, buildReadSkillDef, SKILL_FILE } from './skills'
 export { resolveInside, createIgnoreChecker, parseGitignore, relPathOf } from './workspace'
 export { createAgentFileState, buildWorkspaceToolDefs } from './tools'
+export {
+  pruneToolOutputs,
+  PRUNE_PROTECT_TOKENS,
+  PRUNE_MIN_TOKENS,
+  PRUNE_PROTECT_TOOLS
+} from './prune'
+export type { PruneResult } from './prune'

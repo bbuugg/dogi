@@ -1,6 +1,6 @@
 {
   "name": "dogi",
-  "version": "0.0.21",
+  "version": "0.0.22",
   "description": "Dogi",
   "author": "chengyao",
   "main": "./out/main/index.js",

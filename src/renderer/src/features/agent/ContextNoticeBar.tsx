@@ -35,9 +35,19 @@ export function ContextNoticeBar({
         </span>
         <span>压缩前 {fmt(notice.beforeTokens)} token</span>
         <span>→ 压缩后 {fmt(notice.afterTokens)} token</span>
-        <span>
-          摘要了 {notice.summarizedTurns} 轮，保留 {notice.keptTurns} 轮
-        </span>
+        {/* 摘要只发生在「按轮摘要」那一段；只剪了旧工具输出时 summarizedTurns 为 0，这里不渲染 */}
+        {notice.summarizedTurns > 0 && (
+          <span>
+            摘要了 {notice.summarizedTurns} 轮，保留 {notice.keptTurns} 轮
+          </span>
+        )}
+        {/* 剪枝（压缩的第一段，见 agent-core/prune.ts）：换了多少条旧工具输出、省了多少 */}
+        {notice.prunedToolResults ? (
+          <span>
+            剪枝了 {notice.prunedToolResults} 条旧工具输出
+            {notice.prunedTokens ? `（省 ${fmt(notice.prunedTokens)} token）` : ''}
+          </span>
+        ) : null}
         {notice.truncated && (
           // 摘要请求失败时的降级：旧轮是被**丢弃**而不是摘要，如实说明，否则用户会以为细节还在
           <span className="text-destructive">摘要失败，旧轮已截断丢弃</span>

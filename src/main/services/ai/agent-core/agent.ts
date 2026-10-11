@@ -60,7 +60,12 @@ export type AgentStreamEvent =
 export type AgentPermissionMode = 'full' | 'confirm' | 'readonly'
 
 /**
- * 构建 Agent 系统提示词：说明工作区、工具约定与安全边界。
+ * 构建 Agent 系统提示词：说明工作区、**跨工具的行为约定**与安全边界。
+ *
+ * ⚠️ **刻意不逐条复述每个工具的用法**（2026-10 精简）：工具自身的 `description` 每轮都随
+ * 请求发出去，提示词里再列一遍等于每一步白烧 ~1.5-2K token（pi 的整份系统提示 + 工具定义
+ * 不到 1K token，靠的就是不重复）。这里只留「工具描述里写不下、或跨多个工具」的规则。
+ * **新增工具时把用法写进它自己的 description，不要加回这里。**
  *
  * `skills` 非空时追加「可用技能」段落（只有名称 + 描述，正文由 read_skill 按需加载，
  * 见 skills.ts 的渐进式披露说明）。
@@ -82,24 +87,20 @@ export function buildAgentSystemPrompt(
   const lines = [
     `你是一个运行在 Dogi 中的 AI Agent（编程与运维助手），工作区是「${workspaceName}」（${workspacePath}）。`,
     '你的职责：理解用户意图，主动使用工具在工作区内完成开发与运维任务。',
-    '可用工具：',
-    '- list_files / find_files / read_file：动手前先了解项目结构与目标文件；find_files 按文件名通配符找文件（如 *.ts、**/*.test.tsx）；',
-    '- read_file：输出每行带「行号: 内容」前缀，默认最多 2000 行；大文件按结尾提示的 offset 续读，避免反复读 30 行级别的小窗口；可以并行发起多个独立的读取 / 搜索调用提高效率；',
-    '- search_files：按正则搜索文件内容，定位符号、配置与报错来源；结果很多时用 filesOnly 只拿「文件:命中数」，要看上下文用 context；',
-    '- edit_file：精确替换（oldString → newString）。必须先用 read_file 读过目标文件；oldString 从读取输出复制（不要带「行号: 」前缀），带足够上下文保证唯一；多处出现时扩大上下文或传 replaceAll: true（重命名变量用它）；',
-    '- write_file：只用于新建文件或有意的整体重写；覆盖已有文件前必须先读过，优先用 edit_file 做局部修改；',
-    '- delete_file：删除文件（目录必须显式 recursive=true）；不可恢复，删前先确认路径；',
-    '- execute_command：在工作区目录执行命令（构建、测试、git、安装依赖、启动服务等）。',
-    '- git_read：只读查看 git 仓库（status 改动 / diff 差异 / log 历史 / show 某个提交）——「改了什么」「最近谁动过这里」优先用它；提交 / 回滚 / 切分支等写操作才用 execute_command；',
-    '- web_fetch：抓取网页并整理成结构化 Markdown 返回（只取静态 HTML，不跑 JavaScript）；页面需要登录或 JS 渲染时改用 browser_navigate + browser_snapshot；',
-    '- read_tool_output：读回上一次工具调用（run_in_terminal / execute_command / web_fetch）因输出过长而落盘的内容，按结果里给出的 id + offset 续读；',
+    // ⚠️ 这里**只写跨工具的行为规则**，不再逐条复述每个工具是干什么的 ——
+    // 那些说明与工具自身的 `description` 完全重复，而工具定义每轮都随请求发出去，
+    // 重复一遍等于每一步白烧 ~1.5-2K token（对齐 pi 的「系统提示 + 工具定义 < 1K token」思路）。
+    // 新增工具时把「怎么用」写进它自己的 description，别加回这里。
+    '各工具的用途、参数与用法见工具自身的说明（tool 定义里的 description）。',
     '使用约定：',
     '- 需要工具时直接调用工具，不要在正文里用「[调用工具 xxx]」「[工具 xxx 返回]」这类文字复述调用过程或结果 —— 写出来只会让用户看到一串假动作；',
     '- 所有路径一律使用相对工作区根目录的路径；',
+    '- 动手前先用 list_files / find_files / search_files 摸清结构与定位目标，再 read_file；可以并行发起多个独立的读取 / 搜索调用提高效率；',
+    '- read_file 的输出每行带「行号: 内容」前缀 —— 构造 edit_file 的 oldString 时只取冒号后面的原文，绝不要把行号前缀带进去；',
+    '- 修改文件前必须先 read_file 看清原文，编辑基于最新内容；改完如有可能，用 execute_command 跑项目自带的类型检查 / lint（如 npm run typecheck）验证，这是最快的静态验证手段；',
     '- 工具结果被压成「开头 + 结尾 + 产物提示」时**那不是全部**：关键信息（报错行 / 配置项 / 中段条目）可能就在被省略的部分，按结果里给的参数用 read_tool_output 补齐；不要为同一段内容反复重跑同一条命令，也不要为同一文件反复小窗口读取；',
     '- 执行命令前先简要说明意图；命令输出是事实依据，失败时结合输出排查原因，不要盲目反复重试同一条命令；',
     '- 删除文件、覆盖文件、危险命令（rm -rf、git push --force、DROP TABLE 等）先说明影响再执行；',
-    '- 修改文件前必须先 read_file 看清原文，编辑基于最新内容；编辑后如可能，用 execute_command 验证 —— 优先跑项目自带的类型检查 / lint（如 npm run typecheck、npm run lint），这是最快的静态验证手段；',
     '- 任务完成时用简洁的中文总结做了什么、验证结果如何，以及遗留事项。'
   ]
   const skillsSection = buildSkillsPromptSection(skills)
@@ -138,14 +139,28 @@ function buildPermissionSection(mode: AgentPermissionMode): string {
 /** 历史里工具结果回传时的字符上限：太小模型看不到内容（会反复重读同一个文件），太大撑爆上下文 */
 const TOOL_RESULT_LIMIT = 4000
 
+/**
+ * 超限时保留的**头部 / 尾部**字符数（合计略小于上限，给中间的省略说明留位置）。
+ *
+ * ⚠️ 必须是「头 + 尾」而不是只留头：尾部往往是报错原文、命令的最终结论、测试汇总 ——
+ * 只留头等于把模型最需要的那几行丢掉（`execute_command` 那条路早就是头+尾了，这里是补上）。
+ */
+const TOOL_RESULT_HEAD = 2500
+const TOOL_RESULT_TAIL = 1400
+
 /** 工具结果 -> 模型消息的输出结构（字符串走 text，其余序列化成 json；失败走 error-text） */
 function toToolOutput(output: unknown, isError?: boolean): ToolResultOutput {
   const raw =
     typeof output === 'string' ? output : (JSON.stringify(output, null, 1) ?? String(output))
-  const value =
-    raw.length > TOOL_RESULT_LIMIT
-      ? `${raw.slice(0, TOOL_RESULT_LIMIT)}\n…（输出过长，已截断，共 ${raw.length} 字符）`
-      : raw
+  let value = raw
+  if (raw.length > TOOL_RESULT_LIMIT) {
+    const omitted = raw.length - TOOL_RESULT_HEAD - TOOL_RESULT_TAIL
+    value =
+      `${raw.slice(0, TOOL_RESULT_HEAD)}\n\n` +
+      `…（中段 ${omitted} 字符已省略，共 ${raw.length} 字符。需要完整内容时重新调用该工具，` +
+      `或按结果里给出的产物 id 用 read_tool_output 续读）\n\n` +
+      `${raw.slice(-TOOL_RESULT_TAIL)}`
+  }
   return isError ? { type: 'error-text', value } : { type: 'text', value }
 }
 

@@ -73,8 +73,9 @@ const ctx = {
   permissionMode: 'full' as const,
   requestConfirm: async () => true
 }
+const defs = buildBrowserToolDefs({ channel: () => 'auto', toolMode: () => 'in-app' })
 const tools = Object.fromEntries(
-  buildBrowserToolDefs({ channel: () => 'auto' }).map((d) => [
+  defs.map((d) => [
     d.name,
     {
       execute: (input: unknown, options: { toolCallId: string }): Promise<unknown> =>
@@ -82,6 +83,33 @@ const tools = Object.fromEntries(
     }
   ])
 )
+
+// ---------------------------------------------------------------------------
+// 可用性谓词：`available` 返回 true = 进工具集（见 tool-registry 的 `!def.available(...)`）
+// ---------------------------------------------------------------------------
+// 这组断言防的是「判据方向写反」—— 写反时默认 in-app 模式下 Agent 一个浏览器工具都拿不到。
+const availableWith = (mode: 'off' | 'in-app' | 'system', mcpToolNames: string[]): string[] =>
+  buildBrowserToolDefs({ channel: () => 'auto', toolMode: () => mode })
+    .filter((d) => (d.available ? d.available({ ctx, mcpToolNames }) : true))
+    .map((d) => d.name)
+
+const inAppNames = availableWith('in-app', [])
+check(
+  '默认 in-app、无 MCP 时浏览器工具全部暴露',
+  inAppNames.length === defs.length && inAppNames.includes('browser_navigate'),
+  inAppNames
+)
+check(
+  'MCP 带同名 browser_* 时内置组整组让位',
+  availableWith('in-app', ['browser_navigate']).length === 0,
+  availableWith('in-app', ['browser_navigate'])
+)
+check(
+  'system 模式（内置 Playwright MCP 接管）内置组不暴露',
+  availableWith('system', []).length === 0,
+  availableWith('system', [])
+)
+check('off 模式一个浏览器工具都不给', availableWith('off', []).length === 0, availableWith('off', []))
 const call = (t: { execute?: unknown }, args: unknown): Promise<unknown> =>
   (t.execute as (a: unknown, o: unknown) => Promise<unknown>)(args, {
     toolCallId: 'test',
