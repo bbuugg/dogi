@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 自适应图标的背景层：取 logo 圆盘边缘的青，与前景的圆盘连成一片
+         （不要改回暗色，那会让图标看起来浮在一块黑底上）。见 scripts/generate-icons.mjs -->
+    <color name="ic_launcher_background">#28D8D1</color>
+</resources>

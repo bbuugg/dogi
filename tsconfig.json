@@ -1,0 +1,5 @@
+{
+  // 仓库根不直接承载 TypeScript 代码：各 workspace 包 / 应用都有自己的 tsconfig，
+  // 类型检查走 `npm run typecheck`（typecheck:packages + typecheck:apps）。
+  "files": []
+}

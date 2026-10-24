@@ -1,0 +1,20 @@
+{
+  "name": "fizz-container-runtime",
+  "private": true,
+  "type": "module",
+  "description": "容器型项目镜像内运行时（runtime.mjs + agent-host.mjs）的第三方依赖清单。构建期由 scripts/check-runtime-deps.mjs 校验：bundle 里出现的每个裸导入都必须在这份 dependencies 里。",
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.53",
+    "@ai-sdk/deepseek": "^3.0.44",
+    "@ai-sdk/google": "^4.0.69",
+    "@ai-sdk/openai": "^4.0.66",
+    "@mastra/core": "^1.68.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "ai": "^7.0.99",
+    "dotenv": "^16.6.1",
+    "playwright": "^1.56.0",
+    "simple-git": "^4.0.2",
+    "turndown": "^7.2.0",
+    "zod": "^4.6.4"
+  }
+}

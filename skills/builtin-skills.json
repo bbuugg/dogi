@@ -1,0 +1,4 @@
+{
+  "kind": "fizz-builtin-skills",
+  "description": "随 Fizz 分发的内置技能根（一个子目录一个技能，目录里放 SKILL.md）。这个文件是**目录标记**：宿主探测内置技能目录时，只认带它的目录（光叫 skills 不算），否则从 cwd 逐级往上找时可能误认一个同名的普通目录。改了它请同步 apps/server/src/server/builtin-dirs.ts 的 BUILTIN_SKILLS_MARKER。目录不是技能（扫描会跳过非目录项），所以它不会被当成一个技能。"
+}

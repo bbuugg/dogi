@@ -1,0 +1,33 @@
+{
+  "name": "@fizz/mcp",
+  "version": "0.1.0",
+  "description": "Fizz 的 MCP（Model Context Protocol）工具集：把 MCP server 的工具挂成 AI SDK 工具、探针枚举 server 工具清单，源码直接被打包",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./types": {
+      "types": "./src/types.ts",
+      "default": "./src/types.ts"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@fizz/contracts": "*",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "ai": "^7.0.99"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^7.0.2"
+  }
+}

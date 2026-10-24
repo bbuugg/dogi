@@ -1,0 +1,30 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import './styles.css';
+/* 本 app 自己的源码（`src/app/` 外壳）—— Tailwind 自动扫描的根不一定落在 app 目录，
+   显式写死一条，别指望自动发现 */
+@source '.';
+/* 领域组件（@fizz/agent-kit）：绝大多数工具类都在这里，漏扫等于整站样式塌掉 */
+@source '../../../packages/agent-kit/src';
+/* 无业务原语（@fizz/ui）：同样必须显式扫，否则按钮 / 输入框的工具类不会生成 */
+@source '../../../packages/ui/src';
+/* ⚠️ Streamdown（助手正文 / 思考内容的 markdown 渲染器）的工具类**必须**由这里的 Tailwind
+   生成 —— 它的样式全在 node_modules 里，而 Tailwind 默认不扫 node_modules。
+   漏了这条，代码块 / 表格就是浏览器默认样式（又散又占位）。 */
+@source '../../../node_modules/streamdown/dist/*.js';
+
+/* 应用根撑满视口：`height: 100%`（= 初始包含块 = 布局视口）。
+   手机端的高度链**只有这一条 CSS**，没有 JS 写 px：
+   - 键盘弹出时**缩布局视口**（`capacitor.config.ts` 的 `Keyboard.resize: 'native'` 与
+     `SystemBars` 的原生让位 + `index.html` 的 `interactive-widget=resizes-content`），
+     `100%` 自动跟着缩到键盘上沿，输入框与终端底部快捷键条不会被盖住；
+   - 不用 `100dvh`：部分机型 dvh 会停在偏小的值，底部露出画布背景（暗色近黑），
+     即「有的手机底部一条黑带」；
+   - 不用 JS 写 `--app-height`：聚焦那一刻 `visualViewport` 与布局视口不是同一拍更新，
+     会先写一个偏小的值、150ms 后再补正 —— 页面高度「变一下」就是它。详见
+     `src/app/app-shell.tsx` 里那段注释。 */
+html,
+body,
+#root {
+  height: 100%;
+}

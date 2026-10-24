@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ 系统启动屏的图标位：拿一张全透明的形状把它占住。
+  系统那层图标是固定尺寸的容器、不认我们的 dp，留着应用图标就会
+  「青色方块 → 圆形 logo」地跳一下；让它透明，那几帧就只剩底色，
+  视觉上直接由页面首屏的 logo 接管。
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <size android:width="1dp" android:height="1dp" />
+    <solid android:color="@android:color/transparent" />
+</shape>

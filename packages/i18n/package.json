@@ -1,0 +1,27 @@
+{
+  "name": "@fizz/i18n",
+  "version": "0.1.0",
+  "description": "Fizz 的轻量国际化：语言状态 + 中英文文案（零 React / 零 Node 依赖）",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@fizz/contracts": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^7.0.2"
+  }
+}

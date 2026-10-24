@@ -1,0 +1,51 @@
+{
+  "name": "@fizz/contracts",
+  "version": "0.1.0",
+  "description": "Fizz 共享契约：领域类型 + HTTP/SSE 接口定义（桌面 / server / web / cli 共用一份，源码直接被打包）",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./types": {
+      "types": "./src/types.ts",
+      "default": "./src/types.ts"
+    },
+    "./workspace-config": {
+      "types": "./src/workspace-config.ts",
+      "default": "./src/workspace-config.ts"
+    },
+    "./agent-api": {
+      "types": "./src/agent-api.ts",
+      "default": "./src/agent-api.ts"
+    },
+    "./workspace": {
+      "types": "./src/workspace.ts",
+      "default": "./src/workspace.ts"
+    },
+    "./browser": {
+      "types": "./src/browser.ts",
+      "default": "./src/browser.ts"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@fizz/acp": "*",
+    "@fizz/git": "*",
+    "@fizz/mcp": "*",
+    "@fizz/shells": "*",
+    "@fizz/skills": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^7.0.2"
+  }
+}

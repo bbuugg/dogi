@@ -1,0 +1,58 @@
+{
+  "name": "@fizz/agent-host",
+  "version": "0.1.0",
+  "description": "Fizz 宿主（Node / Electron，无 React）：进程内后端 BackendManager + desktop 的 IPC 传输桥",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./env": {
+      "types": "./src/env.ts",
+      "default": "./src/env.ts"
+    },
+    "./manager": {
+      "types": "./src/manager.ts",
+      "default": "./src/manager.ts"
+    },
+    "./transport-ipc": {
+      "types": "./src/transport-ipc.ts",
+      "default": "./src/transport-ipc.ts"
+    },
+    "./preload": {
+      "types": "./src/preload.ts",
+      "default": "./src/preload.ts"
+    },
+    "./channels": {
+      "types": "./src/channels.ts",
+      "default": "./src/channels.ts"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@fizz/acp": "*",
+    "@fizz/server": "*",
+    "@fizz/shells": "*",
+    "@fizz/workspace": "*",
+    "@hono/node-server": "^1.19.5",
+    "hono": "^4.10.3",
+    "node-pty": "^1.1.0"
+  },
+  "peerDependencies": {
+    "electron": "^44.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "electron": "44.9.3",
+    "typescript": "^7.0.2"
+  }
+}

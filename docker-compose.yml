@@ -1,0 +1,105 @@
+# Fizz server —— 跑在服务器上，本地浏览器打开 http://<服务器IP>:7801 就能用这个 agent。
+#
+#   docker compose up -d --build      # 首次 / 改过代码后
+#   docker compose logs -f            # 启动日志里有「对外」地址与鉴权状态
+#   docker compose down               # 停掉（数据卷保留）
+#
+# 配置写在同目录的 .env 里（compose 会自动读，见 .env.example）：
+#   FIZZ_AUTH_USER / _PASS / _JWT_SECRET
+#                        一起配置才启用登录鉴权（web / cli 用它登录换 JWT）
+#   FIZZ_PORT        选填，宿主机端口，默认 7801
+#   FIZZ_WORKSPACE   选填，宿主机上给 agent 操作的目录，默认 ./workspace
+#   FIZZ_SECRET_KEY  选填，加密 API key 的主密钥（32 字节 base64）
+#
+# 浏览器端连接方式（页面首次打开是登录页）：
+#   用户名 / 密码填 FIZZ_AUTH_USER / FIZZ_AUTH_PASS，登录后自动换 JWT。
+
+services:
+  fizz:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fizz-server:latest
+    container_name: fizz-server
+    restart: unless-stopped
+
+    ports:
+      # 只监听宿主机端口 → 想限制来源改成 "127.0.0.1:7801:7801" 再套 Nginx 反代
+      - "${FIZZ_PORT:-7801}:7801"
+
+    environment:
+      # 容器内必须绑 0.0.0.0，否则宿主机映射进来的流量到不了
+      FIZZ_HOST: 0.0.0.0
+      FIZZ_PORT: "7801"
+      FIZZ_DATA_DIR: /data
+      FIZZ_WEB_DIR: /app/apps/web/dist
+
+      # 三个一起配置才启用登录鉴权（用户名密码换 JWT）；都不配 = 开发态全放行
+      FIZZ_AUTH_USER: ${FIZZ_AUTH_USER:-}
+      FIZZ_AUTH_PASS: ${FIZZ_AUTH_PASS:-}
+      FIZZ_JWT_SECRET: ${FIZZ_JWT_SECRET:-}
+      # 留空则用数据卷里的 /data/secret.key；填了必须是 32 字节 base64
+      # （openssl rand -base64 32）。换了它，已存的 API key 要重新填一次。
+      FIZZ_SECRET_KEY: ${FIZZ_SECRET_KEY:-}
+
+      TZ: ${TZ:-Asia/Shanghai}
+
+      # 容器内运行身份：填宿主机用户的 `id -u` / `id -g`，容器里新建的文件在宿主机上就属于你
+      # （不用再 sudo chown；git 也不会再闹「dubious ownership」）。
+      # ⚠️ 同时要让宿主机那个工作区目录也是这个属主，否则容器里写不进去：
+      #   sudo chown -R $(id -u):$(id -g) /srv/my-project
+      # 留 0:0 就是以前的 root 行为（默认），不会有任何变化。
+      PUID: ${PUID:-0}
+      PGID: ${PGID:-0}
+
+      # git 提交身份（user.name / user.email）：容器里没有全局配置，不设的话提交会报
+      # 「Please tell me who you are」。跑一次即可 —— 它写进 /data，容器重建不会丢：
+      #   docker compose exec fizz git config --global user.email "you@example.com"
+      #   docker compose exec fizz git config --global user.name  "你的名字"
+
+      # 同源托管 web 页面时**不需要** CORS；只有本地跑 vite dev（5173/5178）
+      # 直连这台 server 才要放开：
+      # FIZZ_CORS_ORIGINS: "http://localhost:5173,http://127.0.0.1:5173"
+
+    volumes:
+      # 配置 / 会话历史 / 加密后的 API key
+      - fizz-data:/data
+      # 用户技能目录（agent-core 的 userSkillsDir = ~/.fizz/skills）。
+      # 容器里 HOME 恒为 /home/fizz（见 docker-entrypoint.sh），所以挂这里；
+      # 不挂这个卷，重启后自己加的技能就没了。
+      - fizz-home:/home/fizz/.fizz
+      # agent 能读写的目录。⚠️ 注册工作区时要填**容器里的路径**（/workspace），
+      # 不是宿主机的路径 —— web 端「选择文件夹」浏览的是 server 的文件系统。
+      - ${FIZZ_WORKSPACE:-./workspace}:/workspace
+      # 用 SSH 形式的远端（git@github.com:…）时，把宿主机已配好的 .ssh 挂进来（只读）。
+      # 不方便挂宿主机的话，也可以在容器里 ssh-keygen 生成、再把公钥加到 Git 服务端。
+      # - ${FIZZ_SSH_DIR:-./ssh}:/root/.ssh:ro
+
+      # ---------------------------------------------------------------------
+      # 「后台任务」**不要**用这个容器跑 —— 请直接在宿主机上 `npm run server`。
+      #
+      # 原因：后台任务要 `docker run` 起任务容器，而且挂进去的是**宿主机路径**
+      # （`<repo>/.git` 与 `<repo>/.fizz/worktrees/<id>`）。server 自己在容器里的话：
+      #   · 镜像里没有 docker CLI，还得自己派生镜像装；
+      #   · 要挂 /var/run/docker.sock —— 等于把宿主机 root 权限交出去；
+      #   · compose 里的路径（/workspace 之类）是**容器内**路径，宿主机 docker 看不到，
+      #     任务项目得填宿主机真实路径，还要把它的父目录也挂进来。
+      # 三样加起来全是坑，而 `npm run server` 在宿主机上跑时这三件事本来就是现成的。
+      #
+      # 不开后台任务时，这个容器跑「工作区 / 会话」完全正常 —— 任务页会如实显示
+      # 「docker 不可用」，其余功能一点都不受影响。
+
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:7801/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  fizz-data:
+  fizz-home:

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 冷启动窗口：纯色底 + 居中 logo。logo 按固有尺寸画（不 fill），屏幕比例怎么变都不会拉长 -->
+    <item android:drawable="@color/fizz_splash_background" />
+    <item>
+        <bitmap android:gravity="center" android:src="@drawable/fizz_splash_logo" />
+    </item>
+</layer-list>

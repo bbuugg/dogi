@@ -1,0 +1,1088 @@
+/**
+ * 渲染一条消息里的一个 part（正文 / 思考 / 工具调用）。
+ *
+ * 用的是 ai-elements 的原生组件：
+ * - 正文 `MessageResponse`（走 streamdown，流式 markdown）
+ * - 思考 `Reasoning`（可折叠，流式时自动展开、结束后按「自动折叠」偏好决定收不收）
+ * - 工具调用 `Tool`（可折叠，头部显示「中文工具名 + 主入参明细（截断，悬停看全文）+ 状态徽章」）
+ *
+ * **折叠档位统一由设置 → 通用 →「自动折叠」决定**（见 `lib/auto-collapse.ts`）：
+ * 被选中的那一类（思考 / 工具调用）收起来（列表里归进折叠条、单卡默认收起），
+ * 没被选中的那一类则摊开（思考保持展开、工具卡默认展开）。用户仍可逐个手动开合。
+ *
+ * 我们的事件模型是服务端自定义的 `AgentMessagePart`，这里负责把它翻译成
+ * ai-elements 期望的形状（`ToolUIPart['type']` / `['state']`）。
+ */
+import { memo, useEffect, useRef, useState, type ReactNode } from 'react'
+import { CheckCircle2, Circle, FileText, ImageOff, Loader2, RefreshCw } from 'lucide-react'
+import { ImageViewer } from '@fizz/ui/image-viewer'
+import { SpinnerButton } from '@fizz/ui/spinner-button'
+import type { ToolUIPart } from 'ai'
+import { useStickToBottom } from 'use-stick-to-bottom'
+import { AskFollowupCard } from '@fizz/agent-kit/shared/ai-elements/followup-card'
+import { useConversationOptional } from '@fizz/agent-kit/shared/ai-elements/conversation'
+import { MessageResponse } from '@fizz/agent-kit/shared/ai-elements/message'
+import {
+  Reasoning,
+  ReasoningContent,
+  ReasoningTrigger,
+  reasoningPreviewLine,
+} from '@fizz/agent-kit/shared/ai-elements/reasoning'
+import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput } from '@fizz/agent-kit/shared/ai-elements/tool'
+import { useAgentStore } from '@fizz/agent-kit/shared/lib/stores/agent-store'
+import { useT } from '@fizz/agent-kit/shared/lib/language'
+import { t } from '@fizz/i18n'
+import { FileDiffView, type DiffHunk } from '@fizz/agent-kit/features/git/FileDiffView'
+import {
+  ASK_FOLLOWUP_TOOL,
+  isCommandRunning,
+  isErrorText,
+  partialJsonString,
+  toolCardTitle,
+  toolErrorText,
+  toolLabel,
+  toolOutputText,
+  toolState
+} from '@fizz/agent-kit/shared/lib/parts'
+import { cn } from '@fizz/agent-kit/shared/lib/utils'
+import { diffLines } from '@fizz/agent-kit/shared/lib/diff'
+import {
+  isTerminalTool,
+  terminalOutputForDisplay
+} from '@fizz/agent-kit/shared/lib/terminal/display'
+import { autoCollapsesReasoning, autoCollapsesTools, useAutoCollapse } from '@fizz/agent-kit/shared/lib/auto-collapse'
+import { collapsedBody, shouldRefreshSnapshot } from '@fizz/agent-kit/shared/lib/collapse-swap'
+import { loadMediaObjectUrl } from '@fizz/agent-kit/shared/lib/media-url'
+import type { AgentMessagePart, TodoItem } from '@fizz/contracts/types'
+import type { AskFollowupAnswer } from '@fizz/contracts/types'
+
+/**
+ * 思考段：**思考中自动展开；结束后要不要自动折叠由设置决定**（设置 → 通用 → 自动折叠）。
+ *
+ * 不能只靠 ai-elements 自带的 `defaultOpen`：那个只在**挂载时**取一次初值
+ * （`useControllableState` 的 defaultProp），而这里的 part 是流式过程中才被追加进来的，
+ * 之后 streaming 由 true 变 false 时它不会自己收 —— 而且它内置的「1 秒后自动收」
+ * 是 `hasAutoClosed` 只跑一次，用户手动点开一个已结束的思考还会被它再收回去。
+ *
+ * 所以自己控 `open`：`defaultOpen={false}` 把组件内部那套自动开合关掉，
+ * 由 `streaming` + 「自动折叠」偏好驱动开合；收起来之后用户仍可自己点开，不会再被自动收走。
+ *
+ * 「自动折叠」选了不折叠 / 只折叠工具时 `autoClose` 为假：结束也不收，而且历史消息里的
+ * 思考一开始就是展开的（用户选这个档就是不想让它自己消失）。
+ *
+ * **折叠 + 仍在思考时**，触发行上会跟着一行实时预览（思考正文的最后一行）：不然思考条只剩
+ * 「正在思考…」四个字，长时间思考时完全看不出它在写什么。
+ */
+function ReasoningView({ text, streaming }: { text: string; streaming: boolean }) {
+  /** 思考结束要不要自动收起（折叠思考 / 全部折叠才算） */
+  const autoCollapse = useAutoCollapse()
+  const autoClose = autoCollapsesReasoning(autoCollapse)
+  const [open, setOpen] = useState(autoClose ? streaming : true)
+  // 消息区的滚动上下文（可能不在 Conversation 里，拿不到就退化成空操作）
+  const conversation = useConversationOptional()
+
+  // 开始思考 → 展开；结束（开始说正文 / 调工具 / 整轮结束）→ 按偏好决定收不收。
+  // 思考过程中用户手动收起后，streaming 没变，effect 不会重跑，不会被强行撑开。
+  useEffect(() => {
+    if (streaming) setOpen(true)
+    else if (autoClose) setOpen(false)
+  }, [streaming, autoClose])
+
+  // 折叠 + 流式 → 触发行上多跟一行实时预览（最新一行）；不折叠 / 不流式时传 undefined
+  const previewText = !open && streaming && text.trim() ? reasoningPreviewLine(text) : undefined
+
+  return (
+    <Reasoning
+      className="w-full"
+      isStreaming={streaming}
+      open={open}
+      defaultOpen={false}
+      // 用户手动开合：暂停自动贴底，让内容向下长（否则一展开就被拽到底、点的那条往上跳）。
+      // 上面由 streaming 驱动的展开不走这里，所以流式时照旧跟随底部。
+      onOpenChange={(next) => {
+        conversation?.holdScroll()
+        setOpen(next)
+      }}
+    >
+      <ReasoningTrigger previewText={previewText} />
+      <ReasoningContent>{text}</ReasoningContent>
+    </Reasoning>
+  )
+}
+
+/**
+ * 工具卡：**所有工具调用的统一折叠外壳**（内置 / ACP、有无直显内容都走它）。
+ *
+ * 「默认展开还是收起」**统一由设置 → 通用 →「自动折叠」决定**：选了「折叠工具 /
+ * 全部折叠」就默认收起（只由用户点开），选「不折叠 / 折叠思考」就默认展开 ——
+ * 与列表侧「哪一类进折叠条」是同一套判定（`autoCollapsesTools`），不会两边各说各话。
+ *
+ * 展开后的内容形态由调用方决定：没有直显内容时给「输入 / 输出 JSON」，
+ * 有直显内容（diff / 命令 / 文本）时直接铺那块内容 —— 头部与折叠行为完全一致。
+ *
+ * ⚠️ 不能用 `defaultOpen={hasOutput}` 那套写法：Radix 的 `Collapsible` 只在**挂载时**
+ * 取一次 `defaultOpen` 初值（`useControllableState` 的 defaultProp），之后 props 变了也不理。
+ * 而一轮结束时 `loadMessages()` 会拿服务端落盘的权威消息覆盖本地流式那份 —— 助手消息 id 从
+ * `a-local-…` 变成服务端 id，`ChatPanel` 里 `PartView` 的 key（`${message.id}-${partIndex}`）
+ * 跟着变，整棵子树**重新挂载**，`defaultOpen` 被重新取值 → 表现就是
+ * 「一跑完所有工具卡自己全展开」。同理，工具在流式过程中完成也不会自动弹开。
+ *
+ * 所以自己控 `open`：初值 = 折叠偏好（`defaultOpen={false}` 是为了把 Radix 内部那套
+ * 初值逻辑彻底让开，与 ReasoningView 同一写法）。
+ *
+ * 例外是**入参流式生成期**（调用方显式传 `defaultOpen` 且为真）：那时候卡片本来就是给
+ * 用户看的「正在写什么」，不展开就白流了；收口（完整 tool-call 到达）后调用方不再传
+ * `defaultOpen`，effect 就回到折叠偏好那一档。
+ */
+function ToolCallCard({
+  title,
+  type,
+  state,
+  detail,
+  defaultOpen,
+  onStop,
+  children
+}: {
+  title: string
+  type: ToolUIPart['type']
+  state: ToolUIPart['state']
+  /** 头部明细（命令 / 主入参）：截断显示在工具名后面，悬停出 Tooltip 看全文 */
+  detail?: string
+  /** 显式指定展开态（目前只有流式期的入参预览用）；不传 = 跟随「自动折叠」偏好 */
+  defaultOpen?: boolean
+  /** 工具在飞（pending / 执行中）时给的停止回调，透传给头部那颗停止钮 */
+  onStop?: () => void
+  children: ReactNode
+}) {
+  /** 「折叠工具 / 全部折叠」= 默认收起；其余两档 = 默认展开（用户改设置时已渲染的卡片也跟着变） */
+  const autoCollapse = useAutoCollapse()
+  const expandedByDefault = !autoCollapsesTools(autoCollapse)
+  // 消息区的滚动上下文（可能不在 Conversation 里，拿不到就退化成空操作）
+  const conversation = useConversationOptional()
+
+  // 展开态的驱动值：「显式指定（入参还在流式生成 / 命令正在跑）」优先，否则跟折叠偏好。
+  const driver = defaultOpen ?? expandedByDefault
+  const [open, setOpen] = useState(driver)
+  const [prevDriver, setPrevDriver] = useState(driver)
+  // ⚠️ 在**渲染期**同步 state，不放 useEffect：effect 要等 commit 之后才跑，而内容
+  // （children）在同一个 commit 里已经换成新的了 —— 中间会多出一帧「还开着 + 已是新
+  // 内容」，用户看到的就是「内容先变 diff、才开始折叠」。
+  // 渲染期 setState（同一组件内）是 React 认可的写法：会立刻重渲染、不会落到 DOM 上。
+  if (driver !== prevDriver) {
+    setPrevDriver(driver)
+    setOpen(driver)
+  }
+
+  /**
+   * 「先折叠、再换内容」：收起动画（ToolContent 的 animate-out，150ms）期间继续渲染
+   * **上次开着时**的内容，动画结束 / 下次展开才是最新的。
+   *
+   * 快照只在 open 为真时刷新（shouldRefreshSnapshot）—— 关着时也刷，折叠那一瞬间渲染
+   * 的就是新内容，正是用户报的「内容先变、才开始折叠」。关着时内容被 Radix 卸掉了
+   * （CollapsibleContent 没有 forceMount），快照旧一点看不见；用户再点开走的是
+   * 「开着」那条，拿到的又是最新的。规则与说明见 lib/collapse-swap.ts。
+   */
+  const openSnapshotRef = useRef(children)
+  useEffect(() => {
+    if (shouldRefreshSnapshot(open)) openSnapshotRef.current = children
+  }, [open, children])
+  const body = collapsedBody(open, children, openSnapshotRef.current)
+
+  return (
+    <Tool
+      open={open}
+      // 用户手动展开 / 收起：暂停自动贴底。展开时内容会长高（ToolContent 带 animate-in），
+      // 不暂停的话贴底逻辑会把视图拽到底部、用户点的那张卡被顶上去（看起来像「点展开、
+      // 页面往上滚」）。暂停后视口纹丝不动，内容在原地下方长出来。
+      onOpenChange={(next) => {
+        conversation?.holdScroll()
+        setOpen(next)
+      }}
+      defaultOpen={false}
+    >
+      <ToolHeader title={title} type={type} state={state} detail={detail} onStop={onStop} />
+      <ToolContent>{body}</ToolContent>
+    </Tool>
+  )
+}
+
+/**
+ * 从工具入参构造「代码修改前后对比」。
+ *
+ * 故意只依赖入参、不依赖工具返回值：返回值会被原样送回模型，把整文件塞进去会灌爆上下文；
+ * 而入参（edit_file 的 oldText/newText、write_file 的 content）本来就持久化在 part 里，
+ * 刷新后照常能渲染。delete_file 入参没有内容，只能提示删了哪个文件。
+ */
+function buildFileDiff(part: AgentMessagePart): {
+  path: string
+  hunks: DiffHunk[]
+  deleted?: boolean
+} | null {
+  const p = part as { toolName?: string; input?: unknown }
+  const input = p.input as
+    | { path?: string; content?: string; edits?: Array<{ oldText?: string; newText?: string }> }
+    | undefined
+  if (!input) return null
+
+  if (p.toolName === 'edit_file' && Array.isArray(input.edits)) {
+    return {
+      path: input.path ?? '',
+      hunks: input.edits.map((e, i) => ({
+        header: t('@@ 编辑 {index} @@', { index: i + 1 }),
+        lines: diffLines(e.oldText ?? '', e.newText ?? '')
+      }))
+    }
+  }
+  if (p.toolName === 'write_file' && typeof input.content === 'string') {
+    return {
+      path: input.path ?? '',
+      hunks: [{ header: t('@@ 新建 / 覆盖 @@'), lines: diffLines('', input.content) }]
+    }
+  }
+  if (p.toolName === 'delete_file') {
+    return { path: input.path ?? '', hunks: [], deleted: true }
+  }
+  return null
+}
+
+function DelegationRunning({ toolName, toolCount }: { toolName?: string; toolCount?: number }) {
+  const tr = useT()
+  const [seconds, setSeconds] = useState(0)
+  useEffect(() => {
+    const start = Date.now()
+    const timer = setInterval(() => {
+      setSeconds(Math.floor((Date.now() - start) / 1000))
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [])
+  return (
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+      <span className="inline-flex items-center gap-1.5">
+        <Loader2 className="size-3.5 animate-spin" />
+        {tr('子任务运行中… {seconds}s', { seconds })}
+      </span>
+      {toolName ? <span>{tr('· 正在 {tool}', { tool: toolLabel(toolName) })}</span> : null}
+      {toolCount ? <span>{tr('· 已调用 {count} 个工具', { count: toolCount })}</span> : null}
+    </div>
+  )
+}
+
+/**
+ * 派活的 prompt（`agent-<id>` 的入参结构就是 `{ prompt }`）—— 放到头部明细位，
+ * 紧跟工具名截断显示，悬停看全文（ToolHeader 的 detail 本来就是干这个的）。
+ *
+ * 故意只认 `prompt` 一个字段：派活的入参 Mastra 随时可能加东西（`skills` 之类），
+ * 逐个摊开会把明细位变成第二张说明书。
+ */
+function delegationPromptOf(input: unknown): string | undefined {
+  const prompt = (input as { prompt?: unknown } | null | undefined)?.prompt
+  if (typeof prompt !== 'string') return undefined
+  const text = prompt.trim()
+  return text || undefined
+}
+
+/**
+ * 入参**流式生成期**的预览：从半截 JSON 里抠出「主入参」（头部明细）+「正在写的内容」。
+ *
+ * 与 `buildFileDiff` 的分工：那个吃完整 `input`、生成前后对比；这个吃 `inputText`、
+ * 只给一坨正在变长的文本。两者不会同时命中（有 `inputText` 就说明还没收口）。
+ * 返回 null = 抠不出可看的东西，调用方按普通卡渲染（不展开空壳）。
+ */
+function renderStreamingPreview(part: AgentMessagePart): { detail?: string; text?: string } | null {
+  const raw = (part as { inputText?: unknown }).inputText
+  if (typeof raw !== 'string' || !raw.trim()) return null
+  const path =
+    partialJsonString(raw, 'path') ||
+    partialJsonString(raw, 'file_path') ||
+    partialJsonString(raw, 'filePath')
+  const command = partialJsonString(raw, 'command') || partialJsonString(raw, 'cmd')
+  const content = partialJsonString(raw, 'content') || partialJsonString(raw, 'newText')
+  // 命令类：命令本身就够看（走头部明细），内容区没有别的东西 → 不展开
+  if (command) return { detail: `$ ${command}` }
+  if (path || content) {
+    return {
+      ...(path ? { detail: path } : {}),
+      ...(content ? { text: content } : {})
+    }
+  }
+  return null
+}
+
+/**
+ * 正在生成的入参文本：等宽 + 限高滚动，随增量一帧帧变长。
+ *
+ * `mono=false`（子任务输出）走 markdown 渲染：子 agent 写的是给人看的结论，等宽 pre 会把
+ * `**加粗**` / `- 列表` 原样吐出来，反而更难读。
+ *
+ * 贴底用 `use-stick-to-bottom`（与 ReasoningContent / 消息区同一套）：内容长过 `max-h-64`
+ * 之后自动跟到底部；用户中途上滚即停止跟随、滚回底部自动恢复 —— 写大文件时不会一边
+ * 滚一边把用户正在看的位置拽走。
+ *
+ * `label` 由调用方给：入参是「疯狂输出中...」（等宽 JSON），子 agent 的文本是
+ * 「子任务输出中...」且要正常比例字体 —— 自然语言用等宽 + break-all 很难读。
+ */
+function StreamingInputBlock({ text, label, mono = true }: {
+  text: string
+  label?: string
+  mono?: boolean
+}) {
+  const tr = useT()
+  const { scrollRef, contentRef } = useStickToBottom({ initial: 'instant' })
+  return (
+    <div className="flex flex-col gap-1 border border-border rounded-lg mt-2 p-2">
+      <span className="text-xs text-muted-foreground">{label ?? tr('疯狂输出中...')}</span>
+      <div
+        ref={scrollRef}
+        className="max-h-64 overflow-y-auto rounded-md bg-muted/50"
+        // overflow-anchor: none —— 关掉 Chromium 滚动锚定（它会在文本重排时「帮忙」修位置，
+        // 造成偶发跳顶）；滚动位置由 use-stick-to-bottom 显式管理。
+        style={{ overflowAnchor: 'none' }}
+      >
+        <div ref={contentRef}>
+          {mono ? (
+            <pre className="whitespace-pre-wrap break-all px-2 py-1.5 font-mono text-xs">{text}</pre>
+          ) : (
+            // 子任务的输出是给人看的结论：markdown（列表 / 代码块 / 加粗）比等宽 pre 好读。
+            // 仍坐在下面那个 max-h-64 的滚动容器里，长输出不会把消息流撑爆。
+            <MessageResponse className="px-2 py-1.5 tracking-[0.02em]">{text}</MessageResponse>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * execute_command 运行中的**实时输出区**（stdout / stderr 合并纯文本）。
+ *
+ * - stderr 行首的 `[stderr] ` 前缀已在 parts 层加好（见 `appendStreamChunk`）——
+ *   这里只负责展示，不再解析一次；
+ * - 贴底用 `useStickToBottom`（与 StreamingInputBlock / 消息区同一套）：内容长过
+ *   `max-h-64` 后自动贴底，用户上滚即停跟，不会把正在看的位置拽走；
+ * - **停止钮不在这里**：已上移到卡片头部（`ToolHeader` 的 `onStop`）——
+ *   放在输出面板里时，`input-streaming`（Pending）阶段压根没有这块内容、
+ *   用户找不到停止，执行中的命令也得先看这块板子。命令结束（tool-result 到达）
+ *   后本区块被结果直显替换。
+ *
+ * ⚠️ **没有输出也要照常渲染这一块**：`live` 可能是全空（命令刚起步、或压根不吐东西），
+ * 用占位文案填空，头部那句状态随之换 —— 「实时输出中…」/「命令运行中，暂无输出」。
+ */
+function LiveOutputBlock({ live }: { live: { stdout: string; stderr: string } }) {
+  const tr = useT()
+  const { scrollRef, contentRef } = useStickToBottom({ initial: 'instant' })
+  // 两条流合并展示：stderr 接在 stdout 后（行首前缀已在数据里，视觉上能区分）
+  const text = live.stderr
+    ? live.stdout + (live.stdout && !live.stdout.endsWith('\n') ? '\n' : '') + live.stderr
+    : live.stdout
+  return (
+    <div className="flex flex-col gap-1 border border-border rounded-lg mt-2 p-2">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs text-muted-foreground">
+          {text ? tr('实时输出中...') : tr('命令运行中，暂无输出')}
+        </span>
+      </div>
+      <div
+        ref={scrollRef}
+        className="max-h-64 overflow-y-auto rounded-md bg-muted/50"
+        // overflow-anchor: none —— 关掉 Chromium 滚动锚定；滚动位置由 use-stick-to-bottom 管
+        style={{ overflowAnchor: 'none' }}
+      >
+        <div ref={contentRef}>
+          <pre className="whitespace-pre-wrap break-all px-2 py-1.5 font-mono text-xs">
+            {text || tr('（这个命令还没有产生任何 stdout / stderr。它可能正在跑，也可能一直沉默。）')}
+          </pre>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 从 `todo_write` 的入参 / 结果里抠出清单条目。
+ *
+ * 优先用**结果**（收口后的规范形态），结果还没到时退回到**入参**（模型刚提交的那份）——
+ * 两者形状相同（都是 `{ todos: [{content, status}] }`），只是一个来自模型、一个来自工具返回。
+ * 形状不对一律当空清单，不抛错（坏数据不该把整条消息渲染炸掉）。
+ */
+function todoItemsOf(input: unknown, output: unknown): TodoItem[] {
+  const fromOutput = (output as { todos?: unknown } | null | undefined)?.todos
+  const fromInput = (input as { todos?: unknown } | null | undefined)?.todos
+  const src = Array.isArray(fromOutput) ? fromOutput : fromInput
+  if (!Array.isArray(src)) return []
+  return src
+    .map((t) => {
+      const item = t as { content?: unknown; status?: unknown }
+      const content = typeof item?.content === 'string' ? item.content.trim() : ''
+      const status: TodoItem['status'] =
+        item?.status === 'in_progress' || item?.status === 'completed' ? item.status : 'pending'
+      return { content, status }
+    })
+    .filter((t) => t.content)
+}
+
+/**
+ * 待办清单（`todo_write` 的结果视图）：一行一项，勾选 / 进行中 / 待办三种图标。
+ *
+ * 与命令卡同样的直显外壳（`border + 圆角`），不铺「输入 / 输出 JSON」——
+ * 清单本来就是给人看的进度，JSON 化等于白建。
+ */
+function TodoChecklist({ items }: { items: TodoItem[] }) {
+  return (
+    <div className="flex flex-col gap-1 rounded-lg border border-border mt-2 p-2">
+      <ul className="flex flex-col gap-1.5">
+        {items.map((t, i) => (
+          <li key={i} className="flex items-start gap-2 text-sm">
+            {t.status === 'completed' ? (
+              <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+            ) : t.status === 'in_progress' ? (
+              <Loader2 className="mt-0.5 size-4 shrink-0 animate-spin text-primary" />
+            ) : (
+              <Circle className="mt-0.5 size-4 shrink-0 text-muted-foreground/40" />
+            )}
+            <span
+              className={cn(
+                'min-w-0',
+                t.status === 'completed' ? 'text-muted-foreground line-through' : 'text-foreground'
+              )}
+            >
+              {t.content}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+/**
+ * 文本块直显。
+ *
+ * `singleLine`（脚本 / 命令的**结果**用）：换行折成空格、溢出省略，消息列表里一行带过，
+ * 全文挂在 `title` 上悬停可看 —— 脚本输出动辄几十行，全量铺开会把消息流撑爆。
+ * 不带 `singleLine`（ACP 内容块等可能天生多行的文本）：等宽 + 预换行 + 滚动上限。
+ */
+function AcpTextBlock({ text, singleLine }: { text: string; singleLine?: boolean }) {
+  if (singleLine) {
+    return (
+      <div
+        // 工具输出（脚本 / 命令结果）：不是 <pre>，靠 data-selectable 进 styles.css 的内容白名单
+        data-selectable
+        className="whitespace-pre-wrap overflow-x-hidden overflow-y-auto rounded-md bg-muted/50 px-2 py-1.5 font-mono text-ellipsis text-xs max-h-48"
+        title={text}
+      >
+        {text}
+      </div>
+    )
+  }
+  return (
+    <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted/50 px-2 py-1.5 font-mono text-xs">
+      {text}
+    </pre>
+  )
+}
+
+/**
+ * 直显内容 + 头部明细。
+ *
+ * `content`：展开后的内容区（diff / 输出文本等）；
+ * `detail`：命令 / 主入参，**截断显示在工具名后面**、悬停出 Tooltip 看全文 ——
+ * 命令不放内容区第一块了，折叠状态下也能直接看到跑的是什么。
+ */
+type DirectResult = { content: ReactNode; detail?: string }
+
+/**
+ * 收集 ACP 工具的可直显内容；返回 null = 没有（回退通用折叠卡）。
+ * 优先级：diff / text 内容块 → 输出（execute / terminal 类）。
+ */
+function renderAcpDirect(part: AgentMessagePart): DirectResult | null {
+  if (part.type !== 'tool-call') return null
+  const nodes: ReactNode[] = []
+  const content = Array.isArray(part.acpContent) ? part.acpContent : []
+
+  for (const [i, item] of content.entries()) {
+    if (item?.type === 'diff' && (item.newText !== undefined || item.oldText !== undefined)) {
+      // 文件修改：直接给前后对比（与内置 edit_file 的直显同一套视图）
+      nodes.push(
+        <FileDiffView
+          key={`diff-${i}`}
+          path={item.path ?? ''}
+          hunks={[
+            { header: `@@ ${item.path ?? 'diff'} @@`, lines: diffLines(item.oldText ?? '', item.newText ?? '') }
+          ]}
+        />
+      )
+    } else if (item?.type === 'content' && item.content?.type === 'text' && item.content.text) {
+      nodes.push(<AcpTextBlock key={`text-${i}`} text={item.content.text} />)
+    }
+    // type === 'terminal' 只有 terminalId（输出在 rawOutput / 后续 content 里）：不单独渲染，
+    // 交给下面的 execute 分支直显输出
+  }
+
+  // 头部明细：默认给 agent 的标题；命令执行类优先入参里的命令
+  //（agent 标题常带「Bash: 」前缀 / 是整段脚本，命令本身更干净）
+  let detail = part.title
+  if (nodes.length === 0 && (part.acpKind === 'execute' || content.some((i) => i?.type === 'terminal'))) {
+    const input = part.input as { command?: string; cmd?: string; title?: string } | undefined
+    const command = input?.command ?? input?.cmd ?? input?.title
+    if (command) detail = `$ ${command}`
+    // output 是 tool-result 回填进来的（contracts 的 tool-call 形状没声明）：运行时一定在
+    const outputText = toolOutputText((part as { output?: unknown }).output)
+    if (outputText) nodes.push(<AcpTextBlock key="output" text={outputText} singleLine />)
+  }
+
+  if (nodes.length === 0 && !detail) return null
+  return { content: nodes.length > 0 ? <>{nodes}</> : null, detail }
+}
+
+/**
+ * 收集**内置**工具的可直显内容（与 ACP 的直显同一观感）：每个工具挑最有信息量的
+ * 入参做主入参 → `detail`（工具名后面截断显示），结果抠成人话文本留在内容区。
+ * 返回 null = 覆盖不到（回退通用折叠卡）。
+ *
+ * 文件类工具（write_file / edit_file / delete_file）不走这里 —— 它们由 buildFileDiff
+ * 生成前后对比，在直显分支里铺。
+ */
+function renderBuiltinDirect(
+  part: AgentMessagePart,
+  hasOutput: boolean,
+  output: unknown
+): DirectResult | null {
+  if (part.type !== 'tool-call' || part.acpContent?.length) return null
+  const input = (part.input ?? {}) as Record<string, unknown>
+  const str = (value: unknown): string | undefined =>
+    typeof value === 'string' && value.trim() ? value : undefined
+
+  /**
+   * 终端工具（`run_in_terminal` / `read_terminal_output` / `send_keys` /
+   * `list_terminal_sessions`，客户端在用户眼前那条终端里执行）。
+   *
+   * 结果是一段**终端原始文本**，不是结构化对象 —— 走下面的通用分支会掉进「Parameters /
+   * Result 两坨 JSON」的兜底卡：终端输出被 `JSON.stringify` 当 JSON 高亮，数字全被拆成
+   * 独立 span（用户看到的「满屏乱跳的数字」，`x86_64` 还会被切成 `x` + `86` + `_` + `64`）。
+   *
+   * 所以按 `execute_command` 的样子直显：头部 `$ 命令`，结果文本铺在内容区。
+   * 两处与 execute_command 不同：
+   * - **命令什么都没输出时不铺内容区**：工具会回一句「（等待期内没有捕获到新输出…）」，
+   *   那是给模型的（免得它以为调用失败），摆给用户看就是一句废话；
+   * - `send_keys` 只显示按了什么键：它的结果是一句固定回执（「已向 local:1 发送按键」），
+   *   对用户没有信息量。
+   */
+  if (isTerminalTool(part.toolName)) {
+    const command = str(input.command)
+    const keys = str(input.keys)
+    const body =
+      part.isError === true || !hasOutput || part.toolName === 'send_keys'
+        ? null
+        : terminalOutputForDisplay(toolOutputText(output) ?? '')
+    return {
+      ...(command ? { detail: `$ ${command}` } : keys ? { detail: t('按键 {keys}', { keys }) } : {}),
+      content: body ? <AcpTextBlock text={body} singleLine /> : null
+    }
+  }
+
+  let subject: string | undefined
+  switch (part.toolName) {
+    case 'execute_command':
+      subject = str(input.command)
+      break
+    case 'read_file':
+      subject = str(input.path)
+      break
+    case 'list_files':
+      subject = str(input.path) ?? '.'
+      break
+    case 'find_files':
+      subject = str(input.pattern) ?? str(input.query)
+      break
+    case 'search_files':
+      subject = str(input.query) ?? str(input.pattern) ?? str(input.keyword)
+      break
+    case 'read_skill':
+      subject = str(input.name) ?? str(input.skill) ?? str(input.path)
+      break
+    case 'web_fetch':
+      subject = str(input.url)
+      break
+    case 'screenshot':
+      subject = str(input.url)
+      break
+    default:
+      return null
+  }
+  if (!subject) return null
+
+  const detail = part.toolName === 'execute_command' ? `$ ${subject}` : subject
+  // 结果文本：抠不出来（结构化对象 / 还没结果）就不硬造一块 —— 有结果才给
+  const outputText = toolOutputText(output)
+  if (outputText) {
+    return { content: <AcpTextBlock text={outputText} singleLine />, detail }
+  }
+  if (hasOutput && !isToolResultEmpty(output)) {
+    // 结果在但抠不出人话：回退折叠卡，别丢信息
+    return null
+  }
+  return { content: null, detail }
+}
+
+/** 结果是否「等于没信息」（{} / [] / 空串）—— 与 toolErrorText 里的判断同一口径 */
+function isToolResultEmpty(output: unknown): boolean {
+  if (output === undefined || output === null || output === '') return true
+  try {
+    const json = JSON.stringify(output)
+    return json === '{}' || json === '[]'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 一条**错误**（`⚠️ ` 前缀的文本 part，见 `ERROR_TEXT_PREFIX`）：正文照原样渲染，
+ * 下面挂一颗「重新加载」。
+ *
+ * ## 为什么需要这颗按钮
+ *
+ * 一轮失败时（断线、模型配置不对、ACP 建连失败……）客户端 / 服务端都把错误写成一条
+ * 文本 part 落进历史。以前用户唯一的出路是**刷新整个页面**（手机版只能重启 App）——
+ * 而「刷新页面 → 点开这个会话」做的事其实就是 `reloadConversation`：mastra 拉服务端
+ * 权威历史（断线期间那一轮往往已经跑完落盘了，真回复会顶掉这条错误）、acp 走
+ * `session/load` 回放。所以这里直接给这条错误挂上同一个动作。
+ *
+ * ## 两个细节
+ *
+ * - **正在生成时禁用**：`reloadConversation` 会拒绝（权威历史会把流式现场整段盖掉），
+ *   按钮先禁用比点了一下没反应好。
+ * - **没有 `conversationId` 就不渲染按钮**：容器工作台 / 单独渲染的片段没有
+ *   「重新加载这条会话」的语义（别拿 `activeConversationId` 顶替，多标签下会刷错会话）。
+ */
+function ErrorTextBlock({ text, conversationId }: { text: string; conversationId?: string }) {
+  const tr = useT()
+  const [busy, setBusy] = useState(false)
+  const running = useAgentStore((s) =>
+    conversationId ? !!s.runningConversations[conversationId] : false
+  )
+  const reload = (): void => {
+    if (!conversationId) return
+    setBusy(true)
+    void useAgentStore
+      .getState()
+      .reloadConversation(conversationId)
+      .finally(() => setBusy(false))
+  }
+  return (
+    <div className="flex flex-col items-start gap-1.5">
+      <MessageResponse className="tracking-[0.02em]">{text}</MessageResponse>
+      {conversationId && (
+        <SpinnerButton
+          size="sm"
+          variant="outline"
+          className="h-7 gap-1.5 text-xs"
+          loading={busy}
+          disabled={running}
+          title={
+            running
+              ? tr('这一轮还在生成，先停止再重新加载')
+              : tr('重新从服务端拉这条会话（等同刷新页面后点开它）')
+          }
+          onClick={reload}
+        >
+          {!busy && <RefreshCw className="size-3.5" />}
+          {tr('重新加载')}
+        </SpinnerButton>
+      )}
+    </div>
+  )
+}
+
+export interface PartViewProps {
+  part: AgentMessagePart
+  streaming?: boolean
+  /**
+   * 整轮是不是正处在**这一条消息**的流式里（= 这条是最后一条消息且在跑）。
+   *
+   * 与 `streaming` 的分工：`streaming` 只对**消息的最后一个 part** 为真（思考条靠它判
+   * 「正在思考」）；而停止钮要覆盖整条消息里的**每一个工具卡** —— 模型一步里并行发多条
+   * tool-call 时，只有末位那个 part 拿得到 `streaming`，若拿它当判据，前面那几条命令
+   * 就没了停止钮。所以这里用「整条消息在跑」这个更宽的信号。
+   */
+  turnLive?: boolean
+  /**
+   * 这条 part 属于哪条会话 —— 只给错误块那颗「重新加载」用（见 `ErrorTextBlock`）。
+   *
+   * 不传就不渲染按钮：容器工作台 / 单独的片段渲染没有「重新加载这条会话」的语义。
+   * ⚠️ 别拿 store 里的 `activeConversationId` 顶替：多标签面板里同时挂着好几条会话，
+   * 后台标签上的错误会去刷**当前**那条。
+   */
+  conversationId?: string
+  /** 该 part 是否是在等的 ask_followup_question（决定渲染成可作答的卡片） */
+  followupPending?: boolean
+  /**
+   * 该 part 是**已经结束那一轮**留下的、从没拿到答案的提问（应用退出 / 点了停止 /
+   * 进程崩了）。渲染成可作答的卡片，但答案当新消息发出去 —— 见 `AskFollowupCard`
+   * 的 `resumable`。
+   */
+  followupResumable?: boolean
+  onResolveFollowup?: (answer: AskFollowupAnswer | null) => void
+}
+
+function PartViewInner({
+  part,
+  streaming,
+  turnLive,
+  conversationId,
+  followupPending,
+  followupResumable,
+  onResolveFollowup
+}: PartViewProps) {
+  // 停止动作（工具在飞时头部那颗停止钮用）。两个都是 store 上的稳定引用，
+  // 不会因为它们在依赖里引发额外重渲染。
+  // 订阅语言：本组件是 memo 的，不自己订阅的话切语言时工具卡标题 / 状态文案不会变
+  useT()
+  const stopCommand = useAgentStore((s) => s.stopCommand)
+  const stopTurn = useAgentStore((s) => s.stop)
+
+  if (part.type === 'text') {
+    /*
+     * ⚠️ 只有空白的文本 part 直接不渲染（别改成渲染空元素）。
+     *
+     * 模型在工具调用之间经常只吐几个换行（实测一条消息 22 个文本 part 里 21 个是
+     * `"\n\n\n"`）：它们自身高度是 0，看着"没东西"，但**照样是 MessageContent 里
+     * 的一个 flex 子项、照样吃掉一个 gap-2(8px)** —— 于是每个思考条的下面都比上面
+     * 多出 8px，整列横条看着"思考条偏上、工具条偏下"。渲染层直接返回 null 就没有
+     * 盒子，gap 也就不会为它留空。
+     */
+    if (!part.text.trim()) return null
+    // 错误（`⚠️ ` 前缀，见 `ERROR_TEXT_PREFIX`）：正文照原样渲染，后面挂「重新加载」
+    if (isErrorText(part.text)) {
+      return <ErrorTextBlock text={part.text} conversationId={conversationId} />
+    }
+    // tracking 只加在正文上（思考 / 工具横条是 text-sm 的紧凑行，隔着 MessageContent 一起加会显得散）
+    return <MessageResponse className="tracking-[0.02em]">{part.text}</MessageResponse>
+  }
+
+  if (part.type === 'reasoning') {
+    return <ReasoningView text={part.text} streaming={!!streaming} />
+  }
+
+  // 单独出现的 tool-result（正常流里会被回填到 tool-call 上，这里兜底渲染）
+  if (part.type === 'tool-result') {
+    return (
+      <ToolCallCard
+        title={toolLabel(part.toolName)}
+        type={`tool-${part.toolName}` as ToolUIPart['type']}
+        state={part.isError ? 'output-error' : 'output-available'}
+      >
+        {/* 错误时只给「人话」文本：output 是对象（ACP 的 rawOutput）时，
+            再渲染一份 JSON 代码块会在卡片上把同一件事说两遍 */}
+        <ToolOutput
+          output={part.isError ? undefined : part.output}
+          errorText={part.isError ? toolErrorText(part.output) : undefined}
+        />
+      </ToolCallCard>
+    )
+  }
+
+  // 附件 part：图片缩略图（可放大）/ PDF 文件 chip（用户消息里排在正文上方 —— parts 顺序已保证）
+  if (part.type === 'file') {
+    return <FilePartView part={part} />
+  }
+
+  // ask_followup_question：渲染成可作答的提问卡（而不是普通折叠工具卡）
+  if (part.toolName === ASK_FOLLOWUP_TOOL) {
+    const { output, isError } = toolState(part)
+    const live = !!followupPending && onResolveFollowup != null
+    const resumable = !live && !!followupResumable && onResolveFollowup != null
+    return (
+      <AskFollowupCard
+        toolCallId={part.toolCallId}
+        input={part.input}
+        output={output}
+        isError={isError}
+        pending={live}
+        resumable={resumable}
+        onResolve={onResolveFollowup ?? (() => undefined)}
+      />
+    )
+  }
+
+  const { state, hasOutput, output, isError, streamingInput } = toolState(part)
+
+  // 工具卡头部的停止钮**只给 execute_command**：其它工具没有「单条取消」的通道，
+  // 在它们上面挂停止钮要么是空操作、要么等于偷偷中止整轮，语义不诚实 —— 所以干脆不显示，
+  // 要停整轮用输入框那颗停止钮。
+  //
+  // 命令「在飞」= pending（入参还在流式生成）或执行中（已收到完整入参、结果还没回），
+  // 且**当前这条消息还在流式**（`turnLive`）——历史里因异常中断残留的未结算 part
+  // 不该出现停止钮。
+  const toolCallId = part.type === 'tool-call' ? part.toolCallId : undefined
+  const commandInFlight =
+    turnLive &&
+    part.toolName === 'execute_command' &&
+    (state === 'input-streaming' || state === 'input-available')
+  const onStop =
+    commandInFlight && toolCallId
+      ? () => {
+          // 命令已在执行 → 只停**那一条**（杀进程树、工具结果收尾成「（已中止）」，整轮继续）；
+          // 入参还在生成（还没真正跑起来）→ 没有可停的命令，退回中止这一轮。
+          if (isCommandRunning(part)) void stopCommand(toolCallId)
+          else void stopTurn()
+        }
+      : undefined
+
+  // 待办清单（todo_write）：入参 / 结果都是结构化的 `{ todos: [...] }`，画成勾选清单，
+  // 不铺「输入 / 输出 JSON」。这是「动态规划」在界面上的落点 —— 模型每改写一次清单，
+  // 就多一张卡，用户能看到计划是怎么随执行推进而演变的。
+  //
+  // `!streamingInput`：入参还在流式生成时 `part.input` 还是 undefined（只有 inputText），
+  // 这时抠不出条目，交给下面的流式预览分支；否则会闪一下「清单已清空」。
+  if (part.toolName === 'todo_write' && !streamingInput) {
+    const items = todoItemsOf(part.input, output)
+    const done = items.filter((t) => t.status === 'completed').length
+    return (
+      <ToolCallCard
+        title={toolCardTitle(part.toolName, part.acpKind)}
+        type={`tool-${part.toolName}` as ToolUIPart['type']}
+        state={state}
+        {...(items.length ? { detail: t('{done}/{total} 已完成', { done, total: items.length }) } : {})}
+        // 清单是给人看的进度，有内容就默认展开（与命令实时输出同一取舍）
+        defaultOpen={items.length > 0}
+      >
+        {items.length ? (
+          <TodoChecklist items={items} />
+        ) : (
+          <AcpTextBlock text={t('（待办清单已清空）')} />
+        )}
+      </ToolCallCard>
+    )
+  }
+
+  // 派活卡（toolName = `agent-<id>`）：入参是「给子 agent 的任务说明」，输出是「子 agent
+  // 写的结论」，两边都得按人的读法来，所以单独一个分支：
+  //   - 头部明细放 **prompt**（`detail` 自带截断 + Tooltip 看全文），而不是
+  //     `{"prompt":"…"}` 这坨原始 JSON；
+  //   - 内容区只渲染**结论的 markdown**，工具过程已被主进程的 slimDelegationOutput
+  //     收敛掉（实测 subAgentToolResults 会把整份文件塞进来，还会原样进会话历史）。
+  //
+  // 打开方式分两档：还在跑（有流式文本、还没结果）时自动展开 —— 内容一帧帧在长，
+  // 折叠起来等于白流；出了结果就跟随「工具自动折叠」偏好，与其余工具卡一个待遇。
+  const subText = typeof (part as { subagentText?: unknown }).subagentText === 'string'
+    ? ((part as { subagentText?: string }).subagentText as string)
+    : ''
+  // 派活卡「还在跑」的判据：**不能只看有没有流式文本**。子 agent 常常先连续翻
+  // 十几个文件才吐第一段正文；没有这条时整张卡在工具阶段完全没动静，看起来像卡死。
+  // 用 `streaming`（当前消息仍在流）排除历史里因异常中断残留的未结算 part。
+  const delegationRunning = Boolean(streaming) && !hasOutput && !isError
+  const delegationStreaming = Boolean(subText.trim()) && !hasOutput
+  if (part.toolName.startsWith('agent-')) {
+    const resultText = isError || !hasOutput ? null : toolOutputText(output)
+    return (
+      <ToolCallCard
+        title={toolCardTitle(part.toolName, part.acpKind)}
+        type={`tool-${part.toolName}` as ToolUIPart['type']}
+        state={state}
+        detail={delegationPromptOf(part.input)}
+        defaultOpen={delegationRunning || delegationStreaming}
+        onStop={onStop}
+      >
+        {isError && <AcpTextBlock text={toolErrorText(output)} />}
+        {delegationRunning ? (
+          <DelegationRunning toolName={part.subagentTool} toolCount={part.subagentToolCount} />
+        ) : null}
+        {delegationStreaming ? (
+          <StreamingInputBlock text={subText} label={t('子任务输出中...')} mono={false} />
+        ) : null}
+        {resultText ? <StreamingInputBlock text={resultText} label={t('子任务结论')} mono={false} /> : null}
+      </ToolCallCard>
+    )
+  }
+
+  // execute_command **运行中**（还没有 tool-result）：铺实时输出区 + 单条命令停止。
+  // 结果到达后 hasOutput 变 true，本分支让位给下面的直显分支（结果文本），
+  // liveOutput 也已被 parts 层清口（见 applyEvent 的 tool-result case）。
+  //
+  // ⚠️ 判据用 `isCommandRunning(part)`，**不能**加「liveOutput 在不在」这一条
+  // （最早就是这么写的，实测踩到）：那个字段只在**第一段输出**到达时才被创建，
+  // 而「在跑但什么都不吐」的命令（sleep 30 / 长编译 / 等网络）整轮都没有输出 ——
+  // 于是整张卡只剩一行头部，而头部箭头在未结算态是 disabled 的，停止按钮
+  // 在内容块里、内容块压根不渲染：用户看不到也停不掉。
+  if (isCommandRunning(part)) {
+    const cmdRaw = (part.input as { command?: unknown } | undefined)?.command
+    const cmd = typeof cmdRaw === 'string' ? cmdRaw : ''
+    // 没有输出时 liveOutput 还没被创建：给个空对象，LiveOutputBlock 照样铺占位 + 停止按钮
+    const live =
+      (part as { liveOutput?: { stdout: string; stderr: string } }).liveOutput ?? { stdout: '', stderr: '' }
+    return (
+      <ToolCallCard
+        title={toolCardTitle(part.toolName, part.acpKind)}
+        type={`tool-${part.toolName}` as ToolUIPart['type']}
+        state={state}
+        detail={`$ ${cmd}`}
+        // 运行中**强制展开**：实时输出是这块卡存在的意义，折叠起来等于白流
+        defaultOpen
+        onStop={onStop}
+      >
+        <LiveOutputBlock live={live} />
+      </ToolCallCard>
+    )
+  }
+
+  // 入参还在流式生成：卡片直接铺「正在写什么」（半截 JSON 抠出来的内容，一帧帧变长）。
+  // 完整 tool-call 到达后 inputText 被清掉（见 lib/parts.ts），自动回到下面的直显分支。
+  if (streamingInput) {
+    const preview = renderStreamingPreview(part)
+    return (
+      <ToolCallCard
+        title={toolCardTitle(part.toolName, part.acpKind)}
+        type={`tool-${part.toolName}` as ToolUIPart['type']}
+        state={state}
+        {...(preview?.detail ? { detail: preview.detail } : {})}
+        // 有内容可看才自动展开：命令类只有头部明细，展开是一片空白
+        defaultOpen={Boolean(preview?.text)}
+        onStop={onStop}
+      >
+        {preview?.text ? <StreamingInputBlock text={preview.text} /> : null}
+      </ToolCallCard>
+    )
+  }
+
+  // 文件类工具（write_file / edit_file / delete_file）：从入参构造「修改前后对比」。
+  const fileDiff = buildFileDiff(part)
+  // ACP 工具：diff / 文本 / 命令+输出 直显（renderAcpDirect 判据见函数注释）
+  const acpDirect = renderAcpDirect(part)
+  // 内置工具：与 ACP 统一 —— 主入参 + 结果文本直显（文件类走上面的 diff）
+  const builtinDirect = fileDiff || acpDirect ? null : renderBuiltinDirect(part, hasOutput, output)
+
+  // 直显分支：有可直显内容（diff / 文本 / 命令）时不铺「输入 / 输出 JSON」，展开直接是
+  // diff 对比或人话文本 —— 但外壳仍是同一个 ToolCallCard，头部 / 折叠行为与兜底卡完全一致
+  // （默认收起、点头部展开，头部样式与思考条同口径）。命令 / 主入参走头部明细（detail，
+  // 截断 + Tooltip），内容区只在真有东西时才铺边框盒，避免「还在跑、没输出」时
+  // 展开出一片空白。
+  if (acpDirect || fileDiff || builtinDirect) {
+    const detail = fileDiff ? fileDiff.path : (acpDirect?.detail ?? builtinDirect?.detail)
+    const hasBody = Boolean(isError || fileDiff || acpDirect?.content || builtinDirect?.content)
+    return (
+      <ToolCallCard
+        title={toolCardTitle(part.toolName, part.acpKind)}
+        type={`tool-${part.toolName}` as ToolUIPart['type']}
+        state={state}
+        detail={detail}
+        onStop={onStop}
+      >
+        {hasBody && (
+          <div className="flex flex-col gap-2 border border-border rounded-lg mt-2">
+            {isError && <AcpTextBlock text={toolErrorText(output)} />}
+            {fileDiff && <FileDiffView key="diff" {...fileDiff} />}
+            {acpDirect?.content}
+            {builtinDirect?.content}
+          </div>
+        )}
+      </ToolCallCard>
+    )
+  }
+
+  return (
+    // 兜底：没有任何可直显内容的工具（未知 / 结果是结构化对象）——
+    // 保留「中文工具名 + 状态徽章」的折叠卡，展开是原始参数与结果
+    <ToolCallCard
+      // ai-elements 的头部按 `tool-xxx` 前缀推断图标/文案，我们补一个中文标题覆盖它
+      title={toolCardTitle(part.toolName, part.acpKind)}
+      type={`tool-${part.toolName}` as ToolUIPart['type']}
+      state={state}
+      onStop={onStop}
+    >
+      {part.input !== undefined && part.input !== null && <ToolInput input={part.input} />}
+      {hasOutput && (
+        // 失败时不要把 output 原样塞进去：ACP 的 rawOutput 是对象，
+        // `String(output)` 会渲染成 [object Object]（见 lib/parts.ts 的 toolErrorText）
+        <ToolOutput
+          output={isError ? undefined : output}
+          errorText={isError ? toolErrorText(output) : undefined}
+        />
+      )}
+    </ToolCallCard>
+  )
+}
+
+/**
+ * 单个 part 的渲染（**带 memo**）。
+ *
+ * ⚠️ **为什么必须 memo**：流式期间每一批帧都会重渲整棵消息列表（见 `lib/frame-batch.ts`）。
+ * `applyEvent` 追加 delta 时只重建**最后一个** part 对象，前面那些 part 的引用是不变的
+ * —— 所以一条有几十个 part 的长消息里，每帧真正需要重画的只有末尾那一个。没有 memo 时
+ * 全部 part 都要重跑一遍（`MessageResponse` 内部的 streamdown 解析、工具卡的 JSON 序列化…），
+ * 纯属白做。
+ *
+ * **为什么用自定义比较器**：`onResolveFollowup` 是 `MessageParts` 里内联的箭头函数
+ * （闭包住 `tcid` 与 `followup`），每次渲染都是新引用 —— 逐项浅比会永远判「变了」。
+ * 它只用于「用户点了提问卡」这一个交互，且闭包内部读的是 store 最新值；真正决定卡片
+ * 形态的是 `followupPending` / `followupResumable`（都在比），所以忽略它的引用变化是安全的。
+ */
+export const PartView = memo(
+  PartViewInner,
+  (prev, next) =>
+    prev.part === next.part &&
+    prev.streaming === next.streaming &&
+    prev.turnLive === next.turnLive &&
+    prev.followupPending === next.followupPending &&
+    prev.followupResumable === next.followupResumable
+)
+
+/**
+ * 附件 part（用户消息里的图片 / PDF）。
+ *
+ * 图片的 src 统一经 `loadMediaObjectUrl` 解析：web 同源直用；desktop 没有服务端口，
+ * 走 IPC 桥 fetch 成 blob objectURL。加载失败给一个明确的占位（不吞错误）。
+ * PDF 渲染成文件 chip（浏览器里直接内嵌 PDF 预览的收益小、泄露面大 —— 只展示文件名）。
+ */
+function FilePartView({ part }: { part: Extract<AgentMessagePart, { type: 'file' }> }) {
+  const tr = useT()
+  const isImage = part.mediaType.startsWith('image/')
+  const [src, setSrc] = useState('')
+  const [failed, setFailed] = useState(false)
+  /** 全屏查看器开关：点图打开 */
+  const [zoomOpen, setZoomOpen] = useState(false)
+
+  useEffect(() => {
+    if (!isImage) return
+    let alive = true
+    setSrc('')
+    setFailed(false)
+    loadMediaObjectUrl(part.url)
+      .then((resolved) => {
+        if (alive) setSrc(resolved)
+      })
+      .catch(() => {
+        if (alive) setFailed(true)
+      })
+    return () => {
+      alive = false
+    }
+  }, [isImage, part.url])
+
+  if (!isImage) {
+    return (
+      <span className="flex max-w-72 items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-sm text-foreground">
+        <FileText className="size-4 shrink-0 text-muted-foreground" />
+        <span className="truncate">{part.name}</span>
+      </span>
+    )
+  }
+  if (failed || !src) {
+    return (
+      <span className="flex h-16 w-24 items-center justify-center gap-1 rounded-lg border border-dashed border-border text-xs text-muted-foreground">
+        <ImageOff className="size-3.5" />
+        {failed ? tr('图片加载失败') : tr('加载中…')}
+      </span>
+    )
+  }
+  return (
+    <>
+      <img
+        src={src}
+        alt={part.name}
+        onClick={() => setZoomOpen(true)}
+        className="max-h-60 max-w-64 cursor-zoom-in rounded-lg border border-border object-cover"
+      />
+      <ImageViewer src={src} alt={part.name} open={zoomOpen} onOpenChange={setZoomOpen} />
+    </>
+  )
+}

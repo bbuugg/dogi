@@ -1,0 +1,48 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    /*
+     * `node` 是**故意加的**：`shared/lib` 里有文件用 `import type` 引用 `@fizz/acp` /
+     * `@fizz/mcp` / `@fizz/skills` 这些 Node-only 包拿域类型（编译期擦除，不进产物）。
+     * TS 会顺着 import 去检查那些包的源码，它们要 `process` / `node:fs` 等全局声明。
+     */
+    "types": ["vite/client", "node"],
+    "strict": true,
+    "noUnusedLocals": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "useDefineForClassFields": true,
+    "noEmit": true,
+    /*
+     * ⚠️ 这里**故意不配 `@/*`**：本包内部一律用包名（`@fizz/agent-kit/...`）互相引用，
+     * 留一条 `@/*` 会让「本该改却没改」的旧路径静默指到 `./src/*` 的另一个文件上。
+     * 缺了映射，tsc 会直接报「找不到模块」。
+     */
+    "paths": {
+      "@fizz/agent-kit/*": ["./src/*"],
+      "@fizz/agent-kit": ["./src/index.ts"],
+      "@fizz/ui/*": ["../ui/src/*"],
+      "@fizz/ui": ["../ui/src/index.ts"],
+      "@fizz/agent-client/*": ["../agent-client/src/*"],
+      "@fizz/agent-client": ["../agent-client/src/index.ts"],
+      "@fizz/contracts/types": ["../contracts/src/types.ts"],
+      "@fizz/contracts/workspace-config": ["../contracts/src/workspace-config.ts"],
+      "@fizz/contracts/agent-api": ["../contracts/src/agent-api.ts"],
+      "@fizz/contracts": ["../contracts/src/index.ts"],
+      "@fizz/i18n": ["../i18n/src/index.ts"],
+      "@fizz/acp": ["../acp/src/index.ts"],
+      "@fizz/git": ["../git/src/index.ts"],
+      "@fizz/mcp": ["../mcp/src/index.ts"],
+      "@fizz/mcp/types": ["../mcp/src/types.ts"],
+      "@fizz/shells": ["../shells/src/index.ts"],
+      "@fizz/skills": ["../skills/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*"]
+}

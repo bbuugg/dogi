@@ -1,0 +1,85 @@
+{
+  "name": "@fizz/agent-kit",
+  "version": "0.1.0",
+  "description": "Fizz 领域组件包：对话 / 终端 / 文件 / 流程等业务界面零件，只导出零件、不导出装配好的 <App>",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./features/*": "./src/features/*",
+    "./shared/*": "./src/shared/*",
+    "./shell/*": "./src/shell/*"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@base-ui/react": "^1.8.0",
+    "@capacitor/core": "^8.5.3",
+    "@capacitor/local-notifications": "^8.3.1",
+    "@fizz/agent-client": "*",
+    "@fizz/contracts": "*",
+    "@fizz/i18n": "*",
+    "@fizz/ui": "*",
+    "@milkdown/crepe": "^7.22.3",
+    "@milkdown/kit": "7.22.3",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@monaco-editor/react": "^4.7.0",
+    "@radix-ui/react-use-controllable-state": "^1.2.6",
+    "@shadcn/react": "^0.3.1",
+    "@streamdown/cjk": "^1.0.3",
+    "@streamdown/code": "^1.1.1",
+    "@streamdown/math": "^1.0.2",
+    "@streamdown/mermaid": "^1.0.2",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/xterm": "^6.0.0",
+    "@xyflow/react": "^12.12.0",
+    "ai": "^7.0.99",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "cmdk": "^1.1.1",
+    "cn": "^0.4.0",
+    "color": "^5.0.3",
+    "date-fns": "^4.4.0",
+    "embla-carousel-react": "^8.6.0",
+    "input-otp": "^1.5.0",
+    "lucide-react": "^1.48.0",
+    "motion": "^13.4.0",
+    "nanoid": "^3.3.19",
+    "radix-ui": "^1.6.7",
+    "react-day-picker": "^10.0.1",
+    "react-dnd": "^16.0.1",
+    "react-dnd-html5-backend": "^16.0.1",
+    "react-resizable-panels": "^4.13.3",
+    "recharts": "^3.8.0",
+    "shiki": "^4.4.3",
+    "sonner": "^2.0.8",
+    "streamdown": "^2.6.0",
+    "tailwind-merge": "^3.3.1",
+    "tokenlens": "^1.3.1",
+    "use-stick-to-bottom": "^1.1.6",
+    "vaul": "^1.1.2",
+    "yaml": "^2.9.1",
+    "zmodem.js": "^0.1.10",
+    "zustand": "^5.0.15"
+  },
+  "peerDependencies": {
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.1",
+    "monaco-editor": "^0.56.0",
+    "typescript": "^7.0.2"
+  }
+}

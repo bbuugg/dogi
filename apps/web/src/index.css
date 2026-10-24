@@ -1,0 +1,27 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import './styles.css';
+/* 本 app 自己的源码（`src/app/` 外壳）—— Tailwind 自动扫描的根不一定落在 apps/web，
+   显式写死一条，别指望自动发现 */
+@source '.';
+/* 领域组件（@fizz/agent-kit）：绝大多数工具类都在这里，漏扫等于整站样式塌掉 */
+@source '../../../packages/agent-kit/src';
+/* 无业务原语（@fizz/ui）：同样必须显式扫，否则按钮 / 输入框的工具类不会生成 */
+@source '../../../packages/ui/src';
+/* ⚠️ Streamdown（助手正文 / 思考内容的 markdown 渲染器）的工具类**必须**由这里的 Tailwind
+   生成 —— 它的样式全在 node_modules 里，而 Tailwind 默认不扫 node_modules。
+   漏了这条，代码块 / 表格就是浏览器默认样式（又散又占位）。 */
+@source '../../../node_modules/streamdown/dist/*.js';
+
+/* 应用根用 h-full 撑满。
+   与 ./styles.css 同一套口径：高度 = **纯 CSS** 的 `100%`（初始包含块 = 布局视口）。
+   - 不用 `--app-height`（JS 写 px 那套）：聚焦输入框那一刻 `visualViewport` 与布局视口
+     不同拍，会先写偏小的值再补正 —— 页面高度当着用户的面抖一下（手机模式尤其明显）。
+   - 不用 `100dvh`：部分机型 dvh 偏小，底部露出画布背景（暗色近黑），即「底部一条黑带」。
+   - 键盘让位：`apps/web/index.html` 的 `interactive-widget=resizes-content` 让布局视口
+     跟着缩，`100%` 自动贴到键盘上沿；不认这条的环境（iOS Safari）退回 WebView 默认行为。 */
+html,
+body,
+#root {
+  height: 100%;
+}

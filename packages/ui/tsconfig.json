@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    /*
+     * 只有 `vite/client`：这个包**不该**碰 Node 全局。出现 `process` / `node:fs`
+     * 就说明有东西放错层了（那是 `agent-client` 的事）。
+     */
+    "types": ["vite/client"],
+    "strict": true,
+    "noUnusedLocals": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "useDefineForClassFields": true,
+    "noEmit": true,
+    /*
+     * shadcn CLI 按 `paths` 解析 `components.json` 的别名（`@/...` → `./src/...`）。
+     * 本包的文件是**平铺**在 `src/` 下的（`@fizz/ui/button` 一个原语一个文件），
+     * 所以别名直接指到 `src/` 根，CLI 生成的东西才落在同一层。
+     */
+    "paths": {
+      "@": ["./src"],
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["src/**/*"]
+}

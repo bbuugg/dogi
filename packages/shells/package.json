@@ -1,0 +1,24 @@
+{
+  "name": "@fizz/shells",
+  "version": "0.1.0",
+  "description": "Fizz 的本地 shell 探测：按平台在固定安装位置与 PATH 上只读探测可用 shell（终端选择器与 agent 命令执行共用同一份判定），源码直接被打包",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^7.0.2"
+  }
+}

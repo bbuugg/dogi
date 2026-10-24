@@ -1,0 +1,204 @@
+name: Build Clients
+
+# 触发：推送 tag（v*）或手动触发。
+#
+# ⚠️ tag 名**不参与**版本比较 —— electron-updater 比的是「客户端里 `app.getVersion()`」
+#    与「release 里 latest*.yml 的 version」。所以**推 tag 前必须先改
+#    `apps/desktop/package.json` 的 `version`**，否则打出来的包还是旧版本号，
+#    用户那边永远收不到更新（tag 只是 Release 的地址与文件名）。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# 创建 Release 需要写权限（默认 GITHUB_TOKEN 对 contents 只读）
+permissions:
+  contents: write
+
+# 允许并发上传产物（不同平台互不干扰）
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            script: dist:linux
+          - os: macos-latest
+            platform: mac
+            script: dist:mac
+          - os: windows-latest
+            platform: win
+            script: dist:win
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          # Vite 8 要 Node >= 20.19 / 22.12，Electron 44 亦兼容。
+          # （本机开发用的是 Node 24，想跟本机一致就把这里改成 24。）
+          node-version: 22
+          cache: npm
+
+      # 依赖带原生模块（node-pty / cpu-features / ssh2），用 npm ci 依据 lockfile 安装，
+      # 安装脚本会拉取各平台的 N-API 预编译二进制（无需 node-gyp 现场编译）
+      - name: Install dependencies
+        run: npm ci
+
+      # Electron 44 起取消了 postinstall（改为惰性下载），而 `apps/desktop` 的 electronDist
+      # 指向 `<仓库根>/node_modules/electron/dist` —— 这里显式跑一次（已装则秒过）；
+      # 再重建 node-pty，确保原生模块与本平台的 Electron ABI 对齐。
+      - name: Ensure Electron binary & native prebuilds
+        run: |
+          node node_modules/electron/install.js
+          npm rebuild node-pty
+
+      # 清理上一次构建产物（避免 app.asar.unpacked 等中途残留导致解包 EEXIST 冲突）
+      # ⚠️ electron-builder 的 `directories.output` 是相对 **project 目录** 解析的，
+      #    本项目 project = `apps/desktop`，所以产物落在 `apps/desktop/release`
+      #    （不是仓库根的 `release/`）。
+      - name: Clean release output
+        run: |
+          node -e "require('fs').rmSync('apps/desktop/release', { recursive: true, force: true })"
+
+      # dist:* 脚本里 `--publish never` 是刻意的：**发布只由下面的 Publish Release 做**，
+      # 免得 electron-builder 和 action-gh-release 抢着建同一个 Release。
+      # 三个平台各自的签名 Secrets（不配就是未签名包，能装、自动更新也能用）：
+      #   macOS  ：CSC_LINK / CSC_KEY_PASSWORD
+      #            （要公证再加 APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID）
+      #   Windows：CSC_LINK / CSC_KEY_PASSWORD
+      - name: Build (${{ matrix.platform }})
+        run: npm run ${{ matrix.script }}
+        env:
+          CI: true
+
+      # 产物按平台上传为 Artifact，方便未打 tag 时也能取包。
+      # ⚠️ latest*.yml / *.blockmap 是 electron-builder 生成的自动更新清单与增量包，
+      #    必须一起收（`--publish never` 也照样生成它们）。注意块标量里的 `#` 不是
+      #    注释而是文件名字符串 —— 说明只能写在这个位置。
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fizz-${{ matrix.platform }}
+          path: |
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.zip
+            apps/desktop/release/*.AppImage
+            apps/desktop/release/latest*.yml
+            apps/desktop/release/*.blockmap
+          if-no-files-found: ignore
+
+      # 仅当推送 v* tag 时，把产物附加到 GitHub Release。
+      # ⚠️ files 里必须含 latest*.yml：客户端 checkForUpdates() 就是去
+      #    <release>/download/vX/latest.yml 取清单，漏了会抛
+      #    ERR_UPDATER_CHANNEL_FILE_NOT_FOUND 并被 error 事件吞掉 ——
+      #    表现为「永远收不到更新、点了检查更新也没反应」（真实事故）。
+      #    *.blockmap 只影响能否增量下载（缺了每次全量下），不影响功能。
+      # ⚠️ 不能是 draft：草稿 Release 对客户端不可见，等于没发。
+      # ⚠️ Release 必须是**公开**的：私有仓库的自动更新要往客户端塞 token，本项目没做。
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.zip
+            apps/desktop/release/*.AppImage
+            apps/desktop/release/latest*.yml
+            apps/desktop/release/*.blockmap
+          draft: false
+          prerelease: false
+          # 与 android job 并发创建 Release 时，后到的一方靠重试改成「追加 assets」
+          max_retries: 3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 安卓 APK：与桌面端互不依赖，单独一个 job。
+  #
+  # `apps/mobile/android/` 是 `cap add android` 的生成物（已 gitignore），所以每次都要
+  # 先重建平台再 `cap sync`（`build:mobile` 会跑 vite build + sync + 图标铺回）。
+  # 产出的是 **debug APK**：用 CI 每次新生成的 debug keystore 签名，可直接侧载安装，
+  # 但**不能用于覆盖安装已发布版本**（签名不同）。正式分发要接 release 签名 Secrets。
+  android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Capacitor 8 的 Android Gradle Plugin 要 JDK 21（runner 默认是 17）
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install dependencies
+        run: npm ci
+
+      # 生成 android/ 平台。新机器第一次必须先 add，否则 cap sync 会报
+      # 「android platform has not been added yet」。
+      - name: Add Android platform
+        run: npm run add:android --workspace @fizz/mobile
+
+      # vite build + cap sync + 把入库的图标/启动屏铺回 res/
+      - name: Build web assets & sync
+        run: npm run build:mobile
+        env:
+          CI: true
+
+      - name: Build debug APK
+        working-directory: apps/mobile/android
+        run: ./gradlew assembleDebug --no-daemon
+
+      # 改个能看出版本的名字：Release 里多个版本并存时 `app-debug.apk` 一律同名，
+      # 用户下载根本分不清是哪个 tag 的包（版本号取 mobile 的 package.json）。
+      - name: Rename APK
+        run: |
+          version=$(node -p "require('./apps/mobile/package.json').version")
+          mv apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk \
+             "apps/mobile/android/app/build/outputs/apk/debug/Fizz-${version}-android-debug.apk"
+
+      # Artifacts 只能是 zip（GitHub 强制打包），想要「点开就是 .apk」只能走 Release。
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: fizz-android-debug
+          path: apps/mobile/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      # 与桌面端**同一个** Release（tag）追加 APK。
+      # ⚠️ 两个 job 并发跑，Release 尚未创建时同时创建会有一次失败，
+      #    max_retries 让后到的那个改用「已存在则追加」。
+      - name: Publish APK to Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: apps/mobile/android/app/build/outputs/apk/debug/*.apk
+          draft: false
+          prerelease: false
+          max_retries: 3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

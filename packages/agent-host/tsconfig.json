@@ -1,0 +1,48 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023"],
+    /* `vite/client`：`apps/server/src/app.ts` 用 `import.meta.glob` 收集路由模块，
+       本包 type-only 引用了它（`@fizz/server` → app.ts），所以要跟着有这套类型 */
+    "types": ["node", "vite/client"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "useDefineForClassFields": true,
+    "noEmit": true,
+    "paths": {
+      /*
+       * `@/…`：本包（经 `@fizz/server/ws`）把 apps/server 的 WS 分流器及其依赖
+       * 拉进了类型程序，那些文件内部写的是根目录那套 `@/…` 路径（与 server 的
+       * tsconfig / vite alias 一一对应）。
+       */
+      "@/lib/server/*": ["../../apps/server/src/server/*"],
+      "@/lib/*": ["../../apps/server/src/lib/*"],
+      "@/app/api/*": ["../../apps/server/src/api/*"],
+      "@fizz/contracts": ["../contracts/src/index.ts"],
+      "@fizz/contracts/*": ["../contracts/src/*"],
+      "@fizz/acp": ["../acp/src/index.ts"],
+      "@fizz/acp/*": ["../acp/src/*"],
+      "@fizz/shells": ["../shells/src/index.ts"],
+      "@fizz/shells/*": ["../shells/src/*"],
+      "@fizz/server/ws": ["../../apps/server/src/server/ws.ts"],
+      /*
+       * 公网预览入口（按 Host 分派 + 反代到容器）。远程访问那个监听要靠它把
+       * `<slug>.<域名>` 接到容器上，与独立部署的 `index.ts` 同一套。
+       */
+      "@fizz/server/container-projects/public-gateway": [
+        "../../apps/server/src/server/container-projects/public-gateway.ts"
+      ],
+      "@fizz/server/container-projects/lifecycle": [
+        "../../apps/server/src/server/container-projects/lifecycle.ts"
+      ],
+      "@fizz/server": ["../../apps/server/src/app.ts"]
+    }
+  },
+  "include": ["src/**/*"]
+}

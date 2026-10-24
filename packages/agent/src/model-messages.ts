@@ -1,0 +1,233 @@
+/**
+ * 历史消息 -> 模型消息的转换。
+ *
+ * **独立成文件的原因**：本文件对 `ai` / contracts 只有 type-only import，验证脚本
+ * （`scripts/verify-uploads.mjs`）可以直接加载它做纯函数测试；prompt.ts 对
+ * `@fizz/tools` 有运行时 import，整文件不可独立加载。改这里的转换规则时，
+ * 两边的测试一起跑。
+ *
+ * 工具过程必须用**原生 tool-call / tool-result 结构**，不能压成
+ * `[调用工具 xxx]` / `[工具 xxx 返回] xxx` 这类纯文本摘要 ——
+ * 模型会把这个格式当成「助手的说话方式」，在自己的正文里照抄出来
+ * （实测：多步工具链后开始输出 `[调用工具 read_file]` 这种假调用文本）。
+ *
+ * 一轮里的工具过程是扁平交错的（text, call, result, text, call, result…），
+ * 按「一批 tool-call 及其全部结果」切成若干段：每段 = assistant（文本 + tool-call）
+ * + tool（结果），与模型 API 要求的消息顺序一致。
+ */
+import type { FilePart, ImagePart, ModelMessage, TextPart, ToolCallPart, ToolResultPart } from 'ai'
+
+/**
+ * Agent 消息（渲染端历史的结构化镜像，与 `@fizz/contracts/types.AgentMessagePart`
+ * 同构 —— **两边改动必须同步**，否则 server 侧全量 typecheck 会红）。
+ */
+export type AgentMessagePart =
+  | { type: 'text'; text: string }
+  | {
+      /** 附件（图片 / PDF）：url 直传给模型（不 base64、不抽文本），见 toModelMessages */
+      type: 'file'
+      url: string
+      mediaType: string
+      name: string
+    }
+  | { type: 'reasoning'; text: string }
+  | {
+      type: 'tool-call'
+      toolCallId: string
+      toolName: string
+      input: unknown
+      /**
+       * 工具结果。**落盘形状是回填在 tool-call 上**（没有独立的 tool-result part，
+       * 见 `apps/server/src/server/agent-parts.ts`），缺省 = 没有结果。
+       */
+      output?: unknown
+      isError?: boolean
+    }
+  | {
+      type: 'tool-result'
+      toolCallId: string
+      toolName: string
+      output: unknown
+      isError?: boolean
+    }
+
+/** 工具结果的输出结构（ai 包没有单独导出这个类型，从 ToolResultPart 派生） */
+type ToolResultOutput = ToolResultPart['output']
+
+/**
+ * 非字符串工具结果回给模型时的字符上限。
+ *
+ * 字符串结果由工具自己负责分页（read_file / search_files）或落盘（output-log）；
+ * 但**结构化结果没人管** —— `JSON.stringify` 出来的数组 / 对象能任意大，
+ * 且它不在工具作者的控制范围内（工具只是返回一个对象）。这里兜一道底：
+ * 超限就截断并明确告诉模型「截断位置」，而不是让它以为拿到的是完整数据。
+ *
+ * 8000 字符 ≈ 2000 token，比单个工具结果的预算（MAX_TOOL_RESULT_CHARS=4000）宽松，
+ * 因为结构化结果通常需要保持 JSON 可读性，不宜裁得太狠。
+ */
+const MAX_STRUCTURED_OUTPUT_CHARS = 8000
+
+/**
+ * 工具结果 -> 模型消息的输出结构（字符串走 text，其余序列化成 json；失败走 error-text）。
+ *
+ * 这里**不做落盘**：output-log（全文落盘 + 行号续读）只用于 execute_command /
+ * web_fetch（见 @fizz/tools 的 output-log.ts），其余工具的超长输出要么靠自己的参数
+ * 分页（read_file / search_files），要么在这里按字符上限截断 —— 结构化结果至少
+ * 要有上限，否则一个返回大数组的工具能把整轮上下文顶爆。
+ */
+function toToolOutput(output: unknown, isError?: boolean): ToolResultOutput {
+  let value: string
+  if (typeof output === 'string') {
+    value = output
+  } else {
+    // 紧凑序列化：`JSON.stringify(v, null, 1)` 每层缩进都要 token，
+    // 而模型读紧凑 JSON 毫无障碍 —— 缩进纯属浪费
+    const json = JSON.stringify(output) ?? String(output)
+    value =
+      json.length > MAX_STRUCTURED_OUTPUT_CHARS
+        ? `${json.slice(0, MAX_STRUCTURED_OUTPUT_CHARS)}\n…（结构化结果过长已截断：共 ${json.length} 字符，仅保留前 ${MAX_STRUCTURED_OUTPUT_CHARS}。请用更精确的参数收窄返回内容）`
+        : json
+  }
+  return isError ? { type: 'error-text', value } : { type: 'text', value }
+}
+
+/**
+ * 渲染端对话历史 -> 模型消息。
+ *
+ * `resolveFileUrl`：附件 URL 的绝对化策略由调用方注入（server 端经 UploadAdapter
+ * 拼 `FIZZ_PUBLIC_BASE_URL ?? origin`）—— 本文件零存储知识。未传时用 localhost
+ * base 兜底：`new URL('/api/...')` 会抛错，不能让一条附件把整轮炸掉。
+ *
+ * 附件提交形态（用户拍板）：**URL 直传** —— 图片走 ImagePart、PDF 走 FilePart，
+ * 不读文件、不转 base64、不做文本抽取。
+ */
+export async function toModelMessages(
+  history: Array<{ role: 'user' | 'assistant'; parts: AgentMessagePart[] }>,
+  opts?: {
+    resolveFileUrl?: (url: string) => string
+    /**
+     * 这个模型能不能收图片（`AiModelSettings.imageInput`）。缺省 true。
+     *
+     * 关掉时历史里的图片附件被**过滤成一行说明**，不是整条消息丢掉 —— 用户换过模型之后
+     * 老会话仍要能继续跑（那些图片是当时模型真看过的，新模型看不见就说一句）。
+     * 新消息里的图片在发送时就被拒绝（见 server 的 startTurn），不会走到这里。
+     */
+    allowImages?: boolean
+  }
+): Promise<ModelMessage[]> {
+  const messages: ModelMessage[] = []
+  for (const msg of history) {
+    if (msg.role === 'user') {
+      const text = msg.parts
+        .map((p) => (p.type === 'text' ? p.text : ''))
+        .join('')
+        .trim()
+      const allFiles = msg.parts.filter(
+        (p): p is Extract<AgentMessagePart, { type: 'file' }> => p.type === 'file'
+      )
+      // 模型不收图片：只摘掉 image/*，PDF 等文件仍照常直传
+      const files =
+        opts?.allowImages === false
+          ? allFiles.filter((f) => !f.mediaType.startsWith('image/'))
+          : allFiles
+      const omittedImages = allFiles.length - files.length
+      const omittedNote =
+        omittedImages > 0
+          ? `（用户发送了 ${omittedImages} 张图片，但当前模型未开启图片输入，这些图片已省略）`
+          : ''
+      if (files.length === 0) {
+        const body = [text, omittedNote].filter(Boolean).join('\n')
+        if (body) messages.push({ role: 'user', content: body })
+        continue
+      }
+      // 有附件：content 升级为数组（AI SDK 的 UserContent 原生支持），附件在前文本在后
+      const content: Array<ImagePart | FilePart | TextPart> = files.map((f) => {
+        const url = new URL(opts?.resolveFileUrl ? opts.resolveFileUrl(f.url) : f.url, 'http://localhost')
+        if (f.mediaType.startsWith('image/')) {
+          return { type: 'image', image: url, mediaType: f.mediaType } satisfies ImagePart
+        }
+        return { type: 'file', data: url, mediaType: f.mediaType, filename: f.name } satisfies FilePart
+      })
+      if (text) content.push({ type: 'text', text })
+      if (omittedNote) content.push({ type: 'text', text: omittedNote })
+      messages.push({ role: 'user', content })
+      continue
+    }
+
+    let content: Array<TextPart | ToolCallPart> = []
+    let results: ToolResultPart[] = []
+    /** 已发出、还没配到结果的 toolCallId */
+    const pending = new Set<string>()
+
+    const flush = () => {
+      // 有调用没结果（用户中止 / 工具没跑完）：补一条占位结果，
+      // 否则 assistant 里的 tool-call 在协议上找不到配对，请求会被 provider 拒掉
+      for (const id of pending) {
+        const call = content.find(
+          (p): p is ToolCallPart => p.type === 'tool-call' && p.toolCallId === id
+        )
+        if (call) {
+          results.push({
+            type: 'tool-result',
+            toolCallId: id,
+            toolName: call.toolName,
+            output: { type: 'error-text', value: '该工具调用未执行完成（被中止或对话已结束）' }
+          })
+        }
+      }
+      pending.clear()
+      if (content.length) messages.push({ role: 'assistant', content })
+      if (results.length) messages.push({ role: 'tool', content: results })
+      content = []
+      results = []
+    }
+
+    for (const part of msg.parts) {
+      if (part.type === 'text') {
+        if (part.text.trim()) content.push({ type: 'text', text: part.text })
+      } else if (part.type === 'tool-call') {
+        content.push({
+          type: 'tool-call',
+          toolCallId: part.toolCallId,
+          toolName: part.toolName,
+          input: part.input ?? {}
+        })
+        /**
+         * ⚠️ 落盘形状把结果**回填在 tool-call 的 `output` 上**（没有独立的
+         * tool-result part，见 `apps/server/src/server/agent-parts.ts`）。
+         *
+         * 只认 `tool-result` 的话，历史里每个工具调用都会掉进 pending、被补成
+         * 「未执行完成」占位 —— 下一轮模型会真的以为上一轮的工具全被中止了
+         * （实测：问「刚才工具返回的是什么」，模型答「被中止了、输出是空的」）。
+         */
+        if (part.output !== undefined) {
+          results.push({
+            type: 'tool-result',
+            toolCallId: part.toolCallId,
+            toolName: part.toolName,
+            output: toToolOutput(part.output, part.isError)
+          })
+          // 这一批调用全部有结果了，收束成一段
+          if (pending.size === 0) flush()
+        } else {
+          pending.add(part.toolCallId)
+        }
+      } else if (part.type === 'tool-result') {
+        // 孤儿结果（找不到对应调用）：丢弃，否则同样过不了 provider 校验
+        if (!pending.has(part.toolCallId)) continue
+        pending.delete(part.toolCallId)
+        results.push({
+          type: 'tool-result',
+          toolCallId: part.toolCallId,
+          toolName: part.toolName,
+          output: toToolOutput(part.output, part.isError)
+        })
+        // 这一批调用全部有结果了，收束成一段
+        if (pending.size === 0) flush()
+      }
+      // reasoning：思考内容不回传（对模型无价值，部分 provider 还要求签名才能回传）
+    }
+    flush()
+  }
+  return messages
+}

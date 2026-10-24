@@ -1,0 +1,344 @@
+/**
+ * AI 助手的一轮对话启动服务：与 `chat-turn.ts` 同构，但**完全无状态**。
+ *
+ * ## 助手没有「多会话」概念
+ *
+ * - **服务端不落盘**：没有会话清单、没有历史存储。历史只暂存在**客户端内存**里，
+ *   每轮随 `history` 带上来，服务端拼上本轮 `text` 直接喂模型（见 `AssistantSendInput`）；
+ * - **每次打开面板就是一个新会话**：客户端换一个 `sessionId` 即可，服务端不关心它是什么、
+ *   也不认识它 —— 它只是这一轮 run 在共享注册表里的键（断线重接 / 审批答复按它找）；
+ * - 助手是**跨项目**的：不挂 workspace、不落会话树、不发 `conversation:*` 广播。
+ *
+ * ## 工具集按 `scope` 二选一（两组互斥）
+ *
+ * - `project`（缺省）：`buildProjectTools`（经 `setup` 覆盖装配 —— 不建文件工具，
+ *   因为跨项目场景下文件工具的 root 语义不清晰）；
+ * - `terminal`：只挂客户端带上来的终端工具。
+ *
+ * 审批走共用的 `createConfirmGate`；run 挂进共享的 run 注册表（`chat-run.ts`），
+ * 断线接回（POST /api/chat/stream?requestId=）与审批答复（POST /api/chat/confirm）复用现有端点。
+ *
+ * ⚠️ 这里刻意**只放内存**：run 随进程重启丢失，本来也没有历史需要保留。
+ */
+import type { AssistantSendInput } from '@fizz/contracts/agent-api'
+import { resolveContextWindow } from '@fizz/contracts/types'
+import type { AgentChatMessage, AgentStreamEvent, AiPermissionMode, TurnUsage } from '@fizz/contracts/types'
+import { defaultContextWindowFromEnv, runAgent, type RunAgentResult } from '@fizz/agent'
+import { buildProjectTools } from '@fizz/tools'
+import { domain, markDirty } from './state'
+import { refreshPluginModels } from './plugin-models'
+import { createConfirmGate, DEFAULT_CONFIRM_TIMEOUT_MS } from './confirm-gate'
+import { buildClientToolset, createClientToolGate } from './client-tool-gate'
+import { errorPart, foldEventIntoParts } from './agent-parts'
+import { createProject, createWorktree, getDefaultProjectsRoot, isInsideProjectsRoot, listDirs, removeProject } from './projects'
+import { createProjectConversation } from './conversation-create'
+import {
+  createTaskTriggerFromTool,
+  deleteTaskTriggerFromTool,
+  listTaskTriggersForTool,
+  setTaskTriggerEnabledFromTool,
+  updateTaskTriggerFromTool
+} from './task-triggers'
+import { createPluginFile } from './plugin-create'
+import { createRun, emit, findActiveByConversation, finishRun, type ChatRun } from './chat-run'
+import { describeError } from './lib/http'
+
+export type StartAssistantTurnResult =
+  | { ok: true; run: ChatRun }
+  | { ok: false; status: 400 | 404 | 409 | 500; message: string }
+
+/**
+ * 助手的系统提示词:**每轮现算**,把当前项目清单快照与默认根目录注进去 ——
+ * 模型不用先查再动,「打开 xx」「删掉 yy」这类指令一步到位。
+ */
+export function buildAssistantInstructions(): string {
+  const workspaces = domain.listWorkspaces()
+  const now = new Date().toLocaleString('zh-CN', { hour12: false })
+  const lines = [
+    '你是 Fizz 的项目管理助手,负责帮用户管理 Fizz 里的项目(工作区):查看清单、登记已有目录、新建目录、从 Git 克隆、打开项目、给项目建会话、创建 / 删除 worktree、删除项目、查看 / 创建 / 修改 / 删除 / 启停定时任务、给项目写插件。',
+    `默认项目根目录:${getDefaultProjectsRoot()}。建议用户把项目放这里(根内创建免审批);用户明确要放别处时照做(根外创建会弹审批卡)。`,
+    `当前时间:${now}(需要算 at 这一类一次性触发时刻时以它为准)。`,
+    workspaces.length
+      ? '当前已登记的项目(id / 名称 / 路径):'
+      : '当前还没有登记任何项目。',
+    ...workspaces.map(
+      (w) =>
+        `- [${w.id}] ${w.name} → ${w.path}${w.isWorktree && w.parentWorkspaceId ? `(worktree,父项目 ${w.parentWorkspaceId})` : ''}`
+    ),
+    '约定:',
+    '- 信息不够时先用 list_projects / list_dirs 查,或直接问用户;不要猜路径;',
+    '- open_project 只是通知界面切换项目;create_conversation 在项目下建一个空会话(不发言),界面随即打开它;',
+    '- create_task_trigger 建定时任务:cron(5 段「分 时 日 月 周」,如 0 9 * * *)或 at(毫秒时间戳,必须晚于上面那个当前时间)二选一,prompt 是到点发给 agent 的需求原文;到点会以完全访问权限无人值守地跑 agent(会话用你当前这个模型);',
+    '- list_task_triggers 查看已有定时任务(含 id / 排程 / 启用态 / 下次触发),按项目过滤;要改 / 删 / 启停某条前先用它拿 id;',
+    '- update_task_trigger / delete_task_trigger / set_task_trigger_enabled 分别改内容、删除、启用停用:update 只传要改的字段(其余保持原样;给 cron 或 at 之一即把触发方式换成那种);',
+    '- create_plugin 给项目写插件:你只给工具名 / 描述 / 行为脚本(execute 的函数体,必须以 return 给出一段文字),服务端套模板生成合法插件并当场加载一遍;插件下一轮对话生效,只给 Agent 加一个无参数工具;',
+    '- 定时任务的创建 / 修改 / 删除 / 启停与写插件都会弹审批卡,且产出或改动的是「以后会自动执行」的东西 —— 动手前先用一句话向用户讲清你要做什么;改 / 删定时任务前先 list 出来确认是哪一条;',
+    '- 根目录外的创建、删除、worktree 变更都会弹审批卡等用户点头;',
+    '- remove_project 缺省只移除登记、不删磁盘文件;deleteFiles=true 只对 worktree 项目生效;删之前必须向用户复述一次要删什么;',
+    '- 操作完成或失败都要如实说明,失败时带上原因;用简洁的中文回复。'
+  ]
+  return lines.join('\n')
+}
+
+/**
+ * 终端标签内嵌助手的系统提示词（`scope: 'terminal'`）。
+ *
+ * 与 `buildAssistantInstructions` 是**两套身份**：这里刻意不出现任何项目管理内容 ——
+ * 那条会话绑定的是某一条终端，模型的任务是「看输出、跑命令」，不是管项目。
+ * 项目能力在装配层就整组缺席了（见 `projectTools`），提示词只是把身份说清楚。
+ */
+export function buildTerminalAssistantInstructions(): string {
+  const now = new Date().toLocaleString('zh-CN', { hour12: false })
+  return [
+    '你是 Fizz 的终端助手，挂在一个终端标签上，服务的是**这个终端**。',
+    `当前时间：${now}。`,
+    '约定：',
+    '- 你可以读取该终端的输出、执行命令、发送按键（工具清单见下），作用于用户眼前这一条终端；',
+    '- 执行命令前先简要说明要做什么；优先使用安全、无破坏性的命令（先看状态再动手）；',
+    '- 涉及删除文件、重启服务、修改配置等危险操作时，先说明影响再执行；',
+    '- 命令是串行执行的：上一条跑完并读到输出后下一条才开始，不要并发下发；',
+    '- 执行命令后终端原始输出即为事实依据；失败时结合输出排查原因再尝试，不要盲目重试同一条命令；',
+    '- 交互式 / 前台程序（htop、top、vim、nano、less、man、watch、python、node 等）会占住终端不返回提示符：执行这类命令后不要继续输入新命令，先用发送按键退出（多数用 "q"，卡住用 "C-c"，个别用 "exit" / "C-d"），确认回到 shell 提示符后再继续；',
+    '- 用简洁的中文回复。'
+  ].join('\n')
+}
+
+/**
+ * 启动一轮助手对话并立刻返回:run 已登记、runner 已在后台跑。
+ * 调用方(POST /api/assistant)拿 `run` 接到 SSE 上(`pipeRun`)。
+ */
+export async function startAssistantTurn(input: AssistantSendInput): Promise<StartAssistantTurnResult> {
+  const text = input.text?.trim()
+  if (!input.sessionId || !text) {
+    return { ok: false, status: 400, message: '缺少 sessionId 或 text' }
+  }
+  if (findActiveByConversation(input.sessionId)) {
+    return { ok: false, status: 409, message: '这个助手会话正在回复中,等它收尾再发' }
+  }
+
+  // 插件注册的模型：解析前刷新（与 chat-turn 同一口径）
+  await refreshPluginModels()
+
+  // 模型:请求带了 configId 就严格解析(缺 modelId 用该配置第一个;悬空 / 不在清单给人话,
+  // 不静默回退);没带 = 第一份带模型的配置的第一个模型(老客户端 / 未选时的缺省)。
+  // 解析出的这一对(配置 id + 模型 id)同时是 `create_conversation` 的默认目标 ——
+  // 助手给项目建会话时,把自己正在用的模型带下去,新会话开箱就能发消息。
+  let effectiveTarget: { configId: string; modelId: string } | undefined
+  let modelConfig
+  if (input.configId?.trim()) {
+    const view = domain.listModels().find((m) => m.id === input.configId!.trim())
+    if (!view) {
+      return { ok: false, status: 400, message: '所选模型配置不存在或已被删除,请在助手面板重新选择模型' }
+    }
+    const modelId = input.modelId?.trim() || view.models[0]?.id
+    if (!modelId || !view.models.some((m) => m.id === modelId)) {
+      return {
+        ok: false,
+        status: 400,
+        message: `模型配置「${view.name}」下没有「${input.modelId ?? ''}」这个模型,请重新选择`
+      }
+    }
+    try {
+      modelConfig = domain.resolveModelConfig(view.id, modelId)
+    } catch (err) {
+      const { message } = describeError(err)
+      return { ok: false, status: 400, message }
+    }
+    effectiveTarget = { configId: view.id, modelId }
+  } else {
+    const configView = domain.listModels().find((m) => m.models.length > 0)
+    if (!configView) {
+      return { ok: false, status: 400, message: '没有可用模型,请先在「设置 → 模型」里添加' }
+    }
+    try {
+      modelConfig = domain.resolveModelConfig(configView.id, configView.models[0]!.id)
+    } catch (err) {
+      const { message } = describeError(err)
+      return { ok: false, status: 400, message }
+    }
+    effectiveTarget = { configId: configView.id, modelId: configView.models[0]!.id }
+  }
+
+  const userMessage: AgentChatMessage = {
+    id: `u-${Date.now()}`,
+    role: 'user',
+    parts: [{ type: 'text', text }],
+    createdAt: Date.now()
+  }
+  /**
+   * 历史来自**客户端**（本地内存），服务端不留 —— 这就是「消息只暂存在本地」的实现。
+   * 拼上本轮这条 user 消息后直接喂模型。
+   */
+  const history = [...(input.history ?? []), userMessage]
+
+  const run = createRun({ conversationId: input.sessionId, workspaceId: '', backend: 'mastra' })
+  markDirty(['activeRuns'])
+
+  // 审批:与聊天同一套四 kind 选项与超时;不发 conversation:* 广播(助手没有跨页场景)
+  const gate = createConfirmGate({
+    run,
+    ownerKey: input.sessionId,
+    title: '项目助手',
+    confirmTimeoutMs: DEFAULT_CONFIRM_TIMEOUT_MS
+  })
+
+  /**
+   * 这一轮的作用域:**两组工具互斥**,由请求显式声明(见 `AssistantSendInput.scope`)。
+   *
+   * - `project`(缺省):项目管理助手 —— 只有项目工具;
+   * - `terminal`:终端标签内嵌的助手 —— 只有客户端带上来的终端工具。
+   *
+   * 为什么互斥而不是「都挂上,用不到的模型自己不用」:工具就是模型的行动能力边界。
+   * 全局面板挂着一堆 run_in_terminal,模型迟早会去试;而那条终端根本不是这个面板
+   * 的语境(它属于某个终端标签)。反过来,一条绑定终端的会话里出现 create_project,
+   * 用户看到的就是「让助手看下日志,它却在建目录」。边界交给装配层,不交给提示词。
+   */
+  const scope: 'project' | 'terminal' = input.scope === 'terminal' ? 'terminal' : 'project'
+
+  /**
+   * 这一轮的工具权限档(客户端在助手输入框左侧那颗 pill 上选的;没带 = `confirm`)。
+   *
+   * 两处落地**范围不同**,别按一个想:
+   * - `terminal`(客户端工具):三档全生效 —— 闸在 `buildClientToolset`,依据是客户端
+   *   自己声明在 `ClientToolSpec.mutating` 上的标记;
+   * - `project`(项目工具):只有 `readonly` 生效(拒绝全部改动),`confirm` / `full` 一律
+   *   弹审批 —— 项目工具的作用域在单个工作区之外,且「一次授权、长期自动执行」,见
+   *   `guardMutation` 的说明。别拿这里的档位去放松它。
+   */
+  const permissionMode = (input.permissionMode ?? 'confirm') as AiPermissionMode
+  // 起始活权限档写回 run：上面 createRun 缺省是 confirm，这里用请求里的档位对齐，
+  // 之后 POST /api/chat/permission 改的也是它（见 buildClientToolset / buildProjectTools 的 getter）
+  run.permissionMode = permissionMode
+
+  /**
+   * 客户端工具(终端操作):**只有 terminal 作用域**才装。
+   * 服务端负责推帧、等客户端执行完回填;**审批闸在服务端**(`buildClientToolset` 按
+   * `mutating` + `permissionMode` 套,帧走 confirm-gate → 助手面板的审批卡)。
+   */
+  const clientGate = createClientToolGate({ run })
+  const clientTools =
+    scope === 'terminal' && input.clientTools?.length
+      ? buildClientToolset(input.clientTools, clientGate, {
+          permissionMode,
+          // 运行中活取：与主会话同一颗 pill，切档立刻生效（改档端点改的是同一个 run 字段）
+          getPermissionMode: () => run.permissionMode,
+          requestConfirm: gate.requestConfirm
+        })
+      : {}
+  /** terminal 作用域:给模型一段「你能操作终端」的说明,并把可用工具名列出来 */
+  const terminalHint =
+    scope === 'terminal' && input.clientTools?.length
+      ? [
+          '',
+          '你**绑定了一个终端**(用户当前正在看的那个)。你可以通过下面这些工具直接操作它 —— 执行命令、读取输出、发送按键:',
+          ...input.clientTools.map((t) => `- ${t.name}:${t.description}`),
+          '执行命令后终端输出即为事实依据;涉及删除 / 重启 / 改配置等危险操作前先说明影响。命令是串行执行的,不要并发下发。',
+          '你不负责项目管理(建 / 删项目、worktree、定时任务),这类请求请让用户去项目面板或全局助手。'
+        ].join('\n')
+      : ''
+
+  const assistantParts: AgentChatMessage['parts'] = []
+  let turnUsage: TurnUsage | undefined
+
+  /** 项目工具:**只有 project 作用域**才建(terminal 作用域下这套能力整组缺席) */
+  const projectTools =
+    scope === 'project'
+      ? buildProjectTools({
+          projects: {
+            createProject,
+            removeProject,
+            createWorktree,
+            getDefaultProjectsRoot,
+            isInsideProjectsRoot,
+            listDirs
+          },
+          domainApi: {
+            listWorkspaces: () => domain.listWorkspaces(),
+            getWorkspace: (id) => domain.getWorkspace(id)
+          },
+          conversations: {
+            createConversation: (input) =>
+              Promise.resolve(createProjectConversation(input, effectiveTarget))
+          },
+          // 定时任务:创建时模型绑定继承助手本轮正在用的模型(触发会话无人值守,用不了界面选择);
+          // 改 / 删 / 启停复用同一份服务端逻辑(与 HTTP 路由同源)
+          triggers: {
+            create: (input) => Promise.resolve(createTaskTriggerFromTool(input, effectiveTarget)),
+            list: (workspaceId) => listTaskTriggersForTool(workspaceId),
+            update: (input) => Promise.resolve(updateTaskTriggerFromTool(input)),
+            remove: (id) => deleteTaskTriggerFromTool(id),
+            setEnabled: (id, enabled) => setTaskTriggerEnabledFromTool(id, enabled)
+          },
+          plugins: { create: createPluginFile },
+          // ⚠️ `guardMutation` 只认 `readonly`(其余档一律弹审批),所以这里透传档位不会
+          // 放松任何项目操作的审批 —— 只是让「只读」这一档对项目工具也生效
+          permissionMode,
+          getPermissionMode: () => run.permissionMode,
+          requestConfirm: gate.requestConfirm
+        })
+      : {}
+
+  const onEvent = (event: AgentStreamEvent): void => {
+    if (event.type === 'finish' && event.usage) turnUsage = event.usage
+    foldEventIntoParts(assistantParts, event)
+    emit(run, { type: 'event', requestId: run.requestId, event })
+  }
+
+
+  const runner: Promise<RunAgentResult> = runAgent({
+    // workspace 只在 setup 缺省时被装配使用;setup 已显式传入,这里给个占位即可
+    // setup 已显式传入，workspace 只是类型占位（助手没有工作区）
+    workspace: { id: input.sessionId, name: 'AI 助手', path: '', createdAt: Date.now(), updatedAt: Date.now() },
+    // 自动摘要固化的缓存键（助手会话也会聊很久，同样需要复用摘要）
+    conversationId: input.sessionId,
+    history,
+    model: modelConfig,
+    skills: [],
+    permissionMode,
+    requestConfirm: gate.requestConfirm,
+    setup: {
+      // 两套身份各自配套:terminal 只有终端提示词 + 终端工具,project 只有项目提示词 + 项目工具
+      instructions:
+        scope === 'terminal'
+          ? buildTerminalAssistantInstructions() + terminalHint
+          : buildAssistantInstructions(),
+      // 工具集**按作用域二选一**,不再合并 —— 两组能力互斥(见 scope 的说明)
+      tools: scope === 'terminal' ? clientTools : projectTools
+    },
+    contextWindow: resolveContextWindow(
+      modelConfig.models,
+      modelConfig.model,
+      defaultContextWindowFromEnv()
+    ),
+    signal: run.controller.signal,
+    onEvent
+  })
+
+  void runner
+    .then((result) => {
+      if (result.finishReason === 'error' && result.error) {
+        console.error('[assistant] 这一轮出错:', result.error)
+      }
+      return result.finishReason
+    })
+    .catch((err: unknown) => {
+      const message = describeError(err).message
+      console.error('[assistant] 对话执行失败:', err)
+      assistantParts.push(errorPart(message))
+      emit(run, { type: 'event', requestId: run.requestId, event: { type: 'error', message } })
+      return 'error'
+    })
+    .then((finishReason) => {
+      gate.releaseAll()
+      clientGate.releaseAll()
+      finishRun(run, finishReason ?? 'error')
+      markDirty(['activeRuns'])
+    })
+
+  run.controller.signal.addEventListener('abort', () => {
+    gate.releaseAll()
+    clientGate.releaseAll()
+  })
+
+  return { ok: true, run }
+}

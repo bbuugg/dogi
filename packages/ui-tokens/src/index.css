@@ -1,0 +1,16 @@
+/*
+ * @fizz/ui-tokens —— 设计令牌总入口。
+ *
+ * ⚠️ 引用顺序：`tokens.css`（默认值）→ `themes.css`（命名主题）→ `theme.css`（Tailwind
+ * `@theme` 映射）。前两者都是自定义属性，但**主题块必须排在默认值之后**：亮色块与 `:root`
+ * 特异性同为 0,1,0，只靠源码顺序分胜负。
+ *
+ * ⚠️ 各 app 换肤只准覆盖 `:root` / `.dark` 里的**语义变量**，不要改 `@theme` 映射：
+ * 映射是把 `--primary` 这类变量接到 Tailwind 的 `bg-primary` 工具类上，改它等于改所有
+ * 组件里的类名含义。
+ */
+@import './tokens.css';
+/* 命名主题（`<html data-theme="…">`）：必须排在 tokens.css **之后** —— 亮色块与 `:root`
+   特异性相同（都是 0,1,0），靠源码顺序取胜；排前面会被默认配色压掉。 */
+@import './themes.css';
+@import './theme.css';

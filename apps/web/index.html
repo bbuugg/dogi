@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      `interactive-widget=resizes-content`：软键盘弹出时**让布局视口一起缩**（而不是只缩
+      视觉视口）。Android Edge / Chrome 认这条，于是 `window.innerHeight` 直接等于「键盘上方
+      的可视高度」，应用高度链（= innerHeight）自动贴到键盘上沿，不会再在底部留一条空白。
+      iOS Safari 不认识、直接忽略，那边仍由 useKeyboardInset 的 `--app-height` 兜底。
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content"
+    />
+    <title>Fizz</title>
+    <!--
+      「装到主屏」那一套：manifest + 图标（`public/icon-192.png` / `icon-512.png`，都是从
+      `apps/desktop/resources/app-icon.png`（512×512）裁出来的同一枚标记）+ Service Worker
+      （`public/sw.js`，注册在 client-root.tsx）。三个缺一个都装不上 —— 之前只有注册调用、
+      缺文件与 manifest，等于空转。
+    -->
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <!--
+      ⚠️ 首帧前必须把主题类名定好，否则会「先亮后暗 / 先暗后亮」闪一下。
+      原因：真实主题要等 JS bundle 下完 → React 挂载 → useTheme 的 effect 跑完才
+      applyThemeClass() 上去；这中间第一帧已经画出来了。网页版要过网络拉 1.3MB+ 的 JS，
+      这个窗口肉眼可见。`<html>` 上那个静态 class 只是「这段脚本没跑成」时的兜底
+      （脚本在 <head> 里同步执行，第一帧前就把类名覆盖掉了）。
+
+      判定逻辑必须与下面两处**完全一致**，改那两处时记得同步这里：
+      - apps/web/src/host.ts 的 loadTheme()：只认 'light' / 'dark'，其余（含未存过、存坏、
+        storage 被禁）回落 'system'
+      - packages/agent-kit/src/shared/hooks/useTheme.ts：mode = 'system' 时才看 prefers-color-scheme
+
+      所以这里**先按系统偏好取一个值**，再用存下来的 light / dark 覆盖它：
+      'system' / 没存过 / 存坏 / storage 抛错，全都落到「跟随系统」这条默认路上。
+    -->
+    <script>
+      ;(function () {
+        var dark = window.matchMedia('(prefers-color-scheme: dark)').matches
+        try {
+          var mode = localStorage.getItem('fizz.web.theme')
+          if (mode === 'light') dark = false
+          else if (mode === 'dark') dark = true
+          // 'system' / null / 存坏：保持上面按系统偏好取的值
+        } catch (e) {
+          // localStorage 被禁（隐私模式等）：同样保持按系统偏好取的值
+        }
+        document.documentElement.classList.toggle('dark', dark)
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

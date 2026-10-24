@@ -1,0 +1,27 @@
+/*
+ * 会话内查找（Ctrl/Cmd+F）的高亮样式 —— 配合 CSS Custom Highlight API 使用。
+ *
+ * 为什么是 `::highlight()` 而不是往 DOM 里插 `<mark>`：消息正文由 streamdown 渲染，
+ * 流式期间每帧都会被 React 重排；手工插节点会和它抢同一批文本节点，出现
+ * `NotFoundError: The node to be removed is not a child of this node`，或者高亮在下一帧
+ * 就被抹掉。Custom Highlight 只登记 Range、不动 DOM，React 怎么重渲染都互不干扰。
+ *
+ * 名字必须与 `chat-find.tsx` 里的 `HL_ALL` / `HL_ACTIVE` 逐字一致（这两条规则是按名字
+ * 静态匹配的，代码里没法注册动态名字）。
+ *
+ * 只声明「颜色」相关的属性：`::highlight()` 的允许清单里只有 color / background-color /
+ * text-decoration / text-shadow 一类，写 padding、圆角都不会生效。
+ */
+
+/* 全部命中：淡一层，别抢正文的对比度 */
+::highlight(fizz-find) {
+  background-color: color-mix(in oklab, var(--primary) 28%, transparent);
+  color: inherit;
+}
+
+/* 当前命中：实心反白，一眼能找到「现在跳到哪一条」。
+   必须在 `fizz-find` 之后声明 —— 两个 highlight 同时命中时，后注册 / 后者优先。 */
+::highlight(fizz-find-active) {
+  background-color: var(--primary);
+  color: var(--primary-foreground);
+}

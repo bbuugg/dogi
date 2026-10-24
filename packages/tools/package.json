@@ -1,0 +1,36 @@
+{
+  "name": "@fizz/tools",
+  "version": "0.1.0",
+  "description": "Fizz 的内置 Agent 工具集：文件 / 命令工具（带路径安全与审批）、联网抓取（Playwright + turndown）、追问工具，源码直接被打包",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@fizz/contracts": "*",
+    "@fizz/git": "*",
+    "@fizz/i18n": "*",
+    "@fizz/skills": "*",
+    "@fizz/workspace": "*",
+    "ai": "^7.0.99",
+    "playwright": "^1.56.0",
+    "turndown": "^7.2.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "@types/turndown": "^5.0.5",
+    "typescript": "^7.0.2"
+  }
+}

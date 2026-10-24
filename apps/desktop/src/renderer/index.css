@@ -1,0 +1,62 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+/* 本文件在 apps/desktop/src/renderer/ → 四级回到仓库根 */
+@import './styles.css';
+/* 本 app 自己的源码（`src/renderer/` 外壳 + 标题栏） */
+@source '.';
+/* 领域组件（@fizz/agent-kit）：绝大多数工具类都在这里，漏扫等于整站样式塌掉 */
+@source '../../../../packages/agent-kit/src';
+/* 无业务原语（@fizz/ui）：同样必须显式扫 */
+@source '../../../../packages/ui/src';
+/* ⚠️ Streamdown（助手正文 / 思考内容的 markdown 渲染器）的工具类**必须**由这里的 Tailwind
+   生成 —— 它的样式全在 node_modules 里，而 Tailwind 默认不扫 node_modules。
+   漏了这条，代码块 / 表格就是浏览器默认样式（又散又占位）。 */
+@source '../../../../node_modules/streamdown/dist/*.js';
+
+/* 应用根用 h-full 撑满：桌面端标题栏占掉一条，根容器负责 100% 高 */
+html,
+body,
+#root {
+  height: 100%;
+}
+
+/* 自定义标题栏：拖拽区域（窗口控制按钮等交互元素需用 app-no-drag 排除） */
+@utility app-drag {
+  -webkit-app-region: drag;
+}
+
+@utility app-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/*
+ * ════ sonner toast 必须落在标题栏之下，且不能被拖拽区吞掉点击 ════
+ *
+ * 症状：右上角通知的「关闭」按钮点不动。
+ *
+ * 根因（Windows）：frameless 窗口的拖拽区是**系统级 caption 命中**（窗口过程对
+ * `-webkit-app-region: drag` 的矩形返回 `HTCAPTION`），**与 DOM 的 z 序无关** ——
+ * 只要点在标题栏那条矩形里，mousedown 就被系统吞掉去拖窗口，页面根本收不到。
+ * 而 sonner 默认 `top` 偏移是 24px，标题栏是 36px（TitleBar 的 `h-9`），于是
+ * toast 顶边落在标题栏内；关闭按钮又用 `translate(35%, -35%)` 再往上/右顶出去，
+ * 它的可点中心正好落在 0–36px 这条拖拽带里 —— 视觉上压在标题栏上层，实际点不到。
+ *
+ * 修两处，缺一不可：
+ *   1) 把 toast 整体下移到标题栏之下，从根上不再重叠（也顺便不再遮住右上角的
+ *      最小化/最大化/关闭三颗窗口按钮）；
+ *   2) 兜底标 `no-drag`：toast 是动态挂载的，进场动画会从上方滑入，任一瞬间的
+ *      重叠都不该被拖拽区吃掉点击。
+ *
+ * ⚠️ 偏移量必须 `!important`：sonner 是把 `--offset-top` 作为**内联样式**写在
+ * `<ol data-sonner-toaster>` 上的，普通规则压不过内联。移动端的 `--mobile-offset-top`
+ * 一并覆盖 —— 桌面窗口拖窄到 600px 以下时 sonner 会切到那套变量。
+ * 44px = 标题栏 36px + 8px 呼吸间距。
+ */
+[data-sonner-toaster] {
+  --offset-top: 44px !important;
+  --mobile-offset-top: 44px !important;
+}
+
+[data-sonner-toast] {
+  -webkit-app-region: no-drag;
+}

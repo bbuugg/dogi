@@ -1,0 +1,609 @@
+/*
+ * 命名主题（换肤）：`<html data-theme="ocean">` 就是把整套**中性面**换成海雾那套配色。
+ *
+ * ## 改哪里
+ *
+ * - **改某一套主题的某个颜色**：直接改下面 `[data-theme='xxx']` 里对应的变量
+ *   （想改 `--sidebar` 就找 `--sidebar`），亮暗各一块，改完刷新即生效。
+ * - **新增一套主题**：
+ *   1. 复制 `ocean` 那两块（亮 + 暗），把选择器里的 `ocean` 换成新名字；
+ *   2. 到 `@fizz/agent-kit` 的 `shared/hooks/useColorTheme.ts` 的 `COLOR_THEMES` 里加一行，
+ *      `id` 必须与这里的选择器同名 —— 只改 CSS 的话设置里选不到它。
+ *   3. 预览小卡直接用 `data-theme` 渲染真实配色，不用另外补色值。
+ *
+ * ## 边界（别越界，越界就会出现「改了没反应」的哑谜）
+ *
+ * - 主题管**整套视觉语法**：中性面配色 + 强调色 + 字体 / 字号 / 密度 / 阴影 / 纹理 +
+ *   代码配色。
+ * - `--primary` 是主题的招牌色，取同套 `--syntax-keyword` 的同色系；
+ *   `--primary-soft/subtle/line/strong` 由它现算，不在这里写。
+ * - `--destructive` 不写：语义红在每套底色上都得是「危险」，跟着主题漂反而坏事。
+ * - 变量名必须与 `tokens.css` 完全一致，`theme.css` 的 `@theme inline` 映射才会接上。
+ *
+ * ## 选择器为什么长这样
+ *
+ * `[data-theme='ocean']`（不带 `:root`）是为了让**预览小卡**也能用：卡片自带这个属性，
+ * 自己声明的值压过从 `<html>` 继承来的值。`.dark[data-theme='ocean']` 是暗色那套
+ * （特异性 0,2,0，稳赢亮色块），卡片在深色模式下也带 `.dark` 类，所以预览的亮暗是对的。
+ *
+ * ## ⚠️ 每套主题的亮 / 暗两块都要重写 `--surface-1` / `--surface-2`
+ *
+ * 写法恒为 `var(--background)`（**不是**抄一份色值）。原因：自定义属性按**元素**求值 ——
+ * `tokens.css` 的 `:root { --surface-1: var(--background) }` 求值时看的是 `:root` 自己
+ * 那份 `--background`；而本文件在 `<html>` 上重写了 `--background`（同元素、更高特异性），
+ * 于是 `--background` 是主题色、`--surface-1` 却停在默认值上，两者静默分家。
+ *
+ * 分家的后果不在配色上（没配背景媒体时默认值恰好也是同一个值），而在**层级**：
+ * `bg-surface-1` 面板一旦拿到的不是主题底色，就会在深色主题 / 自定义主题下透出下层
+ * （手机设置页的二级页就是这么变成「纯透明」的，2026-10）。自定义主题 / 内置主题的
+ * 覆盖层那份由 `useColorTheme.ts` 的 `decls()` 一起生成，新增主题时记得同步那边。
+ */
+
+/* ════════ 默认主题：与 `tokens.css` 的 `:root` 同源，这里只是显式再声明一遍 ════════ */
+[data-theme='default'] {
+  --surface-1: var(--background);
+  --surface-2: var(--background);
+}
+
+/* 海雾：冷蓝灰，最接近默认主题的「安静版」 */
+[data-theme='ocean'] {
+  --background: oklch(0.99 0.004 240);
+  --surface-1: var(--background);
+  --surface-2: var(--background);
+  --foreground: oklch(0.18 0.02 250);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.18 0.02 250);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.18 0.02 250);
+  --secondary: oklch(0.955 0.012 240);
+  --secondary-foreground: oklch(0.22 0.02 250);
+  --muted: oklch(0.975 0.008 240);
+  --muted-foreground: oklch(0.46 0.02 245);
+  --accent: oklch(0.945 0.018 240);
+  --accent-foreground: oklch(0.22 0.02 250);
+  --border: oklch(0.915 0.014 240);
+  --input: oklch(0.915 0.014 240);
+  --sidebar: oklch(0.968 0.014 240);
+  --sidebar-foreground: oklch(0.18 0.02 250);
+  --sidebar-accent: oklch(0.94 0.02 240);
+  --sidebar-accent-foreground: oklch(0.22 0.02 250);
+  --sidebar-border: oklch(0.915 0.014 240);
+  --primary: #0b6ea8;
+  --primary-foreground: #ffffff;
+  --radius: 0.875rem;
+  /* 人格：紧凑、阴影克制、代码关键字偏蓝 */
+  --fizz-text-scale: 1;
+  --fizz-density: 0.97;
+  --fizz-shadow-alpha: 0.8;
+  --syntax-keyword: #0b6ea8;
+}
+
+.dark[data-theme='ocean'] {
+  --background: oklch(0.17 0.016 245);
+  --surface-1: var(--background);
+  --surface-2: var(--background);
+  --foreground: oklch(0.97 0.005 240);
+  --card: oklch(0.225 0.018 245);
+  --card-foreground: oklch(0.97 0.005 240);
+  --popover: oklch(0.225 0.018 245);
+  --popover-foreground: oklch(0.97 0.005 240);
+  --secondary: oklch(0.275 0.02 245);
+  --secondary-foreground: oklch(0.97 0.005 240);
+  --muted: oklch(0.275 0.02 245);
+  --muted-foreground: oklch(0.78 0.02 240);
+  --accent: oklch(0.29 0.024 245);
+  --accent-foreground: oklch(0.97 0.005 240);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --sidebar: oklch(0.205 0.018 245);
+  --sidebar-foreground: oklch(0.97 0.005 240);
+  --sidebar-accent: oklch(0.275 0.02 245);
+  --sidebar-accent-foreground: oklch(0.97 0.005 240);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --primary: #7cc7ff;
+  --primary-foreground: #101010;
+  --radius: 0.875rem;
+  --fizz-text-scale: 1;
+  --fizz-density: 0.97;
+  --fizz-shadow-alpha: 1.1;
+  --syntax-keyword: #7cc7ff;
+}
+
+/* 森野：微绿，圆角收一档，看起来更「工具」一点 */
+[data-theme='forest'] {
+  --background: oklch(0.992 0.004 150);
+  --surface-1: var(--background);
+  --surface-2: var(--background);
+  --foreground: oklch(0.19 0.02 155);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.19 0.02 155);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.19 0.02 155);
+  --secondary: oklch(0.955 0.014 150);
+  --secondary-foreground: oklch(0.22 0.02 155);
+  --muted: oklch(0.972 0.01 150);
+  --muted-foreground: oklch(0.46 0.025 155);
+  --accent: oklch(0.94 0.02 150);
+  --accent-foreground: oklch(0.22 0.02 155);
+  --border: oklch(0.91 0.016 150);
+  --input: oklch(0.91 0.016 150);
+  --sidebar: oklch(0.966 0.016 150);
+  --sidebar-foreground: oklch(0.19 0.02 155);
+  --sidebar-accent: oklch(0.938 0.022 150);
+  --sidebar-accent-foreground: oklch(0.22 0.02 155);
+  --sidebar-border: oklch(0.91 0.016 150);
+  --primary: #2f7d4f;
+  --primary-foreground: #ffffff;
+  --radius: 0.75rem;
+  /* 人格：编辑向 —— 衬线标题、略大字号、紧凑间距、几乎没有阴影 */
+  --fizz-font-heading: 'Iowan Old Style', 'Palatino Linotype', Georgia, 'Songti SC', 'SimSun', serif;
+  --fizz-text-scale: 1.02;
+  --fizz-density: 0.96;
+  --fizz-shadow-alpha: 0.5;
+  --syntax-keyword: #2f7d4f;
+}
+
+.dark[data-theme='forest'] {
+  --background: oklch(0.165 0.018 155);
+  --surface-1: var(--background);
+  --surface-2: var(--background);
+  --foreground: oklch(0.965 0.006 150);
+  --card: oklch(0.215 0.02 155);
+  --card-foreground: oklch(0.965 0.006 150);
+  --popover: oklch(0.215 0.02 155);
+  --popover-foreground: oklch(0.965 0.006 150);
+  --secondary: oklch(0.27 0.024 155);
+  --secondary-foreground: oklch(0.965 0.006 150);
+  --muted: oklch(0.27 0.024 155);
+  --muted-foreground: oklch(0.79 0.02 150);
+  --accent: oklch(0.285 0.026 155);
+  --accent-foreground: oklch(0.965 0.006 150);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --sidebar: oklch(0.2 0.02 155);
+  --sidebar-foreground: oklch(0.965 0.006 150);
+  --sidebar-accent: oklch(0.27 0.024 155);
+  --sidebar-accent-foreground: oklch(0.965 0.006 150);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --primary: #7ee787;
+  --primary-foreground: #101010;
+  --radius: 0.75rem;
+  --fizz-font-heading: 'Iowan Old Style', 'Palatino Linotype', Georgia, 'Songti SC', 'SimSun', serif;
+  --fizz-text-scale: 1.02;
+  --fizz-density: 0.96;
+  --fizz-shadow-alpha: 0.9;
+  --syntax-keyword: #7ee787;
+}
+
+/* 暖砂：米黄暖调 + 大圆角，唯一一套「明显更圆」的主题（顺便演示圆角也能跟着主题走） */
+[data-theme='sand'] {
+  --background: oklch(0.988 0.008 80);
+  --surface-1: var(--background);
+  --surface-2: var(--background);
+  --foreground: oklch(0.22 0.02 70);
+  --card: oklch(1 0.006 80);
+  --card-foreground: oklch(0.22 0.02 70);
+  --popover: oklch(1 0.006 80);
+  --popover-foreground: oklch(0.22 0.02 70);
+  --secondary: oklch(0.955 0.02 80);
+  --secondary-foreground: oklch(0.25 0.02 70);
+  --muted: oklch(0.972 0.014 80);
+  --muted-foreground: oklch(0.47 0.025 70);
+  --accent: oklch(0.94 0.028 80);
+  --accent-foreground: oklch(0.25 0.02 70);
+  --border: oklch(0.91 0.022 80);
+  --input: oklch(0.91 0.022 80);
+  --sidebar: oklch(0.965 0.022 80);
+  --sidebar-foreground: oklch(0.22 0.02 70);
+  --sidebar-accent: oklch(0.938 0.03 80);
+  --sidebar-accent-foreground: oklch(0.25 0.02 70);
+  --sidebar-border: oklch(0.91 0.022 80);
+  --primary: #9a5b13;
+  --primary-foreground: #ffffff;
+  --radius: 1rem;
+  /* 人格：纸感 —— 暖米黄 + 细横纹、字号最大、间距最松、阴影几乎扁平 */
+  --fizz-font-heading: 'Iowan Old Style', 'Palatino Linotype', Georgia, 'Songti SC', 'SimSun', serif;
+  --fizz-text-scale: 1.03;
+  --fizz-density: 1.05;
+  --fizz-shadow-alpha: 0.45;
+  --fizz-theme-texture: repeating-linear-gradient(0deg, rgb(128 96 48 / 0.05) 0 1px, transparent 1px 4px);
+  --fizz-texture-size: auto;
+  --syntax-keyword: #9a5b13;
+}
+
+.dark[data-theme='sand'] {
+  --background: oklch(0.17 0.014 70);
+  --surface-1: var(--background);
+  --surface-2: var(--background);
+  --foreground: oklch(0.97 0.008 80);
+  --card: oklch(0.22 0.016 70);
+  --card-foreground: oklch(0.97 0.008 80);
+  --popover: oklch(0.22 0.016 70);
+  --popover-foreground: oklch(0.97 0.008 80);
+  --secondary: oklch(0.275 0.018 70);
+  --secondary-foreground: oklch(0.97 0.008 80);
+  --muted: oklch(0.275 0.018 70);
+  --muted-foreground: oklch(0.8 0.02 80);
+  --accent: oklch(0.29 0.02 70);
+  --accent-foreground: oklch(0.97 0.008 80);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --sidebar: oklch(0.205 0.016 70);
+  --sidebar-foreground: oklch(0.97 0.008 80);
+  --sidebar-accent: oklch(0.275 0.018 70);
+  --sidebar-accent-foreground: oklch(0.97 0.008 80);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --primary: #ffb86b;
+  --primary-foreground: #101010;
+  --radius: 1rem;
+  --fizz-font-heading: 'Iowan Old Style', 'Palatino Linotype', Georgia, 'Songti SC', 'SimSun', serif;
+  --fizz-text-scale: 1.03;
+  --fizz-density: 1.05;
+  --fizz-shadow-alpha: 0.8;
+  --fizz-theme-texture: repeating-linear-gradient(0deg, rgb(128 96 48 / 0.05) 0 1px, transparent 1px 4px);
+  --fizz-texture-size: auto;
+  --syntax-keyword: #ffb86b;
+}
+
+/* 暮紫：紫灰 + 小圆角，偏「克制」的一档 */
+[data-theme='plum'] {
+  --background: oklch(0.99 0.006 300);
+  --surface-1: var(--background);
+  --surface-2: var(--background);
+  --foreground: oklch(0.2 0.025 300);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.2 0.025 300);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.2 0.025 300);
+  --secondary: oklch(0.955 0.016 300);
+  --secondary-foreground: oklch(0.24 0.025 300);
+  --muted: oklch(0.973 0.012 300);
+  --muted-foreground: oklch(0.47 0.025 300);
+  --accent: oklch(0.945 0.022 300);
+  --accent-foreground: oklch(0.24 0.025 300);
+  --border: oklch(0.912 0.018 300);
+  --input: oklch(0.912 0.018 300);
+  --sidebar: oklch(0.968 0.018 300);
+  --sidebar-foreground: oklch(0.2 0.025 300);
+  --sidebar-accent: oklch(0.94 0.024 300);
+  --sidebar-accent-foreground: oklch(0.24 0.025 300);
+  --sidebar-border: oklch(0.912 0.018 300);
+  --primary: #7b3fa0;
+  --primary-foreground: #ffffff;
+  --radius: 0.625rem;
+  /* 人格：夜航 —— 阴影最重（浮起来）、亮色纯色 / 暗色星点 */
+  --fizz-text-scale: 1;
+  --fizz-density: 1;
+  --fizz-shadow-alpha: 1.2;
+  --fizz-theme-texture: none;
+  --fizz-texture-size: auto;
+  --syntax-keyword: #7b3fa0;
+}
+
+.dark[data-theme='plum'] {
+  --background: oklch(0.17 0.018 300);
+  --surface-1: var(--background);
+  --surface-2: var(--background);
+  --foreground: oklch(0.97 0.006 300);
+  --card: oklch(0.22 0.02 300);
+  --card-foreground: oklch(0.97 0.006 300);
+  --popover: oklch(0.22 0.02 300);
+  --popover-foreground: oklch(0.97 0.006 300);
+  --secondary: oklch(0.275 0.024 300);
+  --secondary-foreground: oklch(0.97 0.006 300);
+  --muted: oklch(0.275 0.024 300);
+  --muted-foreground: oklch(0.8 0.02 300);
+  --accent: oklch(0.29 0.026 300);
+  --accent-foreground: oklch(0.97 0.006 300);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --sidebar: oklch(0.205 0.02 300);
+  --sidebar-foreground: oklch(0.97 0.006 300);
+  --sidebar-accent: oklch(0.275 0.024 300);
+  --sidebar-accent-foreground: oklch(0.97 0.006 300);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --primary: #d8b4fe;
+  --primary-foreground: #101010;
+  --radius: 0.625rem;
+  --fizz-text-scale: 1;
+  --fizz-density: 1;
+  --fizz-shadow-alpha: 1.5;
+  /* 星点：值必须与 useColorTheme.ts 的 TEXTURE_CSS.dots 逐字一致 */
+  --fizz-theme-texture: radial-gradient(circle, rgb(128 128 128 / 0.10) 1px, transparent 1px);
+  --fizz-texture-size: 16px 16px;
+  --syntax-keyword: #d8b4fe;
+}
+
+/* 终端：方角 + 等宽标题 + 扫描线，像一台浅色终端 */
+[data-theme='terminal'] {
+  --background: oklch(0.98 0.004 150);
+  --surface-1: var(--background);
+  --surface-2: var(--background);
+  --foreground: oklch(0.22 0.02 150);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.22 0.02 150);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.22 0.02 150);
+  --secondary: oklch(0.95 0.008 150);
+  --secondary-foreground: oklch(0.24 0.02 150);
+  --muted: oklch(0.965 0.006 150);
+  --muted-foreground: oklch(0.45 0.02 150);
+  --accent: oklch(0.93 0.012 150);
+  --accent-foreground: oklch(0.24 0.02 150);
+  --border: oklch(0.88 0.01 150);
+  --input: oklch(0.88 0.01 150);
+  --sidebar: oklch(0.955 0.008 150);
+  --sidebar-foreground: oklch(0.22 0.02 150);
+  --sidebar-accent: oklch(0.92 0.014 150);
+  --sidebar-accent-foreground: oklch(0.24 0.02 150);
+  --sidebar-border: oklch(0.88 0.01 150);
+  --primary: #00875f;
+  --primary-foreground: #ffffff;
+  --radius: 0.125rem;
+  /* 人格：极客 —— 方角、等宽标题、略小字号、最紧凑、无阴影、扫描线 */
+  --fizz-font-heading: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  --fizz-text-scale: 0.98;
+  --fizz-density: 0.94;
+  --fizz-shadow-alpha: 0;
+  --fizz-theme-texture: repeating-linear-gradient(0deg, rgb(0 120 80 / 0.045) 0 1px, transparent 1px 3px);
+  --fizz-texture-size: auto;
+  --syntax-keyword: #00875f;
+  --syntax-function: #006b4f;
+}
+
+/* 终端暗：近黑底 + 荧光绿前景 */
+.dark[data-theme='terminal'] {
+  --background: oklch(0.135 0.012 150);
+  --surface-1: var(--background);
+  --surface-2: var(--background);
+  --foreground: oklch(0.92 0.03 150);
+  --card: oklch(0.18 0.014 150);
+  --card-foreground: oklch(0.92 0.03 150);
+  --popover: oklch(0.18 0.014 150);
+  --popover-foreground: oklch(0.92 0.03 150);
+  --secondary: oklch(0.23 0.016 150);
+  --secondary-foreground: oklch(0.92 0.03 150);
+  --muted: oklch(0.23 0.016 150);
+  --muted-foreground: oklch(0.72 0.03 150);
+  --accent: oklch(0.25 0.02 150);
+  --accent-foreground: oklch(0.92 0.03 150);
+  --border: oklch(1 0 0 / 12%);
+  --input: oklch(1 0 0 / 18%);
+  --sidebar: oklch(0.16 0.014 150);
+  --sidebar-foreground: oklch(0.92 0.03 150);
+  --sidebar-accent: oklch(0.23 0.016 150);
+  --sidebar-accent-foreground: oklch(0.92 0.03 150);
+  --sidebar-border: oklch(1 0 0 / 12%);
+  --primary: #7ee787;
+  --primary-foreground: #101010;
+  --radius: 0.125rem;
+  --fizz-font-heading: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  --fizz-text-scale: 0.98;
+  --fizz-density: 0.94;
+  --fizz-shadow-alpha: 0;
+  --fizz-theme-texture: repeating-linear-gradient(0deg, rgb(0 120 80 / 0.045) 0 1px, transparent 1px 3px);
+  --fizz-texture-size: auto;
+  --syntax-keyword: #7ee787;
+  --syntax-function: #56d364;
+}
+
+/* 高对比：纯黑白无障碍主题 —— 无阴影、大字号、边框全实线 */
+[data-theme='contrast'] {
+  --background: #ffffff;
+  --surface-1: var(--background);
+  --surface-2: var(--background);
+  --foreground: #000000;
+  --card: #ffffff;
+  --card-foreground: #000000;
+  --popover: #ffffff;
+  --popover-foreground: #000000;
+  --secondary: #f2f2f2;
+  --secondary-foreground: #000000;
+  --muted: #f2f2f2;
+  --muted-foreground: #333333;
+  --accent: #e6e6e6;
+  --accent-foreground: #000000;
+  --border: #000000;
+  --input: #000000;
+  --sidebar: #f7f7f7;
+  --sidebar-foreground: #000000;
+  --sidebar-accent: #e6e6e6;
+  --sidebar-accent-foreground: #000000;
+  --sidebar-border: #000000;
+  --primary: #0000ee;
+  --primary-foreground: #ffffff;
+  --radius: 0.25rem;
+  --fizz-text-scale: 1.05;
+  --fizz-density: 1.02;
+  --fizz-shadow-alpha: 0;
+  --fizz-theme-texture: none;
+  --fizz-texture-size: auto;
+  --syntax-keyword: #0000ee;
+  --syntax-function: #006400;
+}
+
+/* 高对比暗：纯黑白反转 */
+.dark[data-theme='contrast'] {
+  --background: #000000;
+  --surface-1: var(--background);
+  --surface-2: var(--background);
+  --foreground: #ffffff;
+  --card: #0a0a0a;
+  --card-foreground: #ffffff;
+  --popover: #0a0a0a;
+  --popover-foreground: #ffffff;
+  --secondary: #1a1a1a;
+  --secondary-foreground: #ffffff;
+  --muted: #1a1a1a;
+  --muted-foreground: #d0d0d0;
+  --accent: #262626;
+  --accent-foreground: #ffffff;
+  --border: #ffffff;
+  --input: #ffffff;
+  --sidebar: #050505;
+  --sidebar-foreground: #ffffff;
+  --sidebar-accent: #1a1a1a;
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: #ffffff;
+  --primary: #ffff00;
+  --primary-foreground: #101010;
+  --radius: 0.25rem;
+  --fizz-text-scale: 1.05;
+  --fizz-density: 1.02;
+  --fizz-shadow-alpha: 0;
+  --fizz-theme-texture: none;
+  --fizz-texture-size: auto;
+  --syntax-keyword: #ffff00;
+  --syntax-function: #00ffff;
+}
+
+/* ---------------------------------------------------------------- 阴影强度
+ *
+ * 只改 `--tw-shadow-color`，**不改 `--tw-shadow`**：`hover:shadow-lg` 这类变体与
+ * `[data-theme] .shadow-lg` 特异性相同，若覆盖 `--tw-shadow` 会把悬停效果一起压掉。
+ * 每个尺寸的默认 alpha 抄自 Tailwind v4 的 `--tw-shadow` 值；`--fizz-shadow-alpha`
+ * 为 1 时逐像素等于现状，0 时完全扁平，1.6 时明显悬浮。
+ *
+ * ⚠️ 副作用：显式写了 `shadow-<color>` 的元素会被主题 alpha 覆盖（仓库目前没有这种用法）。
+ */
+[data-theme] .shadow-xs {
+  --tw-shadow-color: rgb(0 0 0 / calc(0.05 * var(--fizz-shadow-alpha, 1)));
+}
+[data-theme] .shadow-sm {
+  --tw-shadow-color: rgb(0 0 0 / calc(0.1 * var(--fizz-shadow-alpha, 1)));
+}
+[data-theme] .shadow-md {
+  --tw-shadow-color: rgb(0 0 0 / calc(0.1 * var(--fizz-shadow-alpha, 1)));
+}
+[data-theme] .shadow-lg {
+  --tw-shadow-color: rgb(0 0 0 / calc(0.1 * var(--fizz-shadow-alpha, 1)));
+}
+[data-theme] .shadow-xl {
+  --tw-shadow-color: rgb(0 0 0 / calc(0.1 * var(--fizz-shadow-alpha, 1)));
+}
+[data-theme] .shadow-2xl {
+  --tw-shadow-color: rgb(0 0 0 / calc(0.25 * var(--fizz-shadow-alpha, 1)));
+}
+
+/* ---------------------------------------------------------------- 侧栏作用域
+ *
+ * 侧栏里的文字 / 分隔线 / 悬停底用的是**通用**语义变量（`text-foreground`、
+ * `border-border`、`hover:bg-accent`），不是 shadcn 那套 `--sidebar-*`。所以主题里
+ * 改 `--sidebar-foreground` 原本没有任何消费方 —— 表现就是「侧栏文字改了不起作用」。
+ *
+ * 这里在侧栏根节点（`[data-fizz-sidebar]`，由 `ActivitySidebar` 的 `<aside>` 打）把通用
+ * 变量重指到 sidebar 令牌上。**对内置主题基本是恒等映射**：`--sidebar-foreground` /
+ * `--sidebar-border` / `--sidebar-accent-foreground` 与 `--foreground` / `--border` /
+ * `--accent-foreground` **逐字相同**（脚本逐块比对过），所以文字 / 分隔线零变化；
+ * 只有 `--sidebar-accent` 与 `--accent` 差 ≤0.03 明度（默认主题的悬停底会略浅一点，
+ * 各主题的 hover 本来就是这个量级的差别），换来「侧栏悬停」这颗滑块真的生效。
+ *
+ * ⚠️ **别把 `--muted-foreground` 也重指过来**：它没有对应的 sidebar 令牌，而内置暗色主题
+ * 的值是 0.78、按「侧栏文字 62% 叠侧栏底」算出来只有 0.69 —— 重指会让每套暗色主题的
+ * 分区标题明显变重。侧栏里的灰色小字（分区标题 / 计数）仍跟「弱化文字」走。
+ *
+ * ⚠️ 作用域只能挂在侧栏根节点上，不能挂 `html`：弹窗 / 下拉都渲染到 `body` 的 portal，
+ * 挂在根上会把「侧栏文字」的颜色漏进所有弹层。
+ */
+[data-fizz-sidebar] {
+  --foreground: var(--sidebar-foreground);
+  --border: var(--sidebar-border);
+  --accent: var(--sidebar-accent);
+  --accent-foreground: var(--sidebar-accent-foreground);
+}
+
+/* ---------------------------------------------------------------- 主题背景（图 / 视频）
+ *
+ * 两层**互斥**，同一套主题只会有一层在画：
+ *
+ * - 图片：JS 把 data URL 挂到 `<html>` 的 `--fizz-bg-image`，下面那条 `body::before` 画；
+ * - 视频：`background-image` 放不了视频，由 `useColorTheme` 的 `applyBackgroundVideo()`
+ *   往 `<body>` 里塞一个 `#fizz-bg-video`（本体是 IndexedDB 里的 Blob + objectURL）。
+ *
+ * 两层共用 `--fizz-bg-filter`（模糊）与同一个 `z-index:-1` 定位。
+ *
+ * ⚠️ 两层都受**首帧门禁**约束：应用挂载前 `buildStyle()` 整段不发（图片是同步的 data URL，
+ * 不挡的话首帧就是「满窗一张图、没有任何界面」，界面随后才压上来）。见 `useColorTheme.ts`
+ * 的 `backgroundRevealed` / `revealBackgroundOnMount()`。
+ *
+ * 为什么必须 `z-index:-1`：应用根节点那层 `bg-background` 会盖住画在它后面的任何东西，
+ * 只有「body 背景透明 + 媒体在最底层」+「`--background` / `--sidebar` 换成半透明」才能
+ * 透出来（后者由 `buildStyle()` 生成，媒体不在时这两个变量不会被改写）。
+ *
+ * `inset:-32px`：模糊会把边缘糊成透明，留出溢出让四边不留白。视频是替换元素，
+ * 光靠 inset 撑不开尺寸，必须自己写 `width/height: calc(100% + 64px)`。
+ *
+ * ⚠️ **视频层必须显式写 `max-width/max-height: none`**（踩过：右侧一条 32px 的空缺）。
+ * Tailwind 的 preflight 里有 `img, video { max-width: 100%; height: auto }`：
+ * `height` 被下面这条 ID 规则压过了，但 **`max-width` 是另一个属性，它不会被 `width` 覆盖**
+ * —— `calc(100% + 64px)` 被夹回 `100%`，而 `inset:-32px` 让元素从 -32px 起画，
+ * 于是右边缘停在「视口宽 - 32px」，正好空出一条 = 溢出量。图片层不受影响（不是替换元素），
+ * 所以症状只在视频主题上出现。
+ *
+ * ⚠️ **「要读字」的界面必须标 `data-fizz-opaque` + 自带 `bg-background`**（桌面设置窗口、
+ * 手机设置页）：前者让 `buildStyle()` 生成的那条规则把 `--background` 换回**不透明**的
+ * 主题底色，后者才是真正画出来的那块底。两个缺一：不写属性 = 半透明底透出背景；
+ * 只写属性不写 `bg-background` = 变量换了但没人画，整块仍然透（踩过：设置页直接看到视频）。
+ * 别给主界面 / 对话区加这个属性 —— 那些地方就是要透出背景。
+ *
+ * **压在人上面的面板用 `bg-surface-1` / `bg-surface-2`，不要用 `bg-background`**：
+ * 后者在有媒体时是「画布那层遮罩」，同一块区域被多层嵌套容器各画一次就会叠成近乎不透明
+ * （0.72 叠四层 = 0.994，图完全看不见 —— 这正是用户报的「有的区域看不到背景」）。
+ * 两个 surface 令牌由 `buildStyle()` 按同一主题底色派生（alpha 比画布更高），
+ * 用在右侧面板 / 助手 / 抽屉 / 卡片这类**叠在别的内容之上**的容器上；整页内容容器仍然
+ * 只让最外层画一次 `bg-background`。没有背景媒体时两者逐像素等于 `bg-background`。
+ * `[data-fizz-opaque]` 子树里它们也会被换回不透明底（见 `buildStyle()` 里那段注释）。
+ */
+body::before {
+  content: '';
+  position: fixed;
+  inset: -32px;
+  z-index: -1;
+  pointer-events: none;
+  /*
+   * 第一层是主题纹理，第二层是用户背景图。纹理在上，但两者互斥
+   * （有媒体时 `buildStyle()` 会把 `--fizz-theme-texture` 强制成 none）。
+   * `--fizz-texture-size`：点阵要 16px 网格，线性纹理用 auto（整块铺开）—— 由
+   * `buildStyle()` 按 `ThemeTexture` 派生，别在这里写死。
+   */
+  background-image: var(--fizz-theme-texture, none), var(--fizz-bg-image, none);
+  background-position: 0 0, center;
+  /* 第一层纹理尺寸，第二层铺满 / 完整显示（值与 `object-fit` 同名） */
+  background-size: var(--fizz-texture-size, auto), var(--fizz-bg-fit, cover);
+  background-repeat: repeat, no-repeat;
+  /* 图**还没解码出来** / `contain` 两侧留白处露出来的底，由 `buildStyle()` 按明暗发
+   * `--fizz-bg-base`（本主题的不透明底色），与视频层的 `--fizz-bg-void` 同源。
+   *
+   * 不写它的话露出来的是画布白（配了背景时 `buildStyle()` 会把 body 背景清成
+   * `transparent`，画布就退回 UA 默认的白）：深色主题下 `contain` 是两道亮边，
+   * 图片解码那一两帧也会透白。写成本主题底色后，这两处都变成「和没配背景时
+   * 一模一样的一块底」—— `cover` 且图已就绪时被完全盖住，零影响。
+   * 没配背景媒体时不发这个变量，回落到 `transparent`（默认值），与改动前完全一致。 */
+  background-color: var(--fizz-bg-base, transparent);
+  filter: var(--fizz-bg-filter, none);
+}
+
+/* 视频层：`hidden` 由 JS 控制（没配视频时整块不显示，不留一个空解码器） */
+#fizz-bg-video {
+  position: fixed;
+  inset: -32px;
+  z-index: -1;
+  width: calc(100% + 64px);
+  height: calc(100% + 64px);
+  /* preflight 的 `max-width:100%` 会把上面那 64px 溢出夹掉 → 右侧空一条（见上方注释） */
+  max-width: none;
+  max-height: none;
+  /* 铺满 / 完整显示：值与 `object-fit` 同名，由 `buildStyle()` 发 `--fizz-bg-fit` */
+  object-fit: var(--fizz-bg-fit, cover);
+  /* `contain` 时露出来的那两块底色。
+   *
+   * ⚠️ 必须是**视频自己的底**，不能用 `backgroundColor: transparent`：视频层在 `z-index:-1`，
+   * 而应用根节点那层 `bg-background`（半透明遮罩）**盖在它上面** —— 透明区会显出遮罩后面的
+   * 页面底，等于「完整显示」变成一块与页面融在一起的空白，看不出图框在哪。
+   * 这里用 `--fizz-bg-void`（由 `useColorTheme` 的 `applyBackgroundVideo()` 按**当前明暗**
+   * 算好的不透明主题底色），四边溢出那 32px 也就在这个底色里，模糊时不会漏出对比边。
+   * `cover` 时画面铺满、这个底色被完全盖住，不产生任何视觉影响。 */
+  background-color: var(--fizz-bg-void, #000);
+  pointer-events: none;
+  filter: var(--fizz-bg-filter, none);
+}

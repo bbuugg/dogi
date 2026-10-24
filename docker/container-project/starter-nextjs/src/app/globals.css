@@ -1,0 +1,74 @@
+@import 'tailwindcss';
+
+/* 主题色：Tailwind v4 的 `@theme` 直接声明成工具类可用的变量（bg-brand 等） */
+@theme {
+  --color-brand: oklch(0.62 0.19 264);
+  --color-brand-soft: oklch(0.72 0.14 264);
+}
+
+html,
+body {
+  height: 100%;
+}
+
+/*
+ * 页面滚动条。预览时这一页的右侧就是面板的边缘，浏览器默认那条浅色宽条在暗色页面上特别
+ * 扎眼，所以统一成：10px、圆角、半透明滑块、赛道透明。
+ *
+ * - `color-scheme: dark`：系统级滚动条 / 表单控件也走暗色，不会在白底上冒出一条亮的；
+ * - `scrollbar-gutter: stable`：内容从「不满一屏」长到「超过一屏」时预留的那 10px 已经占着，
+ *   页面不会整块横向抖一下（做卡片列表时最明显）。
+ *
+ * ⚠️ **不要在同一个元素上同时用标准属性（`scrollbar-width` / `scrollbar-color`）和
+ * `::-webkit-scrollbar` 伪元素**：Chromium 121+ 只要看到那两条标准属性，就**完全不画**伪元素
+ * 那一套了（圆角、透明赛道、hover 全部失效，退回原生细条）。所以标准属性只在「不支持
+ * 伪元素」的引擎里给（Firefox），用 `@supports` 隔开。
+ */
+html {
+  color-scheme: dark;
+  scrollbar-gutter: stable;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: rgb(255 255 255 / 0.18);
+  border-radius: 9999px;
+  /* 透明边框 + content-box 裁剪：滑块的视觉宽度比占位窄，不会贴着正文 */
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgb(255 255 255 / 0.3);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Firefox（不认 ::-webkit-scrollbar）：退回标准属性，一样细、一样半透明 */
+@supports not selector(::-webkit-scrollbar) {
+  html {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(255 255 255 / 0.22) transparent;
+  }
+}
+
+body {
+  @apply bg-neutral-950 text-neutral-100 antialiased;
+}
+
+/* 触摸设备上滚动条会占位吃掉 10px，藏掉（滚动本身不受影响） */
+@media (pointer: coarse) {
+  ::-webkit-scrollbar {
+    display: none;
+  }
+}

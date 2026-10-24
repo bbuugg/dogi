@@ -1,0 +1,31 @@
+{
+  "name": "@fizz/git",
+  "version": "0.1.0",
+  "description": "Fizz 的 git 工具层：simple-git 访问层（git 路由共用）+ 零依赖 worktree 辅助（服务端建删 worktree、任务提交），源码直接被打包",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./worktree": {
+      "types": "./src/worktree.ts",
+      "default": "./src/worktree.ts"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "simple-git": "^4.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^7.0.2"
+  }
+}

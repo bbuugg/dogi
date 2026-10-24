@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Fizz</title>
+    <!--
+      ⚠️ 首帧前必须把主题类名定好，否则会「先黑后亮 / 先亮后黑」闪一下。
+      原因：真实主题要等 JS bundle 加载 → main.tsx 执行 applyThemeClass() 才落地 ——
+      这中间第一帧已经画出来了。`<html>` 上那个静态 class 只是「这段脚本没跑成」时的兜底
+      （脚本在 <head> 里同步执行，第一帧前就把类名覆盖掉了）。
+
+      判定逻辑必须与下面两处完全一致，改那两处时记得同步这里：
+      - apps/desktop/src/renderer/host.ts 的 loadTheme()：只认 'light' / 'dark'，
+        其余（含未存过、存坏、storage 被禁）回落 'system'；新 key 没有时读旧版的 web key
+      - packages/agent-kit/src/shared/hooks/useTheme.ts：mode = 'system' 时才看 prefers-color-scheme
+
+      所以这里**先按系统偏好取一个值**，再用存下来的 light / dark 覆盖它。
+    -->
+    <script>
+      ;(function () {
+        var dark = window.matchMedia('(prefers-color-scheme: dark)').matches
+        try {
+          // 新 key 优先；没有才读旧版 UI 写的那把（与 host.ts 的 loadTheme 同序）
+          var mode = localStorage.getItem('fizz.desktop.theme')
+          if (mode === null) mode = localStorage.getItem('fizz.web.theme')
+          if (mode === 'light') dark = false
+          else if (mode === 'dark') dark = true
+          // 'system' / null / 存坏：保持上面按系统偏好取的值
+        } catch (e) {
+          // storage 被禁：同样保持按系统偏好取的值
+        }
+        document.documentElement.classList.toggle('dark', dark)
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/renderer/main.tsx"></script>
+  </body>
+</html>

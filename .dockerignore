@@ -1,0 +1,39 @@
+# 构建上下文瘦身：node_modules 与产物都在镜像里重新生成，不进上下文
+node_modules
+**/node_modules
+
+# 构建产物（apps/*/dist 由 build:server / build:web 生成）
+**/dist
+apps/desktop/out
+release
+
+# 由 scripts/copy-monaco.cjs 从 node_modules/monaco-editor 复制生成（600+ 文件），
+# build:web 会自己重新拷一遍
+apps/web/public/monaco-editor
+apps/desktop/public/monaco-editor
+
+# 本地配置：镜像里绝不带 .env（token / API key 由 compose 注入，真实环境变量优先）
+.env
+.env.*
+!.env.example
+
+# 容器型项目「Web 栈镜像」的起手模板里各有一个 .gitignore（`vite.Dockerfile` /
+# `nextjs.Dockerfile` 的 COPY），它和上面的 `.gitignore` 同名同后缀，被挡在上下文外的话：
+# 铺进用户工作区的模板就没有忽略规则，agent 一句 `git add -A` 就能把 node_modules /
+# dist / .next 提交进去。**新增带 .gitignore 的模板目录时要在这里补一行例外。**
+!docker/container-project/starter/.gitignore
+!docker/container-project/starter-nextjs/.gitignore
+
+# 版本控制与本地工具目录
+.git
+.gitignore
+.workbuddy-ai
+.workbuddy
+.trae
+.vscode
+.tooltest
+.worktree
+
+# 与 server / web 构建无关
+build/icon.ico
+*.log

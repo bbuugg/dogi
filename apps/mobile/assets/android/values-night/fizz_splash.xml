@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 启动屏底色 = 对应主题的 App 底色（见 scripts/splash-brand.mjs）。
+         Android 12+ 的系统启动屏与冷启动窗口背景都用它。
+         注意：注释里不能出现两个连续的短横线，安卓的资源解析器会直接抛 SAXParseException。 -->
+    <color name="fizz_splash_background">#0a0a0a</color>
+    <!-- 状态栏 / 手势条上的系统图标要不要用深色（亮色底要，暗色底不要） -->
+    <bool name="fizz_splash_light_bars">false</bool>
+</resources>

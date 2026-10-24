@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="zh-CN" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      `interactive-widget=resizes-content`：软键盘弹出时**让布局视口一起缩**（而不是只缩
+      视觉视口）。安卓 WebView 认这条，于是 `window.innerHeight` 直接等于「键盘上方的
+      可视高度」，应用高度链（`html, body, #root { height: 100% }`）自动贴到键盘上沿，
+      终端底部那条快捷键条 / 输入框不会被输入法盖住。
+      （壳里另有 Capacitor 的 `Keyboard.resize: 'native'` / `SystemBars` 原生让位；
+      页面这侧仍必须显式声明，去掉就会复现「快捷键条在输入法下层、得先收键盘才点得到」。）
+
+      `user-scalable=no` / `maximum-scale=1`：安卓壳里页面不该被双指缩放 —— 它是个
+      App，不是网页；双指缩放会把整个界面（含顶栏、快捷键条）一起放大，退出还得靠
+      系统手势。注意 Chrome / WebView 可能出于无障碍忽略这两个值，所以真正的兜底是
+      `styles.css` 里 `html, body { touch-action: pan-x pan-y }`（禁掉 pinch-zoom，
+      滚动照常）。
+
+      `viewport-fit=cover`：**必须有**。Capacitor 8 的 `SystemBars` 只有在检测到它时才把
+      系统栏 insets **透传给页面**（注入 `--safe-area-inset-*`、WebView 不加 padding）；
+      缺了它就退回「原生给 WebView 加 padding」，而那条路下面露的是窗口背景色
+      （`Theme.AppCompat.DayNight` 的底色，通常是白）—— 表现就是状态栏和手势条那两条
+      与主题对不上。页面侧怎么用那几个变量见 `src/app/app-shell.tsx` 的根容器。
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <title>Fizz</title>
+    <!--
+      ⚠️ 这个页面的 origin 是 `https://localhost`（Capacitor 本地 server），**不是** server
+      的地址。所有 `/api`、SSE、WS 都靠 `main.tsx` 里注入的服务端地址接成绝对地址；
+      地址由用户在登录页填写、存在本机（`fizz.mobile.serverUrl`），不再构建期烘死。
+      见 `@fizz/agent-client` 的 `Connection.serverBase`。
+    -->
+    <!--
+      ⚠️ 首帧前必须把主题类名定好，否则启动屏会先按错的底色画一帧。
+      `#boot-splash` 的底色就是按 `<html class="dark">` 分的（见下面那段内联样式），
+      所以这里算错 = 「启动屏黑一下、进去变白」这种闪。
+
+      判定逻辑必须与下面两处完全一致，改那两处时记得同步这里：
+      - apps/mobile/src/host.ts 的 loadTheme()：只认 'light' / 'dark'，其余（含未存过、
+        存坏、storage 被禁）回落 'system'
+      - packages/agent-kit/src/shared/hooks/useTheme.ts：mode = 'system' 时才看 prefers-color-scheme
+
+      所以这里**先按系统偏好取一个值**，再用存下来的 light / dark 覆盖它。
+    -->
+    <script>
+      ;(function () {
+        var dark = window.matchMedia('(prefers-color-scheme: dark)').matches
+        try {
+          var mode = localStorage.getItem('fizz.mobile.theme')
+          if (mode === 'light') dark = false
+          else if (mode === 'dark') dark = true
+          // 'system' / null / 存坏：保持上面按系统偏好取的值
+        } catch (e) {
+          // localStorage 被禁：同样保持按系统偏好取的值
+        }
+        document.documentElement.classList.toggle('dark', dark)
+      })()
+    </script>
+    <!--
+      首屏启动屏（body 里的 #boot-splash）的样式：**必须内联在这一层**，
+      不能等打包后的 CSS —— 它要在页面第一帧就生效，而 `index.css` 里的主题变量
+      要等样式表加载后才在。所以底色写死成与默认主题的 `--background` 同值
+      （亮 #ffffff / 暗 #0a0a0a，见 packages/ui-tokens/src/tokens.css），亮暗跟着
+      上面那段内联脚本给 <html> 挂的 class 走 —— 用户在设置里选的主题，第一帧就对。
+
+      logo 的边长由 vite.config.ts 的 bootSplashLogo 插件填（取值在
+      scripts/splash-brand.mjs 的 SPLASH_LOGO_DP）—— **必须与原生启动屏同一个 dp**：
+      原生那边是固定 dp 的 logo，这里要是写成 vmin 之类的相对值，两边尺寸对不上，
+      切过来就会「高度跳一下」（用户报过）。CSS px 与安卓 dp 是 1:1。
+      图片 src 同理由插件内联成 data URI（占位符会被整个替换掉，产物里不会留下它）。
+    -->
+    <style>
+      #boot-splash {
+        /* 构建期替换成固定 px（与原生同一个 dp），别改成 vmin */
+        --boot-logo-size: __FIZZ_BOOT_LOGO_SIZE__;
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background-color: #ffffff;
+        transition: opacity 220ms ease;
+      }
+      html.dark #boot-splash {
+        background-color: #0a0a0a;
+      }
+      #boot-splash img {
+        display: block;
+        width: var(--boot-logo-size);
+        height: var(--boot-logo-size);
+      }
+      /*
+        状态行（加载圈 + 文字）：绝对定位在 logo 正下方，**不参与 flex 居中** —— 它一进
+        正常流，logo 就会被往上推半个（状态行 + 间距），而原生启动屏的 logo 是严格居中
+        的，切过来那一下就会「图标跳一下」。定位从 50% 算起，与 logo 的几何中心对齐；
+        水平居中交给这个容器的 translateX，圈自己的旋转动画才不会被覆盖。
+      */
+      #boot-splash-status {
+        position: absolute;
+        top: calc(50% + var(--boot-logo-size) / 2 + 28px);
+        left: 50%;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        transform: translateX(-50%);
+        font-family:
+          system-ui,
+          -apple-system,
+          'Segoe UI',
+          'PingFang SC',
+          'Microsoft YaHei',
+          sans-serif;
+        font-size: 14px;
+        line-height: 1;
+        letter-spacing: 0.02em;
+        color: rgba(0, 0, 0, 0.6);
+        white-space: nowrap;
+      }
+      html.dark #boot-splash-status {
+        color: rgba(255, 255, 255, 0.65);
+      }
+      #boot-splash-spinner {
+        box-sizing: border-box;
+        flex: none;
+        width: 18px;
+        height: 18px;
+        border: 2px solid rgba(0, 0, 0, 0.14);
+        border-top-color: rgba(0, 0, 0, 0.65);
+        border-radius: 9999px;
+        animation: boot-splash-spin 700ms linear infinite;
+      }
+      html.dark #boot-splash-spinner {
+        border-color: rgba(255, 255, 255, 0.16);
+        border-top-color: rgba(255, 255, 255, 0.72);
+      }
+      /*
+        「加载中」后面三个点依次亮起。不用 `content` 动画（WebKit 上不可靠），
+        固定三个圆点 + 错开的 opacity 动画，节奏更稳。
+      */
+      #boot-splash-dots {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        margin-left: 2px;
+      }
+      #boot-splash-dots i {
+        width: 4px;
+        height: 4px;
+        border-radius: 9999px;
+        background-color: currentColor;
+        opacity: 0.25;
+        animation: boot-splash-dot 1.2s ease-in-out infinite;
+      }
+      #boot-splash-dots i:nth-child(2) {
+        animation-delay: 0.2s;
+      }
+      #boot-splash-dots i:nth-child(3) {
+        animation-delay: 0.4s;
+      }
+      @keyframes boot-splash-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @keyframes boot-splash-dot {
+        0%,
+        60%,
+        100% {
+          opacity: 0.25;
+        }
+        30% {
+          opacity: 1;
+        }
+      }
+      @keyframes boot-splash-pulse {
+        0%,
+        100% {
+          opacity: 0.3;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
+      #boot-splash.is-leaving {
+        opacity: 0;
+        pointer-events: none;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #boot-splash {
+          transition: none;
+        }
+        /* 减动效时不转圈，退化成呼吸式明暗，仍然能看出「还在加载」 */
+        #boot-splash-spinner {
+          animation: boot-splash-pulse 1.2s ease-in-out infinite;
+          border-color: rgba(0, 0, 0, 0.45);
+        }
+        html.dark #boot-splash-spinner {
+          border-color: rgba(255, 255, 255, 0.55);
+        }
+        /* 三个点保持常亮，不再依次闪烁 */
+        #boot-splash-dots i {
+          animation: none;
+          opacity: 0.6;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <!--
+      首屏：居中 logo + 下方「加载圈 + 加载中…」，底色跟设置里的亮暗主题（见上面那段内联样式）。
+      退出由 src/app/boot-splash.ts 负责（React 画完第一帧后淡出并移除）。
+    -->
+    <div id="boot-splash" aria-hidden="true">
+      <img src="__FIZZ_BOOT_LOGO__" alt="" />
+      <div id="boot-splash-status">
+        <span id="boot-splash-spinner" role="status" aria-label="加载中"></span>
+        <span>加载中<span id="boot-splash-dots"><i></i><i></i><i></i></span></span>
+      </div>
+    </div>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

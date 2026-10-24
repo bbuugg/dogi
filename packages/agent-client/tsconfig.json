@@ -1,0 +1,25 @@
+{
+  // DOM 是必须的：`web-host.ts` 是浏览器兜底实现（WebSocket / document / matchMedia）。
+  // 但它不引 React、不出 JSX —— 那是 `agent-kit` 的事。
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    /*
+     * 必须带 `node`：`@fizz/contracts` 的源码里有 `node:fs`（workspace 契约），
+     * 本包经 node_modules 软链解析到它的 .ts，会被一起检查。**只是让类型可见**，
+     * 本包运行时不碰 node —— 它的产物要能直接进浏览器。
+     */
+    "types": ["node"],
+    "strict": true,
+    "noUnusedLocals": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "useDefineForClassFields": true,
+    "noEmit": true
+  },
+  "include": ["src/**/*"]
+}

@@ -1,0 +1,273 @@
+/*
+ * 滑块验证码样式（移植自 `console/apps/captcha/sdk/src/styles.css`）。
+ *
+ * 原版跑在 Shadow DOM 里，靠 `--cap-*` 变量与宿主隔离；这里是同一份 CSS，只是把变量的
+ * **默认值换成工作台的语义色 token**（`--muted` / `--border` / `--primary` / `--destructive`…），
+ * 于是亮暗主题、品牌色、圆角都跟着应用走，不需要原版那套 `.cap--dark` 与 `prefers-color-scheme`
+ * 分支（工作台的主题切换是 `.dark` 类，不是系统偏好）。
+ *
+ * 类名保持 `cap-` 前缀原样：这套组件是从独立 SDK 搬进来的，改名只会让「对着原版看差异」变难。
+ */
+
+.cap {
+  display: block;
+  width: 100%;
+  color: var(--foreground);
+  -webkit-font-smoothing: antialiased;
+  box-sizing: border-box;
+}
+
+.cap *,
+.cap *::before,
+.cap *::after {
+  box-sizing: border-box;
+}
+
+/* ── 舞台 ───────────────────────────────────────────────── */
+
+.cap-stage {
+  position: relative;
+  width: 100%;
+  /* 关键：从一开始就占住高度，挑战到达前后弹窗不会跳变。
+     挑战到手后由内联 aspect-ratio 覆盖成真实比例。 */
+  aspect-ratio: var(--cap-aspect, 2 / 1);
+  overflow: hidden;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--muted);
+  cursor: grab;
+  /* 关键：触摸设备上禁止浏览器接管手势（滚动 / 缩放），否则拖不动 */
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  outline: none;
+}
+
+.cap-stage:focus-visible {
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary) 32%, transparent);
+}
+
+.cap--dragging .cap-stage {
+  cursor: grabbing;
+}
+
+.cap--disabled .cap-stage,
+.cap--verifying .cap-stage,
+.cap--passed .cap-stage {
+  cursor: default;
+}
+
+.cap-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+.cap-piece {
+  position: absolute;
+  pointer-events: none;
+  -webkit-user-drag: none;
+  user-select: none;
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.45));
+  /* 键盘微调时平滑；拖动时关掉（见下） */
+  transition: left 0.12s ease;
+  will-change: left;
+}
+
+.cap--dragging .cap-piece {
+  transition: none;
+}
+
+/* ── 骨架屏（挑战到达前占位，避免高度跳变 / 白屏） ───────── */
+
+.cap-skeleton {
+  position: absolute;
+  inset: 0;
+  background: var(--muted);
+  overflow: hidden;
+}
+
+/* 掠过的高光，做「加载中」的观感 */
+.cap-skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in oklab, var(--foreground) 8%, transparent) 50%,
+    transparent 100%
+  );
+  transform: translateX(-100%);
+  animation: cap-shimmer 1.3s ease-in-out infinite;
+}
+
+@keyframes cap-shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* 加载失败：停掉高光，避免一直闪 */
+.cap--error .cap-skeleton::after {
+  animation: none;
+  opacity: 0;
+}
+
+/* ── 加载 / 失败文案（叠在骨架屏之上） ──────────────────── */
+
+.cap-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 16px;
+  font-size: 13px;
+  text-align: center;
+  color: var(--muted-foreground);
+  pointer-events: none;
+}
+
+.cap-spinner {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--primary);
+  animation: cap-spin 0.7s linear infinite;
+  flex: none;
+}
+
+@keyframes cap-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── 底部：提示 + 刷新 ──────────────────────────────────── */
+
+.cap-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  min-height: 24px;
+}
+
+.cap-hint {
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--muted-foreground);
+  transition: color 0.15s ease;
+}
+
+.cap--dragging .cap-hint,
+.cap--ready .cap-hint {
+  color: var(--foreground);
+}
+
+.cap--verifying .cap-hint {
+  color: var(--primary);
+}
+
+.cap--passed .cap-hint {
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.cap--failed .cap-hint,
+.cap--error .cap-hint {
+  color: var(--destructive);
+}
+
+.cap-refresh {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    transform 0.3s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.cap-refresh:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.cap-refresh:active {
+  transform: rotate(-90deg);
+}
+
+.cap-refresh:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cap-refresh svg {
+  width: 15px;
+  height: 15px;
+}
+
+.cap--loading .cap-refresh svg {
+  animation: cap-spin 0.7s linear infinite;
+}
+
+/* ── 失败抖动 ───────────────────────────────────────────── */
+
+@keyframes cap-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-6px);
+  }
+  40% {
+    transform: translateX(5px);
+  }
+  60% {
+    transform: translateX(-3px);
+  }
+  80% {
+    transform: translateX(2px);
+  }
+}
+
+.cap--failed .cap-stage {
+  animation: cap-shake 0.4s ease;
+}
+
+/* 减少动效偏好 */
+@media (prefers-reduced-motion: reduce) {
+  .cap-piece,
+  .cap-hint,
+  .cap-refresh {
+    transition: none;
+  }
+  .cap--failed .cap-stage {
+    animation: none;
+  }
+  .cap-skeleton::after {
+    animation: none;
+    opacity: 0;
+  }
+}

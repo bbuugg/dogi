@@ -1,0 +1,38 @@
+{
+  "name": "@fizz/agent",
+  "version": "0.1.0",
+  "description": "Fizz 的对话编排：基于 Mastra 的单轮 agent、系统提示词 / 历史消息转换 / 流事件适配、项目约束文档、上游模型探测，源码直接被打包",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.53",
+    "@ai-sdk/deepseek": "^3.0.44",
+    "@ai-sdk/google": "^4.0.69",
+    "@ai-sdk/openai": "^4.0.66",
+    "@fizz/contracts": "*",
+    "@fizz/i18n": "*",
+    "@fizz/plugin": "*",
+    "@fizz/skills": "*",
+    "@fizz/tools": "*",
+    "@mastra/core": "^1.68.0",
+    "ai": "^7.0.99",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^7.0.2"
+  }
+}

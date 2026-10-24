@@ -1,0 +1,301 @@
+/*
+ * 设计令牌（语义变量）。组件只准用语义名（`bg-background` / `text-muted-foreground` /
+ * `border-border` / `rounded-lg`），**不要**在组件里写 `bg-zinc-800` 这类字面色 ——
+ * 那样各 app 换肤时改不动。
+ *
+ * 各 app 覆盖方式（在自己的 `app.css` 里，`@import` 令牌之后）：
+ *   :root { --primary: oklch(...); --radius: 0.5rem; }
+ *   .dark { --primary: oklch(...); }
+ */
+
+/*
+ * `[data-theme='default']` 与 `:root` 同一份值：命名主题的**预览小卡**（设置 → 外观）
+ * 要在任意主题下都退回默认配色，而卡片继承的是 `<html>` 上的主题变量 —— 只有把默认那套
+ * 也挂到一个选择器上，卡片才能靠自己的 `data-theme` 拿回原色。别在这里另写一套色值。
+ */
+:root,
+[data-theme='default'] {
+  --background: oklch(1 0 0);
+  /*
+   * 表面层级：给「压在别的画面之上、必须读字」的面板 / 卡片用。
+   *
+   * 默认值必须写成 `var(--background)`（而不是另抄一份色值）：没配背景媒体时两者
+   * 逐像素相同，配了之后由 `useColorTheme` 的 `buildStyle()` 按遮罩强度派生出更实的
+   * 半透明值。详见 `themes.css` 里「主题背景」那段。
+   *
+   * ⚠️ `themes.css` 里**每套命名主题的亮 / 暗两块都必须重写这两行**（`--surface-1:
+   * var(--background)`）：自定义属性是逐元素各自求值的，`[data-theme='ocean']` 在
+   * `<html>` 上把 `--background` 换掉了，而这里的 `var(--background)` 只对「没有声明
+   * 过 surface 的元素」成立 —— 一旦主题块声明了 surface 又写成固定色值，就会跟那套
+   * 主题的底色对不上。验算方法：`getComputedStyle(document.documentElement).getPropertyValue('--surface-1')`
+   * 应与同处的 `--background` 相同（配了背景媒体时是它的半透明版）。
+   */
+  --surface-1: var(--background);
+  --surface-2: var(--background);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --secondary: oklch(0.95 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  /* ⚠️ 次要文字灰（全项目 700+ 处 `text-muted-foreground` 都吃这一个值）。
+     原来跟 shadcn 默认一样是 `oklch(0.556 0 0)`（#737373，白底对比度 4.74:1）——
+     在 12px 小字 + `/70` 半透明叠加之后掉到 2.7:1，整屏看着「发灰、发虚」。
+     收到 `oklch(0.48 0 0)`（#5d5d5d，6.6:1）：仍是明确的次要层级，但读得清。
+     改这里 = 全项目一起变，不需要动任何组件。 */
+  --muted-foreground: oklch(0.48 0 0);
+  /* hover 底色：与纯白要可辨，不能回到 0.97（0.97 在侧栏那种浅底上几乎看不出来） */
+  --accent: oklch(0.94 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: var(--primary);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  /* 圆角基数：按钮 12px（`--radius-md` = 0.8 × 0.875rem ≈ 11.2px，`--radius-lg` = 14px）。
+     shadcn 默认是 0.625rem，本项目刻意放大到 0.875rem。 */
+  --radius: 0.875rem;
+  --sidebar: oklch(0.97 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: var(--primary);
+  --sidebar-primary-foreground: var(--primary-foreground);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+  /*
+   * 消息目录那条竖线（`features/chat/MessageOutline`）离**面板右缘**的距离。
+   *
+   * 手机 / 无滚动条时**贴边**（4px）：窄屏横向每一像素都值钱，而竖线只是 1px 的线 + 几个
+   * 小点，贴边才是它该在的位置。**有真滚动条时必须让开**（下面的 `@media` 给 12px）——
+   * 否则竖线会画在滚动条上。所以下面的判据与「画滚动条」那条 `@media` **完全一致**
+   * （10px 宽的滚动条只在「有鼠标 + ≥768px」时画）：改一处就要一起改。
+   */
+  --rail-inset: 4px;
+  /*
+   * 窄面板时消息内容要给竖线让出的右内边距 = 通道 + 列宽(24px) + 缝(4px)。
+   * **由 `--rail-inset` 推导**（不要写死）：竖线的落点与内容让出的宽度同源，
+   * 改上面那一个数就够了 —— 早先这两处各写一个魔数、靠注释互相提醒，结果就是右边
+   * 让出了一大段空白还没人发现（用户报的「手机版右侧空白一大片」）。
+   */
+  --rail-channel: calc(var(--rail-inset) + 28px);
+  /*
+   * 手机抽屉（活动侧栏）**左侧让出的宽度** = 外壳最左边那根活动栏竖条的宽度
+   * （`2.5rem` = `w-10`，与 `ActivityBar` 同源）。
+   *
+   * 抽屉是 fixed 覆盖层：从 `left-0` 起会压住竖条 —— 竖条虽然点得到，但被半透明遮罩
+   * 压暗，看起来仍是「不可点」。所以**有竖条的外壳**必须让出这段，遮罩也要跟着让。
+   *
+   * 没有活动栏的外壳（`apps/mobile`）在它自己的 `styles.css` 里覆盖成 `0`。这是**一个端的
+   * 形态差异**，落在 token 上而不是给 `ActivitySidebar` 加一个只服务单端的 prop —— 否则
+   * 每端一种形态，组件 API 就会长成一串 `xxxRail` 开关。
+   */
+  --sidebar-mobile-inset: 2.5rem;
+  /*
+   * 手机抽屉（活动侧栏）背后那层遮罩的底色。
+   *
+   * 默认取 `foreground` 的 30%：浅色主题下压暗、暗色主题下提亮，都是「底下的东西
+   * 退后一层」的观感。web / desktop 的抽屉是**覆盖**在正文上的，需要这层把正文压下去，
+   * 也顺带把点击收掉。
+   *
+   * `apps/mobile` 覆盖成 `transparent`：那边抽屉展开时正文是**被推走**的（见它
+   * `styles.css` 的 `[data-mobile-sidebar-open] [data-mobile-push]`），再压一层半透明就成了「推挤 + 蒙灰」
+   * 两套语汇叠一起 —— 暗色主题下 `foreground` 接近白，30% 白罩上去是一片发灰的雾。
+   * 遮罩层本身仍然渲染（保留点击收起），只是不画底色。
+   */
+  --sidebar-scrim: color-mix(in oklab, var(--foreground) 30%, transparent);
+  /*
+   * 外壳常驻 chrome 的高度 —— 给 `fixed` 覆盖层（手机抽屉、传输托盘）算让位用。
+   *
+   * 为什么必须是 token：`fixed` 元素是相对视口定位的，拿不到外壳容器上的任何 padding /
+   * flex 占位，只能自己把几条常驻边的高度算进去。而各端的高度不同 —— 桌面 / web 是
+   * `WebTitleBar` + `StatusBar` 两条 `h-9`；安卓壳换成了 `MobileAppBar`（`h-11`），
+   * 且既不渲染状态栏也没有底部导航条（见 `apps/mobile` 的 `app-shell.tsx` /
+   * `styles.css`）。
+   * 各端覆盖这几个值，共享组件（`ActivitySidebar` / `TransferTray`）一行都不用动 ——
+   * 与 `--sidebar-mobile-inset` 同一条分工。
+   *
+   * `--app-tabbar-height` 只有带底部导航的外壳才会给非零值（目前没有这样的外壳），
+   * web / desktop / mobile 都保持 0：桌面那条底部是状态栏，不是导航条。
+   */
+  --app-titlebar-height: 2.25rem;
+  --status-bar-height: 2.25rem;
+  --app-tabbar-height: 0px;
+  /*
+   * 手机抽屉的上沿（下沿还是自己按 `--status-bar-height` 算）。
+   *
+   * 默认 = 顶栏下沿：web / desktop 的抽屉盖在主区域上，顶栏要露出来。
+   * `apps/mobile` 覆盖成 `--safe-area-inset-top`：那边的抽屉连顶栏一起盖住（推挤式
+   * 抽屉从整屏左边滑出，头顶只剩半条顶栏反而碎）。
+   *
+   * ⚠️ 抽屉与遮罩**必须读同一个 token**：各写一份就会出现「抽屉盖到顶栏、遮罩却从
+   * 顶栏下面开始」，顶栏右上那颗按钮点得到却不收起抽屉，等于露出半截可点的边。
+   */
+  --sidebar-drawer-top: calc(var(--safe-area-inset-top, 0px) + var(--app-titlebar-height));
+}
+
+/*
+ * 视觉语法默认值挂在 `[data-theme]` 上，而不是只给 `:root`。
+ *
+ * 主题块（`themes.css`）只声明「它想改的那几个」：ocean 只写 `--syntax-keyword`、
+ * plum 只给暗色纹理、forest 只换标题字体 —— 没声明的会按继承落到 `<html>` 上。
+ * 于是探针带 `data-theme=ocean` 在暗色页面里读到的是暗色字符串色（`#a5d6ff` 在白底上
+ * 几乎读不了），预览卡也会继承当前主题的纹理 / 标题字体。给每套主题一份完整基线，
+ * 「读回别的主题当种子」才是干净的那一套。（themes.css 在后，同特异性下覆盖这里。）
+ *
+ * ---- 视觉语法（主题可选的控制维度）----
+ *
+ * 主题除中性面配色外，还能控制字体 / 字号倍率 / 密度 / 阴影强度 / 背景纹理 /
+ * 代码配色。这些变量**只在这里给默认值**，主题（`themes.css` 的 `[data-theme]`）
+ * 与自定义主题（`useColorTheme.ts` 生成的 `<style>`）按需覆盖。
+ *
+ * 名字必须与 `theme.css` 的 `@theme inline` 映射一致：字体经 `--font-*` 转发，
+ * 字号与间距直接覆盖 Tailwind 的 `--text-*` / `--spacing`（它们本来就是运行期
+ * 变量，`calc(var(--spacing) * 3)` 这种工具类会跟着变）。
+ */
+:root,
+[data-theme] {
+  /*
+   * 强调色基线。
+   *
+   * 每套主题在 `themes.css` 里声明自己的 `--primary` + `--primary-foreground`；
+   * `--ring` / `--sidebar-primary*` 直接引用它，主题只写一个值就够了。
+   *
+   * 四个深浅度由 `--primary` 现算（不需要在 JS 里维护第二份色板）。**必须放在这里**：
+   * `color-mix()` 的 `var()` 在声明它的元素上解析，预览卡只带 `data-theme` 时若继承
+   * `<html>` 的已计算值，强调色换成卡片自己的、这几档还停在当前页面那套。
+   *
+   * 按「用在哪」选档，别直接拿 `--primary` 铺大面积（浅色下 #0e9cd8 当文字只有 ~3:1）：
+   *   soft   极淡底色：选中的侧栏行 / 强调块（约 13% 主题色）
+   *   subtle 稍强底色：hover / 次级强调底
+   *   line   描边 / 下划线 / 左侧色条 / 分隔（约 45%）
+   *   strong 小面积文字 / 图标：往 `--foreground` 压，浅色下变深、深色下变亮
+   */
+  --primary: oklch(0.6547 0.1372 235.41);
+  --primary-foreground: oklch(0.985 0 0);
+  --ring: var(--primary);
+  --sidebar-primary: var(--primary);
+  --sidebar-primary-foreground: var(--primary-foreground);
+  --primary-soft: color-mix(in oklab, var(--primary) 13%, var(--background));
+  --primary-subtle: color-mix(in oklab, var(--primary) 22%, var(--background));
+  --primary-line: color-mix(in oklab, var(--primary) 45%, var(--background));
+  --primary-strong: color-mix(in oklab, var(--primary) 76%, var(--foreground));
+
+  --fizz-font-sans: 'Segoe UI', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+  --fizz-font-heading: var(--fizz-font-sans);
+  --fizz-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    'Liberation Mono', 'Courier New', monospace;
+
+  /*
+   * 只覆盖 text-xs…text-5xl；`--text-*--line-height` 是无单位比例，字号缩放时行高
+   * 自动跟随。任意值（`text-[11px]`）不跟随，这是已接受的取舍。
+   */
+  --fizz-text-scale: 1;
+  --text-xs: calc(0.75rem * var(--fizz-text-scale));
+  --text-sm: calc(0.875rem * var(--fizz-text-scale));
+  --text-base: calc(1rem * var(--fizz-text-scale));
+  --text-lg: calc(1.125rem * var(--fizz-text-scale));
+  --text-xl: calc(1.25rem * var(--fizz-text-scale));
+  --text-2xl: calc(1.5rem * var(--fizz-text-scale));
+  --text-3xl: calc(1.875rem * var(--fizz-text-scale));
+  --text-4xl: calc(2.25rem * var(--fizz-text-scale));
+  --text-5xl: calc(3rem * var(--fizz-text-scale));
+
+  /* 密度只动间距基数：图标 / 按钮高度 / 内边距一起缩，±8% 以内是安全的 */
+  --fizz-density: 1;
+  --spacing: calc(0.25rem * var(--fizz-density));
+
+  /* 阴影强度：`themes.css` 里按尺寸重映射 `--tw-shadow-color` 的 alpha，1 = 现状 */
+  --fizz-shadow-alpha: 1;
+  /* 主题背景纹理（由 `buildStyle()` 换成具体渐变），默认无 */
+  --fizz-theme-texture: none;
+  /* 纹理的平铺尺寸：点阵用 16px 网格，线性纹理由渐变自己铺满整块 */
+  --fizz-texture-size: auto;
+
+  /* ---- 语法高亮（默认 = GitHub Light）---- */
+  --syntax-keyword: #d73a49;
+  --syntax-string: #032f62;
+  --syntax-number: #005cc5;
+  --syntax-comment: #6a737d;
+  --syntax-function: #6f42c1;
+  --syntax-type: #22863a;
+  --syntax-variable: #e36209;
+  --syntax-punctuation: #24292e;
+}
+
+.dark,
+.dark[data-theme='default'] {
+  --background: oklch(0.145 0 0);
+  /* 一起重写（同 `:root` 里那段注释）：这里换了 `--background`，surface 不跟就分家 */
+  --surface-1: var(--background);
+  --surface-2: var(--background);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  /* 暗色侧同口径：`oklch(0.708 0 0)`（#a1a1a1，7.7:1）→ `oklch(0.78 0 0)`（#b7b7b7，9.9:1） */
+  --muted-foreground: oklch(0.78 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.75 0.13 235.41);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.75 0.13 235.41);
+  --sidebar-primary-foreground: oklch(0.145 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+}
+
+/*
+ * 暗色基线同理：`.dark[data-theme]` 的 (0,2,0) 压过 `[data-theme]` 的 (0,1,0)，
+ * 主题块（`themes.css` 在后、同特异性）再覆盖它自己声明的那几个值。
+ */
+.dark,
+.dark[data-theme] {
+  /* 暗色下的默认强调色：与 :root 同一个色相（235.41），亮度提一档 —— 深底上直接用
+     亮色版的 #0e9cd8 会发闷。文字反过来压深色，才够对比。主题块会再覆盖它自己的那份。 */
+  --primary: oklch(0.75 0.13 235.41);
+  --primary-foreground: oklch(0.145 0 0);
+  /* 深底上阴影本来就看不出来，同样的 alpha 会更「糊」—— 抬到 1.3 补偿 */
+  --fizz-shadow-alpha: 1.3;
+  /* ---- 语法高亮（默认 = GitHub Dark）---- */
+  --syntax-keyword: #ff7b72;
+  --syntax-string: #a5d6ff;
+  --syntax-number: #79c0ff;
+  --syntax-comment: #8b949e;
+  --syntax-function: #d2a8ff;
+  --syntax-type: #ffa657;
+  --syntax-variable: #ffa657;
+  --syntax-punctuation: #c9d1d9;
+}
+
+/*
+ * ⚠️ 判据必须与 `styles.css` 里那条「画滚动条」的 `@media` 一模一样 —— 竖线让开的
+ * 正是那条 10px 滚动条。写在 `@layer` **外面**是必须的：上面的 `:root` 未分层，
+ * 分层样式压不过它，塞进 `@layer` 里这条覆盖会静默失效。
+ */
+@media (pointer: fine) and (min-width: 768px) {
+  :root {
+    --rail-inset: 12px;
+  }
+}

@@ -1,0 +1,101 @@
+/**
+ * 设置的**分组清单**：三端共用的一份（桌面两栏 / 手机两级 / web 弹窗的菜单都由它建）。
+ *
+ * 这里只管「有哪些设置、叫什么、什么图标、归哪一组」——**不掺导航形态**：
+ * 菜单怎么摆、点一下怎么换页、返回键画在哪，是各宿主自己的组件
+ * （`DesktopSettingsPanel` / `MobileSettingsPanel`）。以前这些和 `useIsMobile()`
+ * 一起挤在一个 `SettingsPanel` 里，两边的形态都得为对方让路，谁也不好调。
+ *
+ * 新增一个设置项：这里登记一行 + `SettingsContent` 里加一个分支。
+ */
+import {
+  Archive,
+  Bot,
+  Box,
+  Cpu,
+  Gauge,
+  Keyboard,
+  Palette,
+  Plug,
+  Puzzle,
+  SlidersHorizontal,
+  Sparkles,
+  SquareTerminal,
+  type LucideIcon
+} from 'lucide-react'
+import type { AgentApp } from '@fizz/agent-kit/shared/hooks/useAgentApp'
+import type { SettingsTabId } from '@fizz/agent-kit/features/settings/types'
+import { t } from '@fizz/i18n'
+
+export interface SettingsSection {
+  id: SettingsTabId
+  label: string
+  icon: LucideIcon
+}
+
+export interface SettingsGroup {
+  title: string
+  items: SettingsSection[]
+}
+
+/**
+ * 分组菜单：按「用户想干什么」分组，不按内部模块。AI 相关的一切
+ * （模型 / ACP / MCP / 技能 / 插件 / 容器 / 用量 / 历史会话）都在同一个「AI」组里 ——
+ * 别再按模块把它们拆回多组。
+ * 数字类后缀（模型 / MCP / 技能 / 归档）现算 —— 菜单每次渲染都重建，不需要缓存。
+ */
+export function buildSettingsGroups(app: AgentApp): SettingsGroup[] {
+  return [
+    {
+      title: t('基础'),
+      items: [
+        { id: 'general', label: t('通用'), icon: SlidersHorizontal },
+        // 外观（配色主题 / 明暗 / 强调色）是**内置**分组，不再由各宿主自己拼：
+        // 手机版原来把它塞在 extraGroups 里、web / desktop 藏在左下角菜单，同一个功能两套入口。
+        { id: 'appearance', label: t('外观'), icon: Palette },
+        { id: 'shortcuts', label: t('快捷键'), icon: Keyboard }
+      ]
+    },
+    {
+      // 「SSH 主机」不在这里：它已经升格成活动栏里的「主机」功能区（清单在侧栏、
+      // 表单在 features/hosts/HostDialog），设置页只管本机终端偏好。
+      title: t('终端'),
+      items: [{ id: 'terminal', label: t('偏好'), icon: SquareTerminal }]
+    },
+    {
+      // 「AI」一组：模型 / ACP agent / 能力（MCP、技能、插件）/ 运行环境（容器）/ 用量 /
+      // 历史会话都归这里 —— 原先拆成「模型」「能力」「运行环境」「统计」「会话」五组，
+      // 用户想找「我接的是什么、它能干什么、跑在哪、花了多少、聊过什么」得翻五个标题；
+      // 它们本来就是同一件事的几个侧面。
+      // 组内按「连什么 → 能干什么 → 跑在哪 → 用了多少 → 产出在哪」排；容器排在能力之后
+      // （它是执行环境，不是能力本身，但同属 AI 这条链路）。
+      title: t('AI'),
+      items: [
+        // 「偏好」= 原来挤在通用里、只作用于 AI 的那几条（工具权限 / 并发 / 审批超时 /
+        // 重试 / 自动折叠 / 子任务），见 `AiPreferencesTab`。放第一项：它是「这套 AI 怎么
+        // 干活」的总开关，先定行为再看接什么模型。
+        { id: 'ai-prefs', label: t('偏好'), icon: SlidersHorizontal },
+        { id: 'models', label: t('模型 ({count})', { count: app.models.length }), icon: Cpu },
+        { id: 'acp', label: t('ACP agent ({count})', { count: app.acpAgents.length }), icon: Bot },
+        { id: 'mcp', label: t('MCP ({count})', { count: app.mcpServers.length }), icon: Plug },
+        { id: 'skills', label: t('技能 ({count})', { count: app.skills?.skills.length ?? 0 }), icon: Sparkles },
+        // 叫「插件」而不是「插件」：设置页只管用户级（`~/.fizz/plugins`）那一份，
+        // 项目自己的插件在侧栏那个项目的「更多 → 插件」里管。名字里写清楚，省得用户
+        // 进来发现「我项目里的插件怎么不在」。也不带计数 —— 清单是现拉的，菜单渲染时
+        // 手里没有这个数，硬塞一个只会误导。
+        { id: 'plugins', label: t('插件'), icon: Puzzle },
+        // 容器型项目的运行环境（镜像）：管的是执行环境本身（docker / 镜像构建）。
+        // 导航上叫「运行环境」而不是「容器」：将来还会有别的运行形态，且「容器」在用户眼里
+        // 更像一个具体技术名词，不如「运行环境」直白（tab id 仍是 `container`，别跟着改）
+        { id: 'container', label: t('运行环境'), icon: Box },
+        // 用量虽跨对话与流程，但它回答的就是「这套 AI 花了我多少」，跟在能力后面最自然
+        { id: 'usage', label: t('用量'), icon: Gauge },
+        // 「历史会话」（归档）原先占着 AI Agent 侧栏的一整组，后来单独成「会话」组，现在并进
+        // AI 组：会话就是这套 AI 的产出，清理 / 找回都在这条链路上。放最后（存量数据，日常不常来）。
+        // ⚠️ **不带条数**：这个数字随归档 / 删除实时变，导航项宽度一变整列菜单就重排
+        // （用户报的「数字变化导致内容闪烁」）。要看条数去「历史会话」页里各分组的组头。
+        { id: 'history', label: t('历史会话'), icon: Archive }
+      ]
+    }
+  ]
+}

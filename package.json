@@ -1,0 +1,60 @@
+{
+  "name": "fizz",
+  "version": "0.0.1",
+  "description": "Fizz",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "check:boundaries": "node scripts/check-boundaries.mjs",
+    "version:set": "node scripts/version.mjs",
+    "ui:add": "shadcn add -c packages/ui",
+    "copy:monaco": "node scripts/copy-monaco.cjs",
+    "dev:web": "npm run copy:monaco && vite -c apps/web/vite.config.ts",
+    "dev:mobile": "npm run copy:monaco && npm run dev --workspace @fizz/mobile",
+    "dev:desktop": "npm run copy:monaco && node scripts/dev.mjs --app apps/desktop",
+    "dev:server": "node apps/server/dist/index.js",
+    "dev:stack": "npm run build:server && npm run build:web && node apps/server/dist/index.js",
+    "server": "npm run build:server && node apps/server/dist/index.js",
+    "restart": "bash scripts/restart.sh",
+    "build:server": "vite build -c apps/server/vite.config.ts",
+    "build:web": "npm run copy:monaco && vite build -c apps/web/vite.config.ts",
+    "build:runtime": "vite build -c docker/container-project/runtime/vite.config.ts && node scripts/check-runtime-deps.mjs",
+    "build:desktop": "npm run copy:monaco && vite build -c apps/desktop/vite.main.mts && vite build -c apps/desktop/vite.preload.mts && vite build -c apps/desktop/vite.config.ts",
+    "typecheck:packages": "tsc --noEmit -p packages/contracts/tsconfig.json && tsc --noEmit -p packages/plugin/tsconfig.json && tsc --noEmit -p packages/acp/tsconfig.json && tsc --noEmit -p packages/git/tsconfig.json && tsc --noEmit -p packages/mcp/tsconfig.json && tsc --noEmit -p packages/shells/tsconfig.json && tsc --noEmit -p packages/skills/tsconfig.json && tsc --noEmit -p packages/tools/tsconfig.json && tsc --noEmit -p packages/workspace/tsconfig.json && tsc --noEmit -p packages/agent/tsconfig.json && tsc --noEmit -p packages/ui/tsconfig.json && tsc --noEmit -p packages/agent-client/tsconfig.json && tsc --noEmit -p packages/agent-kit/tsconfig.json && tsc --noEmit -p packages/agent-host/tsconfig.json",
+    "typecheck:apps": "tsc --noEmit -p apps/server/tsconfig.json && tsc --noEmit -p apps/web/tsconfig.json && tsc --noEmit -p apps/mobile/tsconfig.json && tsc --noEmit -p apps/desktop/tsconfig.json && tsc --noEmit -p apps/desktop/tsconfig.web.json",
+    "typecheck": "npm run typecheck:packages && npm run typecheck:apps",
+    "verify:acp": "npm run build:server && node scripts/verify-acp.mjs",
+    "pack:desktop": "npm run build:desktop && electron-builder --project apps/desktop --dir",
+    "dist:desktop": "npm run build:web && npm run build:desktop && electron-builder --project apps/desktop --publish never",
+    "dist:linux": "npm run build:web && npm run build:desktop && electron-builder --project apps/desktop --linux --publish never",
+    "dist:mac": "npm run build:web && npm run build:desktop && electron-builder --project apps/desktop --mac --publish never",
+    "dist:win": "npm run build:web && npm run build:desktop && electron-builder --project apps/desktop --win --publish never",
+    "build:mobile": "npm run copy:monaco && npm run build --workspace @fizz/mobile && npm run sync --workspace @fizz/mobile",
+    "build:mobile:hosted": "npm run copy:monaco && npm run build:hosted --workspace @fizz/mobile",
+    "android:open": "npm run open --workspace @fizz/mobile",
+    "android:build": "npm run build:android --workspace @fizz/mobile"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^1.4.0"
+  },
+  "devDependencies": {
+    "electron": "44.9.3",
+    "electron-builder": "^25.1.8",
+    "monaco-editor": "^0.56.0",
+    "shadcn": "^4.22.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0",
+    "vitest": "^5.0.4"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "ssh2@1.17.0": true,
+    "cpu-features@0.0.10": true,
+    "electron@44.3.0": true,
+    "node-pty@1.1.0": true
+  }
+}

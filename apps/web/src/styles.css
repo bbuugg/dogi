@@ -1,0 +1,524 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fizz/ui-tokens/index.css";
+
+/* Streamdown 的工具类生成：类名只在它的 dist 里，而 Turbopack（next dev / next build
+   默认管线）会静默忽略指向 node_modules 的 @source（独立 postcss 管线不忽略）——
+   所以不走 @source，改用 scripts/generate-streamdown-classes.mjs 把候选类提取成
+   仓库内清单 lib/streamdown-classes.generated.ts（默认扫描范围，任何管线都能扫到）。
+   升级 streamdown 后重跑一次生成脚本。 */
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  html {
+    @apply font-sans;
+  }
+}
+
+/*
+ * ════ 手机端整体放大：只抬根字号 ════
+ *
+ * 手机上一个字都不改地照搬桌面排版 = 12px（`text-xs`，541 处）与 10~11px 的小标签挤在
+ * 390px 宽的屏上，太小。这里**不逐组件调字号**，只抬 `<html>` 的根字号，因为整套尺寸的
+ * 基座就是 rem —— 产物 CSS 实测：`--spacing: .25rem`、`.p-3 { padding: calc(var(--spacing) * 3) }`、
+ * `.text-xs { font-size: var(--text-xs) }`（`.75rem`）。于是**文字 + 行高 + 间距 + 图标
+ * （`size-*`）+ 圆角**一次全部等比放大，连点击区一起变大（原先行高约 32px，低于 44px
+ * 的触摸目标推荐值）。
+ *
+ * 16 → 18px（+12.5%）：`text-xs` 12→13.5px、`text-sm` 14→15.75px。不取 17px（+6%，
+ * 手机上仍偏小），也不取 20px（侧栏 / 状态栏会明显占地方）。因为所有字号都走 rem，
+ * 这里**一个数字**就是全应用的「手机端排版密度」旋钮。
+ *
+ * ⚠️ 判据必须与 JS 侧一致：`shared/hooks/useIsMobile.ts` 的 `MOBILE_QUERY` =
+ * `(max-width: 767px)`，也等于 Tailwind `max-md:` 的断点 —— 三处是同一个概念
+ * 「这是不是手机宽度」。本文件里另有两条同判据的 `@media`（消息目录竖线让位、
+ * 隐藏滚动条），改一处就要一起改。
+ *
+ * ⚠️ 刻意**不加** `(pointer: coarse)`：宽屏窗口被拖到 <768px 时本应用**已经**按手机形态
+ * 渲染（活动栏收起、侧栏变抽屉，判据同样是 `MOBILE_QUERY`），字号跟着一起变才一致；
+ * 只按输入方式分档会做出「抽屉式布局 + 桌面字号」这种半截状态。
+ *
+ * ⚠️ 三类东西**吃不到**这个根字号（仍是 px），动排版时要留意：
+ *   1. **容器上下限**：`max-w-[400px]`、`w-[380px]`（流程节点工作台）、`min-h-[72px]`
+ *      —— 它们跟**视口**走，跟着字号膨胀反而会在 390px 屏上溢出；
+ *   2. **发丝线与装饰**：`ring-[3px]`、`rounded-[2px]`、`w-[2px]`、`blur-[110px]`；
+ *   3. **编辑器 / 终端字号**：Monaco 与 xterm 是自己那套 px 选项、不吃 rem，由
+ *      `shared/lib/ui-scale.ts` 的 `scalePx()` 按同一比例换算（改下面这个数字，那边不用动）。
+ * 另外 `shared/ui/*`（shadcn 原语）内部成对的尺寸（Switch 的 `h-[18.4px]`、menubar 的
+ * `p-[3px]`）也不动：那是上游给的配对值，改了会在 `shadcn add` 重新生成时悄悄漂回去。
+ *
+ * ⚠️ 组件里**不要再写 `text-[10px]` 这种 px 字号**：它在桌面端看着好好的，到手机端就是
+ * 全场唯一没长大的那一个。2026-10 做手机端放大时已一次性把 145 处 px 字号换成等值 rem
+ * （`10px` → `0.625rem`），桌面逐像素不变；新写的地方请**等值用 rem** 或直接用
+ * `text-xs` / `text-sm` 这些 token。
+ */
+@layer base {
+  @media (max-width: 767px) {
+    html {
+      font-size: 18px;
+    }
+  }
+}
+
+::selection {
+  color: var(--background);
+  background-color: var(--primary);
+}
+
+/*
+ * ════ 文本选中：应用默认「不可选」，内容区显式放开 ════
+ *
+ * 这是个**桌面软件**（web / desktop / mobile 三端共用这一份样式），不是文档页面：
+ * 侧栏条目、标签条、工具条、表头、按钮、菜单、状态栏这些**界面文字**被鼠标划中只会
+ * 留下一片蓝色选区，没有任何用处，还让界面「像网页」。所以这里把默认翻过来 ——
+ * 整个 body 禁选，再给「用户真的会想复制」的内容区显式放开。
+ *
+ * 默认禁选挂 **body 而不是 `#root`**：Radix 的 Dialog / DropdownMenu / Select / Tooltip
+ * 和 sonner 的 toast 都是 portal 到 `document.body` 的，挂 `#root` 会漏掉这一整层弹窗。
+ *
+ * ⚠️ 整段写在 `@layer base` 里是**故意**的：Tailwind 的 utilities 层高于 base，于是组件上
+ * 现成的 `select-none`（diff 行号、代码块行号、菜单项、avatar…）照旧压得住下面这些宽口径的
+ * 白名单选择器 —— 白名单容器里的行号不会被一起划中，正是想要的。若挪到分层之外，
+ * 未分层 CSS 会反压 utilities，行号就跟着可选了。
+ *
+ * 放开选中分三档，按「这块内容长什么样」挑：
+ *   1) 结构性的内容锚点，下面已经写好，组件侧不用动：
+ *      `.sd-md`（助手 / 用户正文、思考、md 预览，含其中的行内 `<code>`）、`pre`（代码块、
+ *      工具输出、报错明细）、表单控件、sonner toast；
+ *   2) 内容不在 `pre` / `.sd-md` 里、但确实是「内容」的元素 → 挂 `data-selectable`
+ *      属性（跨行拖选的场景挂在**容器**上，例如 FileDiffView 的 diff 正文）；
+ *   3) 输入与可编辑区由 `input` / `textarea` / `[contenteditable]` 通配覆盖，无需标注。
+ *
+ * ⚠️ 白名单里**刻意没有 `code`**：行内 `<code>` 在弹窗说明里成片出现（「建议先把
+ * `<code>.gitignore</code>` 加进去」这种），放开它会让一句话里「只有代码片段能选中、
+ * 周围的字选不中」，拖选出来是断的。正文里的行内代码由 `.sd-md` 覆盖，不受影响。
+ *
+ * ⚠️ xterm（`.xterm`）与 Monaco（`.monaco-editor`）**刻意不在这里管**：两者都自带选区模型
+ * 与 `user-select` 声明（xterm.css 自己就写了 `.xterm{user-select:none}`），靠自己的 DOM 层
+ * 做选中与复制，外部规则别去碰（xterm 的复制走 `term.getSelection()`，与浏览器原生选区无关）。
+ * `FileHtmlPreview` 是 sandbox iframe（独立文档，宿主 CSS 到不了里面）、`BrowserPane` 是
+ * screencast 图片帧（根本没有文本），两者天然不受影响。
+ */
+@layer base {
+  body {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* 内容白名单：正文 / 思考 / md 预览、代码与工具输出、显式标注的内容块 */
+  .sd-md,
+  pre,
+  [data-selectable] {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  /* 表单控件与可编辑区：禁选会让光标定位 / 三击全选 / 拖选文本一起失效 */
+  input,
+  textarea,
+  [contenteditable]:not([contenteditable='false']) {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  /* toast 是 portal 到 body 的：报错文本必须能选中复制 */
+  [data-sonner-toast] {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+}
+
+/* ════ 以下从 agent-ui/styles.css 迁入：旧项目的观感覆盖 ════ */
+
+/* 桌面软件式全屏高度链：html/body 钉满视口。
+
+   高度 = `100%`（初始包含块 = 布局视口），**全由 CSS 决定，没有 JS 写 px**：
+   - 不再用 `--app-height`：那套 JS 在聚焦输入框那一刻先写偏小的值、150ms 后再补正，
+     整页高度当着用户的面抖一下（手机模式下最明显）。详见 `useKeyboardInset.ts` 文件头。
+   - 刻意**不用** `100dvh` 当口径：部分机型 `dvh` 会停在偏小的值，应用比可视区矮、底部露出
+     **画布背景** `--background`（暗色近黑），即用户报的「手机底部一条黑带」。
+   - 键盘让位由 `index.html` 的 `interactive-widget=resizes-content` 负责（布局视口跟着缩，
+     `100%` 自动贴到键盘上沿）；底部常驻的工具条 / 输入框**不需要**谁在底栏加 margin 去抬
+     （那么做只会留一条等高的空白，见 lib/keyboard-inset.ts 文件头）。
+
+   ⚠️ 这段不能放进 @layer base：Tailwind 层序是 properties → theme → base →
+   components → utilities，utilities 层的 `.h-full{height:100%}`（<html>/<body> 上
+   的类）会盖掉 base 层的这条规则，height 链就退回成了 vh 行为。写成分层之外的
+   未分层规则才能保证压住任何层里的同名声明。 */
+html,
+body {
+  height: 100%;
+}
+
+/*
+ * 细滚动条，跟旧项目观感一致 —— 只在「有鼠标 + 桌面宽度」时画。
+ * 手机宽度 / 触屏下绝不命中：Chromium 给 ::-webkit-scrollbar 写宽度后滚动条会从
+ * 悬浮式变成占位式，每个可滚动列表右侧被永久吃掉 10px。
+ */
+@layer base {
+  @media (pointer: fine) and (min-width: 768px) {
+    ::-webkit-scrollbar {
+      width: 10px;
+      height: 10px;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background-color: color-mix(in oklab, var(--muted-foreground) 35%, transparent);
+      border-radius: 9999px;
+      border: 3px solid transparent;
+      background-clip: content-box;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background-color: color-mix(in oklab, var(--muted-foreground) 55%, transparent);
+    }
+  }
+
+  @media (pointer: coarse),
+  (max-width: 767px) {
+    ::-webkit-scrollbar {
+      display: none;
+    }
+  }
+}
+
+/*
+ * xterm 终端：清掉多余的东西（原生滚动条 / overview ruler / 自绘滚动条 / 滚动阴影 / 黑色底）。
+ *
+ * ① 隐藏原生滚动条。`.xterm-viewport` 是 `overflow-y: scroll` 的真实滚动层，xterm 6 的
+ *    视觉滚动条由 `.xterm-scrollable-element` 自绘、盖在它上面；上面那条 base 层的全局
+ *    `::-webkit-scrollbar { width: 10px }` 会把原生条也画出来，跟自绘那条叠在一起。
+ *    隐藏原生条不影响滚动（滚动层仍是 overflow-y: scroll）。
+ *
+ * ② 隐藏 overview ruler。xterm 6 会在视口右缘建一个与自绘滚动条**同宽**的
+ *    `<canvas class="xterm-decoration-overview-ruler">`。本应用没有终端装饰（decoration），
+ *    这个 canvas 是空的 —— 但它会在**左边缘渲染出一条纯白 1px 竖线**，暗色下就是
+ *    「终端滚动条左边那条白线」（实测：隐藏该 canvas 白线立即消失，自绘滚动条宽度不变）。
+ *    之所以它非有宽度不可：自绘滚动条的宽度**只能**通过 `overviewRuler.width` 设置
+ *    （见 TerminalPanel 的 `overviewRuler: { width: 6 }`），顺带把这块 canvas 也建了出来。
+ *    没有装饰，直接把它藏掉即可。
+ *
+ * ⚠️ 下面这些规则都故意写在 @layer 之外（未分层）：base 层里那条规则是分层的，未分层 CSS
+ * 在层叠顺序上永远压过分层样式，所以不用提特异性就能稳定盖过它。④⑤ 要压的是 **xterm.css
+ * 自己的未分层规则**（同层同特异性、只拼加载顺序，不可靠），所以额外用了 `!important`。
+ */
+.xterm .xterm-viewport {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+/* 防御：万一 display:none 没生效，track / thumb 也用透明而非默认白色 */
+.xterm .xterm-viewport::-webkit-scrollbar-track,
+.xterm .xterm-viewport::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+
+/* ⚠️ 故意**不带 `.xterm` 前缀**：这块 canvas 由 xterm 动态插在 viewport 前面，
+   其祖先链（`.xterm` / `.xterm-scrollable-element` …）随版本变化，带前缀就可能漏匹配；
+   而这条只声明 `display`，xterm.css 那边不碰 `display`，去掉前缀不会输给任何规则。
+   （同样的目的还有 TerminalPanel `buildTheme()` 里的 `overviewRulerBorder: 透明`。） */
+.xterm-decoration-overview-ruler {
+  display: none;
+}
+
+/*
+ * ③ 隐藏 xterm 6 自绘滚动条本身（`.xterm-scrollable-element > .scrollbar`）。
+ *    它是 VS Code ScrollableElement 画在视口右缘的 overlay，**不占布局宽度** —— 真实
+ *    滚动层仍是 `.xterm-viewport` 的原生 `overflow-y: scroll`，所以藏掉它不影响滚轮 /
+ *    键盘 / 触摸滚动，只是不再画出那条滑块。
+ *    xterm 用 `opacity`（`.visible` / `.invisible` 类）控制它显隐、不碰 `display`，
+ *    所以这条 `display: none` 不会被它的 JS 覆盖。
+ */
+.xterm .xterm-scrollable-element > .scrollbar {
+  display: none;
+}
+
+/*
+ * ④ 隐藏滚动内容的内阴影（`.xterm-scrollable-element > .shadow`）。
+ *    VS Code 的 ScrollableElement 在滚动区**上缘 / 左缘**各备了一条 inset 阴影：`.shadow`
+ *    基础是 `display: none`，xterm 运行时按 `scrollTop > 0` / `scrollLeft > 0` 动态补上
+ *    `.top` / `.left` / `.top-left-corner` 类，而 xterm.css 里这三个类写死 `display: block`
+ *    —— 于是「往上滚过一屏」之后终端上缘就凭空多出一条黑边，左缘同理（回到顶部/最左又会消失）。
+ *    颜色取 `var(--vscode-scrollbar-shadow, #000)`，本应用从未定义那个变量，因此**恒为纯黑**，
+ *    亮色主题下最扎眼。要压的是 xterm.css 自己的未分层规则（特异性 0,4,0），只能上 `!important`。
+ *    纯装饰，藏掉不影响滚动。
+ */
+.xterm .xterm-scrollable-element > .shadow {
+  display: none !important;
+}
+
+/*
+ * ⑤ `.xterm-viewport` 的底色是 xterm.css 里写死的 `#000`（上面搜过 xterm 运行时**不会**
+ *    按主题覆盖它）。而 `fit` 出来的 `.xterm-screen` 是「列数 × 行数」的整格尺寸，向右 /
+ *    向下取整后总比容器小几个像素 —— 差的那几像素就是 viewport 的黑底透出来，即终端
+ *    **右缘 / 下缘那条黑边**。改成透明后露出来的是宿主容器的 `--background`
+ *    （终端面板自己是 `bg-transparent`，透到 SidePanel 的 `surface-1` / 画布那层），四边都不会再有黑边。
+ */
+.xterm .xterm-viewport {
+  background-color: transparent !important;
+}
+
+/*
+ * `.no-scrollbar`：需要自己滚、但不想画出滚动条的地方（例如系统监控弹窗 —— 内容多到要滚，
+ * 滚动条却在弹层内侧占 10px，看着像多了一条轨道）。滚轮 / 触摸 / 键盘滚动照常可用。
+ * 用 `!important` 压过上面那条 base 层的 `::-webkit-scrollbar` 宽度声明（分层样式里
+ * utilities 层更高，但 `::-webkit-scrollbar` 是伪元素选择器，稳妥起见直接提权）。
+ */
+@layer utilities {
+  .no-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none !important;
+    width: 0 !important;
+    height: 0 !important;
+  }
+}
+
+
+/*
+ * Streamdown（助手正文 / 思考内容的 markdown）代码块与表格：收敛成项目的「单层扁平块」。
+ *
+ * Streamdown 2.x 的默认观感是「外层侧栏色大卡片（bg-sidebar + p-2 + 18px 圆角）+ 内层再套一个
+ * 带边框的白底圆角盒」的套娃结构 —— 与本项目扁平、紧凑、克制描边的界面语言不符。
+ * 这里把外壳拆掉：代码块 / mermaid 图 / 表格各自只剩**一层**边框，字号 13px（比正文小一档），
+ * 圆角用项目口径的 rounded-md。行号与表格工具条的**开关**在 lib/streamdown.ts（props 层）。
+ *
+ * ⚠️ 这段**故意写在所有 @layer 之外**：Tailwind v4 的 utilities 在 `@layer utilities` 里，
+ * 而未分层的 CSS 在层叠顺序上**永远压过分层样式**（跟选择器优先级无关）—— 所以这里
+ * 不需要 `!important` 就能稳定盖掉 Streamdown 自带的工具类。规则都挂在 `.sd-md` 下
+ * （见 ai-elements 里 Streamdown 的 className），不会波及别处。
+ *
+ * 另注：Streamdown 的工具类靠 lib/streamdown-classes.generated.ts（由
+ * scripts/generate-streamdown-classes.mjs 生成）进入 Tailwind 的扫描范围才会生成 ——
+ * Turbopack 会静默忽略指向 node_modules 的 @source，见本文件顶部那段注释。
+ * 少了清单则这里覆盖的其实是「浏览器默认样式」。
+ * ⚠️ 注释里别写含 `*` 的通配路径 —— 星号后紧跟斜杠会把块注释提前终止，后面整段都会被当成裸 token。
+ */
+
+/* ── 长串英文 / URL 断行 ────────────────────────────────────────────────────
+   用户消息的气泡是 `w-fit`（宽度跟着内容走），而浏览器只在空格与连字符处软换行：
+   纯英文长串（URL、包名、命令行参数）一个断点都没有，就把气泡横向捅穿。
+
+   用 `overflow-wrap: anywhere` 而不是 `break-word`：后者不改 min-content，
+   `w-fit` 的收缩仍然按最长单词算，气泡照样撑破；anywhere 让任意位置都能断，
+   并参与 min-content 计算，气泡宽度才真正听话（`max-w-full` 也才兜得住）。
+
+   `pre` 不受影响 —— `white-space: pre` 下浏览器本就不做软换行，代码块照旧横向滚。
+   表格里同理会把超长 URL 拆行，这也是想要的（`th` 的 nowrap 已经在上面放开）。 */
+.sd-md {
+  overflow-wrap: anywhere;
+}
+
+/* ⚠️ 上一条只管住了 `<p>`，还不够 —— 真正把用户气泡顶穿的是**自动链接**：
+
+   Streamdown 会把正文里的 URL 自动渲染成 `<button class="wrap-anywhere">`
+   （`data-streamdown='link'`，实测 DOM 见下）。而 Tailwind 的 preflight **没有**重置
+   button 的 `white-space`（在 tailwindcss 产物里搜不到这条规则），浏览器 UA 给它的默认值
+   是 `white-space: pre` —— 既不按空格换行，`overflow-wrap` 也**完全失效**（pre 下没有
+   软换行机会，连继承来的 anywhere 都用不上）。于是长 URL 整条横着溢出去：
+   `MessageContent` 是 `w-fit + overflow-hidden`，气泡被撑到满宽后这段就压在
+   `px-4` 的内边距上，最后被裁掉 —— 表现就是「不换行、文字跑到 padding 里」。
+
+   所以这里显式给链接类元素补 `white-space: normal`（把 UA 的 pre 盖掉，恢复正常换行）
+   + `overflow-wrap: anywhere`（URL 里没有空格，还得允许任意位置断；它也参与
+   min-content 计算，`w-fit` 的气泡才收缩得动）。
+
+   实测 DOM（renderToStaticMarkup 渲染纯文本）：
+     <div class="space-y-4 whitespace-normal sd-md size-full ...">
+       <p>...<button class="wrap-anywhere ..." data-streamdown="link">https://example.com/...</button></p>
+     </div> */
+.sd-md :where(a, button, [data-streamdown='link']) {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* ── 链接：用主题色（`--primary-strong` 那一档，往 foreground 压过，浅色下比裸 primary 更深、
+   深色下更亮）—— 原来只有一条下划线 / 继承色，成片正文里认不出哪段能点。
+   `:where()` 不带特异性，别的工具类要覆盖颜色仍压得住。 */
+.sd-md :where(a, [data-streamdown='link']) {
+  color: var(--primary-strong);
+  text-decoration-color: var(--primary-line);
+}
+
+/* ── 代码块 ────────────────────────────────────────────────────────────────
+   外壳自己成为唯一的一层表面（默认是 bg-sidebar 大卡片 + 白底圆角盒两层）。
+   ⚠️ 复制按钮工具条的 -mt-10 是按「header 高 h-8 + flex gap-2」配对写死的，
+   这两个值别动，否则按钮会错位压到代码上。 */
+.sd-md :is([data-streamdown='code-block'], [data-streamdown='mermaid-block']) {
+  margin: 0.5rem 0;
+  /* 默认 my-4，聊天流里太占纵向 */
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  /* 项目口径的 rounded-md（--radius 0.875rem → 12px） */
+  overflow: hidden;
+}
+
+/* 工具条容器（复制 / 下载按钮那一行）：streamdown 原本把它做成 sticky top-2 + -mt-10，
+   贴在语言标签行上、随消息列表滚动时悬浮。但卡片 overflow:hidden 之后自己成了滚动容器
+   （scrollTop 恒 0），sticky 的 top-2 阈值会**立即生效**，把按钮压到卡顶下 8px、
+   与语言标签错位 —— 改回 static，让它停在 -mt-10 拉上去的那一行里，与标签同行。 */
+.sd-md :is([data-streamdown='code-block'], [data-streamdown='mermaid-block'])>div.sticky {
+  position: static;
+}
+
+.sd-md [data-streamdown='code-block'] {
+  padding: 0;
+}
+
+/* mermaid 图没有内层 body，自己补内边距 */
+.sd-md [data-streamdown='mermaid-block'] {
+  padding: 0.5rem;
+}
+
+/* 语言标签行：贴住代码区，只隔一条发丝线 */
+.sd-md [data-streamdown='code-block-header'] {
+  padding: 0 0.625rem;
+  border-bottom: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
+}
+
+/* 复制按钮的悬浮底：从「带边框的 sidebar 药丸」退成与块表面同源的低透明度底
+   （backdrop-blur 保留，滚动中短暂悬浮在内容上时仍可读） */
+.sd-md :is([data-streamdown='code-block-actions'], [data-streamdown='mermaid-block-actions']) {
+  margin-right: 0.25rem;
+  border-color: transparent;
+  background: color-mix(in oklab, var(--background) 80%, transparent);
+}
+
+/* 内层那个白底圆角盒退化成纯内边距（边框 / 底色 / 圆角都由外壳承担） */
+.sd-md [data-streamdown='code-block-body'] {
+  padding: 0.5rem 0.75rem;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  font-size: 0.8125rem;
+}
+
+/* pre 不再自带边距 / 内边距（2.x 里由 body 承担），等宽字体与项目统一；
+   盖掉 shiki 主题自带的整块背景（dark 下 #24292e 与项目近黑的底色对不上） */
+.sd-md [data-streamdown='code-block-body'] pre {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  font-family: var(--font-mono);
+  line-height: 1.55;
+}
+
+/*
+ * 代码行号（`::before` 里那个 `counter(line)`）的字号：**盖成继承**。
+ *
+ * Streamdown 给代码行挂了一整组 `before:*` 类，其中字号是写死的 `before:text-[13px]`
+ * —— 那个类名只存在于 `lib/streamdown-classes.generated.ts` 那份**扫描清单**里（它的作用是
+ * 让 Tailwind 生成对应工具类，类名必须与 Streamdown 运行时写在 DOM 上的一模一样），
+ * 所以**不能**把清单里的值改成 rem：改了生成出来的就是一条谁都不带的规则，字号反而丢了。
+ *
+ * 这里改成「继承它所在的行」：行的字号来自上面那条 `0.8125rem`（rem，跟着根字号走），
+ * 于是桌面端仍是 13px（与原来逐像素相同），手机端抬根字号时行号跟着一起长 —— 否则
+ * 代码长大了、行号是全场唯一没长的那一份。
+ *
+ * 选择器用 `[class*='before:text-']`：这一组类只在代码行上出现，不必依赖 Streamdown
+ * 内部元素名；万一哪天它换了一套类名，这条规则失配、退回「行号用 13px」，不会连累别的样式。
+ */
+.sd-md [data-streamdown='code-block-body'] [class*='before:text-']::before {
+  font-size: inherit;
+}
+
+/* ── 表格 ────────────────────────────────────────────────────────────────
+   外壳拆卡片；内层滚动容器（Streamdown 自带 rounded-md border bg-background）成为唯一表面。 */
+.sd-md [data-streamdown='table-wrapper'] {
+  margin: 0.5rem 0;
+  gap: 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+}
+
+.sd-md table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+  /* 13px：比正文小一档，表格别喧宾夺主 */
+  line-height: 1.5;
+}
+
+/* ⚠️ 字号必须落在单元格上：Streamdown 给 th/td 挂了 text-sm(14px)，
+   只写在 table 上会被元素自身的类盖回 14px（继承敌不过自有声明）。
+   边框淡到 60%：密集网格用全强度 --border（≈#e5e5e5）会显得整块发重 */
+.sd-md :is(th, td) {
+  border: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
+  padding: 0.375rem 0.625rem;
+  font-size: 0.8125rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+/* 表头：盖掉自带的 bg-muted/80，底色统一由 th 上色；th 默认 whitespace-nowrap，
+   窄栏里长表头会把表格撑出横向滚动，放开换行 */
+.sd-md thead {
+  background: transparent;
+}
+
+.sd-md thead th {
+  white-space: normal;
+  font-weight: 600;
+  background: color-mix(in oklab, var(--muted-foreground) 8%, transparent);
+}
+
+/* 行内代码 */
+.sd-md :not(pre)>code {
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.8125rem;
+  background: color-mix(in oklab, var(--muted-foreground) 12%, transparent);
+}
+
+/* ════ React Flow 自定义节点：去掉内建节点外壳的方框 ════
+ * 节点类型名 `input` / `output` 正好命中 xyflow 内建的 `.react-flow__node-input` /
+ * `.react-flow__node-output`，于是自定义节点外面被套了一层「白底 + 深边框 + 内边距 +
+ * 固定宽」的默认盒子（暗色下变成深色方框）。本项目所有节点都是自定义组件，直接把这几类
+ * 默认外壳清零 —— 用 `.react-flow` 前缀提一级特异性，确保压过 `@xyflow/react/dist/style.css`。 */
+.react-flow .react-flow__node-default,
+.react-flow .react-flow__node-input,
+.react-flow .react-flow__node-output,
+.react-flow .react-flow__node-group {
+  padding: 0;
+  border: none;
+  background-color: transparent;
+  width: auto;
+  border-radius: 0;
+  color: inherit;
+  font-size: inherit;
+  text-align: start;
+  box-shadow: none;
+}
+
+/* markdown 图片预览的下载按钮：手机上没有 hover，按钮会永远隐身，这条媒体查询让它常驻
+ * （未分层 CSS 天然压过 `@layer utilities` 里的 `opacity-0`，不必加特异性前缀）。 */
+@media (hover: none) {
+  [data-md-img-download] {
+    opacity: 1;
+  }
+}

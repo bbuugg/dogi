@@ -1,0 +1,16 @@
+{
+  "name": "@fizz/ui-tokens",
+  "version": "0.1.0",
+  "description": "Fizz 设计令牌：纯 CSS 语义变量（颜色 / 圆角 / 字体 / 动效），零 JS。各 app 覆盖 :root 即可换肤",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./index.css": "./src/index.css",
+    "./tokens.css": "./src/tokens.css",
+    "./themes.css": "./src/themes.css",
+    "./theme.css": "./src/theme.css"
+  },
+  "files": [
+    "src"
+  ]
+}

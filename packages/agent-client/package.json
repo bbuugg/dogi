@@ -1,0 +1,28 @@
+{
+  "name": "@fizz/agent-client",
+  "version": "0.1.0",
+  "description": "Fizz Agent 客户端能力层：HTTP/SSE API、宿主契约与浏览器兜底实现。零 JSX、零 React",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./*": "./src/*"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@fizz/contracts": "*"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  }
+}

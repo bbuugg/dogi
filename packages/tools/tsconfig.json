@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "paths": {
+      "@fizz/contracts": ["../contracts/src/index.ts"],
+      "@fizz/i18n": ["../i18n/src/index.ts"],
+      "@fizz/contracts/*": ["../contracts/src/*"],
+      "@fizz/skills": ["../skills/src/index.ts"],
+      "@fizz/skills/*": ["../skills/src/*"]
+    }
+  },
+  "include": ["src/**/*"]
+}

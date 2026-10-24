@@ -1,0 +1,855 @@
+/**
+ * SFTP 文件管理页（主区域标签）：浏览 / 管理远程主机的文件系统。
+ *
+ * 移植自 dogi 的 `features/sftp/SftpPage`，但**连接模型整个换了**，其余交互照搬：
+ *
+ * - dogi 在 Electron 主进程里跑，渲染端按「一个标签一个 connId」主动 open / close；
+ *   这里 SSH 连接在**服务端**，且是**按 hostId 池化**的（见 `server/ssh/sftp.ts`）——
+ *   页面不再管连接生命周期，每个操作用 hostId 直接打一条 HTTP 就行。少了一整类
+ *   「标签关了、连接没关」的漏。
+ * - dogi 的下载 / 上传要弹**系统对话框**（另存为 / 选文件），因为主进程能碰到本地磁盘；
+ *   这里服务端很可能跟浏览器不在同一台机器上，**它看不见用户的本地路径** ——
+ *   下载是「服务端回字节 → 渲染端触发浏览器另存为」，上传是「渲染端读文件成 base64 → 发上去」。
+ *
+ * ## 能力
+ *
+ * 浏览 / 进入目录 / 返回上级 / 跳转路径 / 刷新 / 新建文件夹 / 上传文件（多选）/
+ * 下载（文件 / 整个文件夹递归）/ 复制到 / 移动到 / 重命名 / 删除（目录递归）/ 多选批量操作。
+ *
+ * ## 与 dogi 的两处刻意收敛
+ *
+ * 1. **不做全局传输进度托盘**（dogi 的 TransferTray）。这里除上传外都是一问一答的短操作，
+ *    上传本身在页内用一条进度条就地展示即可 —— 为一个入口搭一整套跨页面状态不划算。
+ * 2. **复制 / 移动不可取消**：它们要么是一次瞬时 rename，要么是一段没有用户可感知进度的
+ *    远端复制。只有上传带取消（大文件真的会卡在那里），走 `sftpAbort`。
+ */
+import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import {
+  ArrowRightLeft,
+  ArrowUp,
+  Copy,
+  Download,
+  File as FileIcon,
+  Folder,
+  FolderPlus,
+  FolderUp,
+  Loader2,
+  Pencil,
+  RefreshCw,
+  Trash2,
+  Upload,
+  X
+} from 'lucide-react'
+import { toast } from 'sonner'
+import { Button } from '@fizz/ui/button'
+import { Checkbox } from '@fizz/ui/checkbox'
+import { Input } from '@fizz/ui/input'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from '@fizz/ui/dialog'
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger
+} from '@fizz/ui/context-menu'
+import { useAppContext } from '@fizz/agent-kit/shared/hooks/use-app-context'
+import { useAgentStore } from '@fizz/agent-kit/shared/lib/stores/agent-store'
+import { runDownload, runUpload } from '@fizz/agent-kit/shared/lib/file-transfer/engine'
+import { createBlobSink } from '@fizz/agent-kit/shared/lib/file-transfer/sink'
+import { cn } from '@fizz/agent-kit/shared/lib/utils'
+import { joinSftpPath, normalizeSftpPath } from '@fizz/agent-kit/shared/lib/sftp-path'
+import type { SftpEntry } from '@fizz/contracts/agent-api'
+import type { SshHostConfig } from '@fizz/contracts/types'
+
+/** 字节数的可读展示 */
+function formatSize(n: number): string {
+  if (!n) return '-'
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
+/** 远端时间戳 → 本地可读时间 */
+function formatTime(ts: number): string {
+  if (!ts) return '-'
+  return new Date(ts).toLocaleString()
+}
+
+export function SftpPanel({ host }: { host: SshHostConfig }): React.JSX.Element {
+  const { app } = useAppContext()
+
+  const [path, setPath] = useState('/')
+  const [pathInput, setPathInput] = useState('/')
+  const [entries, setEntries] = useState<SftpEntry[]>([])
+  const [connecting, setConnecting] = useState(true)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  /** 弹窗状态：新建文件夹 / 重命名 / 删除确认 / 复制或移动的目标目录 */
+  const [mkdirOpen, setMkdirOpen] = useState(false)
+  const [mkdirName, setMkdirName] = useState('')
+  const [renaming, setRenaming] = useState<SftpEntry | null>(null)
+  const [renameText, setRenameText] = useState('')
+  const [pendingRemove, setPendingRemove] = useState<SftpEntry[] | null>(null)
+  const [targetOp, setTargetOp] = useState<{ entries: SftpEntry[]; mode: 'move' | 'copy' } | null>(
+    null
+  )
+  const [targetDir, setTargetDir] = useState('')
+
+  /** 多选：选中的远端路径集合（entries 刷新后自动剔除已不存在的项） */
+  const [selected, setSelected] = useState<Set<string>>(() => new Set())
+  /** Shift 范围选的锚点 */
+  const anchorRef = useRef<string | null>(null)
+
+  /**
+   * 本主机有上传在跑 —— 顶住改造前「上传中禁用上传按钮」的行为。
+   *
+   * 页内进度 state 已经撤掉，但「同一台主机不要并发刷连接」这条**不能跟着丢**。
+   * 选择器只回一个 boolean：store 每 patch 一次进度都会重算 `.some`（一片 4MB，频率很低），
+   * 结果不变时 zustand 不会触发重渲染。
+   */
+  const uploading = useAgentStore((s) =>
+    s.transfers.some((t) => t.kind === 'upload' && t.status === 'active' && t.hostId === host.id)
+  )
+
+  /** 挂载标记：防止异步回包写到已卸载的组件上 */
+  const aliveRef = useRef(true)
+  useEffect(() => {
+    aliveRef.current = true
+    return () => {
+      aliveRef.current = false
+    }
+  }, [])
+
+  const load = useCallback(
+    async (dir: string): Promise<boolean> => {
+      setLoading(true)
+      setError(null)
+      try {
+        const result = await app.sftpList(host.id, dir)
+        if (!aliveRef.current) return true
+        setEntries(result.entries)
+        setPath(result.path)
+        setPathInput(result.path)
+        return true
+      } catch (e) {
+        if (!aliveRef.current) return true
+        setError(e instanceof Error ? e.message : String(e))
+        return false
+      } finally {
+        if (aliveRef.current) setLoading(false)
+      }
+    },
+    [app, host.id]
+  )
+
+  // entries 变化后：剔除已不存在的选中项（删除 / 移动走后列表里就没有了）
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev
+      const valid = new Set(entries.filter((e) => prev.has(e.path)).map((e) => e.path))
+      return valid.size === prev.size ? prev : valid
+    })
+  }, [entries])
+
+  // 初始列目录：先试 `/`；win32-openssh 的默认目录是盘符风格路径（/C:/…），
+  // 只在 readdir 失败（或返回空且 `/` 明显不对）时改用 realpath('.') 拿准工作目录再试一次。
+  useEffect(() => {
+    setConnecting(true)
+    void (async () => {
+      const ok = await load('/')
+      if (!aliveRef.current) return
+      if (!ok) {
+        try {
+          const home = normalizeSftpPath(await app.sftpRealpath(host.id))
+          await load(home)
+        } catch {
+          // realpath 也失败：保留 `/` 那次的错误提示（load 内部已 setError）
+        }
+      }
+      if (aliveRef.current) setConnecting(false)
+    })()
+  }, [app, host.id, load])
+
+  /** 进入目录（仅目录）；文件无操作 */
+  const enter = (entry: SftpEntry): void => {
+    if (entry.isDir && !error) void load(entry.path)
+  }
+
+  const goUp = (): void => {
+    if (path === '/' || error) return
+    const idx = path.lastIndexOf('/')
+    void load(idx <= 0 ? '/' : path.slice(0, idx))
+  }
+
+  const submitPath = (): void => {
+    const target = normalizeSftpPath(pathInput)
+    if (target !== path && !error) void load(target)
+  }
+
+  const refresh = (): void => {
+    if (!error) void load(path)
+  }
+
+  const submitMkdir = async (): Promise<void> => {
+    const name = mkdirName.trim()
+    if (!name) return
+    try {
+      await app.sftpMkdir(host.id, joinSftpPath(path, name))
+      setMkdirOpen(false)
+      setMkdirName('')
+      toast.success('已创建文件夹')
+      void load(path)
+    } catch (e) {
+      toast.error('创建失败：' + (e instanceof Error ? e.message : String(e)))
+    }
+  }
+
+  const submitRename = async (): Promise<void> => {
+    const entry = renaming
+    const name = renameText.trim()
+    if (!entry || !name || name === entry.name) {
+      setRenaming(null)
+      return
+    }
+    try {
+      const parent = entry.path.slice(0, entry.path.lastIndexOf('/'))
+      await app.sftpRename(host.id, entry.path, joinSftpPath(parent, name))
+      setRenaming(null)
+      void load(path)
+    } catch (e) {
+      toast.error('重命名失败：' + (e instanceof Error ? e.message : String(e)))
+    }
+  }
+
+  const confirmRemove = async (): Promise<void> => {
+    const items = pendingRemove
+    if (!items) return
+    setPendingRemove(null)
+    const dirs = items.filter((i) => i.isDir)
+    const files = items.length - dirs.length
+    try {
+      for (const entry of items) {
+        await app.sftpRemove(host.id, entry.path)
+      }
+      toast.success(
+        `已删除 ${items.length} 项` +
+          (dirs.length ? `（含 ${dirs.length} 个文件夹）` : '') +
+          (files ? `（含 ${files} 个文件）` : '')
+      )
+      void load(path)
+    } catch (e) {
+      toast.error('删除失败：' + (e instanceof Error ? e.message : String(e)))
+    }
+  }
+
+  /**
+   * 下载单个远端文件。
+   *
+   * 分片拉取 + 落盘全交给 `runDownload`（进度 / 取消 / 失败都在右下角托盘里显示），
+   * 这里**不**再自己 toast 结果 —— 托盘就是那个入口，两个地方各报一次只会重复。
+   * `size` 直接取列表项里的 `SftpEntry.size`，不为它多发一次 stat。
+   */
+  const download = (entry: SftpEntry): void => {
+    void runDownload({
+      hostId: host.id,
+      hostLabel: host.name,
+      path: entry.path,
+      name: entry.name,
+      size: entry.size
+    })
+  }
+
+  /**
+   * 递归下载整个远端文件夹（逐文件走 `runDownload`）。
+   *
+   * ⚠️ 浏览器不能「一次另存为一个目录」，所以这里是**逐文件**下载 + 在本地按相对路径
+   * 重命名 —— 浏览器会把每个文件都丢进下载目录（子目录名拼进文件名），用户拿到的是
+   * 「文件夹名/子路径/文件名」这种扁平结构。这与 dogi 的 `showSaveDialog` 选目录后落盘
+   * 不是一个体验，但 web 形态下没有更好的办法（File System Access API 在局域网 http 下
+   * 不可用）。
+   *
+   * ⚠️ **显式传 `sink`（`createBlobSink`）**：不传的话 `createSink` 会给**每个文件**弹一次
+   * 保存框 / 文件选择器 —— 50 个文件要点 50 次。文件夹下载保持「浏览器自己往下载目录里
+   * 放」的老行为。
+   *
+   * ⚠️ 逐文件**串行**（`for` + `await`），与改造前一致：避免对同一台主机并发刷连接。
+   */
+  const downloadDir = (entry: SftpEntry): void => {
+    void (async () => {
+      const count = { ok: 0, fail: 0 }
+      const walk = async (remotePath: string, relPrefix: string): Promise<void> => {
+        let list: SftpEntry[]
+        try {
+          list = (await app.sftpList(host.id, remotePath)).entries
+        } catch (e) {
+          count.fail += 1
+          toast.error(`读取 ${relPrefix || remotePath} 失败：${e instanceof Error ? e.message : e}`)
+          return
+        }
+        for (const child of list) {
+          const rel = relPrefix ? `${relPrefix}/${child.name}` : child.name
+          if (child.isDir) {
+            await walk(child.path, rel)
+            continue
+          }
+          const flatName = `${entry.name}-${rel.replace(/\//g, '_')}`
+          // 失败 / 取消的原因都在托盘那一条里，这里只按终态统计个数
+          const outcome = await runDownload({
+            hostId: host.id,
+            hostLabel: host.name,
+            path: child.path,
+            name: flatName,
+            size: child.size,
+            sink: async () => createBlobSink(flatName)
+          })
+          if (outcome === 'done') count.ok += 1
+          else count.fail += 1
+        }
+      }
+      toast.info(`开始下载文件夹「${entry.name}」…`)
+      await walk(entry.path, '')
+      if (!aliveRef.current) return
+      if (count.ok) toast.success(`文件夹「${entry.name}」已下载 ${count.ok} 个文件`)
+      else if (!count.fail) toast.info(`文件夹「${entry.name}」是空的`)
+    })()
+  }
+
+  /** 打开「复制 / 移动到…」弹窗，目标目录默认当前目录（支持批量） */
+  const openTargetOp = (items: SftpEntry[], mode: 'move' | 'copy'): void => {
+    setTargetDir(path)
+    setTargetOp({ entries: items, mode })
+  }
+
+  /** 确认复制 / 移动：to = targetDir + entry.name（同名会被覆盖） */
+  const submitTargetOp = async (): Promise<void> => {
+    const op = targetOp
+    if (!op) return
+    const dir = targetDir.trim()
+    if (!dir) return
+    setTargetOp(null)
+    let lastErr: string | undefined
+    for (const entry of op.entries) {
+      const to = joinSftpPath(dir, entry.name)
+      try {
+        if (op.mode === 'move') await app.sftpMove(host.id, entry.path, to)
+        else await app.sftpCopy(host.id, entry.path, to)
+      } catch (e) {
+        lastErr = e instanceof Error ? e.message : String(e)
+      }
+    }
+    if (lastErr) {
+      toast.error(`${op.mode === 'move' ? '移动' : '复制'}失败：` + lastErr)
+    } else {
+      toast.success(
+        `已${op.mode === 'move' ? '移动' : '复制'} ${op.entries.length} 项到 ${dir}`
+      )
+    }
+    setSelected(new Set())
+    void load(path)
+  }
+
+  /**
+   * 上传本地文件到当前远端目录（逐文件串行）。
+   *
+   * 分片、进度、失败原因全交给 `runUpload`，结果一律显示在右下角传输托盘里 —— 面板里
+   * **没有**页内进度条了，也不在这里 toast 成败（两个地方各报一次只会重复）。
+   *
+   * ⚠️ 逐文件**串行**（`for` + `await`，**不是** `Promise.all`）：同一台主机并发刷连接
+   * 没有好处，而分片本身已经是串行的，并发只会互相抢带宽。
+   *
+   * ⚠️ 取消现在是**按条**的（托盘里每行一个 ✕）：取消一个文件不会中断这一批剩下的文件。
+   * 页内那条「取消整批」的通道随进度条一起撤掉了，托盘里也没有「全部取消」这种按钮。
+   */
+  const uploadFiles = (files: File[]): void => {
+    if (!files.length) return
+    void (async () => {
+      for (const file of files) {
+        await runUpload({ file, hostId: host.id, hostLabel: host.name, dir: path })
+      }
+      if (!aliveRef.current) return
+      // 传完刷新一次列表；被取消 / 失败的文件不会留下完整文件，不需要分别处理
+      void load(path)
+    })()
+  }
+
+  /** 上传入口：隐藏的 `<input type=file multiple>`（`showOpenFilePicker` 在局域网 http 下不可用） */
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const pickFiles = (): void => fileInputRef.current?.click()
+
+  /** 上传文件夹：`webkitdirectory` 拿到的 File 自带 `webkitRelativePath`（保留目录结构） */
+  const dirInputRef = useRef<HTMLInputElement | null>(null)
+  const pickDir = (): void => dirInputRef.current?.click()
+
+  // ---- 多选 ----
+  const selectedEntries = entries.filter((e) => selected.has(e.path))
+  const allSelected = entries.length > 0 && selected.size === entries.length
+  const someSelected = selected.size > 0
+
+  const clearSelection = (): void => {
+    setSelected(new Set())
+    anchorRef.current = null
+  }
+
+  const selectAll = (): void => {
+    setSelected(new Set(entries.map((e) => e.path)))
+    anchorRef.current = entries.length ? entries[entries.length - 1].path : null
+  }
+
+  /** 行点击：普通点选单个；Ctrl/⌘ 切换；Shift 范围选 */
+  const onRowClick = (e: ReactMouseEvent, entry: SftpEntry): void => {
+    if (e.shiftKey && anchorRef.current != null) {
+      const a = entries.findIndex((x) => x.path === anchorRef.current)
+      const b = entries.findIndex((x) => x.path === entry.path)
+      if (a >= 0 && b >= 0) {
+        const [lo, hi] = a < b ? [a, b] : [b, a]
+        setSelected((prev) => {
+          const next = new Set(prev)
+          for (let i = lo; i <= hi; i++) next.add(entries[i].path)
+          return next
+        })
+      }
+      anchorRef.current = entry.path
+      return
+    }
+    if (e.ctrlKey || e.metaKey) {
+      setSelected((prev) => {
+        const next = new Set(prev)
+        if (next.has(entry.path)) next.delete(entry.path)
+        else next.add(entry.path)
+        return next
+      })
+      anchorRef.current = entry.path
+      return
+    }
+    setSelected(new Set([entry.path]))
+    anchorRef.current = entry.path
+  }
+
+  /** 选中框切换单个（不触发行点击） */
+  const toggleSelect = (path: string): void => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+    anchorRef.current = path
+  }
+
+  /** 批量下载：目录走 downloadDir，文件走 download */
+  const bulkDownload = (): void => {
+    const items = selectedEntries
+    clearSelection()
+    for (const entry of items) {
+      if (entry.isDir) downloadDir(entry)
+      else download(entry)
+    }
+  }
+
+  const title = `${host.name}（${host.username}@${host.host}）`
+
+  return (
+    <div className="relative flex h-full min-h-0 flex-col bg-background">
+      {/* 工具栏：返回上级 + 路径 + 刷新 / 新建文件夹 / 上传 */}
+      <div className="flex shrink-0 items-center gap-2 px-3 py-2">
+        <span className="shrink-0 text-xs font-medium text-muted-foreground" title={title}>
+          {title}
+        </span>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="shrink-0"
+          title="返回上级目录"
+          aria-label="返回上级目录"
+          disabled={path === '/' || Boolean(error)}
+          onClick={goUp}
+        >
+          <ArrowUp className="size-4" />
+        </Button>
+        <Input
+          value={pathInput}
+          onChange={(e) => setPathInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') submitPath()
+          }}
+          placeholder="远程路径，如 /var/www"
+          className="min-w-0 flex-1 font-mono text-xs"
+        />
+        <Button
+          variant="ghost"
+          size="sm"
+          className="shrink-0"
+          title="刷新"
+          aria-label="刷新"
+          disabled={connecting || Boolean(error)}
+          onClick={refresh}
+        >
+          <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="shrink-0"
+          title="新建文件夹"
+          aria-label="新建文件夹"
+          disabled={connecting || Boolean(error)}
+          onClick={() => {
+            setMkdirName('')
+            setMkdirOpen(true)
+          }}
+        >
+          <FolderPlus className="size-4" />
+        </Button>
+        <Button
+          size="sm"
+          className="shrink-0 gap-1.5"
+          disabled={connecting || Boolean(error) || uploading}
+          onClick={pickFiles}
+        >
+          <Upload className="size-3.5" />
+          上传
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="shrink-0"
+          title="上传文件夹"
+          aria-label="上传文件夹"
+          disabled={connecting || Boolean(error) || uploading}
+          onClick={pickDir}
+        >
+          <FolderUp className="size-4" />
+        </Button>
+      </div>
+
+      {/* 多选操作栏：常驻显示；未选中时按钮禁用 */}
+      <div className="flex shrink-0 items-center gap-2 border-y border-border/60 bg-secondary/40 px-3 py-1.5">
+        <span className="shrink-0 text-xs font-medium text-foreground">已选 {selected.size} 项</span>
+        <div className="ml-auto flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={!someSelected}
+            onClick={bulkDownload}
+            title="下载选中项（目录走文件夹下载）"
+          >
+            <Download className="size-3.5" />
+            下载
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={!someSelected}
+            onClick={() => openTargetOp(selectedEntries, 'copy')}
+          >
+            <Copy className="size-3.5" />
+            复制到…
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={!someSelected}
+            onClick={() => openTargetOp(selectedEntries, 'move')}
+          >
+            <ArrowRightLeft className="size-3.5" />
+            移动到…
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-destructive hover:text-destructive"
+            disabled={!someSelected}
+            onClick={() => setPendingRemove(selectedEntries)}
+          >
+            <Trash2 className="size-3.5" />
+            删除
+          </Button>
+          <Button variant="ghost" size="sm" disabled={!someSelected} onClick={clearSelection}>
+            <X className="size-3.5" />
+            取消选择
+          </Button>
+        </div>
+      </div>
+
+      {/* 文件列表 */}
+      <div className="min-h-0 flex-1 overflow-auto">
+        {connecting ? (
+          <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="size-5 animate-spin" />
+            正在连接 {host.username}@{host.host}:{host.port}…
+          </div>
+        ) : error ? (
+          <div className="mx-4 mt-10 rounded-md border border-dashed border-destructive/40 px-4 py-6 text-center text-sm text-destructive">
+            {error}
+          </div>
+        ) : (
+          <>
+            {/* 表头（首列勾选框支持全选） */}
+            <div className="sticky top-0 z-10 flex items-center gap-3 border-b border-border/60 bg-background px-3 py-1.5 text-xs font-medium text-muted-foreground">
+              <Checkbox
+                className="shrink-0"
+                checked={allSelected}
+                onCheckedChange={(checked) => (checked ? selectAll() : clearSelection())}
+                disabled={entries.length === 0}
+              />
+              <span className="min-w-0 flex-1">名称</span>
+              <span className="w-24 shrink-0 text-right">大小</span>
+              <span className="w-44 shrink-0">修改时间</span>
+              <span className="w-10 shrink-0" />
+            </div>
+            {entries.length === 0 ? (
+              <div className="mx-4 mt-8 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
+                目录为空。
+              </div>
+            ) : (
+              <div className="flex flex-col">
+                {entries.map((entry) => (
+                  <ContextMenu key={entry.path}>
+                    <ContextMenuTrigger asChild>
+                      <div
+                        className={cn(
+                          'group flex cursor-pointer items-center gap-3 border-b border-border/40 px-3 py-2 hover:bg-secondary/60',
+                          selected.has(entry.path) && 'bg-primary/10 hover:bg-primary/15',
+                          loading && 'opacity-60'
+                        )}
+                        onClick={(e) => onRowClick(e, entry)}
+                        onDoubleClick={() => enter(entry)}
+                        title={entry.isDir ? '双击进入' : undefined}
+                      >
+                        <Checkbox
+                          className="shrink-0"
+                          checked={selected.has(entry.path)}
+                          onClick={(e) => e.stopPropagation()}
+                          onCheckedChange={() => toggleSelect(entry.path)}
+                        />
+                        {entry.isDir ? (
+                          <Folder className="size-5 shrink-0 text-sky-500" />
+                        ) : (
+                          <FileIcon className="size-5 shrink-0 text-muted-foreground" />
+                        )}
+                        <span className="min-w-0 flex-1 truncate text-sm">{entry.name}</span>
+                        <span className="w-24 shrink-0 text-right font-mono text-xs text-muted-foreground">
+                          {entry.isDir ? '-' : formatSize(entry.size)}
+                        </span>
+                        <span className="w-44 shrink-0 truncate text-xs text-muted-foreground">
+                          {formatTime(entry.mtime)}
+                        </span>
+                        <span className="w-10 shrink-0 text-center">
+                          {!entry.isDir && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="size-5 p-0 opacity-0 group-hover:opacity-100"
+                              title="下载"
+                              aria-label="下载"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                download(entry)
+                              }}
+                            >
+                              <Download className="size-3.5" />
+                            </Button>
+                          )}
+                        </span>
+                      </div>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent className="w-44">
+                      {entry.isDir ? (
+                        <>
+                          <ContextMenuItem onSelect={() => enter(entry)}>
+                            <Folder className="size-3.5" />
+                            打开
+                          </ContextMenuItem>
+                          <ContextMenuItem onSelect={() => downloadDir(entry)}>
+                            <Download className="size-3.5" />
+                            下载文件夹
+                          </ContextMenuItem>
+                        </>
+                      ) : (
+                        <ContextMenuItem onSelect={() => download(entry)}>
+                          <Download className="size-3.5" />
+                          下载
+                        </ContextMenuItem>
+                      )}
+                      <ContextMenuItem onSelect={() => openTargetOp([entry], 'copy')}>
+                        <Copy className="size-3.5" />
+                        复制到…
+                      </ContextMenuItem>
+                      <ContextMenuItem onSelect={() => openTargetOp([entry], 'move')}>
+                        <ArrowRightLeft className="size-3.5" />
+                        移动到…
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        onSelect={() => {
+                          setRenaming(entry)
+                          setRenameText(entry.name)
+                        }}
+                      >
+                        <Pencil className="size-3.5" />
+                        重命名
+                      </ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem
+                        variant="destructive"
+                        onSelect={() => setPendingRemove([entry])}
+                      >
+                        <Trash2 className="size-3.5" />
+                        删除
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* 隐藏的文件选择框：上传文件（多选）/ 上传文件夹 */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? [])
+          e.target.value = ''
+          uploadFiles(files)
+        }}
+      />
+      <input
+        ref={dirInputRef}
+        type="file"
+        // `webkitdirectory` 不在 React 的 input 类型里，但浏览器认它
+        {...({ webkitdirectory: '' } as Record<string, string>)}
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? [])
+          e.target.value = ''
+          uploadFiles(files)
+        }}
+      />
+
+      {/* 新建文件夹 */}
+      <Dialog open={mkdirOpen} onOpenChange={setMkdirOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>新建文件夹</DialogTitle>
+            <DialogDescription>将创建在 {path}</DialogDescription>
+          </DialogHeader>
+          <Input
+            autoFocus
+            placeholder="文件夹名称"
+            value={mkdirName}
+            onChange={(e) => setMkdirName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && mkdirName.trim()) void submitMkdir()
+            }}
+          />
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setMkdirOpen(false)}>
+              取消
+            </Button>
+            <Button disabled={!mkdirName.trim()} onClick={() => void submitMkdir()}>
+              创建
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 复制 / 移动到…（填目标目录，目标路径 = 目标目录 + 原名称） */}
+      <Dialog open={targetOp !== null} onOpenChange={(open) => !open && setTargetOp(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{targetOp?.mode === 'move' ? '移动到…' : '复制到…'}</DialogTitle>
+            <DialogDescription>
+              将{targetOp?.mode === 'move' ? '移动' : '复制'} {targetOp?.entries.length ?? 0} 项
+              {targetOp?.entries.some((e) => e.isDir) ? '（含文件夹，将递归处理）' : ''} 到指定目录
+            </DialogDescription>
+          </DialogHeader>
+          <Input
+            autoFocus
+            placeholder="目标目录，如 /var/www"
+            value={targetDir}
+            onChange={(e) => setTargetDir(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && targetDir.trim()) void submitTargetOp()
+            }}
+          />
+          <p className="text-xs text-muted-foreground">
+            目标路径：
+            {targetDir.trim()
+              ? joinSftpPath(targetDir.trim(), targetOp?.entries[0]?.name ?? '')
+              : '—'}
+            （同名文件会被覆盖）
+          </p>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setTargetOp(null)}>
+              取消
+            </Button>
+            <Button disabled={!targetDir.trim()} onClick={() => void submitTargetOp()}>
+              确定
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 重命名 */}
+      <Dialog open={renaming !== null} onOpenChange={(open) => !open && setRenaming(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>重命名</DialogTitle>
+          </DialogHeader>
+          <Input
+            autoFocus
+            value={renameText}
+            onChange={(e) => setRenameText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && renameText.trim()) void submitRename()
+            }}
+          />
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setRenaming(null)}>
+              取消
+            </Button>
+            <Button disabled={!renameText.trim()} onClick={() => void submitRename()}>
+              确定
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 删除确认（目录会递归删除，必须明确警示）；支持批量 */}
+      <Dialog open={pendingRemove !== null} onOpenChange={(open) => !open && setPendingRemove(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>删除？</DialogTitle>
+            <DialogDescription>
+              将删除 {pendingRemove?.length ?? 0} 项
+              {pendingRemove?.some((e) => e.isDir) ? '（含文件夹，将递归删除其全部内容）' : ''}
+              ，该操作不可撤销。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setPendingRemove(null)}>
+              取消
+            </Button>
+            <Button variant="destructive" onClick={() => void confirmRemove()}>
+              删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}

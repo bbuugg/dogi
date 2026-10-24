@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023"],
+    /* `vite/client` 提供 `import.meta.glob` 的类型（app.ts 用它收集路由模块） */
+    "types": ["node", "vite/client"],
+    "strict": true,
+    /* 搬过来的 Next 版服务端源码未按此严格项写过，开着只会淹没真正的错误 */
+    "noUnusedLocals": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "paths": {
+      /*
+       * `src/api/**` 与 `src/server/**` 是从 Next 版整棵搬过来的，内部仍写根目录那套
+       * `@/…` 路径。这里映射到本 app 的目录（与 vite.config.ts 的 alias 一一对应）。
+       * ⚠️ TS 取「最长匹配前缀」，所以带 `*` 的更具体模式会先命中。
+       */
+      "@/lib/server/*": ["./src/server/*"],
+      "@/lib/*": ["./src/lib/*"],
+      "@/app/api/*": ["./src/api/*"]
+    }
+  },
+  "include": ["src/**/*", "vite.config.ts"]
+}

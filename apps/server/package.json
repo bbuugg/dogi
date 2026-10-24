@@ -1,0 +1,37 @@
+{
+  "name": "@fizz/server",
+  "version": "0.0.1",
+  "description": "Fizz 服务端：Hono + SSE + WebSocket，同时托管 web 产物（web / cli / desktop 进程内共用同一份应用）",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "vite build -c vite.config.ts",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@fizz/acp": "*",
+    "@fizz/agent": "*",
+    "@fizz/contracts": "*",
+    "@fizz/git": "*",
+    "@fizz/i18n": "*",
+    "@fizz/mcp": "*",
+    "@fizz/shells": "*",
+    "@fizz/skills": "*",
+    "@fizz/tools": "*",
+    "@fizz/workspace": "*",
+    "@hono/node-server": "^1.19.5",
+    "cron-parser": "^4.9.0",
+    "dockerode": "^5.0.1",
+    "hono": "^4.10.3",
+    "iconv-lite": "^0.6.3",
+    "node-pty": "^1.1.0",
+    "ssh2": "^1.17.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/dockerode": "^4.0.2",
+    "@types/ssh2": "^1.15.5",
+    "@types/ws": "^8.18.0"
+  }
+}

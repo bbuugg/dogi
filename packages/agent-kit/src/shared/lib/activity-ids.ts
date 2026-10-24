@@ -1,0 +1,57 @@
+/**
+ * 功能区（活动栏条目）id 常量。
+ *
+ * 单独放在这个「叶子模块」（不 import 任何东西）是为了避免循环依赖：
+ * `activities.tsx` 需要 import 各面板组件，而面板组件（或外壳）又要引用功能区 id，
+ * 若 id 定义在 `activities.tsx` 就会形成
+ * `AgentSidebar → activities → AgentSidebar` 的环，求值顺序不巧时注册表拿到的
+ * 会是尚未初始化的组件。所以 id 下沉到这里。
+ */
+
+/** AI Agent：工作区 / 会话树，主区域是会话多标签 */
+export const AGENT_ACTIVITY_ID = 'agent'
+
+/**
+ * 主机：SSH 主机清单 + 本机终端入口。
+ *
+ * 它**没有自己的主区域**——从这里打开的主机 / 终端都落在同一块面板里（`PanelView`），
+ * 因为那些标签必须能和对话标签并排、一起拖拽分屏。
+ */
+export const HOSTS_ACTIVITY_ID = 'hosts'
+
+/**
+ * 接口请求：Postman 式的 HTTP 调试（保存的请求按分组树管理 + 请求历史）。
+ *
+ * 与「主机」同款：**没有自己的主区域**——点一条保存的请求，就在 `PanelView` 里开一个
+ * `api:<requestId>` 标签，和对话 / 终端标签并排、一起拖拽分屏。
+ */
+export const API_CLIENT_ACTIVITY_ID = 'api-client'
+
+/**
+ * 笔记：登记若干本地 / 服务端目录，在其中管理 Markdown。
+ *
+ * 与「主机」「接口请求」同款：**没有自己的主区域** —— 点树里的一篇笔记，就在
+ * `PanelView` 里开一个 `note:<n>` 标签，和对话 / 终端标签并排、一起拖拽分屏。
+ */
+export const NOTES_ACTIVITY_ID = 'notes'
+
+/**
+ * 插件界面的活动栏前缀：`plugin:<插件id>`。
+ *
+ * 插件 id 就是它的入口文件绝对路径（所以不同目录里的同名插件也不会撞）。
+ * 点这颗图标打开谁由插件自己声明（`ctx.ui.activityBar({ opens: 'sider:xx' })`），
+ * 解析在 `features/plugins/PluginSidebar.tsx` 里 —— id 只负责「是哪一插件」。
+ */
+export const PLUGIN_ACTIVITY_PREFIX = 'plugin:'
+
+/** 某个插件在活动栏里的 id */
+export function pluginActivityId(pluginId: string): string {
+  return `${PLUGIN_ACTIVITY_PREFIX}${pluginId}`
+}
+
+/** 从活动栏 id 反解插件 id（不是插件的功能区 → null） */
+export function pluginIdOfActivityId(activityId: string): string | null {
+  return activityId.startsWith(PLUGIN_ACTIVITY_PREFIX)
+    ? activityId.slice(PLUGIN_ACTIVITY_PREFIX.length)
+    : null
+}

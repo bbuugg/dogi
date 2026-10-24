@@ -1,0 +1,7 @@
+{
+  "id": "system-prompt",
+  "name": "系统提示词",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "entry": "index.ts"
+}

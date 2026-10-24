@@ -1,0 +1,27 @@
+.vitest/
+**/node_modules
+out
+# 本地环境配置（含 token / API key，绝不入库；.env.example 是模板，照旧入）
+.env
+.env.*
+!.env.example
+.playwright-cli
+# 新端（server / cli / web）的构建产物
+apps/*/dist
+.trae
+.vscode
+release
+.merkle-snapshot.json
+# 由 scripts/copy-monaco.cjs 生成的 Monaco 资源
+src/renderer/public/monaco-editor
+.workbuddy-ai
+.workbuddy
+# 临时验证产物（resolve-model 单文件打包 / 导出的明文配置），用完即弃
+.tooltest
+# mobile 的 Capacitor 生成物（P5 起壳加载自己的 dist，www 那套已废弃；老目录留着不碍事）
+apps/mobile/www
+apps/mobile/android
+# mobile 的 Monaco 资源同样是 copy:monaco 的生成物（不重复入库 152 个 vendored 文件）
+apps/mobile/public/monaco-editor
+# mobile 的「server 托管」版产物（build --mode hosted → base=/m/），与 APK 的 dist/ 分家
+apps/mobile/dist-server

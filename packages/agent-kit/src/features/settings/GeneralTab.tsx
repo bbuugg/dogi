@@ -1,0 +1,536 @@
+/**
+ * 通用设置：结束通知 + 语音输入 + 屏幕常亮 + 系统监控 + 远程访问 + 软件更新。
+ *
+ * **跟 AI 行为有关的几项（工具权限 / 并发 / 审批超时 / 重试 / 自动折叠 / 子任务）不在
+ * 这里**，已经搬到 `AiPreferencesTab`（设置 → AI → 偏好）：通用只管「宿主环境与提醒」。
+ *
+ * - 结束通知：任务出错 / 结束 / 中断、单轮结束、对话一轮结束时提醒一次 ——
+ *   页面在后台走系统通知、在前台走应用内 toast（分流逻辑在 `lib/notify.ts`，
+ *   这里只管偏好与系统通知的授权）。触发逻辑在 `hooks/use-notify-watcher.ts`。
+ * - 屏幕常亮：手机息屏期间页面在后台收不到任何东西，锁屏把「跑完的结果」也一起挡掉了。
+ *   三档（关 / 只在一轮跑的时候 / 始终），生命周期在 `lib/wake-lock.ts`，
+ *   这里只管偏好与能力探测。
+ * - 系统监控：状态栏左侧那条服务器性能监控的总开关（服务端全局一份）。关掉后
+ *   服务端**连采样一起停**、状态栏也不再渲染监控条。
+ * - 软件更新（desktop 专属）：应用自身的自动更新入口，见 `AppUpdateSection`。
+ *   静默只检查、**下载必须用户点**（产品约定）。
+ */
+import { useEffect, useState, type ReactNode } from 'react'
+import { Activity, Bell, Check, Copy, ExternalLink, Globe, Languages, Mic, Sun } from 'lucide-react'
+import { Button } from '@fizz/ui/button'
+import { Input } from '@fizz/ui/input'
+import { Switch } from '@fizz/ui/switch'
+import { IconTip } from '@fizz/agent-kit/shared/components/IconTip'
+import { getAgentHost, type RemoteAccessState } from '@fizz/agent-client/host'
+import type { AgentApp } from '@fizz/agent-kit/shared/hooks/useAgentApp'
+import {
+  DEFAULT_SYSTEM_MONITOR_SETTINGS,
+  type SystemMonitorSettings
+} from '@fizz/contracts'
+import { useAgentStore } from '@fizz/agent-kit/shared/lib/stores/agent-store'
+import { useT } from '@fizz/agent-kit/shared/lib/language'
+import { APP_LANGUAGES } from '@fizz/contracts'
+import { toast } from 'sonner'
+import {
+  notifyPermission,
+  notifySupported,
+  refreshNotifyPermission,
+  requestNotifyPermission,
+  saveNotifyEnabled,
+  useNotifyEnabled,
+  type NotifyPermissionResult
+} from '@fizz/agent-kit/shared/lib/notify'
+import { isNativeShell } from '@fizz/agent-kit/shared/lib/native-notify'
+import {
+  normalizeSilenceTimeoutSec,
+  setVoiceSilenceTimeout,
+  useVoiceSilenceTimeout
+} from '@fizz/agent-kit/shared/lib/voice-prefs'
+import {
+  retryWakeLock,
+  saveWakeLockMode,
+  useWakeLockDesired,
+  useWakeLockMode,
+  useWakeLockState,
+  wakeLockSupported,
+  type WakeLockMode
+} from '@fizz/agent-kit/shared/lib/wake-lock'
+import { AppUpdateSection } from './AppUpdateSection'
+import {
+  ChoiceChips,
+  type ChoiceChipOption
+} from '@fizz/agent-kit/features/settings/ChoiceChips'
+
+/** 屏幕常亮的档位：关 / 只在一轮 Agent 跑的时候 / 页面在前台就始终 */
+const WAKE_LOCK_OPTIONS: ReadonlyArray<ChoiceChipOption<WakeLockMode>> = [
+  { value: 'off', label: '关闭', title: '不申请屏幕唤醒锁' },
+  {
+    value: 'running',
+    label: '会话进行中',
+    title: '只在有会话正在跑（含后台会话）时保持屏幕常亮，跑完立刻释放'
+  },
+  {
+    value: 'always',
+    label: '始终',
+    title: '页面在前台就保持屏幕常亮（旧版开关的行为）'
+  }
+]
+
+export function GeneralTab({ app }: { app: AgentApp }) {
+  const tr = useT()
+  /** 语音输入在 desktop 宿主不可用（宿主缺语音服务）：下面那一节整块不渲染 */
+  const isDesktopHost = !getAgentHost().capabilities.voice
+
+  /** 语音输入静音超时（秒）：偏好存 localStorage，Composer 读它决定语音识别何时停 */
+  const silenceSec = useVoiceSilenceTimeout()
+
+  /**
+   * 屏幕常亮：偏好档位 + 浏览器能力 + **实际有没有锁上** + **当前该不该锁**。
+   *
+   * ⚠️ 状态文案不能只看偏好：这个 API 的锁随时可能被系统收掉（省电策略、用户锁屏），
+   * 而且「会话进行中」档在空闲时本来就该是没锁的 —— 只看档位会显示成「已开启」，
+   * 变成一个查不到的问题。
+   */
+  const wakeSupported = wakeLockSupported()
+  const wakeMode = useWakeLockMode()
+  const wakeDesired = useWakeLockDesired()
+  const lockState = useWakeLockState()
+  const wakeStatus =
+    wakeMode === 'off'
+      ? '已关闭'
+      : lockState === 'on'
+        ? wakeMode === 'running'
+          ? '会话进行中，已保持常亮'
+          : '始终保持常亮'
+        : lockState === 'error'
+          ? '没能拿到锁'
+          : wakeDesired
+            ? '正在申请锁…'
+            : '会话进行中时自动开启（当前没有任务）'
+
+  /**
+   * 结束通知：偏好（总闸门，两条通道都归它管）+ 系统授权（只影响后台那条系统通知）。
+   *
+   * 安卓壳里的系统权限只能**跨桥异步查询**，而 `notifyPermission()` 是同步函数
+   * （它读 `native-notify.ts` 的缓存），所以挂载后补一次真实状态，否则进设置页
+   * 会先闪一下「还没授权」。
+   */
+  const nativeShell = isNativeShell()
+  const supported = notifySupported()
+  const notifyEnabled = useNotifyEnabled()
+  const [permission, setPermission] = useState<NotifyPermissionResult>(notifyPermission)
+
+  useEffect(() => {
+    if (!nativeShell) return
+    let alive = true
+    void refreshNotifyPermission().then((next) => {
+      if (alive) setPermission(next)
+    })
+    return () => {
+      alive = false
+    }
+  }, [nativeShell])
+
+  /**
+   * 系统监控偏好（服务端全局一份，desktop / web 共享）。
+   * `null` = 还没拉到 → 按默认值（开）渲染，免得首帧闪一下「已关闭」。
+   */
+  const systemMonitor = app.systemMonitorSettings ?? DEFAULT_SYSTEM_MONITOR_SETTINGS
+  const [monitorSaving, setMonitorSaving] = useState(false)
+  /** 保存系统监控偏好：失败要说出来（同 saveBrowser） */
+  const saveMonitor = async (patch: Partial<SystemMonitorSettings>): Promise<void> => {
+    setMonitorSaving(true)
+    const ok = await app.saveSystemMonitorSettings(patch)
+    setMonitorSaving(false)
+    if (!ok) toast.error(tr('保存失败：{reason}', { reason: useAgentStore.getState().error ?? tr('未知原因') }))
+  }
+
+  /**
+   * 开：偏好先置上（前台的 toast 不需要任何授权），再顺手申请系统通知权限 ——
+   * 只有**后台**（页面不可见 / 窗口不在前台）那条通道要它。被拒 / 弹窗被静默拦截
+   * 都不影响前台提示，所以也不撤回偏好。
+   */
+  const onToggle = async (next: boolean): Promise<void> => {
+    if (!next) {
+      saveNotifyEnabled(false)
+      return
+    }
+    saveNotifyEnabled(true)
+    if (permission !== 'granted') {
+      const result = await requestNotifyPermission()
+      setPermission(result)
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      <section className="space-y-2">
+        <div className="flex items-center gap-1.5 text-sm font-medium">
+          <Languages className="size-3.5" />
+          {tr('界面语言')}
+        </div>
+        <p className="text-xs leading-4 text-muted-foreground">
+          {tr('切换后界面立即生效；Agent 的工具说明与系统提示词会在下一轮对话按新语言生成。')}
+        </p>
+        <ChoiceChips
+          ariaLabel={tr('界面语言')}
+          value={app.language}
+          onChange={(next) => void app.saveLanguage(next)}
+          options={APP_LANGUAGES.map((item) => ({
+            value: item.value,
+            label: item.label === 'English' ? 'English' : tr('中文')
+          }))}
+        />
+      </section>
+
+      <section className="space-y-2">
+        <div className="flex items-center gap-1.5 text-sm font-medium">
+          <Activity className="size-3.5" />
+          {tr('系统监控')}
+        </div>
+        <p className="text-xs leading-4 text-muted-foreground">
+          {tr('状态栏左侧的服务器性能监控。关闭后服务端停止采样，状态栏也不再显示。默认开启。')}
+        </p>
+        <div className="flex items-center gap-3">
+          <Switch
+            id="system-monitor-enabled"
+            checked={systemMonitor.enabled}
+            disabled={monitorSaving}
+            onCheckedChange={(next) => void saveMonitor({ enabled: next })}
+          />
+          <label htmlFor="system-monitor-enabled" className="text-xs text-muted-foreground">
+            {systemMonitor.enabled ? tr('已开启') : tr('已关闭（后台不再采集性能数据）')}
+          </label>
+        </div>
+      </section>
+
+      {/*
+        桌面端语音输入暂时不可用（Composer 的麦克风按钮、快捷键都已按平台收掉）：整节不渲染，
+        免得给一个调了不动的设置项。web 端正常展示。
+      */}
+      {!isDesktopHost && (
+        <section className="space-y-2">
+          <div className="flex items-center gap-1.5 text-sm font-medium">
+            <Mic className="size-3.5" />
+            {tr('语音输入静音超时')}
+          </div>
+          <p className="text-xs leading-4 text-muted-foreground">
+            {tr('连续静音多久后停止语音输入。0 = 不自动停止。')}
+          </p>
+          <div className="flex items-center gap-2">
+            <Input
+              type="number"
+              min={0}
+              step={1}
+              value={silenceSec}
+              onChange={(e) => {
+                const raw = e.target.value === '' ? 0 : Number(e.target.value)
+                if (!Number.isNaN(raw)) setVoiceSilenceTimeout(raw)
+              }}
+              onBlur={(e) => {
+                // 失焦时把胡乱输入（负数 / 小数 / 空）归一化回合法值
+                const raw = e.target.value === '' ? 0 : Number(e.target.value)
+                setVoiceSilenceTimeout(normalizeSilenceTimeoutSec(raw))
+              }}
+              className="w-28 font-mono"
+            />
+            <span className="text-xs text-muted-foreground">
+              {tr('秒')}{silenceSec === 0 ? tr('（不自动停）') : ''}
+            </span>
+          </div>
+        </section>
+      )}
+
+      <section className="space-y-2">
+        <div className="flex items-center gap-1.5 text-sm font-medium">
+          <Bell className="size-3.5" />
+          {tr('结束通知')}
+        </div>
+        <p className="text-xs leading-4 text-muted-foreground">
+          {tr('任务结束、出错、被中断或对话回复完成时提醒一次；后台走系统通知，前台走应用内提示。')}
+          {nativeShell && tr(' 安卓端为本地通知，App 被系统清理后收不到。')}
+        </p>
+        {supported ? (
+          <>
+            <div className="flex items-center gap-3">
+              <Switch
+                id="notify-enabled"
+                checked={notifyEnabled}
+                onCheckedChange={onToggle}
+              />
+              {/* 开关 = 总偏好。授权只决定**后台**那条系统通知能不能发：前台的应用内
+                  toast 不需要任何授权，所以「未授权」不等于「已关闭」，别再拿 permission
+                  —— 只看权限的话，「授权了但把开关关了」会与偏好自相矛盾 */}
+              <label htmlFor="notify-enabled" className="text-xs text-muted-foreground">
+                {!notifyEnabled
+                  ? tr('已关闭')
+                  : permission === 'granted'
+                    ? tr('已开启')
+                    : tr('已开启（前台为应用内提示）')}
+              </label>
+            </div>
+            {permission === 'denied' && (
+              <p className="text-xs leading-4 text-muted-foreground">
+                {nativeShell
+                  ? tr('系统通知权限已被关闭，页面无法再次申请。请到 系统设置 → 应用 → Fizz → 通知 里允许，回到 App 后这里会自动更新。在此之前：前台的右上角提示仍然会用，只有切到后台（含锁屏）时的系统提醒发不出去。')
+                  : tr('通知权限已被浏览器拒绝，且无法由页面再次申请。请在地址栏的站点设置里把「通知」改为允许，刷新本页后即可开启。在此之前：前台的右上角提示仍然会用，只有切到后台时的系统提醒发不出去。')}
+              </p>
+            )}
+            {(permission === 'default' || permission === 'stuck') && (
+              <div className="flex flex-wrap items-center gap-3">
+                <Button size="sm" variant="outline" onClick={() => void onToggle(true)}>
+                  {permission === 'stuck'
+                    ? tr('再试一次')
+                    : nativeShell
+                      ? tr('开启系统通知')
+                      : tr('授权浏览器通知')}
+                </Button>
+                <span className="text-xs text-muted-foreground">
+                  {permission === 'stuck'
+                    ? tr('授权弹窗一直没弹出来 —— 多半被浏览器的「安静模式」拦截了（以前关过几次弹窗的站点会这样）。点地址栏左侧的小图标，或到 浏览器设置 → 网站设置 → 通知 里把本站改为「允许」，刷新后再试。')
+                    : nativeShell
+                      ? tr('未开启系统通知，点此授权；后台提醒需要它，前台提示不需要。')
+                      : tr('未授权通知，点此在浏览器中允许；后台提醒需要它。')}
+                </span>
+              </div>
+            )}
+          </>
+        ) : (
+          <p className="text-xs leading-4 text-muted-foreground">
+            {tr('当前浏览器不支持系统通知（部分环境在非 HTTPS 下也会禁用）：切到后台时发不出提醒，但前台的右上角提示仍然会用。')}
+          </p>
+        )}
+      </section>
+
+      <section className="space-y-2">
+        <div className="flex items-center gap-1.5 text-sm font-medium">
+          <Sun className="size-3.5" />
+          {tr('屏幕常亮')}
+        </div>
+        <p className="text-xs leading-4 text-muted-foreground">
+          {tr('有任务运行时保持屏幕常亮；跑完自动释放，切到后台也会释放，回来后按需重新获取。')}
+        </p>
+        {wakeSupported ? (
+          <>
+            <ChoiceChips
+              ariaLabel={tr('屏幕常亮')}
+              value={wakeMode}
+              onChange={saveWakeLockMode}
+              options={WAKE_LOCK_OPTIONS.map((o) => ({ ...o, label: tr(String(o.label)), title: o.title ? tr(o.title) : undefined }))}
+            />
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="text-xs text-muted-foreground">{tr(wakeStatus)}</span>
+              {wakeDesired && lockState === 'error' && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void retryWakeLock()}
+                >
+                  {tr('再试一次')}
+                </Button>
+              )}
+            </div>
+            {wakeDesired && lockState === 'error' && (
+              <p className="text-xs leading-4 text-muted-foreground">
+                {tr('浏览器没把锁给下来（系统省电策略、或页面刚从后台回来还没拿到前台权限时会这样）。点「再试一次」；仍不行就手动锁一次屏再解锁。')}
+              </p>
+            )}
+          </>
+        ) : (
+          <p className="text-xs leading-4 text-muted-foreground">
+            {tr('当前浏览器不支持屏幕唤醒锁（iOS Safari 与部分桌面浏览器尚未实现），页面里没有这个开关能开的替代方案 —— 需要的话改用系统的「屏幕常亮」设置。')}
+          </p>
+        )}
+      </section>
+
+      <RemoteAccessSection />
+
+      {/* 软件更新（desktop 打包版专属）：宿主没实现 appUpdate 时自己整块不渲染 */}
+      <AppUpdateSection />
+    </div>
+  )
+}
+
+/**
+ * 远程访问（desktop 专属）：把进程内后端暴露到一个真实端口，浏览器里的 web 端直连。
+ *
+ * 能力探测：`AgentHost.loadRemoteAccess` 只有 desktop 实现 —— web 宿主没有「本机端口」
+ * 这个概念（它是被托管的那一方），这一块就不渲染。
+ *
+ * ⚠️ hooks 全部无条件调用，「没实现就不渲染」放在 hooks **之后** return，
+ * 不然条件 return 会让 hooks 顺序在两次渲染之间漂（React 直接报错）。
+ */
+function RemoteAccessSection() {
+  const tr = useT()
+  const host = getAgentHost()
+  const save = host.saveRemoteAccess?.bind(host) ?? null
+  const initial = host.loadRemoteAccess?.() ?? null
+  const [state, setState] = useState<RemoteAccessState | null>(initial)
+  /** 端口 / 用户名 / 密码都是**草稿**：改完点应用（或拨开关）才落到主进程 */
+  const [portDraft, setPortDraft] = useState<string>(() => String(initial?.port ?? 7801))
+  const [userDraft, setUserDraft] = useState<string>(() => initial?.username ?? '')
+  const [passDraft, setPassDraft] = useState<string>(() => initial?.password ?? '')
+  const [busy, setBusy] = useState(false)
+
+  /** 两栏都非空才算改得完整（主进程对空串按「没改」处理，这里先拦一道，给出明确提示） */
+  const credsReady = userDraft.trim() !== '' && passDraft !== ''
+  const credsDirty =
+    state !== null && (userDraft.trim() !== state.username || passDraft !== state.password)
+
+  /** 图标按钮：把一段文本复制到剪贴板（`label` 同时用于提示与无障碍名） */
+  const copyButton = (text: string, label: string): ReactNode => (
+    <IconTip label={tr('复制{label}', { label })}>
+      <Button
+        size="icon-xs"
+        variant="ghost"
+        aria-label={tr('复制{label}', { label })}
+        disabled={!text}
+        onClick={() => {
+          void navigator.clipboard.writeText(text).then(
+            () => toast.success(tr('已复制{label}', { label })),
+            () => toast.error(tr('复制失败，请手动选中'))
+          )
+        }}
+      >
+        <Copy />
+      </Button>
+    </IconTip>
+  )
+
+  if (!save) return null
+
+  /**
+   * 落一次改动。`withCreds` 表示把凭据草稿一起推过去 —— 主进程会**重启监听**才生效
+   * （服务端只在启动时读 `FIZZ_AUTH_*`，见 agent-host 的 remote-access.ts）。
+   */
+  const apply = async (enabled: boolean, withCreds = false): Promise<void> => {
+    setBusy(true)
+    try {
+      // 端口以输入框为准（空 / 非法值回落到当前配置）
+      const port = Number(portDraft) > 0 ? Math.trunc(Number(portDraft)) : (state?.port ?? 7801)
+      const next = await save({
+        enabled,
+        port,
+        ...(withCreds && credsReady ? { username: userDraft.trim(), password: passDraft } : {})
+      })
+      setState(next)
+      // 主进程可能补了默认值 / 现场生成了密码：以回传的状态为准把草稿对齐
+      setPortDraft(String(next.port))
+      if (next.username) setUserDraft(next.username)
+      if (next.password) setPassDraft(next.password)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : tr('远程访问设置失败'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="space-y-2">
+      <div className="flex items-center gap-1.5 text-sm font-medium">
+        <Globe className="size-3.5" />
+        {tr('远程访问（局域网）')}
+      </div>
+      <p className="text-xs leading-4 text-muted-foreground">
+        {tr('把这台机器的 Agent 后端开放到局域网，其他设备用浏览器即可访问完整工作台。')}
+      </p>
+      <div className="flex items-center gap-3">
+        <Switch
+          checked={state?.enabled === true}
+          onCheckedChange={(v) => void apply(v)}
+          disabled={busy}
+          aria-label={tr('开启端口监听')}
+        />
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          {tr('端口')}
+          <Input
+            type="number"
+            min={1}
+            max={65535}
+            value={portDraft}
+            onChange={(e) => setPortDraft(e.target.value)}
+            className="h-7 w-24 tabular-nums"
+            disabled={busy}
+            aria-label={tr('监听端口')}
+          />
+        </div>
+        {busy && <span className="text-xs text-muted-foreground">{tr('应用中…')}</span>}
+      </div>
+
+      {state?.enabled && (
+        <div className="space-y-2 rounded-md border border-border/60 bg-muted/20 p-2.5 text-xs">
+          {state.url ? (
+            <div className="flex items-center gap-2">
+              <span className="shrink-0 text-muted-foreground">{tr('访问地址')}</span>
+              <code className="min-w-0 flex-1 truncate">{state.url}</code>
+              {copyButton(state.url, tr('访问地址'))}
+              <IconTip label={tr('在系统浏览器里打开')}>
+                <Button
+                  size="icon-xs"
+                  variant="ghost"
+                  aria-label={tr('在系统浏览器里打开')}
+                  onClick={() => void host.openExternal?.(state.url ?? '')}
+                >
+                  <ExternalLink />
+                </Button>
+              </IconTip>
+            </div>
+          ) : (
+            <div className="text-muted-foreground">
+              {tr('没找到对外网卡，只能在本机用')} <code>http://127.0.0.1:{state.port}</code>
+            </div>
+          )}
+          {/* 登录凭据可改：改完点下面的对勾应用（主进程按新凭据重启监听，已连接的页面要重登） */}
+          <div className="flex items-center gap-2">
+            <span className="shrink-0 text-muted-foreground">{tr('用户名')}</span>
+            <Input
+              value={userDraft}
+              onChange={(e) => setUserDraft(e.target.value)}
+              className="h-7 min-w-0 flex-1"
+              disabled={busy}
+              aria-label={tr('登录用户名')}
+            />
+            {copyButton(userDraft, tr('用户名'))}
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="shrink-0 text-muted-foreground">{tr('密码')}</span>
+            <Input
+              value={passDraft}
+              onChange={(e) => setPassDraft(e.target.value)}
+              className="h-7 min-w-0 flex-1 font-mono"
+              disabled={busy}
+              aria-label={tr('登录密码')}
+            />
+            {copyButton(passDraft, tr('密码'))}
+          </div>
+          {credsDirty && (
+            <div className="flex items-center gap-2">
+              <span className="min-w-0 flex-1 text-muted-foreground">
+                {credsReady
+                  ? tr('凭据改过了：点右边应用（会重启监听，已连接的页面需要重新登录）')
+                  : tr('用户名和密码都不能为空')}
+              </span>
+              <IconTip label={tr('应用新凭据（重启监听）')}>
+                <Button
+                  size="icon-xs"
+                  variant="outline"
+                  aria-label={tr('应用新凭据')}
+                  disabled={busy || !credsReady}
+                  onClick={() => void apply(true, true)}
+                >
+                  <Check />
+                </Button>
+              </IconTip>
+            </div>
+          )}
+          {!state.webServed && (
+            <div className="text-muted-foreground">
+              {tr('没找到 web 产物')}（<code>apps/web/dist</code>）：{tr('浏览器打开只有接口、没有界面。先在仓库根跑一次')} <code>npm run build:web</code> {tr('再开关一次这里。')}
+            </div>
+          )}
+          {state.error && <div className="text-destructive">{state.error}</div>}
+        </div>
+      )}
+    </section>
+  )
+}

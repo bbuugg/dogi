@@ -1,0 +1,28 @@
+{
+  "name": "@fizz/acp",
+  "version": "0.1.0",
+  "description": "Fizz 的 ACP（Agent Client Protocol）客户端：把 Claude Code 等 ACP Agent 进程接成统一的 AgentStreamEvent 事件流，源码直接被打包",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^1.4.0",
+    "@fizz/contracts": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^7.0.2"
+  }
+}
