@@ -14,7 +14,7 @@
  *
  * 桌面 / web 的「导入 / 导出」在设置外面（左下角菜单的子菜单），共享的分组清单里
  * 本来没有对应分组；手机版没有那个菜单，它们必须进设置页 —— 走的是手机壳的**宿主扩展点**
- * （`MobileSettingsPanel` 的 `extraGroups`）：渲染成与内置分组完全同款的导航项（菜单 / 详情
+ * （`SettingsShell` 的 `extraGroups`）：渲染成与内置分组完全同款的导航项（菜单 / 详情
  * 两级导航、返回行、同一滚动容器），内容也用各 Tab 同款的分节样式（`space-y-6` 根 + `space-y-2`
  * 分节 + 胶囊按钮）。第一版曾把它们做成页面顶部的自绘快捷区块，UI 与设置页其它项
  * 明显不一致 —— 就是没有扩展点时旁路造的杈，已废。
@@ -58,9 +58,9 @@ import { useAndroidBackHandler } from '@/app/android-back'
 import { useT } from '@fizz/agent-kit/shared/lib/language'
 import { useIsWide, WIDE_QUERY } from '@/app/use-is-wide'
 import {
-  MobileSettingsPanel,
-  type MobileSettingsDetail
-} from '@fizz/agent-kit/features/settings/MobileSettingsPanel'
+  SettingsShell,
+  type SettingsShellDetail
+} from '@fizz/agent-kit/features/settings/SettingsShell'
 import type { SettingsExtraGroup } from '@fizz/agent-kit/features/settings/types'
 import { getAgentHost } from '@fizz/agent-client/host'
 
@@ -161,7 +161,7 @@ function useSlideOut(
  * 设置页的进出场类名。不做动画（宽屏调试）时 `entered` 恒为 true、`leaving` 永远到不了
  * true（`useSlideOut` 那时直接调 `onClose`），于是恒为归位态 —— 与改动前逐像素相同。
  *
- * 底色是 `bg-surface-1`（**不是** `bg-background`）：这一层要跟 `MobileSettingsPanel`
+ * 底色是 `bg-surface-1`（**不是** `bg-background`）：这一层要跟 `SettingsShell`
  * 的二级页逐像素同色 —— 菜单左移那 20% 空出来的一条由这里补，二级页自己也铺同一档
  * 实底（见那个文件头「二级页必须自带实底」）。用 `bg-background` 的话，一旦配了背景
  * 图 / 视频，面板那块会比它周围的页面更实，切二级页时能看出一个色块边界。
@@ -193,8 +193,8 @@ export function SettingsPage({
 }) {
   /** 导入 / 导出对话框的模式（null = 关闭） */
   const [transfer, setTransfer] = useState<TransferMode>(null)
-  /** 二级菜单的标题 / 返回动作：由 MobileSettingsPanel 上报，标题栏因此能跟着一起变 */
-  const [mobileDetail, setMobileDetail] = useState<MobileSettingsDetail | null>(null)
+  /** 二级菜单的标题 / 返回动作：由 SettingsShell 上报，标题栏因此能跟着一起变 */
+  const [mobileDetail, setMobileDetail] = useState<SettingsShellDetail | null>(null)
   /** 「退出」是「连接型宿主」（web / 手机）才有的概念（宿主能力叫 `canDisconnect`）：desktop 内置后端恒在 */
   const canDisconnect = getAgentHost().canDisconnect
   /**
@@ -355,12 +355,16 @@ export function SettingsPage({
       </header>
 
       {/*
-        面板自己带滚动容器（每个分组一个，见 MobileSettingsPanel 的 `key={tab}`），
+        面板自己带滚动容器（每个分组一个，见 MobileSettingsPanel 的 `key={tab}` —— 由
+        `SettingsShell` 转交），
         这里只把剩余高度交给它；横向留白与标题栏对齐。数据 / 退出
         经 `extraGroups` 注入 —— 与内置分组同一套两级导航，不再是旁边的自绘区块。
       */}
       <div className="flex min-h-0 flex-1 flex-col px-2 pb-2 pt-3">
-        <MobileSettingsPanel
+        <SettingsShell
+          platform="mobile"
+          // 手机壳恒两级；宽屏（平板横屏 / 桌面调试）不播转场，退回并排两栏
+          form="two-level"
           app={app}
           shortcuts={shortcuts}
           onSaveShortcuts={onSaveShortcuts}

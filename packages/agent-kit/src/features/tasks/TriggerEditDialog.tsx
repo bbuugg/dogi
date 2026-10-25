@@ -10,13 +10,14 @@
  * ## 表单项复用「新建会话」那一套
  *
  * 需求框、工作区、权限、模型、浏览器、MCP 本来就是会话上的概念，这里不再各写一份下拉，
- * 而是直接复用聊天输入区那几颗 pill（`WorkspacePill` / `PermissionPill` / `ModelPill` /
- * `BrowserPill` / `McpPill`，样式与交互**只有一份实现**）。
+ * 而是直接复用聊天输入区那几颗控件（`WorkspacePicker` / `PermissionPill` / `ModelPicker` /
+ * `BrowserPicker` / `McpPicker`，样式与交互**只有一份实现**）。
  *
- * 模型那颗列的是**两种后端**：设置里的模型配置（内置 mastra，`配置 · 模型`）与外部
- * Agent（ACP，`agent 名 · 跟随 agent 默认` / `agent 名 · 模型名`）。定时任务跑的就是一个
- * 普通会话，所以手动会话能选什么，它就能选什么 —— 选完写进 `template.backend` /
- * `configId` / `modelId`，调度器照这一组建会话（见 `scheduler` 的 `resolveHeadlessTarget`）。
+ * 模型那颗是**会话详情同一颗** `ModelPicker`（不是另写一层平铺清单）：分组（模型配置 /
+ * 外部 Agent）、行尾设置齿轮、ACP 白名单、「跟随 agent 默认」全都一样 —— 定时任务跑的就是
+ * 一个普通会话，手动会话能选什么它就该能选什么。区别只有数据来源：那边读 `chatTarget`，
+ * 这边是表单自己的局部状态（`modelTarget`）。选完写进 `template.backend` / `configId` /
+ * `modelId`，调度器照这一组建会话（见 `scheduler` 的 `resolveHeadlessTarget`）。
  * 外部 Agent 的权限是它自己发的请求，只有「完全访问」才自动放行，其余档会单独提示。
  *
  * 浏览器那颗在定时任务里**不是凑数**：`browser_*` 工具跑在**服务端**（用服务端那台机器的
@@ -35,7 +36,7 @@
  * `trigger = null` 即新建。Radix 的 `DialogContent` 在关闭时会卸载，所以每次打开都是
  * 一棵新树、表单天然干净 —— 不需要「在同一张弹窗里切换编辑对象」时才需要的 `key` 重挂载。
  */
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { CalendarClock, Loader2, TriangleAlert } from 'lucide-react'
 import { toast } from 'sonner'
 import type { AiPermissionMode, TaskTrigger } from '@fizz/contracts/types'
@@ -55,8 +56,14 @@ import {
 import { Input } from '@fizz/ui/input'
 import { Label } from '@fizz/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@fizz/ui/select'
-import { ModelPill, PermissionPill } from '@fizz/agent-kit/features/chat/composer'
-import { BrowserPill, McpPill, WorkspacePill } from '@fizz/agent-kit/features/chat/pickers'
+import { PermissionPill } from '@fizz/agent-kit/features/chat/composer'
+import {
+  ModelPicker,
+  type ModelTarget
+} from '@fizz/agent-kit/features/chat/ModelPicker'
+import { WorkspacePicker } from '@fizz/agent-kit/features/chat/WorkspacePicker'
+import { BrowserPicker } from '@fizz/agent-kit/features/chat/BrowserPicker'
+import { McpPicker } from '@fizz/agent-kit/features/chat/McpPicker'
 import type { TriggersState } from '@fizz/agent-kit/shared/hooks/useTriggers'
 
 /**
@@ -90,6 +97,8 @@ export function TriggerEditDialog({
   defaultPermissionMode,
   defaultBrowserSettings,
   browserDetected,
+  defaultContextWindow,
+  onOpenSettings,
   trigger,
   open,
   onOpenChange
@@ -109,6 +118,13 @@ export function TriggerEditDialog({
   defaultBrowserSettings: BrowserSettings
   /** 服务端探测到的各浏览器来源（下拉里标「未检测到」用） */
   browserDetected: BrowserChannelProbe[]
+  /**
+   * 模型没单独配窗口时的兜底值（`app.defaultContextWindow`）：只用于模型下拉里那个
+   * 参考数字，与「会话详情」那颗同源 —— 不传就按 `DEFAULT_CONTEXT_WINDOW`。
+   */
+  defaultContextWindow?: number
+  /** 模型下拉行尾的设置齿轮（打开 设置 → AI 模型 / 外部 Agent）；不传则不渲染齿轮 */
+  onOpenSettings?: (tab: 'models' | 'acp') => void
   /** 正在编辑的那条；`null` = 新建 */
   trigger: TaskTrigger | null
   open: boolean
@@ -141,6 +157,8 @@ export function TriggerEditDialog({
             defaultPermissionMode={defaultPermissionMode}
             defaultBrowserSettings={defaultBrowserSettings}
             browserDetected={browserDetected}
+            defaultContextWindow={defaultContextWindow}
+            onOpenSettings={onOpenSettings}
             editing={trigger}
             onDone={() => onOpenChange(false)}
           />
@@ -175,6 +193,8 @@ function TriggerForm({
   defaultPermissionMode,
   defaultBrowserSettings,
   browserDetected,
+  defaultContextWindow,
+  onOpenSettings,
   editing,
   onDone
 }: {
@@ -186,6 +206,8 @@ function TriggerForm({
   defaultPermissionMode: AiPermissionMode
   defaultBrowserSettings: BrowserSettings
   browserDetected: BrowserChannelProbe[]
+  defaultContextWindow?: number
+  onOpenSettings?: (tab: 'models' | 'acp') => void
   /** null = 新建 */
   editing: TaskTrigger | null
   onDone: () => void
@@ -197,7 +219,7 @@ function TriggerForm({
    * 正在用的仓库里改东西 —— 想让它改某个仓库时再明确绑一个。
    *
    * 编辑时**绑的那个已经不在清单里**（项目被删 / 级联漏了）→ 当成没绑：下拉里本来
-   * 就选不中它（`WorkspacePill` 找不到就显示「不选」），要是还把这个死 id 留着，
+   * 就选不中它（`WorkspacePicker` 找不到就显示「不选」），要是还把这个死 id 留着，
    * 一点保存就会被服务端以「工作区不存在」打回。改成不绑 = 顺手把它解绑。
    */
   const [workspaceId, setWorkspaceId] = useState<string | null>(
@@ -216,11 +238,14 @@ function TriggerForm({
     editing?.template.permissionMode ?? defaultPermissionMode
   )
   /**
-   * 选中的目标，编码成 `后端::配置id[::模型id]`；空串 = **还没选**。
+   * 选中的目标（后端 / 配置 / 模型）；`null` = **还没选**。
    *
-   * - `mastra::<AiModelConfig.id>::<模型 id>`：内置模型（模型必选）；
-   * - `acp::<AcpAgentConfig.id>`：外部 Agent，用它自己的默认模型；
-   * - `acp::<AcpAgentConfig.id>::<模型值>`：外部 Agent + 它广告的某个模型
+   * 形状与会话详情那颗 `ModelPicker` 的 `value` 完全一致（`chatTarget` 也是它），
+   * 所以同一颗控件两边都能用，不需要编码成字符串再解回来。
+   *
+   * - `{ backend: 'mastra', configId, modelId }`：内置模型（模型必选）；
+   * - `{ backend: 'acp', configId }`：外部 Agent，用它自己的默认模型；
+   * - `{ backend: 'acp', configId, modelId }`：外部 Agent + 它广告的某个模型
    *   （值来自 `agent.models[].value`，与手动会话里选的是同一份）。
    *
    * 没有「不指定 / 用第一份可用配置」这种选项：定时任务没人值守，用哪个跑必须由
@@ -230,24 +255,24 @@ function TriggerForm({
    * 编辑时**绑的配置 / 模型 / agent 已经删了**也退回「没选」：否则 pill 上会显示一串
    * 原文（下拉里没有这一项，找不到名字），保存时还会把这串死 id 写回去。
    */
-  const [modelKey, setModelKey] = useState(() => {
+  const [modelTarget, setModelTarget] = useState<ModelTarget | null>(() => {
     const template = editing?.template
     const configId = template?.configId
-    if (!configId) return ''
+    if (!configId) return null
     if (template?.backend === 'acp') {
       const agent = acpAgents.find((a) => a.id === configId)
-      if (!agent) return ''
+      if (!agent) return null
       const modelId = template.modelId
       // 模型值不在 agent 当前暴露的清单里 = 失效（agent 升级后常见）→ 退回「跟随默认」
       return modelId && (agent.models ?? []).some((m) => m.value === modelId)
-        ? `acp::${configId}::${modelId}`
-        : `acp::${configId}`
+        ? { backend: 'acp', configId, modelId }
+        : { backend: 'acp', configId }
     }
     const modelId = template?.modelId
-    if (!modelId) return ''
+    if (!modelId) return null
     const config = models.find((m) => m.id === configId)
     const catalog = (config?.models ?? []).map((model) => model.id)
-    return catalog.includes(modelId) ? `mastra::${configId}::${modelId}` : ''
+    return catalog.includes(modelId) ? { backend: 'mastra', configId, modelId } : null
   })
   /** 触发时会话要挂的 MCP server id；空 = 一个都不挂（触发会话可以没有 MCP） */
   const [mcpServerIds, setMcpServerIds] = useState<string[]>(
@@ -265,57 +290,20 @@ function TriggerForm({
   )
 
   /**
-   * 下拉里的全部可选项：内置模型与外部 Agent **平铺在同一层**（定时任务只关心
-   * 「拿什么跑」这一个维度，不分两组）。
-   *
-   * 外部 Agent 先给一条「跟随 agent 默认」（`modelId` 留空 —— 与手动会话里那条
-   * 「跟随 agent 默认」同义），再列它在设置里暴露的那几个模型；一个都没暴露的 agent
-   * 就只有默认那一条（这很常见：多数 agent 不需要挑模型）。
-   *
-   * **没有兜底项** —— 没选就不让存（见 `submit`）。
+   * 当前选的是外部 Agent（权限语义与内置模型那套不同，下面要单独提示）。
+   * 清单本身由 `ModelPicker` 自己渲染 —— 这里不再另建一份平铺的 options 数组。
    */
-  const modelOptions = useMemo(() => {
-    const options: { value: string; name: string; description: string }[] = []
-    for (const config of models) {
-      for (const model of config.models ?? []) {
-        options.push({
-          value: `mastra::${config.id}::${model.id}`,
-          name: `${config.name} · ${model.id}`,
-          description: model.id
-        })
-      }
-    }
-    for (const agent of acpAgents) {
-      options.push({
-        value: `acp::${agent.id}`,
-        name: `${agent.name} · 跟随 agent 默认`,
-        description: '外部 Agent（ACP）：用它自己的默认模型'
-      })
-      for (const model of agent.models ?? []) {
-        options.push({
-          value: `acp::${agent.id}::${model.value}`,
-          name: `${agent.name} · ${model.name}`,
-          description: model.description ?? model.value
-        })
-      }
-    }
-    return options
-  }, [models, acpAgents])
-
-  /** 当前选的是外部 Agent（权限语义与内置模型那套不同，下面要单独提示） */
-  const isAcpTarget = modelKey.startsWith('acp::')
+  const isAcpTarget = modelTarget?.backend === 'acp'
 
   async function submit(): Promise<void> {
-    // 模型值里可能带 `::`（agent 自己的命名），所以后两段用 join 拼回去
-    const [backend, configId, ...rest] = modelKey.split('::')
-    const modelId = rest.join('::')
     // 没选 = 不让存：触发时没人值守，存一条没有模型的任务只会变成「到点就报错」
     // （调度器不再回退到清单第一份，见 `scheduler` 的 `resolveHeadlessTarget`）
     // 校验失败统一 toast，弹窗里不再有内联错误区
-    if ((backend !== 'mastra' && backend !== 'acp') || !configId) {
+    if (!modelTarget?.configId) {
       toast.error('先选一个模型或外部 Agent：定时任务触发时没人值守，不会替你挑一份配置')
       return
     }
+    const { backend, configId, modelId } = modelTarget
     // 内置模型必须挑到具体模型；外部 Agent 允许「跟随 agent 默认」（modelId 为空）
     if (backend === 'mastra' && !modelId) {
       toast.error('先选一个模型：定时任务触发时没人值守，不会替你挑一份配置')
@@ -391,7 +379,7 @@ function TriggerForm({
         <div>
           <div className="mb-2 flex flex-wrap items-center gap-1.5">
             {/* 浏览器工具跑在**服务端**，无人值守的任务一样能用（见 template.browserSettings） */}
-            <BrowserPill
+            <BrowserPicker
               value={browserSettings}
               detected={browserDetected}
               onChange={(patch) =>
@@ -399,7 +387,7 @@ function TriggerForm({
               }
             />
             {mcpServers.length > 0 && (
-              <McpPill
+              <McpPicker
                 servers={mcpServers}
                 value={mcpServerIds}
                 onChange={setMcpServerIds}
@@ -422,20 +410,24 @@ function TriggerForm({
                 <PermissionPill value={permissionMode} onChange={setPermissionMode} />
               </div>
               <div className="flex min-w-0 items-center gap-2">
-                <ModelPill
-                  current={modelKey}
-                  options={modelOptions}
-                  onSelect={setModelKey}
+                <ModelPicker
+                  models={models}
+                  acpAgents={acpAgents}
+                  value={modelTarget}
+                  onChange={setModelTarget}
+                  // 「配置 · 模型」：表单比聊天工具条宽，带上配置名少一次猜
+                  showProvider
                   emptyLabel="选择模型 / Agent"
-                  emptyText="还没有可用的模型（先去设置 → 模型 / 外部 Agent 添加）"
-                  title="触发时用什么跑：内置模型（配置 → 模型），或外部 Agent（ACP，可跟随它自己的默认模型）"
+                  emptyTitle="触发时用什么跑：内置模型（配置 → 模型），或外部 Agent（ACP，可跟随它自己的默认模型）"
+                  defaultContextWindow={defaultContextWindow}
+                  onOpenSettings={onOpenSettings}
                 />
               </div>
             </div>
           </div>
           {/* 卡片下方那条工作区窄条：与聊天里同一处、同一套皮（贴着卡片、圆下角） */}
           <div className="mx-3 flex min-w-0 items-center gap-2 rounded-b-lg bg-sidebar/60 px-1">
-            <WorkspacePill
+            <WorkspacePicker
               value={workspaceId}
               workspaces={workspaces}
               onChange={setWorkspaceId}

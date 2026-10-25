@@ -27,7 +27,7 @@ import { cn } from '@fizz/agent-kit/shared/lib/utils'
 /**
  * 操作行最左的上传入口。向上弹（side="top" + sideOffset 6）与权限 / 模型 pill 同款
  * （触发器都贴着窗口底部，popper 向上才不顶出屏幕）；触发器用 title 而非 IconTip ——
- * 与 ModelPill 同款（Tooltip.Trigger 与 DropdownMenuTrigger 双 asChild 嵌套没必要）。
+ * 与 `ModelPicker` 的触发器同款（Tooltip.Trigger 与 DropdownMenuTrigger 双 asChild 嵌套没必要）。
  */
 export function AttachmentUploadButton({
   disabled,

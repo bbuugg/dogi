@@ -3,6 +3,10 @@
  * 那一项，内容区顶部给一条「← 当前项」的返回行（整页设置页会通过 `onDetailChange`
  * 把它搬到宿主自己的标题栏）。
  *
+ * ⚠️ 这个组件**不再由宿主直接用**：三端统一从 `SettingsShell` 进（按 `platform` / `form`
+ * 挑到这里）。`platform` 是必须的 —— 菜单里出现哪几项按宿主过滤（手机版没有「快捷键」，
+ * 见 `sections.ts`）。
+ *
  * 为什么不跟桌面共用一份带断点的面板：390px 屏上桌面那条 `w-44` 竖排菜单连间距要
  * 吃掉 196px，内容区只剩 ~110px —— 模型 / MCP 这些带输入框的表单根本没法用；
  * 反过来，把两级导航塞进桌面面板又得给宽屏写一堆「用不到」的状态。
@@ -50,10 +54,15 @@ import type {
   SettingsExtraGroup,
   SettingsNavGroup,
   SettingsNavItem,
+  SettingsPlatform,
   SettingsTabId
 } from '@fizz/agent-kit/features/settings/types'
 import { useLanguage, useT } from '@fizz/agent-kit/shared/lib/language'
-import { buildSettingsGroups } from '@fizz/agent-kit/features/settings/sections'
+import {
+  buildSettingsGroups,
+  hasSettingsTab,
+  resolveInitialTab
+} from '@fizz/agent-kit/features/settings/sections'
 import { SettingsContent } from '@fizz/agent-kit/features/settings/SettingsContent'
 
 /** 二级页的标题 / 返回动作：宿主（如整页设置）接管顶部标题与返回键时使用 */
@@ -63,6 +72,7 @@ export interface MobileSettingsDetail {
 }
 
 export function MobileSettingsPanel({
+  platform,
   extraGroups,
   className,
   initialTab,
@@ -70,6 +80,8 @@ export function MobileSettingsPanel({
   onDetailChange,
   ...common
 }: SettingsCommonProps & {
+  /** 这台宿主是谁（菜单按它过滤：手机版没有「快捷键」，见 `sections.ts`） */
+  platform: SettingsPlatform
   /**
    * 宿主扩展入口（手机版的「数据 / 退出」）：追加在内置分组之后（菜单列表底部）。
    * 设置项进二级页；一次性动作就是列表最后单独一行，点一下直接执行。
@@ -92,20 +104,23 @@ export function MobileSettingsPanel({
 }) {
   // 订阅语言：分组标签由 sections.ts 用 t() 现算，切语言时要重渲染
   const tr = useT()
+  /** 菜单模型：内置分组（按宿主过滤）+ 宿主扩展分组（后者追加在列表末尾） */
+  const builtIn: SettingsNavGroup[] = buildSettingsGroups(common.app, platform)
+  const groups: SettingsNavGroup[] = extraGroups?.length ? [...builtIn, ...extraGroups] : builtIn
   /** 选中值放宽成 string：扩展分组的 id 由宿主任意定，不进 `SettingsTabId` 联合 */
-  const [tab, setTab] = useState<string>(initialTab ?? 'general')
+  const [tab, setTab] = useState<string>(() => resolveInitialTab(groups, initialTab))
   /**
    * 是否停在「菜单」这一层。选中项 `tab` **不跟着重置** —— 从某项退回来再进去，
    * 还停在原来那一项上。
    *
    * 初值看 `initialTab`：带分组进来的（模型下拉的「去设置里加模型」）就是要**直接看
-   * 那一项**，落在菜单上等于让用户多点一下 —— 手机版菜单是独占一屏的。
+   * 那一项**，落在菜单上等于让用户多点一下 —— 手机版菜单是独占一屏的。但那分组得
+   * **真的在这台宿主的菜单里**（`hasSettingsTab`）：传了个当前宿主没有的项就别直接
+   * 跳，否则打开就是「标题写着某一项、返回却无处可回」。
    */
-  const [menuOpen, setMenuOpen] = useState(!initialTab)
-
-  /** 菜单模型：内置分组 + 宿主扩展分组（后者追加在列表末尾） */
-  const builtIn: SettingsNavGroup[] = buildSettingsGroups(common.app)
-  const groups: SettingsNavGroup[] = extraGroups?.length ? [...builtIn, ...extraGroups] : builtIn
+  const [menuOpen, setMenuOpen] = useState(
+    () => !(initialTab && hasSettingsTab(groups, initialTab))
+  )
 
   /** 当前选中项的文案：宿主那条标题栏拿它当标题（省一个页面标题） */
   const currentLabel =

@@ -1799,24 +1799,32 @@ export function TerminalPanel({
             固定 7 列 × 2 行，所有键等宽铺满：手机上没有键盘的物理布局，键距不均时
             最容易误触。
 
-            按键顺序（用户指定）：**Esc 在左上角，Tab 在 Esc 正下方，Ctrl 在 Esc 右边**。
-            其余键按「修饰键 → 编辑 / 翻页 → 方向键」顺次补满；方向键仍按普通键盘的倒 T
-            摆（↑ 在上一行，← ↓ → 在下一行，↑ 正对 ↓），Home / End 分列 ↑ 两侧。
+            按键顺序（用户指定）：
+            - **Esc 在左上角，Tab 在 Esc 正下方，Ctrl 在 Esc 右边**；
+            - **Home 紧贴 ↑ 左侧、End 紧贴 ↑ 右侧**（寻址键包住方向键，与笔记本键盘一致）；
+            - **PgUp 占最右上角、PgDn 占最右下角**（两颗同一列上下相对，翻页不用横着摸）。
+
+            「End 在 ↑ 右边」与「PgUp 占右上角」本来抢同一格（第 7 列）—— 所以 ↑ 连同
+            Home 一起左移一格，第 7 列留给 PgUp 与 PgDn；挤出来的第 4 格（原来是 Shift）
+            正好接住 End。**Shift 因此下移到第 2 行第 3 格（Alt 正下方）**，修饰键仍是
+            左侧那一条纵向带状区域，没有散到右边去。
+
+            方向键保持普通键盘的倒 T：↑ 在第 5 列，← ↓ → 在第 2 行第 4~6 列，↑ 正对 ↓。
           */}
           <MobileKey label="Esc" onClick={() => handleAction('Escape')} />
           <MobileKey active={mods.ctrl} label="Ctrl" onClick={() => toggleMod('ctrl')} />
           <MobileKey active={mods.alt} label="Alt" onClick={() => toggleMod('alt')} />
-          <MobileKey active={mods.shift} label="Shift" onClick={() => toggleMod('shift')} />
           <MobileKey label="Home" onClick={() => handleAction('Home')} />
           <MobileKey label="↑" ariaLabel="上方向键" onClick={() => handleAction('ArrowUp')} />
           <MobileKey label="End" onClick={() => handleAction('End')} />
+          <MobileKey label="PgUp" ariaLabel="上一页" onClick={() => handleAction('PageUp')} />
           <MobileKey label="Tab" onClick={() => handleAction('Tab')} />
           <MobileKey label="Del" ariaLabel="删除键" onClick={() => handleAction('Delete')} />
-          <MobileKey label="PgUp" ariaLabel="上一页" onClick={() => handleAction('PageUp')} />
-          <MobileKey label="PgDn" ariaLabel="下一页" onClick={() => handleAction('PageDown')} />
+          <MobileKey active={mods.shift} label="Shift" onClick={() => toggleMod('shift')} />
           <MobileKey label="←" ariaLabel="左方向键" onClick={() => handleAction('ArrowLeft')} />
           <MobileKey label="↓" ariaLabel="下方向键" onClick={() => handleAction('ArrowDown')} />
           <MobileKey label="→" ariaLabel="右方向键" onClick={() => handleAction('ArrowRight')} />
+          <MobileKey label="PgDn" ariaLabel="下一页" onClick={() => handleAction('PageDown')} />
         </div>
       )}
     </div>

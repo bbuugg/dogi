@@ -1,10 +1,19 @@
 /**
  * 设置的**分组清单**：三端共用的一份（桌面两栏 / 手机两级 / web 弹窗的菜单都由它建）。
  *
- * 这里只管「有哪些设置、叫什么、什么图标、归哪一组」——**不掺导航形态**：
- * 菜单怎么摆、点一下怎么换页、返回键画在哪，是各宿主自己的组件
- * （`DesktopSettingsPanel` / `MobileSettingsPanel`）。以前这些和 `useIsMobile()`
- * 一起挤在一个 `SettingsPanel` 里，两边的形态都得为对方让路，谁也不好调。
+ * 这里只管「有哪些设置、叫什么、什么图标、归哪一组、**在哪台宿主上出现**」——**不掺导航形态**：
+ * 菜单怎么摆、点一下怎么换页、返回键画在哪，是各外壳自己的组件
+ * （`SettingsShell` 按形态挑 `DesktopSettingsPanel` / `MobileSettingsPanel`）。以前这些和
+ * `useIsMobile()` 一起挤在一个 `SettingsPanel` 里，两边的形态都得为对方让路，谁也不好调。
+ *
+ * ## 三端功能差异靠 `platforms` 声明，别在壳里写 `if (isMobile)`
+ *
+ * 每一项可以选择只出现在某些宿主上（不写 = 三端都有）。过滤在 `buildSettingsGroups` 里
+ * 一次做完，两个壳拿到的都只是「这台宿主该有的项」—— 于是「手机版不显示 X」是一行声明，
+ * 不是散在三个宿主里的三处条件。
+ *
+ * 当前唯一的差异项是**快捷键**：手机版只有软键盘 + 偶尔的外接键盘，没有键位可配，
+ * 列出来只会让人点进去发现「这里跟我没关系」。
  *
  * 新增一个设置项：这里登记一行 + `SettingsContent` 里加一个分支。
  */
@@ -24,13 +33,18 @@ import {
   type LucideIcon
 } from 'lucide-react'
 import type { AgentApp } from '@fizz/agent-kit/shared/hooks/useAgentApp'
-import type { SettingsTabId } from '@fizz/agent-kit/features/settings/types'
+import type { SettingsPlatform, SettingsTabId } from '@fizz/agent-kit/features/settings/types'
 import { t } from '@fizz/i18n'
 
 export interface SettingsSection {
   id: SettingsTabId
   label: string
   icon: LucideIcon
+  /**
+   * 这一项在**哪些宿主**上出现。不写 = 三端都有；写了就是白名单。
+   * @see SettingsPlatform
+   */
+  platforms?: SettingsPlatform[]
 }
 
 export interface SettingsGroup {
@@ -39,12 +53,50 @@ export interface SettingsGroup {
 }
 
 /**
+ * 这台宿主上的分组菜单。
+ *
+ * 过滤只做一层：白名单不匹配的项从组里摘掉，**整组摘空时连分组标题一起收走**
+ * （否则菜单里会剩一个孤零零的标题）。两个壳都只认这个结果，别在壳里再筛一遍。
+ */
+export function buildSettingsGroups(app: AgentApp, platform: SettingsPlatform): SettingsGroup[] {
+  return allSettingsGroups(app)
+    .map((group) => ({
+      ...group,
+      items: group.items.filter((item) => !item.platforms || item.platforms.includes(platform))
+    }))
+    .filter((group) => group.items.length > 0)
+}
+
+/**
+ * 「打开设置时落在哪一项」的兜底：指定的这一项在当前宿主上**不存在**时（例如手机版被
+ * 传了 `shortcuts`）退回菜单第一项，而不是渲染一个菜单里没有、内容区空白的页面。
+ */
+export function resolveInitialTab(groups: MenuLike, want?: string): string {
+  const ids = groups.flatMap((group) => group.items.map((item) => item.id))
+  return want && ids.includes(want) ? want : (ids[0] ?? 'general')
+}
+
+/**
+ * 这一项在菜单里吗。
+ *
+ * 入参只要求「有 items、每项有 id」—— 内置分组（`SettingsGroup`）与手机壳合并宿主扩展项
+ * 之后的导航分组（`SettingsNavGroup`）都能直接传。两个壳判断「带分组进来时要不要直接
+ * 落到二级页」用的是同一个口径，别各写一份 `some(...)`。
+ */
+export function hasSettingsTab(groups: MenuLike, id: string): boolean {
+  return groups.some((group) => group.items.some((item) => item.id === id))
+}
+
+/** 上面两个函数的入参形状（只关心 id，不关心 label / icon） */
+type MenuLike = readonly { items: readonly { id: string }[] }[]
+
+/**
  * 分组菜单：按「用户想干什么」分组，不按内部模块。AI 相关的一切
  * （模型 / ACP / MCP / 技能 / 插件 / 容器 / 用量 / 历史会话）都在同一个「AI」组里 ——
  * 别再按模块把它们拆回多组。
  * 数字类后缀（模型 / MCP / 技能 / 归档）现算 —— 菜单每次渲染都重建，不需要缓存。
  */
-export function buildSettingsGroups(app: AgentApp): SettingsGroup[] {
+function allSettingsGroups(app: AgentApp): SettingsGroup[] {
   return [
     {
       title: t('基础'),
@@ -53,7 +105,13 @@ export function buildSettingsGroups(app: AgentApp): SettingsGroup[] {
         // 外观（配色主题 / 明暗 / 强调色）是**内置**分组，不再由各宿主自己拼：
         // 手机版原来把它塞在 extraGroups 里、web / desktop 藏在左下角菜单，同一个功能两套入口。
         { id: 'appearance', label: t('外观'), icon: Palette },
-        { id: 'shortcuts', label: t('快捷键'), icon: Keyboard }
+        // 快捷键：**手机版没有**（只有软键盘，键位无从谈起，见文件头）。桌面 / web 保留。
+        {
+          id: 'shortcuts',
+          label: t('快捷键'),
+          icon: Keyboard,
+          platforms: ['desktop', 'web']
+        }
       ]
     },
     {

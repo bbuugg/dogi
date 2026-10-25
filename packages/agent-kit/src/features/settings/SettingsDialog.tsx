@@ -1,21 +1,28 @@
 /**
- * 设置弹窗（web 的应用内弹窗）。
+ * 设置弹窗（web / 桌面主界面里的应用内弹窗）。
  *
- * 内容本体是**两套互不干扰的导航壳**，按视口挑一个 —— 不是让一个组件内部到处断点：
- * - 宽屏 → `DesktopSettingsPanel`：左菜单常驻 + 右内容，两栏同时在场；
- * - 窄屏（手机浏览器）→ `MobileSettingsPanel`：菜单 / 详情两级。弹窗里没地方放宿主
- *   标题栏，二级页的返回行由面板自绘。
+ * 内核是 `SettingsShell`：它按 `platform` 过滤菜单项、按 `form` 挑导航形态。这里只剩
+ * **宿主自己的那层壳** —— 弹窗多高、怎么弹出、关掉时清什么。
  *
- * 选择发生在**壳的边界**（这里换组件），两个面板内部都没有 `max-md:` / `useIsMobile()`
- * 分支 —— 各自只写自己那种形态，改一边不会牵动另一边。
+ * ## 视口只在这里判断一次
+ *
+ * 「窄屏用两级、宽屏用两栏」是**弹窗这个宿主**的事实（它可能只有 90dvh 高、也可能被
+ * 拖到 400px 宽），不是设置内核的事实 —— 所以判断留在这里，用 `settingsNavForm()` 算成
+ * 一个 `form` 值，再顺着 `form` 同时决定高度类名（两栏要定高、两级吃 DialogContent
+ * 剩下的高度）。**不要再单独写一个 `isMobile ? h-auto : h-[60dvh]`**：两个判断一旦
+ * 漂开，就会出现「两栏形态套着两级的高度」。
+ *
+ * `platform` 取宿主的 `platform`（web 浏览器 / desktop 渲染进程）：桌面端的应用内弹窗
+ * 与 web 共用这个组件，两者菜单目前一致，但语义上必须分开 —— 将来某一项只在桌面有
+ * （比如「软件更新」已在 `AppUpdateSection` 里按宿主能力隐显），过滤就落在 `sections.ts`。
  */
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@fizz/ui/dialog'
 import { useIsMobile } from '@fizz/agent-kit/shared/hooks/useIsMobile'
 import type { AgentApp } from '@fizz/agent-kit/shared/hooks/useAgentApp'
 import type { AgentShortcutConfig } from '@fizz/agent-kit/shared/lib/shortcuts'
-import { DesktopSettingsPanel } from '@fizz/agent-kit/features/settings/DesktopSettingsPanel'
-import { MobileSettingsPanel } from '@fizz/agent-kit/features/settings/MobileSettingsPanel'
+import { SettingsShell, settingsNavForm } from '@fizz/agent-kit/features/settings/SettingsShell'
 import { useT } from '@fizz/agent-kit/shared/lib/language'
+import { getAgentHost } from '@fizz/agent-client/host'
 
 export function SettingsDialog({
   app,
@@ -38,6 +45,7 @@ export function SettingsDialog({
 }) {
   const tr = useT()
   const isMobile = useIsMobile()
+  const form = settingsNavForm(getAgentHost().platform, isMobile)
   const common = { app, shortcuts, onSaveShortcuts, onShortcutRecordingChange, initialTab }
 
   return (
@@ -57,11 +65,13 @@ export function SettingsDialog({
           <DialogTitle>{tr('设置')}</DialogTitle>
         </DialogHeader>
 
-        {isMobile ? (
-          <MobileSettingsPanel {...common} className="h-auto" />
-        ) : (
-          <DesktopSettingsPanel {...common} className="h-[60dvh]" />
-        )}
+        <SettingsShell
+          platform={getAgentHost().platform}
+          form={form}
+          // 两栏要定高（DialogContent 是 grid、撑不开），两级吃剩余高度
+          className={form === 'two-level' ? 'h-auto' : 'h-[60dvh]'}
+          {...common}
+        />
       </DialogContent>
     </Dialog>
   )

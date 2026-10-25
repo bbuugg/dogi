@@ -32,10 +32,8 @@ import {
 } from '@fizz/ui/dropdown-menu'
 import { Popover, PopoverAnchor, PopoverContent } from '@fizz/ui/popover'
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@fizz/ui/select'
-import type { AcpModelOption } from '@fizz/acp'
 import type { AiPermissionMode } from '@fizz/contracts/types'
 import {
-  Check,
   ChevronDown,
   Clock,
   Eye,
@@ -45,7 +43,6 @@ import {
   Send,
   ShieldAlert,
   ShieldCheck,
-  Sparkles,
   Square,
   Terminal,
   Zap
@@ -793,77 +790,7 @@ function PermissionIcon({ mode }: { mode: AiPermissionMode }) {
 }
 
 /**
- * 单层模型 pill：一个下拉列出可选模型 + 触发器上显示当前那个。
- *
- * 用在容器工作台：模型清单是容器里的 agent **自己广告**的（白名单由它给），没有
- * 「配置 → 模型」那层结构，单层就够。主会话那个 `ModelSelect` 是二级菜单（模型配置 /
- * 外部 Agent → 各自的模型）且绑着 `AgentApp`，结构不同，所以留在 `ChatPanel` 里 ——
- * 两边共用的只有 `CHAT_PILL` 这层皮。
- *
- * `current` 为空时显示 `emptyLabel`：容器工作台用「跟随 agent 默认」—— 那是 agent 侧
- * 自己的缺省，不是 Fizz 的设置；定时任务表单用「选择模型」—— 没选就是没选，不替用户
- * 挑一份配置（调度器也不回退，见 `TriggerEditDialog`）。
+ * 模型选择那颗 pill 已经整块搬到 `ModelPicker.tsx`（受控版）：
+ * 定时任务表单要的是**会话详情同一颗**（分组 + 设置齿轮 + ACP 白名单），而不是这里原先
+ * 那层平铺清单；留两份就是两个功能。本文件只保留 `PermissionPill` 与 `CHAT_PILL` 这层皮。
  */
-export function ModelPill({
-  current,
-  options,
-  onSelect,
-  disabled,
-  title = t('切换模型（下一轮生效）'),
-  emptyLabel = t('跟随 agent 默认'),
-  emptyText = t('没有可选项')
-}: {
-  current: string | null
-  options: AcpModelOption[]
-  onSelect: (value: string) => void
-  disabled?: boolean
-  title?: string
-  /** `current` 为空时触发器上的文案 */
-  emptyLabel?: string
-  /** 选项为空时下拉里的占位文案 */
-  emptyText?: string
-}) {
-  // 订阅语言（title / emptyLabel 的默认值在调用时用 t() 求值，只有本组件重渲染才会重算）
-  useT()
-  const label = current
-    ? (options.find((option) => option.value === current)?.name ?? current)
-    : emptyLabel
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        {/* 手写 button（不是 Select，因为清单是动态的、还要带 description 的 title）：
-            样式与结构都走 CHAT_PILL —— 前置图标 + 短标签，不渲染右侧箭头（见 CHAT_PILL） */}
-        <button type="button" className={CHAT_PILL} title={title} disabled={disabled}>
-          <Sparkles className="size-3.5 shrink-0 text-muted-foreground" />
-          <span className="truncate">{label}</span>
-        </button>
-      </DropdownMenuTrigger>
-      {/* 与几个 Select 同款：向上弹 + 6px 间距（触发器贴着窗口底部） */}
-      <DropdownMenuContent
-        side="top"
-        align="end"
-        sideOffset={6}
-        className="max-h-80 min-w-56 overflow-y-auto"
-      >
-        {options.length === 0 ? (
-          // 与聊天那颗模型 pill 的「还没有模型配置」同款：清单空着也得有个说法，
-          // 不能弹出一个什么都没有的浮层
-          <DropdownMenuItem disabled className="text-xs text-muted-foreground">
-            {emptyText}
-          </DropdownMenuItem>
-        ) : (
-          options.map((option) => (
-            <DropdownMenuItem
-              key={option.value}
-              title={option.description}
-              onSelect={() => onSelect(option.value)}
-            >
-              <span className="truncate">{option.name}</span>
-              {current === option.value && <Check className="ml-auto size-3.5" />}
-            </DropdownMenuItem>
-          ))
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  )
-}

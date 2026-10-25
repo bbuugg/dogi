@@ -143,7 +143,7 @@ function lastText(trigger: TaskTrigger, now: number): string {
 export function TriggersPanel() {
   // `openConversation` 是**宿主包装过**的那个（选中 + 切视图 + 把面板标签也落到位），
   // 不是 store 里那个裸的 —— 光调 store 在「目标已经是当前会话」时会早退，看着像点了没反应
-  const { app, triggers, openConversation } = useAppContext()
+  const { app, triggers, openConversation, openSettingsTab } = useAppContext()
   /** 本地时钟：相对时间秒级刷新用（服务端推送只管数据，不管「时间在走」） */
   const [now, setNow] = useState(() => Date.now())
   /** 右列选中的那条（`null` = 没选，右列显示一句引导） */
@@ -622,6 +622,10 @@ export function TriggersPanel() {
         // 不该让新建的定时任务默认也开着
         defaultBrowserSettings={app.defaultBrowserSettings ?? DEFAULT_BROWSER_SETTINGS}
         browserDetected={app.browserDetected}
+        // 模型下拉与会话详情同一颗：窗口兜底值、设置齿轮都从同一处来
+        // （`defaultContextWindow` 是 `number | null`，转 undefined 走组件内的默认兜底）
+        defaultContextWindow={app.defaultContextWindow ?? undefined}
+        onOpenSettings={openSettingsTab}
         trigger={editing}
         open={editOpen}
         onOpenChange={(next) => {

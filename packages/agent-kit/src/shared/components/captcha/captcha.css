@@ -35,27 +35,11 @@
   border-radius: 10px;
   border: 1px solid var(--border);
   background: var(--muted);
-  cursor: grab;
-  /* 关键：触摸设备上禁止浏览器接管手势（滚动 / 缩放），否则拖不动 */
-  touch-action: none;
+  /* 舞台只负责画：拖动一律走下方轨道，所以这里不接手势、不显示可拖光标 */
+  cursor: default;
   -webkit-user-select: none;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
-  outline: none;
-}
-
-.cap-stage:focus-visible {
-  box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary) 32%, transparent);
-}
-
-.cap--dragging .cap-stage {
-  cursor: grabbing;
-}
-
-.cap--disabled .cap-stage,
-.cap--verifying .cap-stage,
-.cap--passed .cap-stage {
-  cursor: default;
 }
 
 .cap-bg {
@@ -81,6 +65,96 @@
 
 .cap--dragging .cap-piece {
   transition: none;
+}
+
+/* ── 轨道 + 滑块（舞台下方，拖动入口在这里） ─────────────── */
+
+.cap-track {
+  position: relative;
+  height: 40px;
+  margin-top: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--muted);
+  overflow: hidden;
+  /* 关键：触摸设备上禁止浏览器接管手势（滚动 / 缩放），否则拖不动滑块 */
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 已拖过的部分（到滑块右缘为止），给出「走多远」的直观反馈 */
+.cap-track-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: color-mix(in oklab, var(--primary) 16%, transparent);
+  transition: width 0.12s ease;
+}
+
+.cap-knob {
+  position: absolute;
+  left: 0;
+  /* 上下留 4px 让投影落得下来（轨道 overflow: hidden 会裁掉贴边的阴影） */
+  top: 4px;
+  bottom: 4px;
+  /* 宽度必须与 SliderCaptcha.tsx 的 KNOB_WIDTH 一致（位置换算依赖它） */
+  width: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: var(--background);
+  color: var(--muted-foreground);
+  box-shadow: 0 1px 3px color-mix(in oklab, var(--foreground) 18%, transparent);
+  cursor: grab;
+  outline: none;
+  touch-action: none;
+  transition:
+    left 0.12s ease,
+    color 0.15s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.cap-knob svg {
+  width: 16px;
+  height: 16px;
+}
+
+.cap-knob:hover {
+  color: var(--foreground);
+}
+
+.cap-knob:focus-visible {
+  /* 轨道是 overflow: hidden，外扩的焦点环会被裁掉，所以用内描边 */
+  box-shadow: inset 0 0 0 2px var(--primary);
+}
+
+/* 拖动中：去掉过渡，位置严格跟手 */
+.cap--dragging .cap-knob,
+.cap--dragging .cap-track-fill {
+  transition: none;
+}
+
+.cap--dragging .cap-knob {
+  cursor: grabbing;
+  color: var(--foreground);
+}
+
+.cap--disabled .cap-knob,
+.cap--verifying .cap-knob,
+.cap--passed .cap-knob {
+  cursor: default;
+}
+
+.cap--verifying .cap-knob {
+  color: var(--primary);
+}
+
+.cap--passed .cap-knob {
+  color: var(--primary);
 }
 
 /* ── 骨架屏（挑战到达前占位，避免高度跳变 / 白屏） ───────── */
@@ -256,9 +330,15 @@
   animation: cap-shake 0.4s ease;
 }
 
+.cap--failed .cap-knob {
+  color: var(--destructive);
+}
+
 /* 减少动效偏好 */
 @media (prefers-reduced-motion: reduce) {
   .cap-piece,
+  .cap-knob,
+  .cap-track-fill,
   .cap-hint,
   .cap-refresh {
     transition: none;

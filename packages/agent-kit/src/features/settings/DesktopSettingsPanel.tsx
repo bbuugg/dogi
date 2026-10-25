@@ -1,36 +1,45 @@
 /**
- * 桌面 / web 的设置面板：**左侧分组菜单常驻 + 右侧内容区**，两栏同时在场。
+ * 桌面 / web 的**两栏**设置面板：左侧分组菜单常驻 + 右侧内容区，两栏同时在场。
  *
  * 只服务宽屏。手机那套「菜单 / 详情两级」是另一个组件（`MobileSettingsPanel`）：
  * 两边不共用导航结构，也不靠 `useIsMobile()` 在一份代码里分叉 —— 这里每个类名、
  * 每个交互都只为两栏服务，改桌面不会牵动手机，反之同理。
  *
  * 内容本身仍是共享的 `SettingsContent`（只有一个 tab 的选中值要管）。
+ *
+ * ⚠️ 这个组件**不再由宿主直接用**：三端统一从 `SettingsShell` 进，由它按
+ * `platform` / `form` 挑到这儿。`platform` 是必须的 —— 菜单里出现哪几项按宿主过滤
+ * （手机版没有「快捷键」，见 `sections.ts`）。
  */
 import { useState } from 'react'
 import { useLanguage } from '@fizz/agent-kit/shared/lib/language'
 import { cn } from '@fizz/agent-kit/shared/lib/utils'
 import type {
   SettingsCommonProps,
+  SettingsPlatform,
   SettingsTabId
 } from '@fizz/agent-kit/features/settings/types'
-import { buildSettingsGroups } from '@fizz/agent-kit/features/settings/sections'
+import { buildSettingsGroups, resolveInitialTab } from '@fizz/agent-kit/features/settings/sections'
 import { SettingsContent } from '@fizz/agent-kit/features/settings/SettingsContent'
 
 export function DesktopSettingsPanel({
+  platform,
   className,
   initialTab,
   ...common
 }: SettingsCommonProps & {
+  /** 这台宿主是谁（菜单按它过滤，见 `sections.ts`） */
+  platform: SettingsPlatform
   /** 宽高由调用方给：弹窗限高 60dvh（`SettingsDialog`）、独立窗口铺满（`SettingsWindow`） */
   className?: string
   /** 打开时落在哪个分组（模型选择下拉的设置入口用）；只在挂载时生效一次 */
   initialTab?: SettingsTabId
 }) {
   useLanguage()
+  const groups = buildSettingsGroups(common.app, platform)
   // 弹窗关闭时 Radix 会卸载内容，下次打开重新挂载 —— initialTab 只在挂载时生效一次。
-  const [tab, setTab] = useState<string>(initialTab ?? 'general')
-  const groups = buildSettingsGroups(common.app)
+  // 指定的分组在这台宿主上没有时退回第一项（别渲染一个菜单里不存在的空白页）。
+  const [tab, setTab] = useState<string>(() => resolveInitialTab(groups, initialTab))
 
   return (
     <div className={cn('flex min-h-0 flex-1 gap-2 px-2 pb-2', className)}>

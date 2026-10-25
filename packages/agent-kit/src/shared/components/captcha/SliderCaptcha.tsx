@@ -1,9 +1,15 @@
 /**
  * 滑块验证码组件（移植自 `console/apps/captcha/sdk/src/widget.ts` 的原生 DOM 实现）。
  *
- * 原版是一段命令式 DOM 代码（`createElement` + 手挂监听），这里按 React 的写法重排，
- * 但**交互语义逐条保留**：
- * - 按下即 `setPointerCapture`：指针滑出舞台也继续跟手（拖到图片外面不会中断）；
+ * ## 拖的是「图下轨道」，不是图本身
+ *
+ * 拼图舞台（`.cap-stage`）**不接收任何指针事件**，只负责画背景与拼图块；真正可拖的是
+ * 舞台下方那条滑轨（`.cap-track`）上的滑块（`.cap-knob`）。两者的位移按**比例**映射：
+ * 滑块走满一程 = 拼图块从左端走到最右端（`challenge.maxX`），因为轨道宽度与舞台宽度
+ * 并不相等，一一对应（1:1）会让滑块走不到轨道尽头。
+ *
+ * 其余交互语义逐条保留（原版同样是「按下 → 捕获指针 → 移动 → 松手提交」）：
+ * - 按下即 `setPointerCapture`：指针滑出轨道也继续跟手（拖到轨道外面不会中断）；
  * - 位置一律换算成「逻辑 px」（`challenge.width` 坐标系）再上报，与服务端答案同一坐标系；
  * - 松手时补一条终态采样，保证服务端「末点 == 提交的 x」的校验恒成立；
  * - 键盘可达：方向键微调、Home/End 到两端、Enter 提交。
@@ -12,7 +18,7 @@
  */
 import { type PointerEvent as ReactPointerEvent, type KeyboardEvent, useEffect, useRef, useState } from 'react'
 import type { CaptchaAnswer, CaptchaChallenge } from '@fizz/contracts'
-import { RefreshCw } from 'lucide-react'
+import { Check, ChevronRight, RefreshCw } from 'lucide-react'
 import { cn } from '@fizz/agent-kit/shared/lib/utils'
 import { useT } from '@fizz/agent-kit/shared/lib/language'
 import { TrackRecorder } from './track'
@@ -20,6 +26,11 @@ import { TrackRecorder } from './track'
 /** 键盘微调步长（逻辑 px）；按住 Shift 走大步 */
 const KEY_STEP = 2
 const KEY_STEP_LARGE = 10
+/**
+ * 滑块宽度（px）。必须与 `captcha.css` 里 `.cap-knob` 的 `width` 一致：
+ * 滑块左偏移用 `calc(ratio% - ratio * KNOB_WIDTH)` 换算（免测量、免 ResizeObserver）。
+ */
+const KNOB_WIDTH = 40
 
 export type CaptchaStatus =
   | 'idle'
@@ -62,14 +73,17 @@ export function SliderCaptcha({
   onRefresh
 }: SliderCaptchaProps) {
   const t = useT()
-  const stageRef = useRef<HTMLDivElement>(null)
+  const railRef = useRef<HTMLDivElement>(null)
+  const knobRef = useRef<HTMLDivElement>(null)
   const recorderRef = useRef(new TrackRecorder())
-  const startRef = useRef<{ pointerX: number; x: number } | null>(null)
+  /** 一次按下的起点：指针 clientX + 滑块当时的偏移 px + 当时的可走行程 px */
+  const startRef = useRef<{ pointerX: number; offset: number; travel: number } | null>(null)
 
   /** 拼图块左边位置（逻辑 px） */
   const [dragX, setDragX] = useState(0)
   const [dragging, setDragging] = useState(false)
 
+  const maxX = challenge?.maxX ?? 0
   const interactive = !!challenge && !disabled && status !== 'passed' && status !== 'verifying'
 
   // 换挑战：位置归零、轨迹重置
@@ -88,33 +102,33 @@ export function SliderCaptcha({
     }
   }, [interactive])
 
-  /** 舞台内容盒宽度 → 逻辑 px 的换算比例 */
-  const scaleOf = (): number => {
-    const el = stageRef.current
-    const logicalWidth = challenge?.width ?? 1
-    if (!el || logicalWidth <= 0) return 1
-    // clientWidth 不含 border（舞台有 1px 边框），正是我们要的内容宽度
-    return el.clientWidth > 0 ? el.clientWidth / logicalWidth : 1
+  const clampX = (x: number): number => Math.min(Math.max(x, 0), maxX)
+
+  /** 轨道的可走行程（px）= 轨道内容宽 − 滑块宽 */
+  const travelOf = (): number => {
+    const rail = railRef.current
+    const knob = knobRef.current
+    if (!rail || !knob) return 1
+    // clientWidth 不含 border（轨道有 1px 边框），正是滑块能走的范围
+    return Math.max(rail.clientWidth - knob.offsetWidth, 1)
   }
 
-  const clampX = (x: number): number => {
-    const max = challenge?.maxX ?? 0
-    return Math.min(Math.max(x, 0), max)
-  }
+  /** 逻辑 px → 滑块在轨道上的偏移 px */
+  const offsetOf = (x: number): number => (maxX > 0 ? (clampX(x) / maxX) * travelOf() : 0)
 
   const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (!interactive) return
     // 只认主键 / 触摸 / 笔，右键菜单不启动拖动
     if (e.button !== 0 && e.pointerType === 'mouse') return
     const el = e.currentTarget
-    // 捕获指针：拖出舞台也继续收到 move/up（原版同样依赖这一点）
+    // 捕获指针：拖出轨道也继续收到 move/up（原版同样依赖这一点）
     try {
       el.setPointerCapture(e.pointerId)
     } catch {
       // 个别环境不支持捕获：退化成普通拖动，仍可用
     }
     el.focus()
-    startRef.current = { pointerX: e.clientX, x: dragX }
+    startRef.current = { pointerX: e.clientX, offset: offsetOf(dragX), travel: travelOf() }
     recorderRef.current.begin(dragX, performance.now())
     setDragging(true)
   }
@@ -122,7 +136,8 @@ export function SliderCaptcha({
   const handlePointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
     const start = startRef.current
     if (!start || !interactive) return
-    const next = clampX(start.x + (e.clientX - start.pointerX) / scaleOf())
+    const offset = Math.min(Math.max(start.offset + (e.clientX - start.pointerX), 0), start.travel)
+    const next = maxX > 0 ? clampX((offset / start.travel) * maxX) : 0
     setDragX(next)
     recorderRef.current.sample(next, performance.now())
   }
@@ -150,12 +165,11 @@ export function SliderCaptcha({
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (!interactive) return
     const step = e.shiftKey ? KEY_STEP_LARGE : KEY_STEP
-    const max = challenge?.maxX ?? 0
     let next: number | null = null
     if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') next = clampX(dragX - step)
     else if (e.key === 'ArrowRight' || e.key === 'ArrowUp') next = clampX(dragX + step)
     else if (e.key === 'Home') next = 0
-    else if (e.key === 'End') next = max
+    else if (e.key === 'End') next = maxX
     else if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault()
       const rec = recorderRef.current
@@ -180,6 +194,12 @@ export function SliderCaptcha({
     ? { aspectRatio: `${challenge.width} / ${challenge.height}` }
     : { aspectRatio: String(aspectRatio) }
 
+  // 滑块行程比例（0..1）：滑块左偏移 = ratio × (轨道宽 − 滑块宽)，用 calc 表达可免测量
+  const ratio = maxX > 0 ? Math.min(Math.max(dragX / maxX, 0), 1) : 0
+  const pct = Math.round(ratio * 1000) / 10
+  const knobLeft = `calc(${pct}% - ${((pct / 100) * KNOB_WIDTH).toFixed(2)}px)`
+  const fillWidth = `calc(${pct}% + ${(KNOB_WIDTH - (pct / 100) * KNOB_WIDTH).toFixed(2)}px)`
+
   return (
     <div
       className={cn(
@@ -190,23 +210,8 @@ export function SliderCaptcha({
         loading && 'cap--loading'
       )}
     >
-      <div
-        ref={stageRef}
-        className="cap-stage"
-        style={stageStyle}
-        role="slider"
-        tabIndex={interactive ? 0 : -1}
-        aria-label="滑块验证码：拖动拼图块到缺口处"
-        aria-valuemin={0}
-        aria-valuemax={challenge?.maxX ?? 0}
-        aria-valuenow={Math.round(dragX)}
-        aria-disabled={!interactive}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={finishDrag}
-        onPointerCancel={finishDrag}
-        onKeyDown={handleKeyDown}
-      >
+      {/* 舞台：只画，不响应指针（拖动一律走下方轨道） */}
+      <div className="cap-stage" style={stageStyle}>
         {challenge ? (
           <>
             <img className="cap-bg" src={challenge.background} alt="" draggable={false} />
@@ -240,6 +245,36 @@ export function SliderCaptcha({
             )}
           </div>
         )}
+      </div>
+
+      {/* 轨道：拖这里的滑块 */}
+      <div ref={railRef} className="cap-track">
+        <div className="cap-track-fill" style={{ width: fillWidth }} aria-hidden />
+        <div
+          ref={knobRef}
+          className="cap-knob"
+          style={{ left: knobLeft }}
+          role="slider"
+          tabIndex={interactive ? 0 : -1}
+          aria-label={t('拖动滑块完成拼图')}
+          aria-valuemin={0}
+          aria-valuemax={maxX}
+          aria-valuenow={Math.round(dragX)}
+          aria-disabled={!interactive}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={finishDrag}
+          onPointerCancel={finishDrag}
+          onKeyDown={handleKeyDown}
+        >
+          {status === 'passed' ? (
+            <Check aria-hidden />
+          ) : status === 'verifying' ? (
+            <span className="cap-spinner" aria-hidden />
+          ) : (
+            <ChevronRight aria-hidden />
+          )}
+        </div>
       </div>
 
       <div className="cap-foot">

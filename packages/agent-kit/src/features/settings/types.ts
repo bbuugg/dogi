@@ -1,8 +1,8 @@
 /**
- * 设置模块的**共享形状**：分组 / 导航项 / 宿主扩展项 / 各壳的公共入参。
+ * 设置模块的**共享形状**：分组 / 导航项 / 宿主扩展项 / 各壳的公共入参 / 平台与形态枚举。
  *
- * 这里只放数据形状，不放任何导航形态 —— 桌面两栏、手机两级各自是独立组件
- * （`DesktopSettingsPanel` / `MobileSettingsPanel`），靠这份形状拼出来。
+ * 这里只放数据形状，不放导航形态 —— 三端都从 `SettingsShell` 进，由它按 `platform`
+ * 过滤菜单、按 `form` 挑 `DesktopSettingsPanel`（两栏）/ `MobileSettingsPanel`（两级）。
  */
 import type { ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
@@ -24,6 +24,29 @@ export type SettingsTabId =
   | 'skills'
   | 'plugins'
   | 'usage'
+
+/**
+ * 设置页跑在哪种宿主上。
+ *
+ * **只决定菜单里有哪几项**（见 `sections.ts` 每行的 `platforms`），不决定导航形态
+ * —— 形态是 `SettingsNavForm`，两者正交（手机壳在平板横屏上仍是「菜单 + 详情」两级）。
+ *
+ * - `desktop`：桌面端（主界面里的设置弹窗、`?window=settings` 独立窗口）；
+ * - `web`：浏览器里的 web 版；
+ * - `mobile`：手机版整页设置。
+ *
+ * ⚠️ 别拿它当「窗口宽不宽」用：窄屏 web 仍是 `web`（判据与 `useIsMobile` 无关）。
+ */
+export type SettingsPlatform = 'desktop' | 'web' | 'mobile'
+
+/**
+ * 设置外壳的两种导航形态：
+ * - `two-column`：左侧分组菜单常驻 + 右侧内容（`DesktopSettingsPanel`）；
+ * - `two-level`：菜单 / 详情两级（`MobileSettingsPanel`）。
+ *
+ * 选哪个由宿主决定（见 `SettingsShell` 的 `settingsNavForm`），两个面板内部都不写断点。
+ */
+export type SettingsNavForm = 'two-column' | 'two-level'
 
 /**
  * 导航项：内置项与宿主扩展项合并后的形状。

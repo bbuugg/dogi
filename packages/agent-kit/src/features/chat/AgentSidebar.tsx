@@ -37,7 +37,7 @@
  * ## 添加项目不在侧栏（加号已删除）
  *
  * 「选择目录 / 从 Git 导入 / 新建容器型项目」三个入口都在**「开始新对话」页的工作区下拉**里
- * （`ChatPanel` 的 `WorkspaceSelect` → `WorkspacePill` 的 `actions`），侧栏不再有那颗「+」。
+ * （`ChatPanel` 的 `WorkspaceSelect` → `WorkspacePicker` 的 `actions`），侧栏不再有那颗「+」。
  * 侧栏是「看现有项目」的地方，加项目要选目录 / 填仓库地址 / 起容器，那是新建会话页面的活。
  *
  * 整条侧栏的骨架（外壳 + 分区容器）**由宿主挑**（`shell`：不传时是

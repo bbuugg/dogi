@@ -9,9 +9,9 @@
  *
  * ## 三档偏好
  *
- * - `off`：不锁；
+ * - `off`：不锁（**默认**：能亮屏到多久由系统说了算，不默认替用户改）；
  * - `running`：**只有会话还在跑时**才锁（省电：跑完就释放，不会整晚亮着）；
- * - `always`：页面在前台就一直锁（默认，与旧版布尔开关的 `true` 等价）。
+ * - `always`：页面在前台就一直锁（与旧版布尔开关的 `true` 等价）。
  *
  * 「会话在跑」由外壳把 `conversation-activity` 的全局运行态喂进来
  * （`setWakeLockSessionRunning`），本模块不自己去订阅 store / WS —— 它只负责
@@ -59,9 +59,11 @@ function emit(): void {
 }
 
 /**
- * 默认**始终开**：这功能的价值全在「人已经走开」的那段时间，默认关等于默认没用。
- * 真嫌耗电的人可以改成「会话进行中」或关掉 —— 与旧版布尔开关的默认 `true` 一致，
- * 老值 `'1'` / 缺失都按 `always` 读。
+ * 默认**关**：亮不亮屏是用户自己的事，不该由一个聊天工具默认替他决定。
+ * 想要的自己开（旧版布尔时代的 `'1'` 仍然按 `always` 读，别让老用户的选择丢掉）。
+ *
+ * ⚠️ 默认值改过一次（`always` → `off`）：改这里等于改所有**没存过值**的用户的
+ * 行为，别顺手调回去。
  */
 let mode = readInitial()
 /** 当前有没有会话在跑（由外壳喂进来；只有 `running` 档读它） */
@@ -70,11 +72,12 @@ let sessionRunning = false
 function readInitial(): WakeLockMode {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (raw === '0' || raw === 'off') return 'off'
     if (raw === 'running') return 'running'
-    return 'always'
+    // 旧版是布尔开关，`'1'` = 用户**主动打开过**，继续按 `always` 认
+    if (raw === 'always' || raw === '1') return 'always'
+    return 'off'
   } catch {
-    return 'always'
+    return 'off'
   }
 }
 
@@ -99,7 +102,7 @@ function subscribePreference(listener: () => void): () => void {
   }
 }
 
-/** 读偏好（存坏了当没存过 = 默认始终） */
+/** 读偏好（存坏了当没存过 = 默认关） */
 export function loadWakeLockMode(): WakeLockMode {
   return mode
 }
@@ -116,9 +119,9 @@ export function saveWakeLockMode(next: WakeLockMode): void {
   emit()
 }
 
-/** React 版的偏好读取：设置开关与外壳共享同一个值 */
+/** React 版的偏好读取：设置开关与外壳共享同一个值（SSR 快照同默认：关） */
 export function useWakeLockMode(): WakeLockMode {
-  return useSyncExternalStore(subscribePreference, getMode, () => 'always')
+  return useSyncExternalStore(subscribePreference, getMode, () => 'off')
 }
 
 /** React 版：当前档位 + 运行态下是否**应该**锁着（设置页据此显示「等待会话」） */

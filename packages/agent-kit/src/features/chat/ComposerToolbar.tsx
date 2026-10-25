@@ -23,7 +23,7 @@
  * MCP，内置的 `browser_*` 会自动让位（见 `apps/server/src/server/chat-turn.ts`）。
  */
 import { DEFAULT_BROWSER_SETTINGS } from '@fizz/contracts'
-import { BrowserPill } from '@fizz/agent-kit/features/chat/pickers'
+import { BrowserPicker } from '@fizz/agent-kit/features/chat/BrowserPicker'
 import type { AgentApp } from '@fizz/agent-kit/shared/hooks/useAgentApp'
 import { Globe, Wrench } from 'lucide-react'
 import type { ReactNode } from 'react'
@@ -80,13 +80,13 @@ export function ComposerToolbarPlaceholder({ mcp = true }: { mcp?: boolean }) {
 /**
  * 浏览器开关 + 开启后的来源下拉（**按会话**，见文件头）。
  *
- * 长相与全部交互在 `pickers.tsx` 的 `BrowserPill`（定时任务表单也用同一颗 ——
- * 浏览器工具跑在服务端，无人值守的任务一样能用）。这里只负责把 `app` 里的
- * 「这个会话的偏好 + 各来源探测结果」灌进去，并把改动落回会话。
+ * 长相与全部交互在 `BrowserPicker`（定时任务表单也用同一颗 —— 浏览器工具跑在服务端，
+ * 无人值守的任务一样能用）。这里只负责把 `app` 里的「这个会话的偏好 + 各来源探测
+ * 结果」灌进去，并把改动落回会话。
  */
 function BrowserToggle({ app }: { app: AgentApp }) {
   return (
-    <BrowserPill
+    <BrowserPicker
       // `null`（这个会话没设过）= 用全局默认，与界面显示一致
       value={app.browserSettings ?? DEFAULT_BROWSER_SETTINGS}
       detected={app.browserDetected}

@@ -872,7 +872,15 @@ export function AcpTab({ app }: { app: AgentApp }) {
             </Button>
           </div>
 
-          <DialogFooter className="shrink-0 pt-1">
+          {/*
+            `mt-auto` = 按钮行永远贴卡片底边。
+            这张卡是**定高**的（见上面 DialogContent 的注释），可列表整块可能压根不存在：
+            还没探测回来（`probe === 'loading'`）、或这个 agent 一个可选模型都没广告、也没
+            手动加过。那时上面几行全是 `shrink-0`，剩余空间没有任何元素去吃 —— 按钮行就
+            紧贴内容浮在卡片中间，下面留一大片空白（手机上看就像「取消 / 保存跑到上面去了」）。
+            列表在时它自己是 `flex-auto`，空间已被吃满，`mt-auto` 不起作用；列表不在时它接管。
+          */}
+          <DialogFooter className="mt-auto shrink-0 pt-1">
             <Button type="button" size="sm" variant="ghost" onClick={closeModelDialog}>
               {tr('取消')}
             </Button>
