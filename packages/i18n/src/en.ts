@@ -266,6 +266,11 @@ export const EN: Record<string, string> = {
   '重启更新': 'Restart to update',
   '发现新版本{v}，不会自动下载，点开查看': 'New version{v} available; it will not download automatically — open to view',
   '有新版本': 'Update available',
+  '查看版本与更新': 'Version and updates',
+  '发现新版本 v{v}，去「通用」里下载': 'Version v{v} available — open General to download',
+  '已下载 v{v}，去「通用」里重启安装': 'v{v} downloaded — open General to restart and install',
+  '正在下载新版本 v{v}': 'Downloading v{v}',
+  '在 GitHub 上查看项目': 'View the project on GitHub',
 
   '语音输入静音超时': 'Voice input silence timeout',
   '连续静音多久后停止语音输入。0 = 不自动停止。': 'Stop voice input after this much continuous silence. 0 = do not stop automatically.',

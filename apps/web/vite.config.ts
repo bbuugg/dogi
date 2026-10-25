@@ -1,4 +1,4 @@
-import { readdirSync, rmSync } from 'node:fs'
+import { readdirSync, readFileSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
@@ -54,6 +54,16 @@ export default defineConfig({
   // 固定 root：否则从仓库根执行构建时，vite 会把仓库根当成站点根、找不到这个 index.html
   root: import.meta.dirname,
   base: '/',
+  /*
+   * 版本号注入：设置侧栏底部要显示它（见 `packages/agent-kit/src/shared/lib/app-version.ts`）。
+   * 读本 app 的 package.json —— 与 desktop 打包用的那份同源，三端不会各说一个版本。
+   */
+  define: {
+    __APP_VERSION__: JSON.stringify(
+      (JSON.parse(readFileSync(resolve(import.meta.dirname, 'package.json'), 'utf8')) as { version: string })
+        .version
+    )
+  },
   plugins: [react(), tailwindcss(), cleanStaleAssets(resolve(import.meta.dirname, 'dist/assets'))],
   resolve: {
     alias: {

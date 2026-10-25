@@ -147,6 +147,16 @@ export default defineConfig(({ mode }) => {
     // 固定 root：否则从仓库根执行构建时，vite 会把仓库根当成站点根、找不到这个 index.html
     root: import.meta.dirname,
     base: hosted ? '/m/' : '/',
+    /*
+     * 版本号注入：设置侧栏底部要显示它（见 `packages/agent-kit/src/shared/lib/app-version.ts`）。
+     * 读本 app 的 package.json —— 与 APK / hosted 版一起发，三端不会各说一个版本。
+     */
+    define: {
+      __APP_VERSION__: JSON.stringify(
+        (JSON.parse(readFileSync(resolve(import.meta.dirname, 'package.json'), 'utf8')) as { version: string })
+          .version
+      )
+    },
     plugins: [
       react(),
       tailwindcss(),

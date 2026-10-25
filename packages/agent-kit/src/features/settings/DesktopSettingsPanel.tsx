@@ -21,6 +21,7 @@ import type {
 } from '@fizz/agent-kit/features/settings/types'
 import { buildSettingsGroups, resolveInitialTab } from '@fizz/agent-kit/features/settings/sections'
 import { SettingsContent } from '@fizz/agent-kit/features/settings/SettingsContent'
+import { SettingsFooter } from '@fizz/agent-kit/features/settings/SettingsFooter'
 
 export function DesktopSettingsPanel({
   platform,
@@ -43,31 +44,35 @@ export function DesktopSettingsPanel({
 
   return (
     <div className={cn('flex min-h-0 flex-1 gap-2 px-2 pb-2', className)}>
-      <nav className="w-44 shrink-0 overflow-auto no-scrollbar py-2 pr-1 space-y-4">
-        {groups.map((group) => (
-          <div key={group.title}>
-            <div className="px-2 pb-1 text-xs font-medium text-muted-foreground">
-              {group.title}
+      {/* 菜单列：**分组列表可滚，底部那行不动**（版本号 / 仓库常驻可见，别跟着滚走） */}
+      <nav className="flex w-44 shrink-0 flex-col py-2 pr-1">
+        <div className="min-h-0 flex-1 space-y-4 overflow-auto no-scrollbar">
+          {groups.map((group) => (
+            <div key={group.title}>
+              <div className="px-2 pb-1 text-xs font-medium text-muted-foreground">
+                {group.title}
+              </div>
+              {group.items.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setTab(item.id)}
+                  className={cn(
+                    'mb-0.5 flex w-full items-center rounded-md px-2 py-1.5 text-left text-sm transition-colors',
+                    tab === item.id
+                      ? 'bg-primary-subtle text-foreground'
+                      : 'text-muted-foreground hover:bg-primary-soft hover:text-foreground'
+                  )}
+                >
+                  {/* 图标用 currentColor 描边，选中 / 悬停的颜色变化自动跟随按钮文字色 */}
+                  <item.icon className="size-4 shrink-0 mr-1.5" />
+                  <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                </button>
+              ))}
             </div>
-            {group.items.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setTab(item.id)}
-                className={cn(
-                  'mb-0.5 flex w-full items-center rounded-md px-2 py-1.5 text-left text-sm transition-colors',
-                  tab === item.id
-                    ? 'bg-primary-subtle text-foreground'
-                    : 'text-muted-foreground hover:bg-primary-soft hover:text-foreground'
-                )}
-              >
-                {/* 图标用 currentColor 描边，选中 / 悬停的颜色变化自动跟随按钮文字色 */}
-                <item.icon className="size-4 shrink-0 mr-1.5" />
-                <span className="min-w-0 flex-1 truncate">{item.label}</span>
-              </button>
-            ))}
-          </div>
-        ))}
+          ))}
+        </div>
+        <SettingsFooter onOpenGeneral={() => setTab('general')} />
       </nav>
 
       <div className="flex min-w-0 flex-1 flex-col rounded-lg bg-background p-4">

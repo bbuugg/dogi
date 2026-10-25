@@ -178,8 +178,8 @@ export function MobileSettingsPanel({
       */}
       <nav
         className={cn(
-          'absolute inset-y-0 left-0 flex w-full flex-col gap-4 overflow-y-auto px-2 pb-2',
-          animate ? 'translate-x-0' : 'static w-44 shrink-0 gap-4',
+          'absolute inset-y-0 left-0 flex w-full flex-col px-2 pb-2',
+          animate ? 'translate-x-0' : 'static w-44 shrink-0',
           // 进场 / 退场都播；常驻 `transition-transform`（见文件头：`translate` 属性靠它才有过渡）
           'transition-transform duration-250 ease-[cubic-bezier(0.32,0.72,0,1)]',
           animate && !menuOpen && '-translate-x-[20%]'
@@ -188,38 +188,42 @@ export function MobileSettingsPanel({
         aria-hidden={!menuOpen || undefined}
         inert={!menuOpen || undefined}
       >
-        {groups.map((group) => (
-          <div key={group.title ?? group.items[0]?.id}>
-            {group.title && (
-              <div className="px-2 pb-1 text-xs font-medium text-muted-foreground">
-                {group.title}
-              </div>
-            )}
-            {group.items.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => pick(item)}
-                className={cn(
-                  'mb-0.5 flex w-full items-center gap-2 rounded-md px-2 py-2.5 text-left text-sm transition-colors',
-                  tab === item.id
-                    ? 'bg-primary-subtle text-foreground'
-                    : item.tone === 'destructive'
-                      ? // 底色照旧走行 hover（`bg-destructive/10` 在暗色下几乎是透明的，见 `RowAction` 文件头），
-                        // 红色只负责「这是什么性质的动作」，不负责「按钮在哪」
-                        'text-destructive hover:bg-primary-soft'
-                      : 'text-muted-foreground hover:bg-primary-soft hover:text-foreground'
-                )}
-              >
-                {/* 图标用 currentColor 描边，选中 / 悬停的颜色变化自动跟随按钮文字色 */}
-                <item.icon className="size-4 shrink-0 mr-1.5" />
-                <span className="min-w-0 flex-1 truncate">{item.label}</span>
-                {/* 只有会进二级页的项才给箭头；动作项（如「退出」）点了就执行，别暗示还有下一层 */}
-                {!item.action && <ChevronRight className="size-4 shrink-0 opacity-50" />}
-              </button>
-            ))}
-          </div>
-        ))}
+        {/* 分组列表自己滚。菜单底边不再放版本号 / 仓库那一行（手机上一屏本来就紧，
+            版本号在「通用」里能看到，也不必在这里抢一行高度） */}
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto no-scrollbar">
+          {groups.map((group) => (
+            <div key={group.title ?? group.items[0]?.id}>
+              {group.title && (
+                <div className="px-2 pb-1 text-xs font-medium text-muted-foreground">
+                  {group.title}
+                </div>
+              )}
+              {group.items.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => pick(item)}
+                  className={cn(
+                    'mb-0.5 flex w-full items-center gap-2 rounded-md px-2 py-2.5 text-left text-sm transition-colors',
+                    tab === item.id
+                      ? 'bg-primary-subtle text-foreground'
+                      : item.tone === 'destructive'
+                        ? // 底色照旧走行 hover（`bg-destructive/10` 在暗色下几乎是透明的，见 `RowAction` 文件头），
+                          // 红色只负责「这是什么性质的动作」，不负责「按钮在哪」
+                          'text-destructive hover:bg-primary-soft'
+                        : 'text-muted-foreground hover:bg-primary-soft hover:text-foreground'
+                  )}
+                >
+                  {/* 图标用 currentColor 描边，选中 / 悬停的颜色变化自动跟随按钮文字色 */}
+                  <item.icon className="size-4 shrink-0 mr-1.5" />
+                  <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                  {/* 只有会进二级页的项才给箭头；动作项（如「退出」）点了就执行，别暗示还有下一层 */}
+                  {!item.action && <ChevronRight className="size-4 shrink-0 opacity-50" />}
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
       </nav>
 
       {/*

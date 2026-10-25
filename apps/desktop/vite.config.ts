@@ -1,4 +1,4 @@
-import { readdirSync, rmSync } from 'node:fs'
+import { readdirSync, readFileSync, rmSync } from 'node:fs'
 import { resolve } from 'node:path'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
@@ -48,6 +48,16 @@ function moduleAliases(dir: string, prefix: string): Record<string, string> {
 export default defineConfig({
   root: import.meta.dirname,
   base: './',
+  /*
+   * 版本号注入：设置侧栏底部要显示它（见 `packages/agent-kit/src/shared/lib/app-version.ts`）。
+   * 读的是 apps/desktop/package.json —— electron-builder 也用它当安装包版本，两边同源。
+   */
+  define: {
+    __APP_VERSION__: JSON.stringify(
+      (JSON.parse(readFileSync(resolve(import.meta.dirname, 'package.json'), 'utf8')) as { version: string })
+        .version
+    )
+  },
   plugins: [react(), tailwindcss(), cleanStaleAssets(resolve(import.meta.dirname, 'out/renderer/assets'))],
   resolve: {
     alias: {
