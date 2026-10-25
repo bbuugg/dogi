@@ -25,7 +25,7 @@
     "build:runtime": "vite build -c docker/container-project/runtime/vite.config.ts && node scripts/check-runtime-deps.mjs",
     "build:desktop": "npm run copy:monaco && vite build -c apps/desktop/vite.main.mts && vite build -c apps/desktop/vite.preload.mts && vite build -c apps/desktop/vite.config.ts",
     "typecheck:packages": "tsc --noEmit -p packages/contracts/tsconfig.json && tsc --noEmit -p packages/plugin/tsconfig.json && tsc --noEmit -p packages/acp/tsconfig.json && tsc --noEmit -p packages/git/tsconfig.json && tsc --noEmit -p packages/mcp/tsconfig.json && tsc --noEmit -p packages/shells/tsconfig.json && tsc --noEmit -p packages/skills/tsconfig.json && tsc --noEmit -p packages/tools/tsconfig.json && tsc --noEmit -p packages/workspace/tsconfig.json && tsc --noEmit -p packages/agent/tsconfig.json && tsc --noEmit -p packages/ui/tsconfig.json && tsc --noEmit -p packages/agent-client/tsconfig.json && tsc --noEmit -p packages/agent-kit/tsconfig.json && tsc --noEmit -p packages/agent-host/tsconfig.json",
-    "typecheck:apps": "tsc --noEmit -p apps/server/tsconfig.json && tsc --noEmit -p apps/web/tsconfig.json && tsc --noEmit -p apps/mobile/tsconfig.json && tsc --noEmit -p apps/desktop/tsconfig.json && tsc --noEmit -p apps/desktop/tsconfig.web.json",
+    "typecheck:apps": "tsc --noEmit -p apps/server/tsconfig.json && tsc --noEmit -p apps/web/tsconfig.json && tsc --noEmit -p apps/mobile/tsconfig.json && tsc --noEmit -p apps/extension/tsconfig.json && tsc --noEmit -p apps/desktop/tsconfig.json && tsc --noEmit -p apps/desktop/tsconfig.web.json",
     "typecheck": "npm run typecheck:packages && npm run typecheck:apps",
     "verify:acp": "npm run build:server && node scripts/verify-acp.mjs",
     "pack:desktop": "npm run build:desktop && electron-builder --project apps/desktop --dir",
@@ -35,6 +35,8 @@
     "dist:win": "npm run build:web && npm run build:desktop && electron-builder --project apps/desktop --win --publish never",
     "build:mobile": "npm run copy:monaco && npm run build --workspace @fizz/mobile && npm run sync --workspace @fizz/mobile",
     "build:mobile:hosted": "npm run copy:monaco && npm run build:hosted --workspace @fizz/mobile",
+    "dev:extension": "npm run copy:monaco && npm run dev --workspace @fizz/extension",
+    "build:extension": "npm run copy:monaco && npm run build --workspace @fizz/extension",
     "android:open": "npm run open --workspace @fizz/mobile",
     "android:build": "npm run build:android --workspace @fizz/mobile"
   },

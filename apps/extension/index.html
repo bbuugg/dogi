@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      扩展页面（侧栏 / 独立标签页）没有移动端的软键盘与安全区问题，viewport 取最普通的一档；
+      `viewport-fit=cover` 留着无害——手机版外壳里那几处 `--safe-area-inset-*` 的 fallback
+      本来就是 0，桌面浏览器里算出来也是 0。
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Fizz</title>
+    <!--
+      ⚠️ 这个页面的 origin 是 `chrome-extension://<id>`，**不是**服务端的地址。所有 `/api`、
+      SSE、WS 都靠 `main.tsx` 里注入的服务端地址接成绝对地址；地址由用户在登录页填写、
+      存在本机（`fizz.ext.serverUrl`，见 `src/server-url.ts`）。
+
+      ⚠️ 首帧前必须把主题类名定好，否则会先按系统色画一帧再翻成用户选的主题。
+      判定逻辑必须与 `src/host.ts` 的 `loadTheme()` 一致：只认 'light' / 'dark'，
+      其余（含未存过、存坏、storage 被禁）回落 'system' —— 那时看 `prefers-color-scheme`。
+      `packages/agent-kit/src/shared/hooks/useTheme.ts` 里的 mode = 'system' 判断同理。
+    -->
+    <script>
+      ;(function () {
+        var dark = window.matchMedia('(prefers-color-scheme: dark)').matches
+        try {
+          var mode = localStorage.getItem('fizz.ext.theme')
+          if (mode === 'light') dark = false
+          else if (mode === 'dark') dark = true
+        } catch (e) {
+          /* localStorage 被禁：保持按系统偏好取的值 */
+        }
+        document.documentElement.classList.toggle('dark', dark)
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
