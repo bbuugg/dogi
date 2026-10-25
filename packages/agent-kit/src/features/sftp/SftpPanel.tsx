@@ -22,11 +22,23 @@
  *    上传本身在页内用一条进度条就地展示即可 —— 为一个入口搭一整套跨页面状态不划算。
  * 2. **复制 / 移动不可取消**：它们要么是一次瞬时 rename，要么是一段没有用户可感知进度的
  *    远端复制。只有上传带取消（大文件真的会卡在那里），走 `sftpAbort`。
+ *
+ * ## 刷新语义（两档，别混）
+ *
+ * - **连接那一下**（`connect`）：`/` 列目录 + realpath 兜底，整块换成「正在连接 xxx…」。
+ *   只在**首次挂载 / 换主机 / 点重试**时发生，由 `connect` 的稳定引用保证。
+ * - **列表刷新**（`load(dir, { silent: true })`）：上传完成、新建 / 重命名 / 删除 /
+ *   移动之后走这条 —— 不碰 `loading`、失败不换错误页，数据回来原地换行。
+ *   进入目录 / 手动刷新才用非静默，那时候「行变淡 + 图标转」是应有的反馈。
+ *
+ * ⚠️ 这个页面**不能**把 `app` 写进 effect / useCallback 依赖：`app` 每次渲染都是新对象，
+ * 后果就是「列表每隔几秒自己刷新一次、还把人顶回根目录」。`app` 一律经 `appRef` 读。
  */
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import {
   ArrowRightLeft,
   ArrowUp,
+  ChevronDown,
   Copy,
   Download,
   File as FileIcon,
@@ -52,6 +64,12 @@ import {
   DialogHeader,
   DialogTitle
 } from '@fizz/ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger
+} from '@fizz/ui/dropdown-menu'
 import {
   ContextMenu,
   ContextMenuContent,
@@ -85,6 +103,18 @@ function formatTime(ts: number): string {
 
 export function SftpPanel({ host }: { host: SshHostConfig }): React.JSX.Element {
   const { app } = useAppContext()
+
+  /**
+   * `app` 的**最新值**的 ref —— 只给 `load` 与「初次连接」那个 effect 读。
+   *
+   * ⚠️ `app` 对象每次渲染都是新的（见 AGENTS.md）。只要把它写进 `useEffect` /
+   * `useCallback` 的依赖数组，上层每重渲染一次（流式期间每个 token 一次）就会：
+   * 重新跑「初次连接」→ `setConnecting(true)` + 从 `/` 重列目录 → 用户正看着的
+   * 目录被顶回根目录、整页闪一下「正在连接 xxx」。这不是「自动刷新」，
+   * 是**依赖数组写错导致的重复初始化**。ref 让 `load` 只随 `host.id` 变化。
+   */
+  const appRef = useRef(app)
+  appRef.current = app
 
   const [path, setPath] = useState('/')
   const [pathInput, setPathInput] = useState('/')
@@ -129,26 +159,50 @@ export function SftpPanel({ host }: { host: SshHostConfig }): React.JSX.Element 
     }
   }, [])
 
+  /** 请求序号：只认最后一次发出的 `load` 的回包，先发后到的旧回包直接丢掉 */
+  const seqRef = useRef(0)
+
+  /**
+   * 列目录。
+   *
+   * `opts.silent` = **静默刷新**：不动 `loading`，也不在失败时把整页换成错误页 ——
+   * 上传完成、新建 / 重命名 / 删除 / 移动之后都走这条路。用户要的是「列表还是列表」：
+   * 数据回来就原地替换行，回来之前界面上什么都不跳。
+   *
+   * 非静默（手动刷新、进入目录、跳转路径）才给 `loading`：那几处是用户主动发起的，
+   * 行变淡 + 刷新图标转起来是**应有的**反馈，不是噪声。
+   *
+   * 失败：静默刷新用 toast 报错并**保留现有列表**（把已经看得到的目录换成一屏红字，
+   * 比报错本身更难受）；非静默仍然走错误页，那一屏本来就没有可信内容。
+   */
   const load = useCallback(
-    async (dir: string): Promise<boolean> => {
-      setLoading(true)
-      setError(null)
+    async (dir: string, opts?: { silent?: boolean }): Promise<boolean> => {
+      const silent = opts?.silent === true
+      const seq = ++seqRef.current
+      if (!silent) setLoading(true)
       try {
-        const result = await app.sftpList(host.id, dir)
-        if (!aliveRef.current) return true
+        const result = await appRef.current.sftpList(host.id, dir)
+        // 已经卸载，或者后面又发了一次（回包顺序不保证），丢弃这次结果
+        if (!aliveRef.current || seq !== seqRef.current) return true
         setEntries(result.entries)
         setPath(result.path)
         setPathInput(result.path)
+        setError(null)
         return true
       } catch (e) {
-        if (!aliveRef.current) return true
-        setError(e instanceof Error ? e.message : String(e))
+        if (!aliveRef.current || seq !== seqRef.current) return true
+        const message = e instanceof Error ? e.message : String(e)
+        if (silent) toast.error('刷新列表失败：' + message)
+        else setError(message)
         return false
       } finally {
-        if (aliveRef.current) setLoading(false)
+        // ⚠️ 这里**不看** `silent`：静默刷新可能把前面那次非静默请求顶掉（seq 变了），
+        // 若只在非静默分支清 `loading`，那个 loading 就永远停在 true（行一直发灰、
+        // 刷新图标一直转）。谁最后落地谁负责收尾。
+        if (aliveRef.current && seq === seqRef.current) setLoading(false)
       }
     },
-    [app, host.id]
+    [host.id]
   )
 
   // entries 变化后：剔除已不存在的选中项（删除 / 移动走后列表里就没有了）
@@ -160,24 +214,43 @@ export function SftpPanel({ host }: { host: SshHostConfig }): React.JSX.Element 
     })
   }, [entries])
 
-  // 初始列目录：先试 `/`；win32-openssh 的默认目录是盘符风格路径（/C:/…），
-  // 只在 readdir 失败（或返回空且 `/` 明显不对）时改用 realpath('.') 拿准工作目录再试一次。
-  useEffect(() => {
+  /**
+   * 建立连接（= 列一次目录）：
+   * 先试 `/`；win32-openssh 的默认目录是盘符风格路径（/C:/…），只在 readdir 失败时
+   * 改用 realpath('.') 拿准工作目录再试一次。
+   *
+   * 这整段只跟 `host.id` 有关，所以引用是稳定的 —— 「重试」按钮与初次连接共用同一份逻辑。
+   */
+  const connect = useCallback(async (): Promise<void> => {
     setConnecting(true)
-    void (async () => {
-      const ok = await load('/')
-      if (!aliveRef.current) return
-      if (!ok) {
-        try {
-          const home = normalizeSftpPath(await app.sftpRealpath(host.id))
-          await load(home)
-        } catch {
-          // realpath 也失败：保留 `/` 那次的错误提示（load 内部已 setError）
-        }
+    setError(null)
+    const ok = await load('/')
+    if (!aliveRef.current) return
+    if (!ok) {
+      try {
+        const home = normalizeSftpPath(await appRef.current.sftpRealpath(host.id))
+        await load(home)
+      } catch {
+        // realpath 也失败：保留 `/` 那次的错误提示（load 内部已 setError）
       }
-      if (aliveRef.current) setConnecting(false)
-    })()
-  }, [app, host.id, load])
+    }
+    if (aliveRef.current) setConnecting(false)
+  }, [host.id, load])
+
+  /**
+   * 连接那一下。
+   *
+   * ⚠️ 依赖只有 `connect`（它自己只依赖 `host.id`）：这个 effect 是**连接建立**，
+   * 不能再被渲染次数触发。之前它依赖 `app`，上层每重渲染一次就会把列表顶回
+   * 根目录并闪一遍「正在连接 xxx」——用户看到的就是「列表老是自动刷新」。
+   */
+  useEffect(() => {
+    // 同一实例挂到另一台主机上：先把上一台的内容清掉，别在连接页背后留着旧列表
+    setEntries([])
+    setPath('/')
+    setPathInput('/')
+    void connect()
+  }, [connect])
 
   /** 进入目录（仅目录）；文件无操作 */
   const enter = (entry: SftpEntry): void => {
@@ -207,7 +280,8 @@ export function SftpPanel({ host }: { host: SshHostConfig }): React.JSX.Element 
       setMkdirOpen(false)
       setMkdirName('')
       toast.success('已创建文件夹')
-      void load(path)
+      // 静默刷新：新目录回来时原地多一行，不闪 loading
+      void load(path, { silent: true })
     } catch (e) {
       toast.error('创建失败：' + (e instanceof Error ? e.message : String(e)))
     }
@@ -224,7 +298,7 @@ export function SftpPanel({ host }: { host: SshHostConfig }): React.JSX.Element 
       const parent = entry.path.slice(0, entry.path.lastIndexOf('/'))
       await app.sftpRename(host.id, entry.path, joinSftpPath(parent, name))
       setRenaming(null)
-      void load(path)
+      void load(path, { silent: true })
     } catch (e) {
       toast.error('重命名失败：' + (e instanceof Error ? e.message : String(e)))
     }
@@ -245,7 +319,7 @@ export function SftpPanel({ host }: { host: SshHostConfig }): React.JSX.Element 
           (dirs.length ? `（含 ${dirs.length} 个文件夹）` : '') +
           (files ? `（含 ${files} 个文件）` : '')
       )
-      void load(path)
+      void load(path, { silent: true })
     } catch (e) {
       toast.error('删除失败：' + (e instanceof Error ? e.message : String(e)))
     }
@@ -354,7 +428,7 @@ export function SftpPanel({ host }: { host: SshHostConfig }): React.JSX.Element 
       )
     }
     setSelected(new Set())
-    void load(path)
+    void load(path, { silent: true })
   }
 
   /**
@@ -376,8 +450,9 @@ export function SftpPanel({ host }: { host: SshHostConfig }): React.JSX.Element 
         await runUpload({ file, hostId: host.id, hostLabel: host.name, dir: path })
       }
       if (!aliveRef.current) return
-      // 传完刷新一次列表；被取消 / 失败的文件不会留下完整文件，不需要分别处理
-      void load(path)
+      // 传完刷新一次列表；被取消 / 失败的文件不会留下完整文件，不需要分别处理。
+      // ⚠️ 必须 silent：这条是**后台**刷新，闪一遍 loading 会让人以为「点了上传又把页面重置了」。
+      void load(path, { silent: true })
     })()
   }
 
@@ -457,6 +532,9 @@ export function SftpPanel({ host }: { host: SshHostConfig }): React.JSX.Element 
 
   const title = `${host.name}（${host.username}@${host.host}）`
 
+  /** 两个上传入口共用一套禁用条件：连接中 / 目录读失败 / 本机已有上传在跑 */
+  const uploadDisabled = connecting || Boolean(error) || uploading
+
   return (
     <div className="relative flex h-full min-h-0 flex-col bg-background">
       {/* 工具栏：返回上级 + 路径 + 刷新 / 新建文件夹 / 上传 */}
@@ -509,30 +587,52 @@ export function SftpPanel({ host }: { host: SshHostConfig }): React.JSX.Element 
         >
           <FolderPlus className="size-4" />
         </Button>
-        <Button
-          size="sm"
-          className="shrink-0 gap-1.5"
-          disabled={connecting || Boolean(error) || uploading}
-          onClick={pickFiles}
-        >
-          <Upload className="size-3.5" />
-          上传
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="shrink-0"
-          title="上传文件夹"
-          aria-label="上传文件夹"
-          disabled={connecting || Boolean(error) || uploading}
-          onClick={pickDir}
-        >
-          <FolderUp className="size-4" />
-        </Button>
+        {/*
+          上传收成**一个分裂按钮**（与会话详情顶栏的终端入口同一形状）：
+          左半直接选文件（最常用的那个，少一次点击），右半箭头弹「上传文件 / 上传文件夹」。
+          两个动作仍然是两个隐藏 `<input>`（见文件末尾），这里只负责把点击转过去 ——
+          合的是**入口**，不是实现。
+        */}
+        <div className="flex shrink-0 items-center">
+          <Button
+            size="sm"
+            className="gap-1.5 rounded-r-none"
+            title="上传文件（可多选）"
+            aria-label="上传文件"
+            disabled={uploadDisabled}
+            onClick={pickFiles}
+          >
+            <Upload className="size-3.5" />
+            上传
+          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                size="sm"
+                className="rounded-l-none border-l border-primary-foreground/25 px-1.5"
+                title="上传文件 / 文件夹"
+                aria-label="上传文件或文件夹"
+                disabled={uploadDisabled}
+              >
+                <ChevronDown className="size-3.5" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-44">
+              <DropdownMenuItem onSelect={pickFiles}>
+                <Upload className="size-3.5" />
+                上传文件
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={pickDir}>
+                <FolderUp className="size-3.5" />
+                上传文件夹
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
 
       {/* 多选操作栏：常驻显示；未选中时按钮禁用 */}
-      <div className="flex shrink-0 items-center gap-2 border-y border-border/60 bg-secondary/40 px-3 py-1.5">
+      <div className="flex shrink-0 items-center gap-2 px-3 py-1">
         <span className="shrink-0 text-xs font-medium text-foreground">已选 {selected.size} 项</span>
         <div className="ml-auto flex items-center gap-1">
           <Button
@@ -588,13 +688,19 @@ export function SftpPanel({ host }: { host: SshHostConfig }): React.JSX.Element 
             正在连接 {host.username}@{host.host}:{host.port}…
           </div>
         ) : error ? (
-          <div className="mx-4 mt-10 rounded-md border border-dashed border-destructive/40 px-4 py-6 text-center text-sm text-destructive">
-            {error}
+          <div className="mx-4 mt-10 flex flex-col items-center gap-3 rounded-md border border-dashed border-destructive/40 px-4 py-6 text-center text-sm text-destructive">
+            <span>{error}</span>
+            {/* 出错后工具栏那几个按钮都是禁用的（`disabled` 里带着 `Boolean(error)`），
+                这里是唯一的出口 —— 不然只能关标签重开 */}
+            <Button variant="outline" size="sm" onClick={() => void connect()}>
+              <RefreshCw className="size-3.5" />
+              重试
+            </Button>
           </div>
         ) : (
           <>
             {/* 表头（首列勾选框支持全选） */}
-            <div className="sticky top-0 z-10 flex items-center gap-3 border-b border-border/60 bg-background px-3 py-1.5 text-xs font-medium text-muted-foreground">
+            <div className="sticky top-0 z-10 flex items-center gap-3 bg-background px-3 py-1.5 text-xs font-medium text-muted-foreground">
               <Checkbox
                 className="shrink-0"
                 checked={allSelected}
@@ -617,7 +723,7 @@ export function SftpPanel({ host }: { host: SshHostConfig }): React.JSX.Element 
                     <ContextMenuTrigger asChild>
                       <div
                         className={cn(
-                          'group flex cursor-pointer items-center gap-3 border-b border-border/40 px-3 py-2 hover:bg-secondary/60',
+                          'group flex cursor-pointer items-center gap-3 px-3 py-2 hover:bg-secondary/60',
                           selected.has(entry.path) && 'bg-primary/10 hover:bg-primary/15',
                           loading && 'opacity-60'
                         )}
