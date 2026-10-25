@@ -396,6 +396,18 @@ function tickDocker(): void {
       if (reachable !== dockerReachable) {
         dockerReachable = reachable
         restartDockerEvents()
+        /*
+         * docker 刚变得可用 ⇒ 顺手清一次孤儿容器。
+         *
+         * 启动时那趟清扫在「服务先起来、Docker Desktop 后启动」的情况下会直接跳过（连不上
+         * 就 return），而用户删项目时如果 docker 没起来，容器也就留了下来 —— 这里补上，
+         * 不用等下次重启服务。幂等：还活着的项目不在清扫范围里（判据见 `purge.ts`）。
+         */
+        if (reachable) {
+          void import('./container-projects/purge')
+            .then((m) => m.sweepOrphanContainers())
+            .catch(() => undefined)
+        }
       }
       const projects = JSON.stringify(snapshot)
       if (projects !== lastContainerProjects) {

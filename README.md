@@ -1,3 +1,11 @@
+<div align="center">
+
+<img src="screenshots/account.jpg" alt="公众号：AI实习生" width="420" />
+
+**关注公众号「AI实习生」** · 聚焦前沿 AI 资讯，每日精选行业动态与技术实践
+
+</div>
+
 # Fizz
 
 **自托管的 AI Agent 工作台。**

@@ -644,6 +644,19 @@ async function doStart(ws: AgentWorkspace): Promise<StartResult> {
       await startContainer(name)
     }
 
+    /*
+     * 删除竞态：`doStart` 是长流程（拉镜像 + 建容器可能几十秒），这期间用户完全可能把项目
+     * 删了 —— `removeProject` 那趟已经把这个 slug 的容器清过一遍，这里再 `docker run` 出来
+     * 就是一个**没有记录、界面上看不见**的孤儿容器（只能靠下次启动的清扫）。所以建完立刻
+     * 核对记录还在不在；不在就把刚起来的收掉，别留一份占端口的垃圾。
+     */
+    if (!domain.getWorkspace(ws.id)?.container) {
+      await stopContainer(name).catch(() => undefined)
+      await removeContainer(name)
+      clearLive(slug)
+      return {}
+    }
+
     setLive(slug, { phase: 'health' })
     // 端口**现读**（刚 run 出来的映射、或冷启动时当初定下的映射都走这里）；
     // 索引里没有就按名字再问一次 —— 同上，label 不是唯一真相

@@ -20,6 +20,7 @@ export function registerBuiltinNamespaces(): void {
   registerNamespace({ id: 'chat', label: '对话', order: 20 })
   registerNamespace({ id: 'agent', label: 'Agent', order: 30 })
   registerNamespace({ id: 'task', label: '任务', order: 40 })
+  registerNamespace({ id: 'container', label: '容器', order: 50 })
   registerNamespace({ id: 'ssh', label: 'SSH', order: 60 })
   registerNamespace({ id: 'terminal', label: '终端', order: 70 })
   registerNamespace({ id: 'tunnel', label: '隧道', order: 80 })

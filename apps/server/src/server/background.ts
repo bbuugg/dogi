@@ -78,6 +78,12 @@ export function startBackgroundServices(): void {
   run('container-public-gateway', () => {
     void import('./container-projects/public-gateway').then((m) => m.startPublicGateway())
   })
+  // 容器型项目 · 孤儿容器清扫：删项目那次如果 docker 没起来（Windows 上很常见），容器会留下
+  // 而记录已经摘了 —— 界面上再也看不见它（快照按工作区遍历），它却还占着端口与内存。
+  // 启动时按 label 扫一遍、只清「本实例目录下、且确实没有项目记录」的那些。
+  run('container-sweep', () => {
+    void import('./container-projects/purge').then((m) => m.sweepOrphanContainers())
+  })
   // 浏览器引擎配置：把持久化 profile 落到数据目录下（登录态活得过会话重启），
   // 并把「用哪个浏览器」接到设置里的偏好上。
   // desktop / web 共享同一份后端代码，这里一处配置两者都生效。

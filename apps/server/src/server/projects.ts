@@ -21,8 +21,8 @@ import { WORKTREE_IDENTIFIER_RE } from '@fizz/contracts/agent-api'
 import { addWorktree, cloneRepo, ensureWorktreesIgnored, hasCommits, isCloneCanceled, refExists, removeWorktree, repoNameFromUrl, resolveRepoRoot, type GitLogLevel } from '@fizz/git'
 import { resolveDataDir } from '@fizz/workspace'
 import { domain } from './state'
-import { removeContainer, stopContainer } from './lib/docker'
-import { containerNameOf, projectDirOf } from './container-projects/root'
+import { projectDirOf } from './container-projects/root'
+import { purgeProjectContainers } from './container-projects/purge'
 import { describeError } from './lib/http'
 import { invalidNameReason, WORKTREE_DIR, worktreeIdentifierOf } from './projects-pure'
 
@@ -281,8 +281,7 @@ export type RemoveProjectInput = { deleteWorktree?: boolean }
 /**
  * 删除项目:**逐字搬自原 DELETE /api/workspaces/[id]** 的主体(三道闸语义不变)——
  * 1. 勾了删磁盘时,每个 worktree 项目过 dropWorktree 三道闸;
- * 2. 先把容器型项目的容器收干净,再由 domain.deleteWorkspace 级联摘记录;
- * 3. 容器型项目先 stop 再 rm,最后摘记录。
+ * 2. 容器型项目先把容器停掉再删掉(见 `container-projects/purge.ts`),最后才摘记录。
  */
 export async function removeProject(id: string, input?: RemoveProjectInput): Promise<AgentWorkspace[]> {
   const workspace = domain.getWorkspace(id)
@@ -308,15 +307,13 @@ export async function removeProject(id: string, input?: RemoveProjectInput): Pro
   }
 
   // 2. 容器型项目:先把容器停掉再删掉,最后才摘记录。
-  //    记录摘了之后容器就再也管不着了,
-  //    留着它只会变孤儿、还占着宿主端口映射。stop 再 rm 是为了给容器内进程一次
-  //    「收到 SIGTERM 收拾自己」的机会(顺序不能反)。
+  //    记录摘了之后容器就再也管不着了(界面上看不见它,快照是按工作区遍历的),
+  //    留着它只会变孤儿、还占着宿主端口映射。收尸逻辑在 `container-projects/purge.ts`
+  //    (按名字 + label 双路径找容器,失败写应用日志,不挡这次删除 —— 记录不摘的话
+  //    用户会卡在一个「删不掉的项目」上,docker 没启动时尤其常见;孤儿由启动清扫兜住)。
   for (const ws of subtree) {
-    const slug = ws.container?.slug
-    if (!slug) continue
-    const name = containerNameOf(slug)
-    await stopContainer(name).catch(() => undefined)
-    await removeContainer(name).catch(() => undefined)
+    if (!ws.container?.slug) continue
+    await purgeProjectContainers(ws.container.slug)
   }
 
   domain.deleteWorkspace(id)

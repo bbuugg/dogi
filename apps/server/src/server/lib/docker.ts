@@ -307,6 +307,13 @@ export interface ContainerState {
   oomKilled?: boolean
   /** 容器内端口 → 宿主端口（inspect 对停着的容器也给，比 `docker ps` 全） */
   ports: Map<number, number>
+  /**
+   * bind 挂载的原始串（`宿主机路径:容器内路径[:ro]`）。
+   *
+   * 目前只有一个用途：判断一个容器是不是**本实例**的（宿主侧路径落在本项目的数据目录下）。
+   * `listContainers` 不返回挂载，所以只有 inspect 拿得到。
+   */
+  binds: string[]
 }
 
 /**
@@ -335,7 +342,8 @@ export async function inspectContainer(name: string): Promise<ContainerState | n
       ...(state?.FinishedAt ? { finishedAt: state.FinishedAt } : {}),
       ...(state?.Error ? { error: state.Error } : {}),
       ...(state?.OOMKilled === true ? { oomKilled: true } : {}),
-      ports
+      ports,
+      binds: info.HostConfig?.Binds ?? []
     }
   } catch {
     return null
@@ -470,6 +478,23 @@ export async function removeContainer(name: string): Promise<void> {
     await client().getContainer(name).remove({ force: true })
   } catch {
     /* 收尾动作，失败不抛（见上） */
+  }
+}
+
+/**
+ * 删容器的**要回执**版本：删掉（或本来就不存在）返回 null，失败返回一句人话。
+ *
+ * 与上面那个的分工：`removeContainer` 用于「收尾失败也无所谓」的路径（启动回滚、重建前
+ * 清理）；**删项目**不是那种路径 —— 记录一摘，容器就成了谁也管不着的孤儿（还占着宿主
+ * 端口），所以那里必须知道有没有删掉，好在日志里说清楚、并让启动时的清扫兜住。
+ */
+export async function removeContainerReporting(name: string): Promise<string | null> {
+  try {
+    await client().getContainer(name).remove({ force: true })
+    return null
+  } catch (err) {
+    if (isNotFound(err)) return null
+    return dockerErrorMessage(err)
   }
 }
 
