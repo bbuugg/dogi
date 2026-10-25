@@ -106,7 +106,7 @@ export function TitleBar() {
     // 底色与 AgentApp 的 header / sidebar 同色（bg-sidebar），窗口顶部连成一片。
     // ⚠️ 必须自己画：外层根容器是 `bg-transparent`（见 main.tsx，避免整窗多蒙一层），
     // 标题栏不画的话这里直接透出背景图，与下面那条侧栏色断成两截。
-    <header className="app-drag flex h-9 shrink-0 items-stretch bg-sidebar">
+    <header className="app-drag flex h-8 shrink-0 items-stretch bg-sidebar">
       {/* macOS：左边这 76px 让给系统交通灯（主进程 hiddenInset + trafficLightPosition x:12） */}
       {IS_MAC && <div className="w-[76px] shrink-0" />}
 

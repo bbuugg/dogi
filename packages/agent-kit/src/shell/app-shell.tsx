@@ -55,6 +55,8 @@ import type { NewInWorkspaceKind } from "@fizz/agent-kit/shared/lib/new-in-works
 import { StatusBar } from "@fizz/agent-kit/shell/layout/StatusBar";
 import { StatusBarNodes } from "@fizz/agent-kit/shell/layout/status-bar-nodes";
 import { LogsButton } from "@fizz/agent-kit/shell/layout/LogsButton";
+import { FilesButton } from "@fizz/agent-kit/shell/layout/FilesButton";
+import { SysmonButton } from "@fizz/agent-kit/shell/layout/SysmonButton";
 import { AppUpdateBadge } from "@fizz/agent-kit/shell/layout/AppUpdateBadge";
 import { AppUpdateNotifier } from "@fizz/agent-kit/shell/AppUpdateNotifier";
 import { SystemMonitorBadge } from "@fizz/agent-kit/shared/components/SystemMonitorBadge";
@@ -762,6 +764,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   {/* 耗时活儿「转到后台」之后唯一的常驻可见处（无任务时自己隐掉） */}
                   <BackgroundTasksBadge app={app} />
                   <AppUpdateBadge onOpenSettings={openSettings} />
+                  <SysmonButton />
+                  <FilesButton />
                   <LogsButton />
                 </>
               }
