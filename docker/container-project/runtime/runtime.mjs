@@ -1484,6 +1484,103 @@ async function createIgnoreChecker(root) {
 function relPathOf(root, abs) {
 	return relative(root, abs).split(sep).join("/");
 }
+/**
+* 取生效的「模型请求重试次数上限」。
+*
+* `0 = 不限制`（返回 `Infinity`，一直重试）；其余按非负整数四舍五入。
+* 缺省 = `DEFAULT_MAX_RETRIES`。只对**可重试的请求错误**（网络中断 / 上游空响应）生效，见 @fizz/agent。
+*/
+function resolveMaxRetries(override) {
+	const rounded = Math.max(0, Math.round(override ?? 2));
+	return rounded === 0 ? Number.POSITIVE_INFINITY : rounded;
+}
+/**
+* 收敛「工具调用并发数」：非数字 / 越界一律夹到 [1, 10]，缺省 = 3。
+*
+* 这是**每步**的上限，不是一轮对话的总工具数：模型一步返回 20 个 tool-call 时，
+* 服务端也只会同时跑这么多个，其余排队。
+*/
+function resolveToolCallConcurrency(override) {
+	return Math.min(10, Math.max(1, typeof override === "number" && Number.isFinite(override) ? Math.round(override) : 3));
+}
+//#endregion
+//#region packages/contracts/src/browser.ts
+/**
+* ⚠️ 视口**不跟随面板尺寸**。
+*
+* 面板宽度取决于用户把窗口拉多宽、分隔条拖到哪，把它当视口会让同一个页面在不同窗口
+* 大小下走不同的响应式断点（窗口窄了页面就变「手机版」），既不可复现也没法跟浏览器
+* 里手动看到的效果对齐。所以固定成两个预设，画面由 `object-contain` 缩放填进面板。
+*
+* `desktop` 用 1280×800@1x（与改动前的默认视口一致，Agent 工具也用它）；
+* `mobile` 用 390×844@2x（iPhone 14 的逻辑尺寸与 DPR），页面里的
+* `devicePixelRatio` 也真的是 2，站点才会按手机给图。
+*/
+var BROWSER_VIEWPORT_PRESETS = {
+	desktop: {
+		mode: "desktop",
+		label: "PC",
+		width: 1280,
+		height: 800,
+		dpr: 1
+	},
+	mobile: {
+		mode: "mobile",
+		label: "手机",
+		width: 390,
+		height: 844,
+		dpr: 2
+	}
+};
+/** 默认 PC 屏 —— 打开浏览器时不该先看到移动版布局 */
+var DEFAULT_BROWSER_VIEWPORT = "desktop";
+/** 取预设；传入未知值时回退到默认，别让一个坏值把会话搞崩 */
+function browserViewportPreset(mode) {
+	return BROWSER_VIEWPORT_PRESETS[mode ?? "desktop"] ?? BROWSER_VIEWPORT_PRESETS.desktop;
+}
+/**
+* UA 必须跟视口预设一起切。
+*
+* 光切视口只能让**响应式**的那部分跟着变；站点按 UA 分流的那部分（`m.xxx` 跳转、
+* 服务端按 UA 出模板）在下次请求前一直是老样子 —— 「视口是 PC、页面却是手机」最常见
+* 的来源就是这里。所以两个预设各自带一份 UA。
+*
+* 桌面 UA 用宿主浏览器**自己报的那份**（版本号真实、与 Sec-CH-UA 自洽）；
+* 手机 UA 只把平台段换成 Android，**Chrome 版本号沿用桌面 UA 的** —— 写死版本号
+* 迟早会和浏览器真实版本对不上，而那些做指纹一致性校验的站点就吃这一套。
+*/
+function browserUserAgent(mode, actualDesktopUa) {
+	const desktop = (actualDesktopUa.trim() || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36").replace(/HeadlessChrome/g, "Chrome");
+	if (mode !== "mobile") return desktop;
+	return `Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${/Chrome\/([\d.]+)/.exec(desktop)?.[1] ?? "131.0.0.0"} Mobile Safari/537.36`;
+}
+/** 手机 UA 对应的 `navigator.platform`（桌面不覆盖，保持宿主原样） */
+var MOBILE_PLATFORM = "Linux armv8l";
+//#endregion
+//#region packages/i18n/src/index.ts
+/**
+* Fizz 国际化内核：语言状态 + 中英文文案。
+*
+* 设计取舍：
+* - **中文是源文案**，也是默认语言；英文走 `EN` 字典（key 就是中文原文）；
+* - 未翻译的条目自动回落到中文，新增界面文案不会因为漏翻而变成空白；
+* - 零 React / 零 Node 依赖：服务端工具描述与前端组件共用同一份 `t()`；
+* - 需要「中英成对」的静态长文案（工具描述 / 系统提示词）用 `tr(zh, en)`，不必进字典。
+*
+* 语言是**进程级 / 页面级单例**：设置页改完立刻 `setLanguage`，订阅者重渲染；
+* 服务端在构建工具 / 提示词前从 `CoreData` 同步一次（见 `apps/server` 的启动段）。
+*/
+var current = "zh";
+function getLanguage() {
+	return current;
+}
+/**
+* 中英成对文案：给工具描述 / 系统提示词这种「长、且只在服务端用」的字符串。
+* 比把它们塞进字典更好读，也不会让字典变成第二份源码。
+*/
+function tr(zh, en) {
+	return current === "en" ? en : zh;
+}
 //#endregion
 //#region packages/skills/src/skill-tools.ts
 /**
@@ -1571,7 +1668,7 @@ function buildReadSkillTool(skills) {
 */
 function buildSkillsPromptSection(skills) {
 	if (skills.length === 0) return "";
-	return [
+	return tr([
 		"## 可用技能（Skills）",
 		"用户在本机安装了一些技能，每个技能是一份带步骤的说明（可能还带脚本与参考资料）：",
 		...skills.map((s) => `- ${s.name}：${s.description}`),
@@ -1579,7 +1676,15 @@ function buildSkillsPromptSection(skills) {
 		"- 判断任务与某个技能相关时，**先调用 read_skill 读它的完整说明，再严格按说明执行**；不要凭技能名猜做法；",
 		"- 技能说明里提到的脚本 / 参考资料，用 read_skill 的 file 参数读取，或用 execute_command 以绝对路径执行；",
 		"- 技能与当前任务无关时不要提及，也不要在正文里罗列技能清单。"
-	].join("\n");
+	].join("\n"), [
+		"## Available skills",
+		"The user installed skills on this machine. Each skill is a step-by-step guide (possibly with scripts and references):",
+		...skills.map((s) => `- ${s.name}: ${s.description}`),
+		"Conventions:",
+		"- When a task relates to a skill, **first call read_skill to read its full instructions, then follow them strictly**; do not guess from the name;",
+		"- Read scripts/references mentioned by a skill with read_skill’s file parameter, or run them via execute_command with an absolute path;",
+		"- Do not mention skills unrelated to the current task and do not list them in the reply."
+	].join("\n"));
 }
 //#endregion
 //#region packages/tools/src/edit-match.ts
@@ -2387,6 +2492,7 @@ function buildAgentTools(root, opts) {
 	const isWin = process.platform === "win32";
 	const bashPath = isWin ? gitBashPath() : null;
 	const shellNote = isWin ? bashPath ? "命令运行在 Git Bash（POSIX）环境：可以用 ls / grep / sed / find / cat / 管道等 Unix 工具与语法；Windows 路径建议写成 C:/xxx 或 /c/xxx 形式。" : "命令运行在 PowerShell 环境（未检测到 Git Bash）。" : "命令运行在 bash 环境。";
+	const shellNoteEn = process.platform === "win32" ? bashPath ? "Commands run in Git Bash (POSIX): you can use ls / grep / sed / find / cat, pipes, and Unix syntax. For Windows paths prefer C:/xxx or /c/xxx." : "Commands run in PowerShell (Git Bash not detected)." : "Commands run in bash.";
 	/**
 	* 改动类工具的统一闸门。
 	*
@@ -2411,10 +2517,10 @@ function buildAgentTools(root, opts) {
 	};
 	return filterToolSet({
 		list_files: tool({
-			description: "列出工作区目录内容（自动忽略 .git、node_modules、构建产物与 .gitignore 规则）。返回每个条目的相对路径，目录带 / 后缀，文件附大小。适合先了解项目结构。",
+			description: tr("列出工作区目录内容（自动忽略 .git、node_modules、构建产物与 .gitignore 规则）。返回每个条目的相对路径，目录带 / 后缀，文件附大小。适合先了解项目结构。", "List workspace directory contents (ignores .git, node_modules, build outputs, and .gitignore rules). Returns relative paths; directories end with /, files include size. Useful for getting oriented in a project."),
 			inputSchema: z.object({
-				path: z.string().optional().describe("相对工作区的目录路径，缺省为工作区根目录"),
-				depth: z.number().optional().describe("递归深度，默认 0（仅当前目录），最大 4")
+				path: z.string().optional().describe(tr("相对工作区的目录路径，缺省为工作区根目录", "Directory path relative to the workspace; defaults to the workspace root")),
+				depth: z.number().optional().describe(tr("递归深度，默认 0（仅当前目录），最大 4", "Recursion depth; default 0 (current directory only), max 4"))
 			}),
 			execute: async ({ path = "", depth = 0 }) => {
 				const absDir = resolveInside(root, path);
@@ -2428,11 +2534,11 @@ function buildAgentTools(root, opts) {
 			}
 		}),
 		read_file: tool({
-			description: "读取文件内容并附行号，用于理解源码 / 配置 / 文档。路径相对工作区根目录。默认只读前 200 行（上限 2000）：大文件请用 offset/limit 按需分段读，不要一次拉全文。超出预算时会按行裁剪并告诉你还有哪些行没显示。⚠️ 行号只是给你定位用的（格式 `  42 | 代码`），**不要**把它复制进 edit_file 的 oldText。",
+			description: tr("读取文件内容并附行号，用于理解源码 / 配置 / 文档。路径相对工作区根目录。默认只读前 200 行（上限 2000）：大文件请用 offset/limit 按需分段读，不要一次拉全文。超出预算时会按行裁剪并告诉你还有哪些行没显示。⚠️ 行号只是给你定位用的（格式 `  42 | 代码`），**不要**把它复制进 edit_file 的 oldText。", "Read a file with line numbers for understanding source, config, or docs. Paths are relative to the workspace root. By default it reads the first 200 lines (max 2000): for large files use offset/limit instead of fetching everything at once. When over budget it trims by line and tells you which lines were omitted. ⚠️ Line numbers are only for navigation (`  42 | code`); do NOT copy them into edit_file oldText."),
 			inputSchema: z.object({
-				path: z.string().describe("相对工作区的文件路径"),
-				offset: z.number().optional().describe("起始行号（1 起），缺省 1"),
-				limit: z.number().optional().describe("返回行数上限，默认 200，最大 2000")
+				path: z.string().describe(tr("相对工作区的文件路径", "File path relative to the workspace")),
+				offset: z.number().optional().describe(tr("起始行号（1 起），缺省 1", "Starting line number (1-based); defaults to 1")),
+				limit: z.number().optional().describe(tr("返回行数上限，默认 200，最大 2000", "Maximum lines to return; default 200, max 2000"))
 			}),
 			execute: async ({ path, offset = 1, limit = 200 }) => {
 				const abs = resolveInside(root, path);
@@ -2456,10 +2562,10 @@ function buildAgentTools(root, opts) {
 			}
 		}),
 		write_file: tool({
-			description: "创建或整体覆盖写入一个文件（自动创建父目录）。会覆盖已有内容，写入前请先 read_file 确认原文。路径相对工作区根目录。",
+			description: tr("创建或整体覆盖写入一个文件（自动创建父目录）。会覆盖已有内容，写入前请先 read_file 确认原文。路径相对工作区根目录。", "Create or fully overwrite a file (parent directories are created automatically). Existing content is replaced; use read_file first to confirm. Paths are relative to the workspace root."),
 			inputSchema: z.object({
-				path: z.string().describe("相对工作区的文件路径"),
-				content: z.string().describe("完整文件内容")
+				path: z.string().describe(tr("相对工作区的文件路径", "File path relative to the workspace")),
+				content: z.string().describe(tr("完整文件内容", "Full file contents"))
 			}),
 			execute: async ({ path, content }, options) => {
 				const refused = await guardWrite("文件未写入", {
@@ -2475,13 +2581,13 @@ function buildAgentTools(root, opts) {
 			}
 		}),
 		edit_file: tool({
-			description: "对文件做多处查找替换编辑（只改局部，不整体重写）。oldText 直接用 read_file 看到的原文内容：不要带输出里的「行号 | 」前缀，也不要自己加工转义符。系统已容忍行尾（CRLF/LF）、缩进、行尾空白的细微差异，但替换范围以 oldText 为准，所以仍要带上足够上下文、避免误伤相似片段。同一段文本出现多处时全部替换；一处都找不到则报错且不落盘（错误里会指出 oldText 首行在文件第几行出现过）。",
+			description: tr("对文件做多处查找替换编辑（只改局部，不整体重写）。oldText 直接用 read_file 看到的原文内容：不要带输出里的「行号 | 」前缀，也不要自己加工转义符。系统已容忍行尾（CRLF/LF）、缩进、行尾空白的细微差异，但替换范围以 oldText 为准，所以仍要带上足够上下文、避免误伤相似片段。同一段文本出现多处时全部替换；一处都找不到则报错且不落盘（错误里会指出 oldText 首行在文件第几行出现过）。", "Apply multiple search/replace edits to a file (local changes only, no full rewrite). oldText must be the exact text seen in read_file: no “line | ” prefix and no escaping changes. Minor differences in line endings (CRLF/LF), indentation, and trailing whitespace are tolerated, but the replacement range follows oldText — include enough context to avoid hitting similar snippets. Every occurrence is replaced; if none is found the call errors and nothing is written (the error reports where oldText’s first line occurs)."),
 			inputSchema: z.object({
-				path: z.string().describe("相对工作区的文件路径"),
+				path: z.string().describe(tr("相对工作区的文件路径", "File path relative to the workspace")),
 				edits: z.array(z.object({
-					oldText: z.string().describe("要查找的原文片段（照抄 read_file 的内容，不含行号前缀）"),
-					newText: z.string().describe("替换后的文本")
-				})).describe("按顺序应用的替换列表")
+					oldText: z.string().describe(tr("要查找的原文片段（照抄 read_file 的内容，不含行号前缀）", "Exact source text to find (copy read_file output without line-number prefixes)")),
+					newText: z.string().describe(tr("替换后的文本", "Replacement text"))
+				})).describe(tr("按顺序应用的替换列表", "List of replacements applied in order"))
 			}),
 			execute: async ({ path, edits }, options) => {
 				if (edits.length === 0) throw new Error("edits 是空的：至少给一处 oldText/newText");
@@ -2512,15 +2618,15 @@ function buildAgentTools(root, opts) {
 			}
 		}),
 		search_files: tool({
-			description: "在工作区中按正则搜索文件内容（自动跳过忽略目录、二进制与大文件）。返回命中文件的相对路径、行号与行内容。用于定位符号、关键配置与错误来源。结果很多时用 filesOnly 只拿「文件:命中数」省上下文；要看代码上下文用 context。",
+			description: tr("在工作区中按正则搜索文件内容（自动跳过忽略目录、二进制与大文件）。返回命中文件的相对路径、行号与行内容。用于定位符号、关键配置与错误来源。结果很多时用 filesOnly 只拿「文件:命中数」省上下文；要看代码上下文用 context。", "Search file contents in the workspace by regex (skips ignored directories, binaries, and large files). Returns relative paths, line numbers, and matching lines. Use it to locate symbols, key config, and error sources. For many results use filesOnly to get “file:count” and save context; use context to see surrounding code."),
 			inputSchema: z.object({
-				pattern: z.string().describe("正则表达式（默认区分大小写）"),
-				path: z.string().optional().describe("搜索起点（相对工作区的文件或目录）：给目录递归搜，给文件只搜这一个，缺省为根目录"),
-				filePattern: z.string().optional().describe("限定文件名正则，如 \"\\.(ts|tsx|json)$\""),
-				caseInsensitive: z.boolean().optional().describe("忽略大小写（同时作用于 pattern 与 filePattern），默认 false"),
-				filesOnly: z.boolean().optional().describe("只返回命中的文件及其命中数（每行 `路径:命中数`），不返回行内容"),
-				context: z.number().optional().describe("每条命中附带的前后上下文行数（0–5），默认 0。适合需要看清代码结构的场景"),
-				maxResults: z.number().optional().describe("最大命中行数，默认 200，最大 1000")
+				pattern: z.string().describe(tr("正则表达式（默认区分大小写）", "Regular expression (case-sensitive by default)")),
+				path: z.string().optional().describe(tr("搜索起点（相对工作区的文件或目录）：给目录递归搜，给文件只搜这一个，缺省为根目录", "Search root (file or directory relative to the workspace): directories are searched recursively, a file only itself; defaults to root")),
+				filePattern: z.string().optional().describe(tr("限定文件名正则，如 \"\\.(ts|tsx|json)$\"", "Optional file-name regex, e.g. \"\\.(ts|tsx|json)$\"")),
+				caseInsensitive: z.boolean().optional().describe(tr("忽略大小写（同时作用于 pattern 与 filePattern），默认 false", "Case-insensitive (applies to pattern and filePattern); default false")),
+				filesOnly: z.boolean().optional().describe(tr("只返回命中的文件及其命中数（每行 `路径:命中数`），不返回行内容", "Return only matching files and hit counts (`path:count` per line), not line contents")),
+				context: z.number().optional().describe(tr("每条命中附带的前后上下文行数（0–5），默认 0。适合需要看清代码结构的场景", "Context lines around each hit (0–5); default 0. Useful when code structure matters")),
+				maxResults: z.number().optional().describe(tr("最大命中行数，默认 200，最大 1000", "Maximum matching lines; default 200, max 1000"))
 			}),
 			execute: async ({ pattern, path = "", filePattern, caseInsensitive = false, filesOnly = false, context = 0, maxResults = 200 }) => {
 				const flags = caseInsensitive ? "i" : "";
@@ -2559,11 +2665,11 @@ function buildAgentTools(root, opts) {
 			}
 		}),
 		find_files: tool({
-			description: "按文件名 / 通配符查找文件（如 \"*.ts\"、\"**/*.test.tsx\"、\"src/**/index.*\"）。只匹配文件名，不搜内容（搜内容用 search_files）。自动跳过忽略目录。用于「项目里有哪些 X 文件」这类问题。",
+			description: tr("按文件名 / 通配符查找文件（如 \"*.ts\"、\"**/*.test.tsx\"、\"src/**/index.*\"）。只匹配文件名，不搜内容（搜内容用 search_files）。自动跳过忽略目录。用于「项目里有哪些 X 文件」这类问题。", "Find files by name or glob (e.g. \"*.ts\", \"**/*.test.tsx\", \"src/**/index.*\"). Matches file names only, not contents (use search_files for contents). Ignored directories are skipped. Useful for “which X files exist in this project?”."),
 			inputSchema: z.object({
-				pattern: z.string().describe("文件名通配符：* 匹配单层任意字符，? 匹配单个字符，** 跨目录；不含 / 时匹配任意层级下的文件名"),
-				path: z.string().optional().describe("搜索起点（相对工作区的文件或目录）：给目录递归找，给文件只检查这一个，缺省为根目录"),
-				maxResults: z.number().optional().describe("最大返回条数，默认 200，最大 1000")
+				pattern: z.string().describe(tr("文件名通配符：* 匹配单层任意字符，? 匹配单个字符，** 跨目录；不含 / 时匹配任意层级下的文件名", "File-name glob: * matches any characters in one segment, ? one character, ** across directories; without / it matches file names at any depth")),
+				path: z.string().optional().describe(tr("搜索起点（相对工作区的文件或目录）：给目录递归找，给文件只检查这一个，缺省为根目录", "Search root (file or directory relative to the workspace): directories are searched recursively, a file only itself; defaults to root")),
+				maxResults: z.number().optional().describe(tr("最大返回条数，默认 200，最大 1000", "Maximum results; default 200, max 1000"))
 			}),
 			execute: async ({ pattern, path = "", maxResults = 200 }) => {
 				const re = globToRegExp(pattern);
@@ -2582,11 +2688,11 @@ function buildAgentTools(root, opts) {
 			}
 		}),
 		execute_command: tool({
-			description: "在工作区目录下执行 shell 命令并返回输出（stdout + stderr）。适用于运行构建 / 测试 / git 操作 / 安装依赖 / 启动服务等。命令默认超时 120 秒。输出超过一个工具结果的预算时会被完整落盘到工作区的 .fizz/tool-output/ 下，结果里给出相对路径、全文行数与本次返回了哪几行；其余部分用 read_file 传那个 path 加 offset / limit 按行接着读，也可以用 search_files 检索（常见于构建 / 测试的完整日志）。注意这是真实执行环境，删除、覆盖、危险命令（rm -rf、git push --force 等）前先说明影响。" + shellNote,
+			description: tr("在工作区目录下执行 shell 命令并返回输出（stdout + stderr）。适用于运行构建 / 测试 / git 操作 / 安装依赖 / 启动服务等。命令默认超时 120 秒。输出超过一个工具结果的预算时会被完整落盘到工作区的 .fizz/tool-output/ 下，结果里给出相对路径、全文行数与本次返回了哪几行；其余部分用 read_file 传那个 path 加 offset / limit 按行接着读，也可以用 search_files 检索（常见于构建 / 测试的完整日志）。注意这是真实执行环境，删除、覆盖、危险命令（rm -rf、git push --force 等）前先说明影响。" + shellNote, "Run a shell command in the workspace and return stdout + stderr. Use it for builds, tests, git, installing dependencies, starting services, etc. Default timeout is 120 seconds. If output exceeds one tool result, the full text is saved under .fizz/tool-output/ and the result includes the relative path, total lines, and which lines were returned; read the rest with read_file offset/limit on that path, or search it with search_files (common for full build/test logs). This is a real execution environment: explain the impact before deleting, overwriting, or running dangerous commands (rm -rf, git push --force, etc.). " + shellNoteEn),
 			inputSchema: z.object({
-				command: z.string().describe("要执行的命令"),
-				timeoutMs: z.number().optional().describe("超时毫秒数，默认 120000，最大 300000"),
-				cwd: z.string().optional().describe("执行目录（相对工作区），缺省为工作区根目录")
+				command: z.string().describe(tr("要执行的命令", "Command to run")),
+				timeoutMs: z.number().optional().describe(tr("超时毫秒数，默认 120000，最大 300000", "Timeout in milliseconds; default 120000, max 300000")),
+				cwd: z.string().optional().describe(tr("执行目录（相对工作区），缺省为工作区根目录", "Working directory (relative to the workspace); defaults to the workspace root"))
 			}),
 			execute: async ({ command, timeoutMs, cwd = "" }, options) => {
 				const refused = await guardWrite("命令未运行", {
@@ -2634,15 +2740,15 @@ function buildAgentTools(root, opts) {
 		* part 里重建 —— 不需要另立一份服务端存储。
 		*/
 		todo_write: tool({
-			description: "创建 / 更新本次任务的**待办清单**（todo list）。把多步骤任务拆成「一句话一个动作」的条目，边做边维护：完成一项就把它的 status 改成 completed、把下一项改成 in_progress。\n用法要点：\n- 每次调用都要传**当前完整的清单**（整份重发，不是增量 / 不是补丁）；顺序即执行顺序。\n- **规划是动态的**：做到某一步发现后面的安排不对、偏离目标、或冒出新需求时，直接改写后续条目（增 / 删 / 改 / 换序都行），让清单始终反映真实的下一步，而不是被最初的计划绑死。\n- 同一时刻最多保留一条 in_progress（手上正在做的那件）。\n- 单步骤 / 琐碎任务不要用这个工具；只在确实有三步以上、值得跟踪时才建清单。\n- 任务全部结束后，可以再调用一次传空数组把清单清掉（或全部标 completed 留作记录）。",
+			description: tr("创建 / 更新本次任务的**待办清单**（todo list）。把多步骤任务拆成「一句话一个动作」的条目，边做边维护：完成一项就把它的 status 改成 completed、把下一项改成 in_progress。\n用法要点：\n- 每次调用都要传**当前完整的清单**（整份重发，不是增量 / 不是补丁）；顺序即执行顺序。\n- **规划是动态的**：做到某一步发现后面的安排不对、偏离目标、或冒出新需求时，直接改写后续条目（增 / 删 / 改 / 换序都行），让清单始终反映真实的下一步，而不是被最初的计划绑死。\n- 同一时刻最多保留一条 in_progress（手上正在做的那件）。\n- 单步骤 / 琐碎任务不要用这个工具；只在确实有三步以上、值得跟踪时才建清单。\n- 任务全部结束后，可以再调用一次传空数组把清单清掉（或全部标 completed 留作记录）。", "Create/update the **todo list** for this task. Break a multi-step task into one-action items and maintain progress as you go: mark finished items completed and the next one in_progress.\nUsage:\n- Every call must send the **current complete list** (full replacement, not a patch); order is execution order.\n- **Planning is dynamic**: when later steps no longer fit, the goal shifts, or new requirements appear, rewrite the remaining items (add/remove/edit/reorder) so the list always reflects the real next steps instead of being locked to the original plan.\n- Keep at most one in_progress item at a time.\n- Do not use this for single-step or trivial tasks; create a list only when there are genuinely 3+ steps worth tracking.\n- When everything is done, call once more with an empty array to clear it (or mark all completed to keep a record)."),
 			inputSchema: z.object({ todos: z.array(z.object({
-				content: z.string().describe("这一项要做的事：一句话、具体、可执行（顺序即执行顺序）"),
+				content: z.string().describe(tr("这一项要做的事：一句话、具体、可执行（顺序即执行顺序）", "What to do for this item: one concrete, actionable sentence (order is execution order)")),
 				status: z.enum([
 					"pending",
 					"in_progress",
 					"completed"
-				]).describe("pending 待办 / in_progress 进行中 / completed 已完成")
-			})).describe("当前**完整**的任务清单（每次整份重发；空数组 = 清空清单）") }),
+				]).describe(tr("pending 待办 / in_progress 进行中 / completed 已完成", "pending / in_progress / completed"))
+			})).describe(tr("当前**完整**的任务清单（每次整份重发；空数组 = 清空清单）", "Current **complete** todo list (resend the whole list each time; empty array clears it)")) }),
 			execute: async ({ todos }) => {
 				const clean = todos.map((t) => ({
 					content: t.content.trim(),
@@ -2667,10 +2773,10 @@ function buildAgentTools(root, opts) {
 		* 让模型拼 `rm -rf xxx` 才删，误伤面比单文件大得多。
 		*/
 		delete_file: tool({
-			description: "删除工作区内的文件。默认只删单个文件；path 是目录时必须显式传 recursive=true（会连同目录内所有内容一起删）。路径不存在会报错，不会静默成功。不可恢复操作，调用前请确认路径。",
+			description: tr("删除工作区内的文件。默认只删单个文件；path 是目录时必须显式传 recursive=true（会连同目录内所有内容一起删）。路径不存在会报错，不会静默成功。不可恢复操作，调用前请确认路径。", "Delete a file in the workspace. By default only a single file is deleted; if path is a directory you must pass recursive=true (deletes all contents too). Missing paths error instead of silently succeeding. This is irreversible — confirm the path before calling."),
 			inputSchema: z.object({
-				path: z.string().describe("相对工作区的路径"),
-				recursive: z.boolean().optional().describe("path 是目录时必须显式传 true 才允许删除，默认 false（此时传目录会报错）")
+				path: z.string().describe(tr("相对工作区的路径", "Path relative to the workspace")),
+				recursive: z.boolean().optional().describe(tr("path 是目录时必须显式传 true 才允许删除，默认 false（此时传目录会报错）", "When path is a directory, explicitly pass true to allow deletion; default false (passing a directory then errors)"))
 			}),
 			execute: async ({ path, recursive = false }, options) => {
 				const abs = resolveInside(root, path);
@@ -3274,78 +3380,6 @@ function buildWebFetchTool(root) {
 		}
 	}) };
 }
-/**
-* 取生效的「模型请求重试次数上限」。
-*
-* `0 = 不限制`（返回 `Infinity`，一直重试）；其余按非负整数四舍五入。
-* 缺省 = `DEFAULT_MAX_RETRIES`。只对**可重试的请求错误**（网络中断 / 上游空响应）生效，见 @fizz/agent。
-*/
-function resolveMaxRetries(override) {
-	const rounded = Math.max(0, Math.round(override ?? 2));
-	return rounded === 0 ? Number.POSITIVE_INFINITY : rounded;
-}
-/**
-* 收敛「工具调用并发数」：非数字 / 越界一律夹到 [1, 10]，缺省 = 3。
-*
-* 这是**每步**的上限，不是一轮对话的总工具数：模型一步返回 20 个 tool-call 时，
-* 服务端也只会同时跑这么多个，其余排队。
-*/
-function resolveToolCallConcurrency(override) {
-	return Math.min(10, Math.max(1, typeof override === "number" && Number.isFinite(override) ? Math.round(override) : 3));
-}
-//#endregion
-//#region packages/contracts/src/browser.ts
-/**
-* ⚠️ 视口**不跟随面板尺寸**。
-*
-* 面板宽度取决于用户把窗口拉多宽、分隔条拖到哪，把它当视口会让同一个页面在不同窗口
-* 大小下走不同的响应式断点（窗口窄了页面就变「手机版」），既不可复现也没法跟浏览器
-* 里手动看到的效果对齐。所以固定成两个预设，画面由 `object-contain` 缩放填进面板。
-*
-* `desktop` 用 1280×800@1x（与改动前的默认视口一致，Agent 工具也用它）；
-* `mobile` 用 390×844@2x（iPhone 14 的逻辑尺寸与 DPR），页面里的
-* `devicePixelRatio` 也真的是 2，站点才会按手机给图。
-*/
-var BROWSER_VIEWPORT_PRESETS = {
-	desktop: {
-		mode: "desktop",
-		label: "PC",
-		width: 1280,
-		height: 800,
-		dpr: 1
-	},
-	mobile: {
-		mode: "mobile",
-		label: "手机",
-		width: 390,
-		height: 844,
-		dpr: 2
-	}
-};
-/** 默认 PC 屏 —— 打开浏览器时不该先看到移动版布局 */
-var DEFAULT_BROWSER_VIEWPORT = "desktop";
-/** 取预设；传入未知值时回退到默认，别让一个坏值把会话搞崩 */
-function browserViewportPreset(mode) {
-	return BROWSER_VIEWPORT_PRESETS[mode ?? "desktop"] ?? BROWSER_VIEWPORT_PRESETS.desktop;
-}
-/**
-* UA 必须跟视口预设一起切。
-*
-* 光切视口只能让**响应式**的那部分跟着变；站点按 UA 分流的那部分（`m.xxx` 跳转、
-* 服务端按 UA 出模板）在下次请求前一直是老样子 —— 「视口是 PC、页面却是手机」最常见
-* 的来源就是这里。所以两个预设各自带一份 UA。
-*
-* 桌面 UA 用宿主浏览器**自己报的那份**（版本号真实、与 Sec-CH-UA 自洽）；
-* 手机 UA 只把平台段换成 Android，**Chrome 版本号沿用桌面 UA 的** —— 写死版本号
-* 迟早会和浏览器真实版本对不上，而那些做指纹一致性校验的站点就吃这一套。
-*/
-function browserUserAgent(mode, actualDesktopUa) {
-	const desktop = (actualDesktopUa.trim() || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36").replace(/HeadlessChrome/g, "Chrome");
-	if (mode !== "mobile") return desktop;
-	return `Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${/Chrome\/([\d.]+)/.exec(desktop)?.[1] ?? "131.0.0.0"} Mobile Safari/537.36`;
-}
-/** 手机 UA 对应的 `navigator.platform`（桌面不覆盖，保持宿主原样） */
-var MOBILE_PLATFORM = "Linux armv8l";
 Object.fromEntries(Object.entries({
 	hosts: "hosts.json",
 	api: "api.json",
@@ -3780,18 +3814,18 @@ var REF_RE = /^[A-Za-z0-9._/^~{}()[\]@,-]+$/;
 var MAX_LOG_ENTRIES = 50;
 function buildGitReadTool(root) {
 	return { git_read: tool({
-		description: "只读地看这个 git 仓库：当前改动（git status / git diff）、最近的提交历史（git log）、某个提交的内容（git show）。适合「改了什么」「最近谁动过这里」「这个提交干了什么」这类问题。只能看，不能改仓库（要提交 / 回滚 / 切分支请用 execute_command，那边有审批）。",
+		description: tr("只读地看这个 git 仓库：当前改动（git status / git diff）、最近的提交历史（git log）、某个提交的内容（git show）。适合「改了什么」「最近谁动过这里」「这个提交干了什么」这类问题。只能看，不能改仓库（要提交 / 回滚 / 切分支请用 execute_command，那边有审批）。", "Read-only view of this git repository: current changes (git status / git diff), recent history (git log), and a specific commit (git show). Suitable for questions like “what changed”, “who touched this recently”, or “what did this commit do”. Read-only: use execute_command for commit / rollback / branch switching (that path has approval)."),
 		inputSchema: z.object({
 			action: z.enum([
 				"status",
 				"diff",
 				"log",
 				"show"
-			]).describe("status=当前改动清单；diff=改动内容；log=提交历史；show=某个提交的内容"),
-			ref: z.string().optional().describe("提交 / 分支 / tag，如 HEAD、HEAD~1、main、abc1234。diff 表示与谁比，show 表示看哪个提交"),
-			path: z.string().optional().describe("只看某个文件 / 目录（相对工作区根）"),
-			stat: z.boolean().optional().describe("diff/show 只要「改了哪些文件 + 增删行数」，不要完整内容"),
-			limit: z.number().optional().describe(`log 的条数，默认 20，最大 ${MAX_LOG_ENTRIES}`)
+			]).describe(tr("status=当前改动清单；diff=改动内容；log=提交历史；show=某个提交的内容", "status=current changes; diff=change contents; log=commit history; show=contents of a commit")),
+			ref: z.string().optional().describe(tr("提交 / 分支 / tag，如 HEAD、HEAD~1、main、abc1234。diff 表示与谁比，show 表示看哪个提交", "Commit / branch / tag, e.g. HEAD, HEAD~1, main, abc1234. For diff it is the comparison base; for show the commit to display")),
+			path: z.string().optional().describe(tr("只看某个文件 / 目录（相对工作区根）", "Limit to a file / directory (relative to the workspace root)")),
+			stat: z.boolean().optional().describe(tr("diff/show 只要「改了哪些文件 + 增删行数」，不要完整内容", "For diff/show return only changed files and added/deleted line counts, not full contents")),
+			limit: z.number().optional().describe(tr(`log 的条数，默认 20，最大 ${MAX_LOG_ENTRIES}`, `Number of log entries; default 20, max ${MAX_LOG_ENTRIES}`))
 		}),
 		execute: async ({ action, ref, path, stat = false, limit = 20 }) => {
 			const repo = await repoRoot(root).catch(() => null);
@@ -4404,12 +4438,17 @@ new BrowserSessionManager();
 * 随 schema 发出去），只写 schema 里装不下的跨工具约定 —— 先 snapshot 拿 ref 的
 * 工作流、以及「操作会真的作用在网页上」这个安全前提。
 */
-var BROWSER_PROMPT_SECTION = [
+var BROWSER_PROMPT_SECTION = tr([
 	"浏览器自动化（Playwright，浏览器无窗口运行、画面可在界面右侧查看）：",
 	"- 操作页面前**先 browser_snapshot 拿 ref**，再用 ref 点击 / 输入；页面一变 ref 就失效，要重新 snapshot；",
 	"- 浏览器是真实运行的，点击 / 输入会真的作用在网页上（可能提交表单、下单、删数据）—— 不可逆的操作前先向用户说明；",
 	"- 需要看页面长什么样时用 browser_snapshot（文字快照），它比截图更适合你理解结构。"
-].join("\n");
+].join("\n"), [
+	"Browser automation (Playwright; runs headless and the view is shown on the right):",
+	"- Before interacting with a page, **call browser_snapshot to get refs**, then click/type with those refs. Refs become invalid after the page changes, so snapshot again;",
+	"- The browser is real: clicks and typing affect the live page (they may submit forms, place orders, or delete data) — explain before irreversible actions;",
+	"- To see what the page looks like, use browser_snapshot (text snapshot); it is better than a screenshot for understanding structure."
+].join("\n"));
 //#endregion
 //#region packages/plugin/src/logger.ts
 /**
@@ -5293,18 +5332,17 @@ var HooksService = class extends EventsService {
 /**
 * 项目约束文档（`AGENTS.md`）与分层规则。
 *
-* 文档来源分三类，每轮对话开始时现读、合并后整段注入系统提示词：
+* 文档来源分两类，每轮对话开始时现读、合并后整段注入系统提示词：
 *
 * 1. **全局规则**：`<配置目录>/AGENTS.md`（缺省 `~/.config/fizz/AGENTS.md`，
 *    `CLAUDE.md` 作兼容回落）。跨项目通用的个人偏好放这里；
-* 2. **项目规则**：工作区根目录的 `AGENTS.md` / `CLAUDE.md`；
-* 3. **附加指令**：`<工作区>/.fizz/workspace.json` 的 `instructions`（文件 / 目录 / glob）。
+* 2. **项目规则**：工作区根目录的 `AGENTS.md` / `CLAUDE.md`。
 *
 * **子目录规则**不整段注入，而是在模型 `read_file` / `list_files` 碰到该目录时按需追加
 * （见 `readNestedProjectDocs`）—— 规则要作用于某目录的代码时才需要它，提前把所有
 * `AGENTS.md` 收进来只会稀释上下文。
 *
-* 三类来源都支持行内 `@相对路径` 导入（递归、循环保护、限制在工作区 / 配置目录内）。
+* 两类来源都支持行内 `@相对路径` 导入（递归、循环保护、限制在工作区 / 配置目录内）。
 *
 * 为什么根文档**全文注入**，而不是「给个路径让模型自己 read_file」：
 * 约束要在模型**动手之前**就生效。等它想起来去读时，第一版改动往往已经写歪了。
@@ -5327,7 +5365,7 @@ var MAX_IMPORT_DEPTH = 5;
 var MAX_IMPORTED_FILES = 40;
 /** 单次工具调用最多附带几份子目录规则（通常只命中 1 份） */
 var MAX_NESTED_PER_CALL = 3;
-/** 展开 gob 时跳过的目录（与工作区文件树同一套常识性黑名单） */
+/** 子目录规则向上收集时跳过的目录（与工作区文件树同一套常识性黑名单） */
 var SKIP_DIR_NAMES = /* @__PURE__ */ new Set([
 	".git",
 	"node_modules",
@@ -5494,13 +5532,25 @@ async function readNestedProjectDocs(workspacePath, targetPath, loaded, isDirect
 * ③ 声明**不要擅自修改**（它是项目维护者的文档，不是 agent 的产出物）。
 */
 function buildProjectDocSection(doc) {
-	const sourceLine = doc.sources.length > 1 ? `本次合并了：${doc.sources.map((s) => `${s.label}（${s.file}）`).join("、")}` : `来源：${doc.file}`;
-	const lines = [
+	const en = getLanguage() === "en";
+	const sourceLine = en ? doc.sources.length > 1 ? `Merged this time: ${doc.sources.map((s) => `${s.label} (${s.file})`).join(", ")}` : `Source: ${doc.file}` : doc.sources.length > 1 ? `本次合并了：${doc.sources.map((s) => `${s.label}（${s.file}）`).join("、")}` : `来源：${doc.file}`;
+	const lines = en ? [
+		`Project constraint document: \`${doc.name}\` (${doc.file})`,
+		sourceLine,
+		"These are **rules the project maintainers/users wrote for the AI** (build and verification steps, code conventions, forbidden actions, past pitfalls).",
+		"They take priority over every other general convention in this prompt — when they conflict, follow the document; read it fully before acting.",
+		"When topics conflict, priority is: subdirectory rules > project rules > global rules.",
+		"Do not modify these files unless the user explicitly asks.",
+		"",
+		"<project-doc>",
+		doc.text,
+		"</project-doc>"
+	] : [
 		`项目约束文档：\`${doc.name}\`（${doc.file}）`,
 		sourceLine,
 		"这是**项目维护者 / 用户写给 AI 的规则**（构建与验证方式、代码约定、禁止事项、踩过的坑）。",
 		"它的优先级高于本提示词里其它一切通用约定 —— 与之冲突时以它为准；动手前先完整读一遍。",
-		"同一主题出现冲突时，优先顺序：子目录规则 > 项目规则 / 附加指令 > 全局规则。",
+		"同一主题出现冲突时，优先顺序：子目录规则 > 项目规则 > 全局规则。",
 		"除非用户明确要求，不要修改这些文件。",
 		"",
 		"<project-doc>",
@@ -5509,7 +5559,7 @@ function buildProjectDocSection(doc) {
 	];
 	if (doc.truncated) {
 		const percent = Math.round(doc.text.length / doc.totalChars * 100);
-		lines.push(`⚠️ 该文档过长（共 ${doc.totalChars} 字符），以上只是前 ${percent}%` + (doc.section ? `（截至「${doc.section}」）` : "") + `。若这次任务可能涉及后面的章节，先用 read_file 读 ${doc.file} 补全，别凭猜测动手。`);
+		lines.push(en ? `⚠️ This document is too long (${doc.totalChars} chars); the text above is only the first ${percent}%` + (doc.section ? ` (up to “${doc.section}”)` : "") + `. If this task may touch later sections, read ${doc.file} with read_file first — do not guess.` : `⚠️ 该文档过长（共 ${doc.totalChars} 字符），以上只是前 ${percent}%` + (doc.section ? `（截至「${doc.section}」）` : "") + `。若这次任务可能涉及后面的章节，先用 read_file 读 ${doc.file} 补全，别凭猜测动手。`);
 	}
 	return lines.join("\n");
 }
@@ -5521,7 +5571,7 @@ function buildProjectDocSection(doc) {
 * `skills` 非空时追加「可用技能」段落（只有名称 + 描述，正文由 read_skill 按需加载，
 * 见 skills.ts 的渐进式披露说明）。
 *
-* `projectDoc` 是全局 + 工作区根 + `instructions` 合并后的规则文档（调用方用 `readProjectDoc` 读好传进来）：
+* `projectDoc` 是全局 + 工作区根合并后的规则文档（调用方用 `readProjectDoc` 读好传进来）：
 * 非空时追加「项目约束文档」段落，把项目自己的规则全文喂给模型 —— 见 project-doc.ts
 * 里「为什么全文注入」的说明。它排在技能之前：全程适用的规则，比「有哪些技能」
 * 更该被先看到。
@@ -5539,7 +5589,17 @@ function buildProjectDocSection(doc) {
 * 去设置里切换」，信息一点没少。
 */
 function buildAgentSystemPrompt(workspacePath, workspaceName, skills = [], projectDoc, browser, previewPort, containerStart, containerAutoStart) {
-	const lines = [
+	const lines = getLanguage() === "en" ? [
+		`You are an AI Agent running in Fizz (a coding and operations assistant). The workspace is “${workspaceName}” (${workspacePath}).`,
+		"Your job: understand the user’s intent and proactively use tools to complete development and operations tasks inside the workspace.",
+		"Conventions:",
+		"- Always use paths relative to the workspace root;",
+		"- Call tools directly. Never narrate calls or results in prose such as “[calling tool xxx]”;",
+		"- For oversized output (execute_command / web_fetch), return only the beginning and end. The full text is saved to a workspace file under .fizz/tool-output/ and the result includes its path, total lines, and which lines were returned. To read the middle, call read_file on that path with offset/limit, or search it with search_files — do not stop at the summary and do not re-run the command or re-fetch the page for the same content;",
+		"- Before dangerous operations (rm -rf, git push --force, deleting/overwriting files), explain the impact first;",
+		"- After editing, verify with execute_command when possible — prefer the project’s own typecheck/lint, the fastest static check;",
+		"- When done, summarize concisely what you did, how you verified it, and what remains."
+	] : [
 		`你是一个运行在 Fizz 中的 AI Agent（编程与运维助手），工作区是「${workspaceName}」（${workspacePath}）。`,
 		"你的职责：理解用户意图，主动使用工具在工作区内完成开发与运维任务。",
 		"使用约定：",
@@ -5576,6 +5636,12 @@ function buildAgentSystemPrompt(workspacePath, workspaceName, skills = [], proje
 *    容器里**（与「本机直接跑没事」的直觉相反，是 docker 的经典坑）。
 */
 function buildPreviewPortSection(previewPort) {
+	if (getLanguage() === "en") return [
+		"## Preview service port",
+		`This workspace runs in a container. The platform has exposed container port ${previewPort} — users see a fixed domain; the port is assigned by the platform and you neither need to care about nor change it.`,
+		`For users to see your page in the “Preview” tab, the service must listen on container port ${previewPort} and bind to \`0.0.0.0\` — with \`127.0.0.1\` / \`localhost\` docker port forwarding cannot reach the container, and the page will be blank with no error.`,
+		`Always use ${previewPort} for ports in startup scripts/config (e.g. \`PORT=${previewPort} npm run dev\`, \`--port ${previewPort}\`); never substitute 3000 / 5173 / 8000.`
+	].join("\n");
 	return [
 		"## 预览服务端口",
 		`这个工作区跑在容器里。平台已经把容器内的 ${previewPort} 端口接出去了 —— 用户那边看到的是一条固定域名，端口由平台分配，你不用关心也不需要改它。`,
@@ -5599,7 +5665,15 @@ function buildPreviewPortSection(previewPort) {
 * 是**互斥**的（有脚本就听脚本的），模型好心写一个脚本反而会把开箱能跑的模板顶掉。
 */
 function buildContainerStartSection(previewPort, autoStart) {
-	const lines = [
+	const en = getLanguage() === "en";
+	const lines = en ? [
+		"## Container startup script",
+		"This workspace runs in a container. On every start the container first runs `.fizz/container/start.mjs` (skipped if absent), then starts the Agent service itself.",
+		"- To make a service **start automatically with the container** (dev server / background job / one-time setup), write that file. Restart the container (stop then start) for changes to take effect;",
+		"- The script runs in a **child process** in the background: exceptions, syntax errors, and non-zero exits do **not** affect the container or Agent startup. They only go to container logs (the launcher records a `[fizz-start]` line; the script’s own output goes to the log unchanged);",
+		"- This is suitable for **long-running services** (`npm run dev`, `node server.js`) and also one-time actions (installing dependencies, migrations) — make the latter idempotent yourself;",
+		"- Only `.fizz/container/start.mjs` (ESM) and `.fizz/container/start.cjs` (CJS) are recognized; `.js` is not executed. The script’s working directory is the workspace root `/workspace`, so relative paths work."
+	] : [
 		"## 容器启动脚本",
 		"这个工作区跑在容器里。容器每次启动会先执行 `.fizz/container/start.mjs`（不存在就跳过），再启动 Agent 服务本身。",
 		"- 想让某个服务**随容器自动起来**（开发服务器 / 后台任务 / 一次性初始化），就写这个文件；改完需要重启容器才生效（停止再启动）；",
@@ -5607,8 +5681,8 @@ function buildContainerStartSection(previewPort, autoStart) {
 		"- 所以这里适合放**常驻服务**（`npm run dev`、`node server.js`），也放得下一次性动作（装依赖、跑迁移），后者请自己保证幂等；",
 		"- 只认 `.fizz/container/start.mjs`（ESM）与 `.fizz/container/start.cjs`（CJS）两个文件名，`.js` 不会被执行；脚本的工作目录是工作区根 `/workspace`，用相对路径即可。"
 	];
-	if (previewPort !== void 0) lines.push(`- 脚本里起的服务若要对用户可见，必须监听上面说的预览端口 ${previewPort} 并绑 \`0.0.0.0\`。`);
-	if (autoStart) lines.push("", `**这个镜像已经自带自动启动，不需要你写启动脚本**：工作区没有 \`.fizz/container/start.mjs\` 时，容器启动会自动准备模板（仅当工作区还没有 \`package.json\`）并执行 \`npm run ${autoStart}\`` + (previewPort === void 0 ? "" : `，启动参数由镜像自带（按各自框架的 CLI 口径）把服务绑到 \`0.0.0.0\` 的 ${previewPort} 端口`) + "，服务本身就监听预览端口。", `- 写启动脚本会**顶掉**自动启动（容器只跑其中一个），所以只有确实要换启动命令时才写；`, "- dev server 挂了或改坏了：先看容器日志里 `[fizz-start]` 那几行，修好后重启容器即可；", "- 空工作区第一次启动时日志里会出现「铺模板」和「安装依赖」，属于正常流程。");
+	if (previewPort !== void 0) lines.push(en ? `- A service started by the script must listen on the preview port ${previewPort} and bind to \`0.0.0.0\` to be visible to users.` : `- 脚本里起的服务若要对用户可见，必须监听上面说的预览端口 ${previewPort} 并绑 \`0.0.0.0\`。`);
+	if (autoStart) lines.push("", en ? `**This image already has autostart; do not write a startup script**: when the workspace has no \`.fizz/container/start.mjs\`, container startup prepares the template (only if there is no \`package.json\`) and runs \`npm run ${autoStart}\`` + (previewPort === void 0 ? "" : `; the image supplies framework-specific arguments that bind the service to \`0.0.0.0\` port ${previewPort}`) + ". The service itself listens on the preview port." : `**这个镜像已经自带自动启动，不需要你写启动脚本**：工作区没有 \`.fizz/container/start.mjs\` 时，容器启动会自动准备模板（仅当工作区还没有 \`package.json\`）并执行 \`npm run ${autoStart}\`` + (previewPort === void 0 ? "" : `，启动参数由镜像自带（按各自框架的 CLI 口径）把服务绑到 \`0.0.0.0\` 的 ${previewPort} 端口`) + "，服务本身就监听预览端口。", en ? "- Writing a startup script **overrides** autostart (only one runs), so write one only when you really need a different command;" : `- 写启动脚本会**顶掉**自动启动（容器只跑其中一个），所以只有确实要换启动命令时才写；`, en ? "- If the dev server dies or breaks: check the `[fizz-start]` lines in the container log first, fix it, then restart the container;" : "- dev server 挂了或改坏了：先看容器日志里 `[fizz-start]` 那几行，修好后重启容器即可；", en ? "- On the first start of an empty workspace, logs will show template setup and dependency installation — that is normal." : "- 空工作区第一次启动时日志里会出现「铺模板」和「安装依赖」，属于正常流程。");
 	return lines.join("\n");
 }
 /**
@@ -5620,6 +5694,13 @@ function buildContainerStartSection(previewPort, autoStart) {
 * 以及「清单是给自己对进度用的、不是给用户看的交付物」这个边界。
 */
 function buildPlanningSection() {
+	if (getLanguage() === "en") return [
+		"Task planning (multi-step tasks):",
+		"- For tasks with **three or more steps**, or that need repeated verification, first list the work in a todo list with `todo_write`, then proceed step by step;",
+		"- **Planning is dynamic, not fixed upfront**: maintain the list as you go — mark finished items and set the next one in progress. More importantly, if later arrangements turn out wrong, drift from the user’s goal, or new needs appear, rewrite the remaining items (add/remove/edit/reorder) instead of blindly finishing the original list;",
+		"- Keep exactly one item in progress at a time; make items specific (“one sentence, one action”), not vague phases;",
+		"- Do not use a todo list for simple or single-step tasks. The list is for your own tracking; do not repeat it in the reply."
+	].join("\n");
 	return [
 		"任务规划（多步骤任务）：",
 		"- 遇到**三步以上**、或需要来回验证的任务，先用 `todo_write` 把要做的事列成待办清单，再逐步推进；",

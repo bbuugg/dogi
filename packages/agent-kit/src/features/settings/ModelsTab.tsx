@@ -164,9 +164,16 @@ function TokenPresetButtons({
 /**
  * 模型行尾的短标签：只显示**非默认**的设置，全默认时返回空数组（行上不多一个灰点）。
  * 与「上下文窗口」并排展示，让人不点开弹窗也能看出这个模型被削过哪些能力。
+ *
+ * ⚠️ 这是**纯函数**，`tr` 必须由调用方传入 —— 它在 `modelList.map()` 里被逐行调用，
+ * 若在这里写 `const tr = useT()`，hook 调用次数就跟着模型个数走：加一个模型 = 多一个
+ * hook = `React error #300`（Rendered more hooks than during the previous render），
+ * 删一个模型对称地报 fewer hooks。列表长度会随增删变化，所以这个函数里**绝不能有 hook**。
  */
-function modelSettingBadges(settings: AiModelSettings | undefined): string[] {
-  const tr = useT()
+function modelSettingBadges(
+  tr: (key: string, vars?: Record<string, string | number>) => string,
+  settings: AiModelSettings | undefined
+): string[] {
   if (!settings) return []
   const out: string[] = []
   if (settings.maxOutputTokens) out.push(tr('输出 {value}', { value: formatContextWindow(settings.maxOutputTokens) }))
@@ -536,7 +543,7 @@ export function ModelsTab({ app }: { app: AgentApp }) {
                 {modelList.map((entry) => {
                   const m = entry.id
                   const stored = entry.contextWindow
-                  const badges = modelSettingBadges(entry.settings)
+                  const badges = modelSettingBadges(tr, entry.settings)
                   return (
                     <div
                       key={m}
