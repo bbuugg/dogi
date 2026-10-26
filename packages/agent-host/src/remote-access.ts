@@ -43,6 +43,11 @@ export interface RemoteAccessInfo {
   password: string
   /** 是否找到了 web 产物并开始同源托管（没有就只能当纯 API 用） */
   webServed: boolean
+  /**
+   * 是否找到了**手机版**产物并挂上 `/m/*` + 手机 UA 跳转。
+   * 为 false 时手机浏览器拿到的是 web 的响应式布局（不是报错，只是没有手机版外壳）。
+   */
+  mobileServed: boolean
   error?: string
 }
 
@@ -73,6 +78,37 @@ function resolveWebDir(hint?: string): string | null {
   return null
 }
 
+/**
+ * 找**手机版**产物目录（`apps/mobile/dist-server`，`npm run build:mobile:hosted` 的产物）。
+ *
+ * 为什么必须在这里显式找一遍：server 的 `app.ts` 只认 `FIZZ_MOBILE_DIR`，缺省值写的是
+ * `join(import.meta.dirname, '../../mobile/dist-server')` —— 那个相对路径只在
+ * `apps/server/{src,dist}` 这种「包目录还躺在仓库里」的布局下成立。桌面端把 server
+ * 打进 `out/main` 的 bundle 后，`import.meta.dirname` 变成 `apps/desktop/out/main`
+ * 或 asar 里的 `<app>/out/main`，怎么拼都拼不到 `apps/mobile/dist-server`。
+ * 于是 `app.ts` 里 `existsSync(MOBILE_DIR/index.html)` 为假，`/m/*` 与手机 UA 的 302
+ * **整段不挂** —— 手机打开只拿到 web 产物，走 web 的响应式布局。
+ */
+function resolveMobileDir(hint?: string): string | null {
+  const resourcesPath = (process as unknown as { resourcesPath?: string }).resourcesPath
+  // 候选覆盖：桌面形态的 hint、仓库根（npm run dev:desktop）、apps/desktop（electron .）、
+  // apps/desktop/out/main（dev 主进程目录）、打包后的 resources 目录
+  const candidates = [
+    hint,
+    process.env.FIZZ_MOBILE_DIR,
+    join(process.cwd(), 'apps/mobile/dist-server'),
+    join(process.cwd(), 'mobile/dist-server'),
+    join(process.cwd(), '../mobile/dist-server'),
+    join(process.cwd(), '../../mobile/dist-server'),
+    // 打包形态：electron-builder 的 extraResources 把 hosted 产物放在 <resources>/mobile-dist
+    resourcesPath ? join(resourcesPath, 'mobile-dist') : undefined
+  ]
+  for (const dir of candidates) {
+    if (dir && existsSync(join(dir, 'index.html'))) return dir
+  }
+  return null
+}
+
 /** 从非回环网卡挑一个 IPv4，拼出「别人能用浏览器打开」的地址 */
 function lanUrl(port: number): string | null {
   for (const addrs of Object.values(networkInterfaces())) {
@@ -96,6 +132,8 @@ export async function startRemoteAccess(opts: {
   password: string
   /** web 产物目录提示（打包形态由主进程传 `process.resourcesPath` 下的路径） */
   webDirHint?: string
+  /** 手机版产物目录提示（同上；缺省时按 resolveMobileDir 的候选列表找） */
+  mobileDirHint?: string
 }): Promise<RemoteAccessInfo> {
   stopRemoteAccess()
   const next: RemoteAccessInfo = {
@@ -104,12 +142,15 @@ export async function startRemoteAccess(opts: {
     url: null,
     username: opts.username,
     password: opts.password,
-    webServed: false
+    webServed: false,
+    mobileServed: false
   }
 
   try {
     const webDir = resolveWebDir(opts.webDirHint)
     if (webDir) process.env.FIZZ_WEB_DIR = webDir
+    const mobileDir = resolveMobileDir(opts.mobileDirHint)
+    if (mobileDir) process.env.FIZZ_MOBILE_DIR = mobileDir
     // 打开鉴权（调用时读环境变量，见上「鉴权」一节）
     process.env.FIZZ_AUTH_USER = opts.username
     process.env.FIZZ_AUTH_PASS = opts.password
@@ -120,8 +161,15 @@ export async function startRemoteAccess(opts: {
       import('@fizz/server'),
       import('@fizz/server/ws')
     ])
-    const app = createApp({ auth: true, staticWeb: !!webDir })
+    const app = createApp({ auth: true, staticWeb: !!(webDir || mobileDir) })
     next.webServed = !!webDir
+    next.mobileServed = !!mobileDir
+    if (!mobileDir) {
+      console.warn(
+        '[remote-access] 没找到手机版产物（apps/mobile/dist-server）：手机浏览器会回退到 web 的响应式布局。' +
+          '跑 `npm run build:mobile:hosted` 重建；打包形态还要确认 extraResources 里有 mobile-dist。'
+      )
+    }
 
     const requestListener = getRequestListener(app.fetch)
     /**
@@ -158,6 +206,8 @@ export function stopRemoteAccess(): void {
   delete process.env.FIZZ_AUTH_USER
   delete process.env.FIZZ_AUTH_PASS
   delete process.env.FIZZ_JWT_SECRET
+  // 手机版目录同理（server 的 app.ts 在 createApp 时**调用时**读取它）
+  delete process.env.FIZZ_MOBILE_DIR
 }
 
 export function getRemoteAccessInfo(): RemoteAccessInfo {
@@ -168,7 +218,8 @@ export function getRemoteAccessInfo(): RemoteAccessInfo {
       url: null,
       username: 'fizz',
       password: '',
-      webServed: false
+      webServed: false,
+      mobileServed: false
     }
   )
 }

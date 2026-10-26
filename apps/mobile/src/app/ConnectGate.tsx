@@ -63,6 +63,25 @@ import { loadServerUrl, saveServerUrl } from '@/server-url'
 /** 登录失败时服务端回的机器可读原因（见 apps/server 的 login 路由） */
 type LoginErrorCode = 'captcha' | 'credentials' | 'rate-limited'
 
+/**
+ * 「服务端地址必须填」的判据。
+ *
+ * 判的其实是**页面是不是由 server 托管**：托管时留空正是同源（相对路径的 `/api` 本来
+ * 就通），不能逼用户填；不托管时页面的 origin 上**根本没有后端**，留空就等于把所有请求
+ * 打到一个不存在的地方，表现是「登录页永远连不上」。
+ *
+ * 目前有两种不托管的情形：
+ * - 安卓壳（Capacitor）的本地 `www`，origin 是 `https://localhost`；
+ * - Chrome 扩展页（`apps/extension`，外壳就是本文件所在这套），origin 是
+ *   `chrome-extension://<id>`。
+ *
+ * 与布局无关，别拿「是不是手机」之类的判断来代劳 —— 这里只认 origin。
+ */
+function mustFillServerBase(): boolean {
+  if (Capacitor.isNativePlatform()) return true
+  return typeof location !== 'undefined' && location.protocol === 'chrome-extension:'
+}
+
 export function ConnectGate({
   error,
   onConnect,
@@ -143,15 +162,16 @@ export function ConnectGate({
    * 返回 `null` = 填得不对（已经写好错误提示）；`{ base: undefined }` = hosted 版留空，
    * 走同源（页面由 server 托管）；`{ base }` = 绝对地址。
    *
-   * ⚠️ 原生壳（Capacitor）必须填：页面 origin 是 `https://localhost`，留空后所有请求都
-   * 打向它自己，表现是「登录页永远连不上」。hosted 版反过来 —— 留空正是同源，不能逼填。
+   * ⚠️ 原生壳（Capacitor）与浏览器扩展必须填：页面 origin 分别是 `https://localhost` /
+   * `chrome-extension://<id>`，留空后所有请求都打向它自己，表现是「登录页永远连不上」。
+   * hosted 版反过来 —— 留空正是同源，不能逼填。判据见 `mustFillServerBase`。
    */
   const readServerBase = (): { base?: string } | null => {
     const form = formRef.current
     if (!form) return null
     const raw = String(new FormData(form).get('serverUrl') ?? '').trim()
     if (!raw) {
-      if (Capacitor.isNativePlatform()) {
+      if (mustFillServerBase()) {
         setLocalError('请输入服务地址，例如 http://192.168.1.5:7801')
         return null
       }

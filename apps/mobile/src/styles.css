@@ -104,8 +104,12 @@
  *   改成同色后抽屉从顶到底是一整块面板，与正文的分界靠**右侧投影**（不靠底色差，
  *   也不压暗正文）。
  * - `main` 在抽屉打开时右移**同一个 token** —— 宽度只有一份，改一处两边同步。
- * - 只在 `max-width: 767px` 生效：共享组件自己就是按这个断点判「手机抽屉」的
- *   （`useIsMobile` 的 `MOBILE_QUERY`），窗口更宽时它走桌面占位分支，正文不该再被推走。
+ * - **不套 `max-width: 767px`**（早先套过，是个 bug）：本工程的外壳是手机形态写死的，
+ *   侧栏靠 `forceDrawer` 强制抽屉、与视口宽度无关（见 `layout/Sidebar.tsx` 与
+ *   `activity-sidebar.tsx` 的同名 prop）。样式若还按断点生效，窗口一旦更宽
+ *   （Chrome 扩展的侧栏被拖宽 / 大屏上开成标签页），抽屉会滑出来但**不推挤正文、
+ *   不换底色、没有右侧投影** —— 而遮罩又是透明的，视觉上就是「抽屉飘在正文上、
+ *   分不出边界」。三件事必须同生同死：判定交给 JS，样式无条件跟上。
  *
  * ⚠️ 遮罩仍由共享组件渲染（读 `--sidebar-scrim`，本工程覆盖成 `transparent`）：
  * 露出来的正文不再压暗，但**点击遮罩区域仍然收起抽屉**。
@@ -128,33 +132,31 @@
  * `transform, translate, scale, rotate` 四条）—— 只写 `transition-transform` 就够了，
  * 别改成 `transition-[transform]`，`translate` 不在里面，会变成瞬移。
  */
-@media (max-width: 767px) {
-  [data-fizz-sidebar] {
-    width: var(--mobile-sidebar-width);
-    background-color: var(--background);
-  }
-  /* 右侧投影：只画在抽屉右边（`left: 100%`），上下不会漏灰边（见上面那段注释）。
-     `absolute` 挂到 `fixed` 的抽屉上，宽度跟着 `--mobile-sidebar-width` 走。 */
-  [data-fizz-sidebar]::after {
-    content: '';
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: 100%;
-    width: 20px;
-    pointer-events: none;
-    background: linear-gradient(to right, rgb(0 0 0 / 0.06), rgb(0 0 0 / 0.05) 45%, transparent);
-  }
+[data-fizz-sidebar] {
+  width: var(--mobile-sidebar-width);
+  background-color: var(--background);
+}
+/* 右侧投影：只画在抽屉右边（`left: 100%`），上下不会漏灰边（见上面那段注释）。
+   `absolute` 挂到 `fixed` 的抽屉上，宽度跟着 `--mobile-sidebar-width` 走。 */
+[data-fizz-sidebar]::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 100%;
+  width: 20px;
+  pointer-events: none;
+  background: linear-gradient(to right, rgb(0 0 0 / 0.06), rgb(0 0 0 / 0.05) 45%, transparent);
+}
 
-  /*
-   * 顶栏 / 正文**一起推**（各自带 `data-mobile-push`，属性挂在外壳根上）：
-   * 只推 `main` 的话，抽屉会盖住顶栏左半边，上下一看就是「只有中间那段动了」。
-   * 两块的宽度都不变（推走 = 整体右移，不是压窄），所以内容不会重排，
-   * 只是左侧被抽屉盖住。抽屉本身是 `fixed` 且不在这两块里，不受影响。
-   */
-  [data-mobile-sidebar-open] [data-mobile-push] {
-    translate: var(--mobile-sidebar-width);
-  }
+/*
+ * 顶栏 / 正文**一起推**（各自带 `data-mobile-push`，属性挂在外壳根上）：
+ * 只推 `main` 的话，抽屉会盖住顶栏左半边，上下一看就是「只有中间那段动了」。
+ * 两块的宽度都不变（推走 = 整体右移，不是压窄），所以内容不会重排，
+ * 只是左侧被抽屉盖住。抽屉本身是 `fixed` 且不在这两块里，不受影响。
+ */
+[data-mobile-sidebar-open] [data-mobile-push] {
+  translate: var(--mobile-sidebar-width);
 }
 
 /*

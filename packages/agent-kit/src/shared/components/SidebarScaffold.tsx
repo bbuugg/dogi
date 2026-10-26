@@ -68,6 +68,7 @@ export function SidebarScaffold({
   width,
   mobileOpen,
   onMobileOpenChange,
+  forceDrawer,
   header,
   footer,
   children
@@ -77,6 +78,12 @@ export function SidebarScaffold({
   /** 手机端抽屉开关（isMobile 时生效） */
   mobileOpen: boolean
   onMobileOpenChange: (open: boolean) => void
+  /**
+   * 强制抽屉形态、不看视口宽度。手机壳（及复用它的 Chrome 扩展）传 `true` ——
+   * 那两端侧栏只有抽屉一种形态且 `width` 恒为 0，宽窗口下按断点走桌面分支会变成
+   * 一条展不开的 0 宽缝。语义与判定见 `activity-sidebar.tsx` 的同名 prop。
+   */
+  forceDrawer?: boolean
   /**
    * 侧栏顶部那一行（分区容器**上方**）。留空 = 第一行就是第一个分区标题。
    * 目前只有手机的外壳在传（`apps/mobile` 的 `MobileShell`，一行 `AppBrand`）：
@@ -94,7 +101,12 @@ export function SidebarScaffold({
   const collapsed = useSidebarCollapsed()
 
   return (
-    <ActivitySidebar width={width} mobileOpen={mobileOpen} onMobileOpenChange={onMobileOpenChange}>
+    <ActivitySidebar
+      width={width}
+      mobileOpen={mobileOpen}
+      onMobileOpenChange={onMobileOpenChange}
+      forceDrawer={forceDrawer}
+    >
       {/*
         `open` 绑到全局折叠状态（活动栏那颗按钮 / `CommandOrControl+Alt+B` 写的是同一份），
         Provider 自带的 `Ctrl/Cmd+B` 于是也走这里 —— 两条入口不会各记一份状态。

@@ -9,11 +9,20 @@
  * - `url` 留空 = 同源；填了地址就是跨源，需要 server 侧自行处理跨域。
  * - 对话是 SSE：`event: <start|event|end>` + `data: <ChatStreamFrame>`。
  */
-import { API_ROUTES } from "@fizz/contracts/agent-api";
+import { API_ROUTES, FILES_API } from "@fizz/contracts/agent-api";
 import type { AppLanguage } from "@fizz/contracts";
 import type {
   AppLogFrame,
   AppLogResult,
+  FmArchiveResult,
+  FmEntry,
+  FmListResult,
+  FmOpInput,
+  FmOpResult,
+  FmReadResult,
+  FmRootsResult,
+  FmTrashResult,
+  FmUploadInput,
   FsScaffoldInput,
   FsScaffoldResult,
   FsUploadInput,
@@ -67,6 +76,9 @@ import type {
   ConversationTargetInput,
   UsageSummary,
   SystemMetrics,
+  SystemTaskKillInput,
+  SystemTaskKillResult,
+  SystemTaskList,
   HostMetrics,
   FollowupReplyInput,
   FsDirsResult,
@@ -377,6 +389,17 @@ export function fileToBase64(file: File): Promise<string> {
     reader.onerror = () => reject(reader.error ?? new Error("读取文件失败"));
     reader.readAsDataURL(file);
   });
+}
+
+/**
+ * 把绝对路径拼进 query（文件管理器那批接口共用）。
+ *
+ * Windows 路径里既有 `:` 又有空格 / `#`，**必须**编码，否则 query 会被截断成
+ * `C:\a` 这种半截路径；`path` 缺省时连 `?path=` 都不加（服务端按主目录处理）。
+ */
+function pathQuery(base: string, path?: string): string {
+  if (!path) return base;
+  return `${base}?path=${encodeURIComponent(path)}`;
 }
 
 export function createApi(
@@ -1072,6 +1095,26 @@ export function createApi(
       request<SystemMetrics>(
         `${API_ROUTES.system}${detail ? "?detail=1" : ""}`,
       ),
+    /**
+     * 任务管理器：读服务端那台机器的进程表（含瞬时 CPU / 内存 / 累计 CPU 时间）。
+     *
+     * ⚠️ 与 `getSystemMetrics` **是两条采集通路**：那个读常驻采样器的快照（零子进程），
+     * 这个每次**现采**一次 `ps` / `tasklist`。所以只在任务管理器标签打开时调它 ——
+     * 别顺手塞进某个每 2s 的全局轮询里，那会把「按需」变成「常驻」。
+     */
+    listSystemTasks: () => request<SystemTaskList>(API_ROUTES.systemTasks),
+    /**
+     * 结束一个进程。
+     *
+     * **不要用 `try/catch` 兜业务失败**：进程已退出 / 没权限 / 是系统进程这些都回 200 +
+     * `ok: false`，原因在 `error` 里（见 `SystemTaskKillResult`）。这里只会在网络 /
+     * 鉴权层面抛。
+     */
+    killSystemTask: (input: SystemTaskKillInput) =>
+      request<SystemTaskKillResult>(API_ROUTES.systemTaskKill, {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
     /**
      * 读系统监控偏好（总开关）。关掉后服务端不采样、状态栏也不显示监控条。
      * 设置页「系统监控」小节的状态源，也是 `refresh()` 全量刷新的一项。
@@ -2409,6 +2452,94 @@ export function createApi(
         throw await toError(res);
       }
       await readSseFrames<AppLogFrame>(res, onFrame);
+    },
+
+    // ---------- 文件管理器（服务端那台机器的整盘） ----------
+    //
+    // 与上面的 `*Workspace*` 那批**完全两套语义**：这里全是**绝对路径**、没有工作区
+    // 围栏（用户要的就是「像 linux_web 那样的整盘文件管理器」）。所以刻意收在一个
+    // `files` 子对象里，别和「工作区文件」的扁平方法混着看。
+    //
+    // 路径一律经 `pathQuery()` 编码：Windows 的 `C:\a b\x.txt` 里既有 `:` 又有空格，
+    // 不编码会在 query 里被截断（`+`、`&`、`#` 同理）。
+    files: {
+      /** 列一个目录（`path` 缺省 = 服务端主目录） */
+      list: (path?: string) =>
+        request<FmListResult>(pathQuery(FILES_API.list, path)),
+
+      /** 主目录 / 盘符 / 常用位置（界面打开时先拉它，确定默认落点） */
+      roots: () => request<FmRootsResult>(FILES_API.roots),
+
+      /** 单条属性 */
+      stat: (path: string) => request<FmEntry>(pathQuery(FILES_API.stat, path)),
+
+      /**
+       * 读文件内容（文本 utf8 / 二进制 base64）。
+       *
+       * **有上限**（文本 2MB、二进制 8MB）：预览面板用的。要拿整份大文件走
+       * `download`，要看视频走 `mediaUrl`。
+       */
+      read: (path: string) => request<FmReadResult>(pathQuery(FILES_API.read, path)),
+
+      /** 所有改动动作的总线（新建 / 改名 / 复制 / 移动 / 删除 / 压缩 / 解压…） */
+      op: (input: FmOpInput) =>
+        request<FmOpResult>(FILES_API.op, {
+          method: "POST",
+          body: JSON.stringify(input),
+        }),
+
+      /**
+       * 上传一个文件（**JSON + base64**，禁止 FormData —— desktop 的 IPC 桥只认字符串）。
+       *
+       * 同名默认 409（不静默覆盖）；`overwrite: true` 才是用户显式同意。
+       */
+      upload: (input: FmUploadInput) =>
+        request<FmOpResult>(FILES_API.upload, {
+          method: "POST",
+          body: JSON.stringify(input),
+        }),
+
+      /** 回收站清单 */
+      trash: () => request<FmTrashResult>(FILES_API.trash),
+
+      /** 列压缩包里的条目（只读目录，不解压） */
+      archive: (path: string) =>
+        request<FmArchiveResult>(pathQuery(FILES_API.archive, path)),
+
+      /**
+       * 预览用的 URL：**带鉴权拉成 blob 再造 objectURL**。
+       *
+       * 为什么不直接把 `/api/files/content?path=…` 塞进 `<img src>`：
+       * - web 上要带 token 只能拼 query（`extractTokenFromRequest` 认 `?token=`），
+       *   而那里是**用户文件的绝对路径**，塞进 URL 会被历史记录 / 日志留下来；
+       * - desktop 压根没有可访问的 HTTP 端口（服务端在进程内，走 IPC 桥）。
+       *
+       * 与工作区文件的 `fetchWorkspaceMedia` 同一条路（那里也是 blob）。
+       * ⚠️ 调用方负责 `URL.revokeObjectURL`，否则每看一张图就漏一份内存。
+       */
+      async mediaUrl(path: string): Promise<string> {
+        const res = await fetchImpl(pathQuery(FILES_API.content, path), {
+          headers: authHeaders(),
+        });
+        if (!res.ok) {
+          if (res.status === 401) fireUnauthorized();
+          throw await toError(res);
+        }
+        return URL.createObjectURL(await res.blob());
+      },
+
+      /**
+       * 下载到本机（浏览器另存为）。目录由服务端现场打 zip。
+       *
+       * ⚠️ 整块进内存（blob 没有 Range）：几百 MB 的目录包会让渲染进程吃满 ——
+       * 这是现有 `downloadFile` 的共同限制，与工作区下载同一取舍。
+       */
+      async download(path: string, fileName: string): Promise<void> {
+        await downloadFile(pathQuery(FILES_API.download, path), fileName, {
+          fetchImpl,
+          headers: authHeaders(),
+        });
+      },
     },
   };
 }

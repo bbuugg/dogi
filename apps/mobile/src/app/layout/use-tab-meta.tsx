@@ -19,6 +19,8 @@ import {
   FileCode2,
   FileText,
   FolderOpen,
+  FolderTree,
+  Gauge,
   Globe,
   MessageSquare,
   MessageSquarePlus,
@@ -40,6 +42,7 @@ import {
   apiRequestIdOfTabKey,
   hostIdOfTabKey,
   isApiTabKey,
+  isFilesTabKey,
   isHostTabKey,
   isLocalFileTabKey,
   isLocalTabKey,
@@ -47,6 +50,7 @@ import {
   isPluginTabKey,
   isScriptsTabKey,
   isSftpTabKey,
+  isSysmonTabKey,
   isTriggersTabKey,
   isTunnelTabKey,
   NEW_TAB_KEY,
@@ -149,6 +153,26 @@ export function useTabMeta(): (key: string) => TabMeta {
           label: tool?.label ?? '脚本',
           title: tool?.title ?? '脚本',
           icon: <FileCode2 className="size-3.5 shrink-0" />
+        }
+      }
+      if (isFilesTabKey(key)) {
+        // 文件管理也是全局单例（`files:list`），名字固定。手机端没有入口（见 PanelView 里
+        // 那条分支的说明），这里备着是为了标签名不至于退化成空串。
+        const tool = getToolTab(key)
+        return {
+          label: tool?.label ?? '文件管理',
+          title: tool?.title ?? '文件管理',
+          icon: <FolderTree className="size-3.5 shrink-0" />
+        }
+      }
+      if (isSysmonTabKey(key)) {
+        // 系统监控 / 任务管理器也是全局单例（`sysmon:list`）。手机端没有入口，这里备着
+        // 是为了标签名不至于退化成空串（理由同上面 files 那条）。
+        const tool = getToolTab(key)
+        return {
+          label: tool?.label ?? '系统监控',
+          title: tool?.title ?? '系统监控',
+          icon: <Gauge className="size-3.5 shrink-0" />
         }
       }
       if (isNoteTabKey(key)) {

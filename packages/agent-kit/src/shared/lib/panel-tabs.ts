@@ -116,6 +116,46 @@ export function isLocalFileTabKey(key: string): boolean {
 }
 
 /**
+ * 文件管理器标签：`files:list`（**全局单例**）。
+ *
+ * 与日志 / 隧道 / 脚本同一取舍：浏览的是**服务端那台机器的整盘**，与当前工作区无关，
+ * 也不存在「一台主机一条」这种天然切分（这里的路径本来就是本机绝对路径）。
+ * 一条标签、一份现场（当前目录 / 选中项 / 剪贴板），再点一次只是聚焦。
+ */
+const FILES_TAB_PREFIX = 'files:'
+
+/** 文件管理器面板唯一的标签 key */
+export function filesTabKey(): string {
+  return `${FILES_TAB_PREFIX}list`
+}
+
+export function isFilesTabKey(key: string): boolean {
+  return key.startsWith(FILES_TAB_PREFIX)
+}
+
+/**
+ * 系统监控 + 任务管理器标签：`sysmon:list`（**全局单例**）。
+ *
+ * 与文件管理器 / 日志同一个形状：它看的是**服务端那台机器**（CPU、内存、磁盘、每个进程），
+ * 与当前工作区 / 会话 / 主机都无关，也不存在「一台机器一条标签」这种切分 —— 服务端就是
+ * 一台机器。一条标签、一份现场（筛选词 / 排序 / 选中行），再点一次只是聚焦。
+ *
+ * ⚠️ 前缀**没有**复用 `tasks:`：`triggers:` 那套「定时任务」在中文里也叫「任务」，
+ * 两个前缀都带 task 会让「点错标签」变成常态。`sysmon` 是 system monitor 的缩写，
+ * 与面板里那个「任务管理器」是包含关系（任务管理器是系统监控的一部分），不会歧义。
+ */
+const SYSMON_TAB_PREFIX = 'sysmon:'
+
+/** 系统监控面板唯一的标签 key */
+export function sysmonTabKey(): string {
+  return `${SYSMON_TAB_PREFIX}list`
+}
+
+export function isSysmonTabKey(key: string): boolean {
+  return key.startsWith(SYSMON_TAB_PREFIX)
+}
+
+/**
  * 应用日志标签：`logs:list`（**全局单例**）。
  *
  * 与隧道同一取舍：日志是**横跨所有命名空间**的一份流（面板内部用 Tab 切命名空间），
@@ -268,13 +308,17 @@ export function isScriptsTabKey(key: string): boolean {
 
 /**
  * 是不是工具标签（主机 / 本机终端 / 接口请求 / 脚本管理面板 / 插件界面 / SFTP 文件管理 /
- * 隧道 / 应用日志 / 定时任务 / 笔记 / 外部文件）—— 它们不参与「当前会话」的同步。
+ * 隧道 / 应用日志 / 文件管理 / 系统监控 / 定时任务 / 笔记 / 外部文件）—— 它们不参与
+ * 「当前会话」的同步。
  *
  * 容器型项目的预览**不在此列**：它是会话 SidePanel 的一条标签（`SideTabKey` 的
  * `preview`），不是主区域的工具标签。
  *
  * ⚠️ **新增一种工具标签类型就必须加进这个 OR**：漏了的话它会被 `isConversationTabKey`
  * 判成对话标签，点一下就会去改 `activeConversationId`（顶栏和侧栏高亮跟着跳到别的会话上）。
+ * 实测过的症状：漏了 `files:` 时点「文件管理」，面板会去 `openConversation('files:list')`
+ * —— 一个不存在的会话 id，于是整块主区域落到 `ConversationTab` 的「新对话」空态上。
+ * `panel-tabs.test.ts` 里那组用例就是把这条钉住的（新增前缀往 `cases` 补一行）。
  */
 export function isToolTabKey(key: string): boolean {
   return (
@@ -286,6 +330,8 @@ export function isToolTabKey(key: string): boolean {
     isSftpTabKey(key) ||
     isTunnelTabKey(key) ||
     isLogsTabKey(key) ||
+    isFilesTabKey(key) ||
+    isSysmonTabKey(key) ||
     isTriggersTabKey(key) ||
     isNoteTabKey(key) ||
     isLocalFileTabKey(key)

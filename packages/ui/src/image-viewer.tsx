@@ -12,7 +12,12 @@
  * - **滚轮**：缩放（`preventDefault` 挡掉页面滚动，故用原生非 passive 监听 —— React 的
  *   `onWheel` 是 passive 的，`preventDefault` 不生效）；
  * - **拖拽**：任意时刻按住图片即可平移（放大 / 旋转后尤其需要）；
+ * - **双指捏合**：手机上以两指中点为锚点缩放，同时跟随中点平移；
  * - **键盘**：`Esc` 关闭、`+`/`-` 缩放、`r`/`R` 旋转、`0` 重置；
+ *
+ * 手机端拖拽不能让 React 每帧重渲染：手势期间直接把 transform 写进 `<img>` 的 style，
+ * 并用 `requestAnimationFrame` 合并同一帧的多次 pointermove；浮层上必须 `touch-action: none`，
+ * 否则浏览器会把手指移动当成滚动手势抢走，导致拖动一格一格地跳。
  * - 点遮罩空白处关闭；点图片 / 点工具条都不会误关。
  *
  * ## 为什么 portal 到 `document.body`
@@ -29,7 +34,14 @@
  * 就没得退出场）。用户自己拨的缩放 / 旋转 `transform` 仍在 `<img>` 的 style 上，动画只挂在它
  * 外层容器，两者互不打架（同一元素上挂 motion 会跟手写的 transform 抢）。
  */
-import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent
+} from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'motion/react'
 import { Download, Maximize, RotateCcw, RotateCw, X, ZoomIn, ZoomOut } from 'lucide-react'
@@ -60,29 +72,99 @@ export interface ImageViewerProps {
 const TOOLBAR_BTN =
   'flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground'
 
-export function ImageViewer({ src, alt, open, onOpenChange, onDownload }: ImageViewerProps) {
-  const [scale, setScale] = useState(1)
-  /** 角度制，顺时针为正 */
-  const [rotation, setRotation] = useState(0)
-  /** 平移量（屏幕像素，不随 scale 放大） */
-  const [offset, setOffset] = useState({ x: 0, y: 0 })
-  const [dragging, setDragging] = useState(false)
-  /** 拖拽起点：记下按下时的指针位置与当时的 offset，move 时算差值 */
-  const dragFrom = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null)
-  const overlayRef = useRef<HTMLDivElement>(null)
+type Transform = { x: number; y: number; scale: number; rotation: number }
 
-  const zoomIn = useCallback(() => setScale((s) => clampScale(s + STEP)), [])
-  const zoomOut = useCallback(() => setScale((s) => clampScale(s - STEP)), [])
-  const reset = useCallback(() => {
-    setScale(1)
-    setRotation(0)
-    setOffset({ x: 0, y: 0 })
+type Gesture =
+  | { mode: 'drag'; startX: number; startY: number; ox: number; oy: number }
+  | {
+      mode: 'pinch'
+      startDist: number
+      /** 起始双指中点（屏幕坐标） */
+      midX: number
+      midY: number
+      /** 起始缩放 / 平移 */
+      scale: number
+      ox: number
+      oy: number
+      /** 浮层中心（屏幕坐标），缩放锚点计算用 */
+      cx: number
+      cy: number
+    }
+
+export function ImageViewer({ src, alt, open, onOpenChange, onDownload }: ImageViewerProps) {
+  /** 仅用于工具条上的百分比与按钮禁用态；手势期间涨幅直接写 DOM，不回 React */
+  const [scale, setScale] = useState(1)
+  const [dragging, setDragging] = useState(false)
+  const overlayRef = useRef<HTMLDivElement>(null)
+  const imgRef = useRef<HTMLImageElement>(null)
+  const percentRef = useRef<HTMLSpanElement>(null)
+  /** 真正的变换状态：pointermove 每帧只写这个 ref + DOM，不触发重渲染 */
+  const tf = useRef<Transform>({ x: 0, y: 0, scale: 1, rotation: 0 })
+  /** 当前按在浮层上的指针（两指 = 捏合） */
+  const pointers = useRef(new Map<number, { x: number; y: number }>())
+  const gesture = useRef<Gesture | null>(null)
+  const raf = useRef(0)
+  /** 刚拖过 / 捏过：吞掉随之而来的 click，避免误触关闭 */
+  const suppressClick = useRef(false)
+
+  const paint = useCallback(() => {
+    const t = tf.current
+    if (imgRef.current) {
+      imgRef.current.style.transform = `translate3d(${t.x}px, ${t.y}px, 0) scale(${t.scale}) rotate(${t.rotation}deg)`
+    }
+    if (percentRef.current) percentRef.current.textContent = `${Math.round(t.scale * 100)}%`
   }, [])
 
-  // 打开 / 换图即复位，免得残留上一张的缩放角度
+  /** 同一帧内的多次 pointermove 合并成一次 DOM 写入 */
+  const schedulePaint = useCallback(() => {
+    if (raf.current) return
+    raf.current = requestAnimationFrame(() => {
+      raf.current = 0
+      paint()
+    })
+  }, [paint])
+
+  /** 手势结束 / 按钮操作后把 ref 同步回 React（百分比、禁用态） */
+  const commit = useCallback(() => {
+    setScale(tf.current.scale)
+    paint()
+  }, [paint])
+
+  const zoomIn = useCallback(() => {
+    tf.current.scale = clampScale(tf.current.scale + STEP)
+    commit()
+  }, [commit])
+  const zoomOut = useCallback(() => {
+    tf.current.scale = clampScale(tf.current.scale - STEP)
+    commit()
+  }, [commit])
+  const rotateBy = useCallback(
+    (delta: number) => {
+      tf.current.rotation += delta
+      paint()
+    },
+    [paint]
+  )
+  const reset = useCallback(() => {
+    tf.current = { x: 0, y: 0, scale: 1, rotation: 0 }
+    pointers.current.clear()
+    gesture.current = null
+    setDragging(false)
+    commit()
+  }, [commit])
+
+  // 打开 / 换图即复位，免得残留上一张的缩放角度（图片挂载后再落一次 transform）
   useEffect(() => {
     if (open) reset()
   }, [open, src, reset])
+
+  // 卸载时取消未执行的帧
+  useEffect(
+    () => () => {
+      if (raf.current) cancelAnimationFrame(raf.current)
+    },
+    []
+  )
 
   // 滚轮缩放：挂原生非 passive 监听（React onWheel 是 passive，挡不住页面滚动）
   useEffect(() => {
@@ -91,11 +173,12 @@ export function ImageViewer({ src, alt, open, onOpenChange, onDownload }: ImageV
     if (!el) return
     const onWheel = (e: WheelEvent): void => {
       e.preventDefault()
-      setScale((s) => clampScale(s - e.deltaY * 0.002))
+      tf.current.scale = clampScale(tf.current.scale - e.deltaY * 0.002)
+      commit()
     }
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)
-  }, [open])
+  }, [open, commit])
 
   // 键盘快捷键
   useEffect(() => {
@@ -104,12 +187,12 @@ export function ImageViewer({ src, alt, open, onOpenChange, onDownload }: ImageV
       if (e.key === 'Escape') onOpenChange(false)
       else if (e.key === '+' || e.key === '=') zoomIn()
       else if (e.key === '-' || e.key === '_') zoomOut()
-      else if (e.key === 'r' || e.key === 'R') setRotation((r) => r - ROTATE_STEP)
+      else if (e.key === 'r' || e.key === 'R') rotateBy(-ROTATE_STEP)
       else if (e.key === '0') reset()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [open, onOpenChange, zoomIn, zoomOut, reset])
+  }, [open, onOpenChange, zoomIn, zoomOut, rotateBy, reset])
 
   // 浮层开着时锁住 body 滚动
   useEffect(() => {
@@ -122,9 +205,110 @@ export function ImageViewer({ src, alt, open, onOpenChange, onDownload }: ImageV
   }, [open])
 
   // 没有 document（SSR）就不渲染；**不能**因 `open` 为假而提前 return，否则退场没机会播
-  if (typeof document === 'undefined') return null
-
   const stop = (e: ReactMouseEvent): void => e.stopPropagation()
+
+  /** 按剩余指针重建手势：0 = 结束、1 = 继续拖拽、2 = 继续捏合 */
+  const rebuildGesture = useCallback(() => {
+    const pts = [...pointers.current.values()]
+    if (pts.length === 0) {
+      gesture.current = null
+      setDragging(false)
+      commit()
+      return
+    }
+    if (pts.length === 1) {
+      gesture.current = {
+        mode: 'drag',
+        startX: pts[0].x,
+        startY: pts[0].y,
+        ox: tf.current.x,
+        oy: tf.current.y
+      }
+      return
+    }
+    const el = overlayRef.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    const [a, b] = pts
+    gesture.current = {
+      mode: 'pinch',
+      startDist: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+      midX: (a.x + b.x) / 2,
+      midY: (a.y + b.y) / 2,
+      cx: rect.left + rect.width / 2,
+      cy: rect.top + rect.height / 2,
+      scale: tf.current.scale,
+      ox: tf.current.x,
+      oy: tf.current.y
+    }
+    setDragging(true)
+  }, [commit])
+
+  const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return
+    // 工具条上的按钮不参与手势
+    if ((e.target as HTMLElement).closest('[data-image-viewer-toolbar]')) return
+    const el = overlayRef.current
+    if (!el) return
+    e.stopPropagation()
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    if (!el.hasPointerCapture(e.pointerId)) el.setPointerCapture(e.pointerId)
+    suppressClick.current = false
+    if (pointers.current.size === 1) setDragging(true)
+    rebuildGesture()
+  }
+
+  const onPointerMove = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    if (!pointers.current.has(e.pointerId)) return
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    const g = gesture.current
+    if (!g) return
+
+    if (g.mode === 'drag') {
+      if (pointers.current.size !== 1) return
+      const dx = e.clientX - g.startX
+      const dy = e.clientY - g.startY
+      if (Math.abs(dx) + Math.abs(dy) > 4) suppressClick.current = true
+      tf.current.x = g.ox + dx
+      tf.current.y = g.oy + dy
+      schedulePaint()
+      return
+    }
+
+    const pts = [...pointers.current.values()]
+    if (pts.length < 2) return
+    const [a, b] = pts
+    const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1
+    const midX = (a.x + b.x) / 2
+    const midY = (a.y + b.y) / 2
+    const next = clampScale(g.scale * (dist / g.startDist))
+    // 以双指中点为锚：缩放前后中点下的图像点保持不动，同时跟随中点平移
+    const k = next / g.scale
+    tf.current.scale = next
+    tf.current.x = midX - g.cx - k * (g.midX - g.cx - g.ox)
+    tf.current.y = midY - g.cy - k * (g.midY - g.cy - g.oy)
+    suppressClick.current = true
+    schedulePaint()
+  }
+
+  const endPointer = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    if (!pointers.current.delete(e.pointerId)) return
+    const el = overlayRef.current
+    if (el?.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId)
+    rebuildGesture()
+  }
+
+  const onClickOverlay = (e: ReactMouseEvent<HTMLDivElement>): void => {
+    // 刚拖过 / 捏过：这次 click 是手势尾巴，不当作点击
+    if (suppressClick.current) {
+      suppressClick.current = false
+      return
+    }
+    if (e.target === overlayRef.current) onOpenChange(false)
+  }
+
+  // 没有 document（SSR）就不渲染；全部 hook 都已调用，此处才可提前返回
+  if (typeof document === 'undefined') return null
 
   return createPortal(
     <AnimatePresence>
@@ -134,12 +318,17 @@ export function ImageViewer({ src, alt, open, onOpenChange, onDownload }: ImageV
           role="dialog"
           aria-modal="true"
           aria-label="图片预览"
-          onClick={() => onOpenChange(false)}
+          onClick={onClickOverlay}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={endPointer}
+          onPointerCancel={endPointer}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.18, ease: 'easeOut' }}
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm"
+          style={{ touchAction: 'none', overscrollBehavior: 'none' }}
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 select-none"
         >
           {/* 图片外层只做**进出场**（淡入 + 轻微放大）；用户拨的 transform 在下面的 `<img>` 上 */}
           <motion.div
@@ -150,37 +339,23 @@ export function ImageViewer({ src, alt, open, onOpenChange, onDownload }: ImageV
             className="flex items-center justify-center"
           >
             <img
+              ref={imgRef}
               src={src}
               alt={alt ?? ''}
               draggable={false}
-              onClick={stop}
-              onPointerDown={(e) => {
+              onClick={(e) => {
                 e.stopPropagation()
-                e.currentTarget.setPointerCapture(e.pointerId)
-                dragFrom.current = { x: e.clientX, y: e.clientY, ox: offset.x, oy: offset.y }
-                setDragging(true)
+                suppressClick.current = false
               }}
-              onPointerMove={(e) => {
-                const from = dragFrom.current
-                if (!from) return
-                setOffset({ x: from.ox + (e.clientX - from.x), y: from.oy + (e.clientY - from.y) })
-              }}
-              onPointerUp={(e) => {
-                dragFrom.current = null
-                setDragging(false)
-                e.currentTarget.releasePointerCapture?.(e.pointerId)
-              }}
-              onPointerCancel={() => {
-                dragFrom.current = null
-                setDragging(false)
-              }}
+              onDragStart={(e) => e.preventDefault()}
               style={{
-                transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale}) rotate(${rotation}deg)`,
+                transform: `translate3d(${tf.current.x}px, ${tf.current.y}px, 0) scale(${tf.current.scale}) rotate(${tf.current.rotation}deg)`,
                 // 拖拽时去掉过渡，跟手；否则留 150ms 让按钮缩放 / 旋转有平滑感
-                transition: dragging ? 'none' : 'transform 150ms ease'
+                transition: dragging ? 'none' : 'transform 150ms ease',
+                willChange: 'transform'
               }}
               className={cn(
-                'max-h-[92vh] max-w-[92vw] select-none object-contain',
+                'max-h-[92vh] max-w-[92vw] touch-none object-contain select-none',
                 dragging ? 'cursor-grabbing' : 'cursor-grab'
               )}
             />
@@ -191,6 +366,7 @@ export function ImageViewer({ src, alt, open, onOpenChange, onDownload }: ImageV
               motion 的 y 会把 Tailwind 的 translate 顶掉。 */}
           <div className="absolute bottom-6 left-1/2 -translate-x-1/2">
             <motion.div
+              data-image-viewer-toolbar
               onClick={stop}
               initial={{ opacity: 0, y: 12 }}
               animate={{ opacity: 1, y: 0 }}
@@ -201,7 +377,7 @@ export function ImageViewer({ src, alt, open, onOpenChange, onDownload }: ImageV
               <button type="button" title="缩小" aria-label="缩小" className={TOOLBAR_BTN} onClick={zoomOut} disabled={scale <= MIN_SCALE}>
                 <ZoomOut className="size-4" />
               </button>
-              <span className="w-12 select-none text-center text-xs tabular-nums text-muted-foreground">
+              <span ref={percentRef} className="w-12 select-none text-center text-xs tabular-nums text-muted-foreground">
                 {Math.round(scale * 100)}%
               </span>
               <button type="button" title="放大" aria-label="放大" className={TOOLBAR_BTN} onClick={zoomIn} disabled={scale >= MAX_SCALE}>
@@ -210,10 +386,10 @@ export function ImageViewer({ src, alt, open, onOpenChange, onDownload }: ImageV
 
               <span className="mx-1 h-5 w-px shrink-0 bg-border" />
 
-              <button type="button" title="向左旋转" aria-label="向左旋转" className={TOOLBAR_BTN} onClick={() => setRotation((r) => r - ROTATE_STEP)}>
+              <button type="button" title="向左旋转" aria-label="向左旋转" className={TOOLBAR_BTN} onClick={() => rotateBy(-ROTATE_STEP)}>
                 <RotateCcw className="size-4" />
               </button>
-              <button type="button" title="向右旋转" aria-label="向右旋转" className={TOOLBAR_BTN} onClick={() => setRotation((r) => r + ROTATE_STEP)}>
+              <button type="button" title="向右旋转" aria-label="向右旋转" className={TOOLBAR_BTN} onClick={() => rotateBy(ROTATE_STEP)}>
                 <RotateCw className="size-4" />
               </button>
 

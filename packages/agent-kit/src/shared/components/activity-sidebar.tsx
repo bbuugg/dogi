@@ -48,6 +48,7 @@ export function ActivitySidebar({
   width,
   mobileOpen,
   onMobileOpenChange,
+  forceDrawer = false,
   children
 }: {
   /** 桌面端宽度（px）：由 AppShell 持有并持久化（右缘拖拽条也在 AppShell） */
@@ -55,9 +56,33 @@ export function ActivitySidebar({
   /** 手机端抽屉开关（isMobile 时生效） */
   mobileOpen: boolean
   onMobileOpenChange: (open: boolean) => void
+  /**
+   * **强制抽屉形态**，不看视口宽度。
+   *
+   * 默认（`false`）按 `useIsMobile()` 的 768px 断点判形态，这是 web / desktop 的语义：
+   * 窄屏变抽屉、宽屏是占位的一列。
+   *
+   * 手机壳（`apps/mobile`，以及复用它的 Chrome 扩展 `apps/extension`）必须传 `true`：
+   * 那两端的**整个外壳**都是手机形态写死的（见 `apps/mobile/src/app/app-shell.tsx`
+   * 的文件头），侧栏只有抽屉这一种形态，`width` 恒为 0。一旦窗口比 768px 宽
+   * （扩展侧栏被拖宽 / 在大屏上开成标签页），断点判定会让它落进桌面分支 ——
+   * 那支按 `width` 占位，于是侧栏变成 **0 宽且没有任何开关** 的一条缝，
+   * 用户报的「屏幕宽了侧栏就展不开」就是这个。
+   *
+   * ⚠️ 别把这件事做成「把全局断点改大」：断点变的是**所有**共享组件的形态
+   * （`useIsMobile` 还管着模型选择器是下拉还是抽屉、工具卡是不是触摸交互），
+   * 那些地方在宽屏 + 鼠标下仍该用桌面形态。要强制的是**这一个外壳的这一个分支**。
+   */
+  forceDrawer?: boolean
   children: ReactNode
 }) {
-  const isMobile = useIsMobile()
+  /**
+   * 形态判定：`forceDrawer` 优先。
+   *
+   * hook 必须无条件先调用（`useIsMobile` 内部是 `useState` + `useEffect`），
+   * 再把结果和 prop 合起来 —— 不能写成 `forceDrawer ? true : useIsMobile()`（条件 hook）。
+   */
+  const isMobile = useIsMobile() || forceDrawer
   /**
    * ⚠️ 抽屉的**可见性**用传进来的 `mobileOpen`，**不是**模块状态 `useMobileSidebarOpen()`。
    *

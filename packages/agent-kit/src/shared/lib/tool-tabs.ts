@@ -27,6 +27,7 @@ import type { ApiRequestEntry } from '@fizz/contracts/types'
 import { openTab } from '@fizz/agent-kit/shared/lib/panel-store'
 import {
   apiTabKey,
+  filesTabKey,
   hostTabKey,
   localTabKey,
   localFileTabKey,
@@ -35,6 +36,7 @@ import {
   pluginTabKey,
   scriptsTabKey,
   sftpTabKey,
+  sysmonTabKey,
   triggersTabKey,
   tunnelTabKey,
   NEW_API_REQUEST_ID,
@@ -65,6 +67,10 @@ export type ToolTabKind =
   | 'triggers'
   | 'note'
   | 'local-file'
+  /** 全局单例：服务端那台机器的**整盘文件管理器**（`files:list`） */
+  | 'files'
+  /** 全局单例：服务端那台机器的**系统监控 + 任务管理器**（`sysmon:list`） */
+  | 'sysmon'
 
 export interface ToolTab {
   /** 与 `panel-store` 里的标签 key 一致（`host:<id>` / `local:<n>`） */
@@ -386,6 +392,49 @@ let pluginSeq = 0
 /** 参数的稳定表示（用来判断「是不是同一屏」；对象直接比永远不相等） */
 function paramsKeyOf(params?: Record<string, string | number | boolean>): string {
   return params ? JSON.stringify(params) : ''
+}
+
+/**
+ * 打开全局的**文件管理器面板**（`files:list`，**全局单例**）。
+ *
+ * 入口是状态栏那颗「文件夹」图标（与「应用日志」并排）。浏览的是**服务端那台机器**
+ * 的文件系统（整盘，绝对路径），与当前工作区 / 会话都无关，所以与日志 / 隧道 / 脚本
+ * 同一取舍：一份现场、一条标签，已在时只聚焦 —— 开两份会让当前目录、选中项、
+ * 剪贴板各算一套，人反而分不清哪个是真的。
+ */
+export function openFilesTab(): string {
+  const key = filesTabKey()
+  tabs.set(key, {
+    key,
+    kind: 'files',
+    label: '文件管理',
+    title: '文件管理 · 服务端这台机器上的文件（整盘，可上传 / 下载 / 压缩 / 回收站）'
+  })
+  openTab(key)
+  return key
+}
+
+/**
+ * 打开全局的**系统监控 + 任务管理器面板**（`sysmon:list`，**全局单例**）。
+ *
+ * 入口是状态栏那颗「系统监控」图标（文件管理的左边）。它看的是**服务端那台机器**的
+ * CPU / 内存 / 磁盘 / 每个进程，与当前工作区、会话、SSH 主机都无关，所以与文件管理 /
+ * 日志同一取舍：一份现场、一条标签，已在时只聚焦。
+ *
+ * ⚠️ 与状态栏右端那颗**监控徽标**（`SystemMonitorBadge`）是两个东西：那颗是「扫一眼」，
+ * 走常驻采样器的快照；这个面板是「干活」用的，进程表是按需现采的。两条通路互不影响
+ * （见 `apps/server/src/server/system-tasks/index.ts` 文件头的对照表）。
+ */
+export function openSysmonTab(): string {
+  const key = sysmonTabKey()
+  tabs.set(key, {
+    key,
+    kind: 'sysmon',
+    label: '系统监控',
+    title: '系统监控 · 服务端这台机器的 CPU / 内存 / 磁盘，以及任务管理器（可结束进程）'
+  })
+  openTab(key)
+  return key
 }
 
 /**

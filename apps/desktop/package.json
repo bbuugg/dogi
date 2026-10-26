@@ -1,6 +1,6 @@
 {
   "name": "@fizz/desktop",
-  "version": "0.0.2",
+  "version": "0.0.4",
   "description": "Fizz",
   "private": true,
   "repository": {
@@ -17,8 +17,8 @@
     "build:renderer": "vite build -c vite.config.ts",
     "build": "npm run build:main && npm run build:preload && npm run build:renderer",
     "start": "electron .",
-    "pack:dir": "npm run build:web --prefix ../.. && npm run build && electron-builder --dir",
-    "pack": "npm run build:web --prefix ../.. && npm run build && electron-builder --publish never",
+    "pack:dir": "npm run build:web --prefix ../.. && npm run build:mobile:hosted --prefix ../.. && npm run build && electron-builder --dir",
+    "pack": "npm run build:web --prefix ../.. && npm run build:mobile:hosted --prefix ../.. && npm run build && electron-builder --publish never",
     "icons": "node scripts/generate-icons.mjs"
   },
   "dependencies": {
@@ -126,6 +126,13 @@
       {
         "from": "../../apps/web/dist",
         "to": "web-dist",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../../apps/mobile/dist-server",
+        "to": "mobile-dist",
         "filter": [
           "**/*"
         ]

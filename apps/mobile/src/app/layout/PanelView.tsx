@@ -63,6 +63,8 @@ import { SftpPanel } from '@fizz/agent-kit/features/sftp/SftpPanel'
 import { TunnelPanel } from '@fizz/agent-kit/features/tunnels/TunnelPanel'
 import { TriggersPanel } from '@fizz/agent-kit/features/tasks/TriggersPanel'
 import { LocalFileTabContent } from '@fizz/agent-kit/features/local-file/LocalFileTabContent'
+import { FileManagerPanel } from '@fizz/agent-kit/features/file-manager/FileManagerPanel'
+import { SysmonPanel } from '@fizz/agent-kit/features/system-tasks/SysmonPanel'
 import { NoteTabContent } from '@fizz/agent-kit/features/notes/NoteTabContent'
 import { PluginTabContent } from '@fizz/agent-kit/features/plugins/PluginTabContent'
 import { NEW_API_REQUEST_ID, NEW_WS_REQUEST_ID } from '@fizz/agent-kit/features/api/api-client'
@@ -70,11 +72,13 @@ import {
   apiRequestIdOfTabKey,
   isApiTabKey,
   isConversationTabKey,
+  isFilesTabKey,
   isLocalFileTabKey,
   isNoteTabKey,
   isPluginTabKey,
   isScriptsTabKey,
   isSftpTabKey,
+  isSysmonTabKey,
   isTriggersTabKey,
   isTunnelTabKey,
   NEW_TAB_KEY,
@@ -315,6 +319,27 @@ function PanelTabContent({ tabKey, active }: { tabKey: string; active: boolean }
   // 与上面的笔记标签是两条独立通路，见 `features/local-file/LocalFileTabContent.tsx` 的对照表。
   if (isLocalFileTabKey(tabKey)) {
     return <LocalFileTabContent tabKey={tabKey} active={active} />
+  }
+
+  // 文件管理标签：全局单例（`files:list`），浏览**服务端那台机器**的整盘。
+  //
+  // ⚠️ 手机端**没有**入口（状态栏那颗按钮只在桌面 / Web 的壳里，见 `shell/app-shell.tsx`），
+  // 这条分支纯粹是防呆：`isFilesTabKey` 已经算进 `isToolTabKey`（见 `panel-tabs.ts`），
+  // 所以 `files:list` 不会被当成对话标签；但下面的兜底是**终端**，这里不接一手的话，
+  // 将来真在手机上开出这条标签就会渲染出一条莫名其妙的终端。
+  if (isFilesTabKey(tabKey)) {
+    return <FileManagerPanel />
+  }
+
+  // 系统监控 / 任务管理器标签：全局单例（`sysmon:list`）。
+  //
+  // 同样**在手机上没有入口**（状态栏那颗按钮只在桌面 / Web 的壳里，见
+  // `shell/app-shell.tsx`），这条分支是防呆：`isSysmonTabKey` 已经算进 `isToolTabKey`，
+  // 不接一手的话将来真开出这条标签会落到下面的终端兜底上。顺带一句：手机端这一页其实
+  // 能用（进程表在窄屏上会隐藏几列，见 `SysmonPanel` 的 `sm:` / `md:` 分支），只是没有
+  // 入口 —— 需要时可以从命令面板打开。
+  if (isSysmonTabKey(tabKey)) {
+    return <SysmonPanel />
   }
 
   // 剩下的就是终端标签（`host:<id>` / `local:<n>`）：元数据在登记表里，而「这个工作区

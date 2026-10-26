@@ -18,7 +18,7 @@ import { resolveClientIp, setClientIp } from './lib/rate-limit'
 import { compareRoutePaths, mountRouteModule, routePathFromModuleKey, type RouteModule } from './next-route'
 
 const NAME = 'fizz-server'
-const VERSION = '0.0.2'
+const VERSION = '0.0.4'
 
 /**
  * 编译期收集全部 Next 风格路由模块（`api/**\/route.ts`）。
@@ -92,6 +92,15 @@ export function createApp(options: CreateAppOptions = {}): Hono {
     'http://127.0.0.1:5178',
     'http://localhost:5180',
     'http://127.0.0.1:5180',
+    /*
+     * Chrome 扩展的 **dev** 端口（`npm run dev:extension`）。
+     *
+     * 只有调试样式时才用得上：装进浏览器的扩展页面 origin 是 `chrome-extension://<id>`，
+     * 靠 manifest 的 `host_permissions` 直连，**不经过 CORS**（也放不进来 —— 扩展 id 是
+     * 装上去才生成的，白名单写死不了）。
+     */
+    'http://localhost:5190',
+    'http://127.0.0.1:5190',
     // Capacitor 本地 www（androidScheme https 是默认；另外两条是历史 / iOS 写法）
     'https://localhost',
     'http://localhost',

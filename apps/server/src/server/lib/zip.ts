@@ -277,14 +277,15 @@ export interface ZipBuildResult {
 }
 
 /**
- * 把一个目录递归打成 zip，**归档内保留该目录名作为顶层目录**
- * （下 `tools` 得到 `tools.zip`，解压出来就是 `tools/…`）。
+ * 把一批**绝对路径**打成 zip（文件管理器「压缩」用）。
+ *
+ * 归档内的顶层名字就是各自的 `basename`：选中 `a.txt` 与 `docs/` 得到 `a.txt` + `docs/…`。
+ * 目录会先写一条以 `/` 结尾的目录条目，空目录解出来才不会消失。
  */
-export async function zipDirectory(
-  rootAbs: string,
+export async function zipPaths(
+  absPaths: string[],
   options: ZipBuildOptions = {}
 ): Promise<ZipBuildResult> {
-  const rootName = basename(rootAbs) || 'archive'
   const maxFileBytes = options.maxFileBytes ?? 64 * 1024 * 1024
   const maxTotalBytes = options.maxTotalBytes ?? 256 * 1024 * 1024
   const maxEntries = options.maxEntries ?? 20000
@@ -334,6 +335,44 @@ export async function zipDirectory(
     }
   }
 
-  await walk(rootAbs, rootName)
+  for (const abs of absPaths) {
+    const stat = await fs.lstat(abs)
+    // 根路径（`/`、`C:\`）的 basename 是空串，给个占位名字，否则归档里会出现 `//x`
+    const name = basename(abs) || 'archive'
+    if (stat.isDirectory()) {
+      writer.addEntry(`${name}/`, Buffer.alloc(0), stat.mtime, true)
+      await walk(abs, name)
+      continue
+    }
+    if (!stat.isFile()) continue
+    if (stat.size > maxFileBytes || totalBytes + stat.size > maxTotalBytes) {
+      skipped++
+      options.onSkip?.('too-large', name)
+      continue
+    }
+    if (writer.entries >= maxEntries) {
+      skipped++
+      options.onSkip?.('limit', name)
+      continue
+    }
+    const raw = await fs.readFile(abs)
+    totalBytes += raw.length
+    writer.addEntry(name, raw, stat.mtime, false)
+  }
+
   return { buffer: writer.finish(), skipped }
+}
+
+/**
+ * 把一个目录递归打成 zip，**归档内保留该目录名作为顶层目录**
+ * （下 `tools` 得到 `tools.zip`，解压出来就是 `tools/…`）。
+ *
+ * 实现上就是「只选一个目录」的 `zipPaths` —— 两处共用同一套递归，zip 的字段偏移
+ * 只有一份代码在写（写错一个字节就是一包坏文件）。
+ */
+export async function zipDirectory(
+  rootAbs: string,
+  options: ZipBuildOptions = {}
+): Promise<ZipBuildResult> {
+  return zipPaths([rootAbs], options)
 }

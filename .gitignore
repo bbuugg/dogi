@@ -23,5 +23,7 @@ apps/mobile/www
 apps/mobile/android
 # mobile 的 Monaco 资源同样是 copy:monaco 的生成物（不重复入库 152 个 vendored 文件）
 apps/mobile/public/monaco-editor
+# Chrome 扩展（apps/extension）的 Monaco 资源，同一个脚本生成、同样不入库
+apps/extension/public/monaco-editor
 # mobile 的「server 托管」版产物（build --mode hosted → base=/m/），与 APK 的 dist/ 分家
 apps/mobile/dist-server

@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "Fizz",
+  "description": "Fizz 的浏览器侧栏：连上你自己那台 Fizz 服务端，随手发起对话、看任务与文件。",
+  "version": "0.0.2",
+  "minimum_chrome_version": "114",
+  "icons": {
+    "16": "icons/icon-192.png",
+    "32": "icons/icon-192.png",
+    "48": "icons/icon-192.png",
+    "128": "icons/icon-192.png"
+  },
+  "action": {
+    "default_title": "Fizz",
+    "default_icon": {
+      "16": "icons/icon-192.png",
+      "32": "icons/icon-192.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "index.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["sidePanel", "contextMenus"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "content_security_policy": {
+    "extension_pages": "default-src 'self'; script-src 'self'; object-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; media-src 'self' data: blob: https: http:; font-src 'self' data:; connect-src *; worker-src 'self'; frame-src 'self' https: http:"
+  }
+}

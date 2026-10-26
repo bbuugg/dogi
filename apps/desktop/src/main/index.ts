@@ -278,7 +278,9 @@ async function applyRemoteAccess(input: RemoteAccessInput): Promise<RemoteAccess
       username: cfg.username,
       password: cfg.password,
       // dev 下从仓库根起步能找到 apps/web/dist；其余候选见 remote-access.ts
-      webDirHint: join(process.cwd(), 'apps/web/dist')
+      webDirHint: join(process.cwd(), 'apps/web/dist'),
+      // 手机版（build:mobile:hosted 的产物）：手机浏览器打开这个端口时会被 302 到 /m/
+      mobileDirHint: join(process.cwd(), 'apps/mobile/dist-server')
     })
   } else {
     stopRemoteAccess()

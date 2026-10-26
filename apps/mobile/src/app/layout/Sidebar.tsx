@@ -69,6 +69,19 @@ function MobileShell({
       width={width}
       mobileOpen={mobileOpen}
       onMobileOpenChange={onMobileOpenChange}
+      /*
+       * ⚠️ **必须传 true**：本工程的外壳是手机形态写死的（见 `app-shell.tsx` 文件头），
+       * 侧栏只有抽屉一种形态，`width` 传的是 0。
+       *
+       * 不传的话形态由 `useIsMobile()`（768px 断点）决定 —— 窗口一旦更宽
+       * （Chrome 扩展的侧栏被拖宽 / 大屏上开成标签页），共享组件就落进桌面分支：
+       * 那支按 `width: 0` 占位，侧栏变成一条展不开的 0 宽缝，连开关都没有。
+       * 用户报的「屏幕宽了手机版侧栏就展不开」就是这个。
+       *
+       * 强制的必须是**本外壳这一个分支**，不是全局断点：`useIsMobile` 还管着模型
+       * 选择器是下拉还是抽屉、工具卡走不走触摸交互，那些在宽屏 + 鼠标下仍要桌面形态。
+       */
+      forceDrawer
       header={
         <div className="flex h-11 shrink-0 items-center gap-2 px-3">
           <AppBrand iconClassName="size-6" nameClassName="text-sm" />
@@ -170,7 +183,7 @@ export function Sidebar({
       onNewInWorkspace={onNewInWorkspace}
       onImportInWorkspace={onImportInWorkspace}
       onManagePlugins={onManagePlugins}
-      // 手机形态恒为抽屉，宽度用不到；共享组件的桌面分支在真机上不会走
+      // 手机形态恒为抽屉，宽度用不到 —— 强制抽屉后共享组件的桌面分支永远不会走
       width={0}
       mobileOpen={mobileSidebarOpen}
       onMobileOpenChange={setMobileSidebarOpen}

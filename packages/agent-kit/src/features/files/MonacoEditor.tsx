@@ -54,6 +54,60 @@ loader.config({
   }
 })
 
+/**
+ * Chrome 扩展（MV3）下的 worker 引导壳替换。
+ *
+ * monaco 起 worker 的方式是「blob 包一层」：`new Worker(URL.createObjectURL(new Blob([
+ * "importScripts('<真实的 worker 文件>');postMessage({type:'vscode-worker-ready'})"])))`。
+ * worker 本体是同源文件（`vs/assets/*.worker-*.js`），blob 只是引导壳 —— 但 MV3 扩展页面的
+ * CSP **不允许** `worker-src blob:`（Chrome 装扩展时直接拒："Insecure CSP value \"blob:\"
+ * in directive 'worker-src'"）。
+ *
+ * `scripts/copy-monaco.cjs` 在拷贝时生成了两个替代品：
+ * `vs/worker-map.json`（带哈希的 worker 文件名 → 语义名，哈希随版本变只能拷贝时扫出来）
+ * 和 `vs/worker-proxy.js`（同源的经典脚本壳，从 `?u=` 读目标地址，语义与 blob 壳逐行一致）。
+ * 这里把 `MonacoEnvironment.getWorker` 换成「查 map → 拼代理地址」的实现。
+ *
+ * 时机：必须装在 **editor.main 求值之后** —— monaco 会把自己的 `getWorker` **整个覆写**上
+ * `self.MonacoEnvironment`，先装会被顶掉。`beforeMount` 恰好在 loader 加载完、建第一个编辑
+ * 实例之前，且换目标组件也不会重复装（`shimInstalled` 兜底）。
+ *
+ * 只在 `chrome-extension://` 下生效：web / desktop / mobile 没有这份 CSP 约束，别动它们的
+ * 原生路径。map 取不到（旧拷贝产物没有这两个文件）就保持原样 —— 那 blob 会照旧被 CSP 拦，
+ * monaco 对 worker 创建失败有降级（语言服务退回主线程），不至于白屏。
+ */
+let shimInstalled = false
+function installCspSafeWorkerShim(): void {
+  if (shimInstalled) return
+  shimInstalled = true
+  if (window.location.protocol !== 'chrome-extension:') return
+  const env = (self as unknown as { MonacoEnvironment?: { getWorker?: (label: string) => Worker } })
+    .MonacoEnvironment
+  if (!env) return
+
+  const vsBase = new URL('monaco-editor/vs/', document.baseURI).href
+  fetch(`${vsBase}worker-map.json`)
+    .then((res) => (res.ok ? (res.json() as Promise<Record<string, string>>) : null))
+    .then((map) => {
+      if (!map) return
+      const fileFor = (label: string): string => {
+        if (label === 'json') return map.json
+        if (label === 'css' || label === 'scss' || label === 'less') return map.css
+        if (label === 'html' || label === 'handlebars' || label === 'razor') return map.html
+        if (label === 'typescript' || label === 'javascript') return map.ts
+        return map.editor
+      }
+      const proxy = `${vsBase}worker-proxy.js`
+      env.getWorker = (label: string): Worker => {
+        const target = new URL(fileFor(label), vsBase).href
+        return new Worker(`${proxy}?u=${encodeURIComponent(target)}`)
+      }
+    })
+    .catch(() => {
+      // map 读不到就保持 monaco 原生路径，别让扩展页因为这个挂掉
+    })
+}
+
 /** `beforeMount` 拿到的就是 monaco 命名空间 */
 type Monaco = Parameters<NonNullable<ComponentProps<typeof Editor>['beforeMount']>>[0]
 
@@ -492,6 +546,8 @@ const MonacoEditor = ({
           theme={isDark ? 'fizz-dark' : 'fizz-light'}
           value={value}
           beforeMount={(monaco) => {
+            // 先装 worker 壳替换再定义主题：替换只做一次，装晚了第一个 worker 就走 blob 被 CSP 拦
+            installCspSafeWorkerShim()
             monacoRef.current = monaco
             defineFizzThemes(monaco)
           }}

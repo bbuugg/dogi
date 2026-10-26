@@ -66,12 +66,12 @@ export { AboutDialog } from '@fizz/agent-kit/features/settings/AboutDialog'
 export { AppBrand, APP_NAME } from '@fizz/agent-kit/shared/components/AppBrand'
 
 /**
- * 打开全局工具标签（应用日志 / SSH 隧道）。
+ * 打开全局工具标签（应用日志 / 文件管理 / SSH 隧道）。
  *
  * desktop 自绘标题栏是独立的一棵 React 树，点不到 `app-shell` 内部的东西 ——
  * 它的日志入口只能直接调这个函数（与 `AppBrand` 同一个理由）。
  */
-export { openLogsTab } from '@fizz/agent-kit/shared/lib/tool-tabs'
+export { openFilesTab, openLogsTab, openSysmonTab } from '@fizz/agent-kit/shared/lib/tool-tabs'
 
 /**
  * AI 助手面板的开关状态（模块级 + 订阅）。
