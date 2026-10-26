@@ -18,7 +18,7 @@ import type { AgentApp } from '@fizz/agent-kit/shared/hooks/useAgentApp'
 import { useT } from '@fizz/agent-kit/shared/lib/language'
 import { openRunScriptDialog } from '@fizz/agent-kit/shared/lib/script-run'
 import { formatShortcut } from '@fizz/agent-kit/shared/lib/shortcuts'
-import { openLogsTab, openTunnelTab } from '@fizz/agent-kit/shared/lib/tool-tabs'
+import { openFilesTab, openLogsTab, openSysmonTab, openTunnelTab } from '@fizz/agent-kit/shared/lib/tool-tabs'
 import type { HostConfig } from '@fizz/contracts/types'
 import {
   CommandDialog,
@@ -34,10 +34,12 @@ import {
   ArrowLeft,
   ChevronRight,
   FileCode2,
+  Gauge,
   MessageSquare,
   MessageSquarePlus,
   Moon,
   Network,
+  FolderTree,
   ScrollText,
   Search,
   Server,
@@ -320,6 +322,34 @@ export function CommandPalette({
               {/* 应用日志：全局单例面板，挂在「设置」组里 —— 它跟主机无关（不连主机也看得到
                   全 App 的业务事件），放在主机组里会被「有没有配置主机」挡住。与隧道同一个落点
                   （会渲染内容标签的视图 + `ensureChatView`），键盘用户不点标题栏那颗按钮也能到。 */}
+              {/* 文件管理：同样是全局单例面板。浏览的是服务端那台机器的整盘（绝对路径），
+                  与工作区无关，所以和日志一样落在「设置」组 —— 不连主机也该能打开自己的机器。 */}
+              <CommandItem
+                keywords={['file', 'files', '文件', '文件管理', '浏览器', 'explorer', '文件夹']}
+                onSelect={run(() => {
+                  openFilesTab()
+                })}
+              >
+                <FolderTree />
+                <span>文件管理</span>
+                <span className="ml-auto max-w-40 truncate text-xs text-muted-foreground">
+                  本机整盘
+                </span>
+              </CommandItem>
+              {/* 系统监控 + 任务管理器：同样是全局单例面板，和文件管理一样落在「设置」组 ——
+                  它看的是服务端那台机器，跟项目 / 主机都无关，不连主机也该能打开。 */}
+              <CommandItem
+                keywords={['task', 'tasks', 'process', 'kill', 'monitor', '系统监控', '任务管理器', '进程', '结束进程', 'cpu', '内存']}
+                onSelect={run(() => {
+                  openSysmonTab()
+                })}
+              >
+                <Gauge />
+                <span>系统监控</span>
+                <span className="ml-auto max-w-40 truncate text-xs text-muted-foreground">
+                  任务管理器 · 可杀进程
+                </span>
+              </CommandItem>
               <CommandItem
                 keywords={['log', 'logs', '日志', '记录', 'event', 'trace', '排错']}
                 onSelect={run(() => {

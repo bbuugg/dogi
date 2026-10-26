@@ -61,7 +61,7 @@ export function WebTitleBar({ className }: { className?: string }) {
 
   return (
     <header
-      className={cn('flex h-9 shrink-0 items-center gap-1 px-2', className)}
+      className={cn('flex h-8 shrink-0 items-center gap-1 px-2', className)}
     >
       {isMobile && canOpenSidebar && (
         <Button

@@ -1,0 +1,36 @@
+/**
+ * 扩展的样式入口：**基础层直接从手机版那支 `styles.css` 进来**。
+ *
+ * 为什么不复制一份：主题令牌、`@layer base`（边框色、body 底色、按钮光标、禁双指缩放）、
+ * shadcn 那套变量都在那份文件里。复制一份 = 两端配色迟早各走各的，而这正是「UI 和手机版
+ * 一致」这个要求里最容易崩的一环。
+ *
+ * `@source` 三条是 Tailwind 的**扫描白名单**：类名散落在手机版外壳与 `packages/*` 里，
+ * 自动扫描覆盖不到（Tailwind 默认从 CSS 文件所在目录往上找出入口，扫不到 `../mobile`）。
+ * 少一条的后果是「那一部分的工具类一个都不生成」，界面塌成浏览器默认样式 —— 不报错，
+ * 只是很丑。`@source` 的路径**相对本文件**解析（与手机版 `index.css` 的写法同源）。
+ */
+@import '../../mobile/src/styles.css';
+
+/* 本工程自己的源码（`src/` 里只有启动链与宿主，几乎没有类名，但别漏） */
+@source '.';
+/* 手机版外壳：`App` / `AppProvider` / `AppShell` / `PanelView` / `ConnectGate` … */
+@source '../../mobile/src/app';
+/* 领域组件与无业务原语 */
+@source '../../../packages/agent-kit/src';
+@source '../../../packages/ui/src';
+/*
+ * ⚠️ Streamdown（助手正文的 markdown 渲染器）的类名只在它自己的 dist 里，而 Tailwind
+ * 默认不扫 node_modules。漏了这条，代码块 / 表格就是浏览器默认样式（又散又占位）。
+ */
+@source '../../../node_modules/streamdown/dist/*.js';
+
+/*
+ * 应用根撑满视口。侧栏与标签页的高度都由浏览器给，`100%` 跟的就是它 ——
+ * 与手机版 `index.css` 同一条（那边还多解释了几句软键盘，这里用不上）。
+ */
+html,
+body,
+#root {
+  height: 100%;
+}

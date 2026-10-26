@@ -62,6 +62,7 @@ import {
   ArrowRight,
   ArrowUp,
   Cable,
+  Gauge,
   FileCode2,
   FileText,
   FolderOpen,
@@ -72,6 +73,7 @@ import {
   NotebookPen,
   Pencil,
   CalendarClock,
+  FolderTree,
   Puzzle,
   RefreshCw,
   Rows2,
@@ -116,6 +118,8 @@ import { ApiPage } from '@fizz/agent-kit/features/api/ApiPage'
 import { WsPage } from '@fizz/agent-kit/features/api/WsPage'
 import { ScriptsPanel } from '@fizz/agent-kit/features/scripts/ScriptsPanel'
 import { SftpPanel } from '@fizz/agent-kit/features/sftp/SftpPanel'
+import { FileManagerPanel } from '@fizz/agent-kit/features/file-manager/FileManagerPanel'
+import { SysmonPanel } from '@fizz/agent-kit/features/system-tasks/SysmonPanel'
 import { TunnelPanel } from '@fizz/agent-kit/features/tunnels/TunnelPanel'
 import { LogsPanel } from '@fizz/agent-kit/features/logs/LogsPanel'
 import { TriggersPanel } from '@fizz/agent-kit/features/tasks/TriggersPanel'
@@ -129,6 +133,7 @@ import {
   hostIdOfTabKey,
   isApiTabKey,
   isConversationTabKey,
+  isFilesTabKey,
   isHostTabKey,
   isLocalTabKey,
   isLocalFileTabKey,
@@ -137,6 +142,7 @@ import {
   isPluginTabKey,
   isScriptsTabKey,
   isSftpTabKey,
+  isSysmonTabKey,
   isTriggersTabKey,
   isTunnelTabKey,
   NEW_TAB_KEY,
@@ -303,6 +309,24 @@ function useTabMeta(): (key: string) => TabMeta {
           label: tool?.label ?? t('日志'),
           title: tool?.title ?? t('应用日志'),
           icon: <ScrollText className="size-3.5 shrink-0" />
+        }
+      }
+      if (isFilesTabKey(key)) {
+        // 文件管理器：全局单例（`files:list`），浏览的是服务端那台机器的整盘
+        const tool = getToolTab(key)
+        return {
+          label: tool?.label ?? t('文件管理'),
+          title: tool?.title ?? t('文件管理'),
+          icon: <FolderTree className="size-3.5 shrink-0" />
+        }
+      }
+      if (isSysmonTabKey(key)) {
+        // 系统监控 + 任务管理器：全局单例（`sysmon:list`），看的是服务端那台机器
+        const tool = getToolTab(key)
+        return {
+          label: tool?.label ?? t('系统监控'),
+          title: tool?.title ?? t('系统监控'),
+          icon: <Gauge className="size-3.5 shrink-0" />
         }
       }
       if (isTriggersTabKey(key)) {
@@ -1393,6 +1417,19 @@ function PanelTabContent({ tabKey, active }: { tabKey: string; active: boolean }
   // 的 logs-store），这里同样不需要传数据；命名空间 Tab 列表也来自服务端应答。
   if (isLogsTabKey(tabKey)) {
     return <LogsPanel />
+  }
+
+  // 文件管理标签：全局单例（`files:list`）。所有状态（当前目录 / 选中 / 剪贴板）都在
+  // 面板自己的 hook 里，宿主不需要传任何东西 —— 与日志 / 隧道同一形状。
+  if (isFilesTabKey(tabKey)) {
+    return <FileManagerPanel />
+  }
+
+  // 系统监控标签：全局单例（`sysmon:list`）。指标卡自己去读 `/api/system`（常驻采样器
+  // 的快照，含每核 / 磁盘 / 历史曲线），进程表读 `/api/system/tasks`（按需现采）——
+  // 两条通路都在面板内部，宿主不需要传任何东西。
+  if (isSysmonTabKey(tabKey)) {
+    return <SysmonPanel />
   }
 
   // 定时任务标签：全局单例管理面板（`triggers:list`）。数据走 `useAppContext().triggers`

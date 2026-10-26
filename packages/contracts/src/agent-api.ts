@@ -223,6 +223,23 @@ export const API_ROUTES = {
    */
   system: "/api/system",
   /**
+   * 系统监控 + 任务管理器：GET /api/system/tasks → `SystemTaskList`（进程清单）。
+   *
+   * ⚠️ 与上面的 `/api/system` **不是一条采集通路**：那个是「常驻采样器 + 快照」，
+   * 只用 `node:os`、零子进程，服务状态栏那颗徽标每 2s 读它；这一条是**按需**的，
+   * 每请求现采一次进程表（`ps` / `tasklist`），只为「打开任务管理器标签页」这件事服务。
+   * 两条互不影响：关掉监控条不会让任务管理器变空，反之亦然。
+   */
+  systemTasks: "/api/system/tasks",
+  /**
+   * 结束一个进程：POST `/api/system/tasks/kill`（body: `SystemTaskKillInput`）→
+   * `SystemTaskKillResult`。
+   *
+   * **成功与失败都回 200**：`ok: false` 是业务失败（进程已退出 / 权限不足 / 不允许杀自己），
+   * 界面把 `error` 原样弹出来即可 —— 给它配一个 4xx 只会让前端多写一层错误分支。
+   */
+  systemTaskKill: "/api/system/tasks/kill",
+  /**
    * 服务器性能监控偏好（总开关）：GET / POST `/api/system/settings` →
    * `SystemMonitorSettings`（POST 不传 `enabled` = 保留原样）。
    *
@@ -2986,4 +3003,358 @@ export function buildUserParts(
     })),
     { type: "text" as const, text },
   ];
+}
+
+// ---------------------------------------------------------------------------
+// 文件管理器（全盘浏览 / 管理）
+// ---------------------------------------------------------------------------
+//
+// 与「工作区文件」（`AgentFsEntry`，相对路径、被局限在工作区里）是**两套东西**：
+// 这里是「服务端那台机器的文件管理器」，路径一律**绝对路径**，能翻到主目录以外的任何
+// 位置（用户明确要求照搬 linux_web 的整盘文件管理器）。所以：
+// - 路径**不走** `resolveInside`（那是工作区语义），改由 `file-manager/paths.ts` 只做
+//   归一化与「回收站自身不可删」这类底线校验；
+// - 一次操作**一个路径**（复制 / 移动 / 删除 / 还原都是），批量是客户端循环发 ——
+//   这样进度条能按「第几项 / 共几项」显示，也不用把一小时的批量拷贝挂在一个 HTTP 请求上。
+
+/** 文件管理器的 HTTP 入口（路径常量集中在这里，避免前后端各拼一份） */
+export const FILES_API = {
+  /** GET `?path=<abs>` → `FmListResult`（`path` 缺省 = 主目录） */
+  list: '/api/files/list',
+  /** GET → `FmRootsResult`（主目录 / 盘符 / 常用位置） */
+  roots: '/api/files/roots',
+  /** GET `?path=` → `FmEntry`（单条属性，属性弹窗用） */
+  stat: '/api/files/stat',
+  /** GET `?path=` → `FmReadResult`（文本按 utf8，二进制给 base64） */
+  read: '/api/files/read',
+  /** GET `?path=` → 原始字节（图片 / 视频 / PDF 预览，支持 Range） */
+  content: '/api/files/content',
+  /** GET `?path=` → 附件下载（文件原样吐，目录现场打 zip） */
+  download: '/api/files/download',
+  /** POST `FmOpInput` → `FmOpResult`（所有**改动**动作的总线） */
+  op: '/api/files/op',
+  /** POST `FmUploadInput` → `FmOpResult`（**JSON + base64**，禁止 multipart，见 AGENTS.md） */
+  upload: '/api/files/upload',
+  /** GET → `FmTrashResult`（回收站清单） */
+  trash: '/api/files/trash',
+  /** GET `?path=` → `FmArchiveResult`（压缩包内的条目清单） */
+  archive: '/api/files/archive',
+} as const
+
+/** 文件管理器里的一条目录项（**绝对路径**） */
+export interface FmEntry {
+  /** 文件名（不含上级目录） */
+  name: string;
+  /** 绝对路径（已归一化，可直接喂回 list / stat / op） */
+  path: string;
+  isDir: boolean;
+  /** 符号链接 / Windows 目录联接（界面上加一个小箭头标记） */
+  isLink: boolean;
+  /** 目录恒为 0；文件取 lstat 的字节数 */
+  size: number;
+  /** 最后修改时间（毫秒时间戳；取不到时为 0） */
+  mtime: number;
+  /** 以 `.` 开头 —— 界面上「显示隐藏文件」关着时藏掉 */
+  hidden: boolean;
+}
+
+/** `GET /api/files/list` 的应答 */
+export interface FmListResult {
+  /** 实际列出的目录（`~` 之类的输入已在服务端展开） */
+  path: string;
+  /** 上级目录；null = 已经在根（`/` 或 `C:/`） */
+  parent: string | null;
+  entries: FmEntry[];
+  /**
+   * 条目过多被截断（上限 5000 条）。
+   *
+   * 静默少列等于「文件不见了」，所以一定带上这个标记，界面要明说。
+   */
+  truncated?: boolean;
+}
+
+/** 一个可跳转的位置（盘符 / 常用目录） */
+export interface FmPlace {
+  /** 稳定 id（`home` / `drive:C` / `desktop` …），只用于 React key */
+  id: string;
+  /** 展示名（`本地磁盘 (C:)` / `下载` …） */
+  label: string;
+  /** 绝对路径 */
+  path: string;
+}
+
+/** `GET /api/files/roots` 的应答 */
+export interface FmRootsResult {
+  /** 服务端用户的 home 目录（打开文件管理器时的默认位置） */
+  home: string;
+  /** `process.platform`：界面据此决定要不要显示「盘符」这一组 */
+  platform: string;
+  /** 根：Windows 是各盘符，POSIX 只有 `/` */
+  drives: FmPlace[];
+  /** 常用位置：桌面 / 文档 / 下载 / 图片 / 音乐 / 视频（不存在的不返回） */
+  places: FmPlace[];
+  /** 回收站根目录（只用于提示，界面上按「回收站」模式浏览，不直接列它） */
+  trash: string;
+}
+
+/** `GET /api/files/read` 的应答 */
+export interface FmReadResult {
+  path: string;
+  /** 文本内容；`encoding === 'base64'` 时是原始字节的 base64 */
+  content: string;
+  encoding: 'utf8' | 'base64';
+  /** 字节数 */
+  size: number;
+  /** 超过读取上限被截断（只可能是 utf8 文本） */
+  truncated: boolean;
+}
+
+/**
+ * 改动动作的总线（`POST /api/files/op`）。
+ *
+ * 为什么合成一条而不是十几个路由：这些都是「改一下磁盘」的同族动作，错误语义、返回值
+ * 形状（`FmOpResult`）完全一致；拆开只会让前端多十几个薄封装。**读**动作才单独开路由
+ * （它们各有各的应答类型与 Range / 流式需求）。
+ */
+export type FmOpInput =
+  /** 新建文件夹（`name` 单层，父目录必须存在） */
+  | { op: 'mkdir'; parent: string; name: string }
+  /** 新建空文件（已存在则报错，不静默覆盖） */
+  | { op: 'create'; parent: string; name: string }
+  /** 重命名（同目录内改名，`name` 单层） */
+  | { op: 'rename'; path: string; name: string }
+  /** 批量重命名：`base (1).ext`、`base (2).ext`…（保留各自的扩展名） */
+  | { op: 'batchRename'; paths: string[]; base: string }
+  /** 复制到目录 `to`（重名报错；跨盘走同一套递归实现） */
+  | { op: 'copy'; path: string; to: string }
+  /** 移动到目录 `to`（同盘 rename，跨盘回退成复制 + 删除） */
+  | { op: 'move'; path: string; to: string }
+  /** 移到回收站（可还原） */
+  | { op: 'trash'; path: string }
+  /** 彻底删除（不进回收站，弹窗里要二次确认） */
+  | { op: 'delete'; path: string }
+  /** 从回收站还原（`id` 是 `FmTrashItem.id`） */
+  | { op: 'restore'; id: string }
+  /** 把回收站里的**某一项**彻底删掉（回收站模式下删的就是它，与 `delete` 分开：那条的
+   *  `path` 是用户文件路径，不允许指进回收站内部） */
+  | { op: 'deleteTrash'; id: string }
+  /** 清空回收站（彻底删掉里面所有东西） */
+  | { op: 'emptyTrash' }
+  /** 覆盖写一个文本文件（预览里就地编辑） */
+  | { op: 'write'; path: string; content: string }
+  /** 把选中的若干项打成一个 zip（`to` 是**目标压缩包的绝对路径**） */
+  | { op: 'compress'; paths: string[]; to: string }
+  /** 解压到目录 `to`（zip / tar / tar.gz / tgz / gz） */
+  | { op: 'extract'; path: string; to: string };
+
+/** 所有改动动作的应答 */
+export interface FmOpResult {
+  /** 受影响的绝对路径（新建出来的 / 改名后的 / 解压出来的目录），界面据此刷新并选中 */
+  paths?: string[];
+  /** 因过大 / 数量超限被跳过的条目数（压缩时会有） */
+  skipped?: number;
+  /** 人话补充（如「跨盘移动较慢」），没有就不带 */
+  message?: string;
+}
+
+/** `POST /api/files/upload` 的请求体：一个文件一次（客户端按文件循环，进度才有意义） */
+export interface FmUploadInput {
+  /** 目标**目录**绝对路径 */
+  dir: string;
+  /** 文件名（单层；上传文件夹时由客户端先建好目录再逐个传） */
+  name: string;
+  /** 文件字节的 base64 */
+  dataBase64: string;
+  /**
+   * 目标已存在时是否覆盖。缺省 false —— 服务端回 **409**，把「要不要覆盖」交给用户，
+   * 绝不静默盖掉同名文件（与工作区上传同一条口径）。
+   */
+  overwrite?: boolean;
+}
+
+/** 回收站里的一项 */
+export interface FmTrashItem {
+  /** 回收站内的条目 id（还原 / 彻底删除都用它） */
+  id: string;
+  /** 原始文件名 */
+  name: string;
+  /** 删之前它在哪（还原回原位；同名的已存在时服务端会加后缀） */
+  originalPath: string;
+  /** 删除时间（毫秒时间戳） */
+  deletedAt: number;
+  isDir: boolean;
+  /** 文件字节数；目录为 0 */
+  size: number;
+}
+
+/** `GET /api/files/trash` 的应答 */
+export interface FmTrashResult {
+  items: FmTrashItem[];
+}
+
+/** 压缩包里的一个条目 */
+export interface FmArchiveEntry {
+  /** 归档内的相对路径（`a/b.txt`，目录以 `/` 结尾） */
+  name: string;
+  /** 解压后字节数（目录为 0） */
+  size: number;
+  isDir: boolean;
+}
+
+/** `GET /api/files/archive` 的应答 */
+export interface FmArchiveResult {
+  path: string;
+  /** `zip` / `tar` / `tar.gz` / `gz` */
+  format: string;
+  entries: FmArchiveEntry[];
+  /** 条目过多只列了前 N 条 */
+  truncated?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// 系统监控 + 任务管理器（进程清单 / 结束进程）
+// ---------------------------------------------------------------------------
+//
+// 与上面那套 `SystemSnapshot` **刻意分成两组类型**，理由和「本机 vs SSH 主机」那组一样：
+// - 采集通路不同：`SystemSnapshot` 来自常驻采样器（`node:os`，零子进程，每 2s 一帧，
+//   服务状态栏那颗徽标）；这里来自**按需**的进程表读取（POSIX 走一次 `ps`，Windows 走
+//   一次 PowerShell + CIM 查询），只在任务管理器标签打开时才有请求；
+// - 字段不同：进程表要 pid / ppid / 命令行 / 累计 CPU 时间这些「采样器不采也采不到」的
+//   东西；而采样器那份的每核占用、磁盘、fizz 自身进程这里也不必再重复一份（面板自己去读
+//   `/api/system`）。
+// 硬凑成一套的话，两边都会拖着一堆恒为 null 的字段，读的人分不清「没采到」和「这个概念
+// 在对面不存在」。
+
+/**
+ * 进程状态的**归一档**。
+ *
+ * 各平台的原始状态码完全不可移植（Linux `Ssl` / `R` / `D` / `Z`，Windows 的
+ * `Running` / `Not Responding` / `Unknown`），所以服务端先压成这几档，界面只认这几档
+ * 上色。原始码另给一份（`rawState`）放悬停提示 —— 想深究的人还能看到。
+ */
+export type SystemTaskState = 'running' | 'sleeping' | 'stopped' | 'zombie' | 'unknown'
+
+/** 进程表里的一行 */
+export interface SystemTaskProcess {
+  pid: number;
+  /**
+   * 父进程 pid。
+   *
+   * Windows 从 `Win32_Process.ParentProcessId` 取，POSIX 从 `ps` 的 `ppid` 列取 —— 两边
+   * 都是实的。唯一的例外是 Windows 的**降级模式**（PowerShell 起不来，退到 `tasklist`），
+   * 那时恒为 0。
+   */
+  ppid: number;
+  /** 进程名（POSIX 取命令行首段的 basename；Windows 是 `Win32_Process.Name`，带 `.exe`） */
+  name: string;
+  /** 完整命令行（Windows 走 CIM 时也有；降级模式下为空串） */
+  cmdline: string;
+  /**
+   * 运行这个进程的用户名。
+   *
+   * ⚠️ **Windows 上恒为空串**：`Win32_Process` 没有这个属性，只能逐进程调
+   * `GetOwner()`（几百次 WMI 来回，比整个采集慢一个量级），不值当。界面遇到空串显示 `—`。
+   */
+  user: string;
+  /**
+   * 瞬时 CPU 占用，**单核 100% 为满**（与 `top` / 任务管理器同口径）。
+   *
+   * 一个开满 8 线程的进程可以显示 700%+ —— 这是刻意的：归一成 0–100 会让「一个进程吃满
+   * 所有核」和「8 个进程各吃满一个核」看起来一样。
+   * 首帧没有基准时为 0（此时 `SystemTaskList.windowMs === 0`）。
+   */
+  cpuPercent: number;
+  /** 常驻内存（字节） */
+  rss: number;
+  /** 占物理内存百分比 0–100 */
+  memPercent: number;
+  /** 累计 CPU 时间（秒，进程整个生命周期的和） */
+  cpuSeconds: number;
+  state: SystemTaskState;
+  /** 平台原始状态码（悬停提示用） */
+  rawState: string;
+  /**
+   * 是不是**承载界面的 fizz 自己这个进程**。
+   *
+   * 界面要标记它，并且**不允许**从这里结束它 —— 那等于把用户脚下的地板锯掉：界面立刻
+   * 失联，得回命令行手动重启。服务端也会再挡一次。
+   */
+  self: boolean;
+}
+
+/** 网卡合计速率（只有 Linux 读得到，见 `SystemTaskList.net`） */
+export interface SystemTaskNet {
+  /** 下行字节/秒（自上次采样以来） */
+  rxPerSec: number;
+  /** 上行字节/秒 */
+  txPerSec: number;
+  /** 累计收到字节 */
+  rxTotal: number;
+  /** 累计发出字节 */
+  txTotal: number;
+}
+
+/** `GET /api/system/tasks` 的应答 */
+export interface SystemTaskList {
+  /** 采样时间（Date.now()） */
+  at: number;
+  /**
+   * 采集后端（诊断用）：`ps`（Linux / macOS）、`cim`（Windows，PowerShell + WMI）、
+   * `tasklist`（Windows 降级：PowerShell 不可用时）。
+   *
+   * 放进应答而不是只写日志：不同后端能给的字段不一样（见各字段的 ⚠️），出了问题第一句话
+   * 就是「你这台机器走的是哪条路」。
+   */
+  source: string;
+  /**
+   * 这次 `cpuPercent` 的统计窗口（毫秒）。**0 = 没有基准**（首次采样还没有第二帧），
+   * 此时所有 `cpuPercent` 都是 0，界面该显示「—」而不是一片 0.0% 冒充真值。
+   */
+  windowMs: number;
+  /** 物理内存总量（字节）——`memPercent` 的分母，界面也要显示 */
+  memTotal: number;
+  /** 逻辑核心数（`cpuPercent` 的上限 = `cores × 100`） */
+  cores: number;
+  /** 进程总数（可能大于 `processes.length`，见 `truncated`） */
+  total: number;
+  /** 条目太多只回了前 N 条（上限见服务端 `MAX_PROCESSES`） */
+  truncated: boolean;
+  /**
+   * 进程清单，**已按 CPU 降序**（服务端排的）。
+   *
+   * 服务端排序是为了「就算前端只是原样渲染，最该看的也在最上面」；界面换排序方式
+   * （内存 / pid / 名称）是在这上面**再排一次**，不回头问服务端 —— 一次几百条，重排是
+   * 内存操作，没必要多一个请求。
+   */
+  processes: SystemTaskProcess[];
+  /** 网卡合计速率；当前平台读不到为 null（非 Linux 一律 null，见服务端说明） */
+  net: SystemTaskNet | null;
+  /** 降级 / 平台限制说明（一句话，界面在工具栏旁灰字显示），无则省略 */
+  note?: string;
+}
+
+/** `POST /api/system/tasks/kill` 的请求体 */
+export interface SystemTaskKillInput {
+  pid: number;
+  /**
+   * `term`（缺省）= 请它自己退（POSIX `SIGTERM`，Windows `taskkill` 不加 `/F`）；
+   * `kill` = 强杀（`SIGKILL` / `taskkill /F`）。
+   *
+   * 默认走 `term`：给进程一个收尾（落盘、关连接）的机会。Windows 上的控制台程序往往
+   * 不理 `taskkill` 的软请求，那时界面会提示「改成强制结束」。
+   */
+  mode?: 'term' | 'kill';
+  /** 连子进程一起（POSIX 按 ppid 递归、由深到浅；Windows 交给 `taskkill /T`） */
+  tree?: boolean;
+}
+
+/** `POST /api/system/tasks/kill` 的应答（**业务失败也是 200**，原因见 `error`） */
+export interface SystemTaskKillResult {
+  pid: number;
+  /** 信号是否真的下出去了（进程已退出 / 没权限 / 被保护 = false） */
+  ok: boolean;
+  /** 实际下了信号的 pid 列表（`tree: true` 时是整棵子树，由深到浅） */
+  killed: number[];
+  /** 失败原因（人能读懂的一句话） */
+  error?: string;
 }

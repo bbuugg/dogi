@@ -1,0 +1,56 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    /*
+     * `node` 是**故意加的**（与 web / mobile 一致）：`vite.config.ts` 要 `process` /
+     * `node:fs`，而 `@fizz/agent-kit` 也用 `import type` 引用 Node-only 包拿域类型。
+     */
+    "types": ["vite/client", "node"],
+    "strict": true,
+    /* 手机版外壳源码来自 Next 版，未开此严格项；这里跟着关掉，否则会去挑它们的刺 */
+    "noUnusedLocals": false,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "useDefineForClassFields": true,
+    "noEmit": true,
+    "paths": {
+      /*
+       * ⚠️ `@/*` 指向**手机版**的 `src/`，不是本 app 的。
+       *
+       * 本扩展的界面就是手机版那一套（`apps/mobile/src/app`，见 README 的「为什么是引用
+       * 手机版」）：`App` / `AppProvider` / `AppShell` / `PanelView` / `ConnectGate` 全都
+       * 直接复用，一行副本都不留。而手机版的内部 import 写的就是 `@/app/...`，所以这条
+       * 别名必须落在它那儿，扩展自己的源码用相对路径（`./host`、`./server-url`）。
+       *
+       * `@/server-url` 是例外：那一个文件换成本 app 自己的（见 `src/server-url.ts` 的
+       * 说明），TS 的 `paths` 取最长前缀匹配，所以这一条写在 `@/*` 前面/后面都能命中。
+       */
+      "@/server-url": ["./src/server-url.ts"],
+      "@/*": ["../mobile/src/*"],
+      "@fizz/agent-kit/*": ["../../packages/agent-kit/src/*"],
+      "@fizz/agent-kit": ["../../packages/agent-kit/src/index.ts"],
+      "@fizz/ui/*": ["../../packages/ui/src/*"],
+      "@fizz/ui": ["../../packages/ui/src/index.ts"],
+      "@fizz/agent-client/*": ["../../packages/agent-client/src/*"],
+      "@fizz/agent-client": ["../../packages/agent-client/src/index.ts"],
+      "@fizz/contracts/types": ["../../packages/contracts/src/types.ts"],
+      "@fizz/contracts/agent-api": ["../../packages/contracts/src/agent-api.ts"],
+      "@fizz/contracts/workspace-config": ["../../packages/contracts/src/workspace-config.ts"],
+      "@fizz/contracts": ["../../packages/contracts/src/index.ts"],
+      "@fizz/i18n": ["../../packages/i18n/src/index.ts"],
+      "@fizz/acp": ["../../packages/acp/src/index.ts"],
+      "@fizz/git": ["../../packages/git/src/index.ts"],
+      "@fizz/mcp": ["../../packages/mcp/src/index.ts"],
+      "@fizz/mcp/types": ["../../packages/mcp/src/types.ts"],
+      "@fizz/shells": ["../../packages/shells/src/index.ts"],
+      "@fizz/skills": ["../../packages/skills/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*", "vite.config.ts"]
+}

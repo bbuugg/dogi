@@ -611,16 +611,9 @@ export default {
       ctx.inject(['uploads'], (c) => {
         // 没配齐就不注册：`urlPrefixes` 为空会当场抛错，那会把整个插件的挂载带崩
         if (missing.length > 0) {
-          c.logger.warn(
-            `[oss] 还不完整（缺 ${missing.join('、')}），暂不作为附件上传提供商 —— ` +
-              '在 设置 →「插件」里补齐后，下一次上传即可用'
-          )
           return
         }
         if (!validPublicBase(settings.publicBaseUrl)) {
-          c.logger.warn(
-            `[oss] publicBaseUrl「${settings.publicBaseUrl}」不是合法的 https 前缀，暂不作为附件上传提供商`
-          )
           return
         }
         c.uploads.register({

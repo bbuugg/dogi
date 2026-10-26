@@ -48,7 +48,7 @@ export function StatusBar({
   actions?: ReactNode
 }) {
   return (
-    <footer className="flex h-9 shrink-0 items-center gap-0.5 px-2 py-1">
+    <footer className="flex h-8 shrink-0 items-center gap-0.5 px-2 py-1">
       {/* 全局菜单：位置恒定在最左 */}
       <SidebarMenu
         app={app}
