@@ -291,7 +291,7 @@ export function ManageWorktreeDialog({
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
+          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
             {tr('取消')}
           </Button>
           <Button disabled={!workspace || !selected || busy} onClick={() => void submit()}>

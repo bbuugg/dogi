@@ -341,7 +341,7 @@ export function ImportConversationDialog({
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
+          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
             {tr('取消')}
           </Button>
           <Button disabled={!agentId || selectedCount === 0 || busy} onClick={() => void submit()}>

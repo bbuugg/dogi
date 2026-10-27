@@ -955,7 +955,7 @@ function KillDialog({
         </label>
 
         <DialogFooter>
-          <Button variant="outline" size="sm" onClick={onCancel}>
+          <Button variant="ghost" size="sm" onClick={onCancel}>
             取消
           </Button>
           <Button

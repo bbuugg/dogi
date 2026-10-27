@@ -65,3 +65,21 @@ export function clearChatDraft(key: string): void {
     // 同上：删不掉也不影响当前会话
   }
 }
+
+/**
+ * 这一轮的草稿该不该收：把提交时的正文和输入框**当前**的值比一次。
+ *
+ * ## 两边都要 trim
+ *
+ * 提交出去的是 trim 过的正文，而输入框里留着的往往还带**尾随空格 / 换行** ——
+ * 敲完顺手回车、粘贴的文本自带结尾换行、输入法上屏再补一记空格，都会留下尾巴。
+ * 早先这里拿「原文 === trim 后的正文」直接比，于是这些情况一律被判成「用户又改过」，
+ * 草稿就**不收**：消息明明发出去了，输入框里却还留着那一份（用户报的「有时候消息
+ * 发出去了消息框没清空」）。
+ *
+ * 真正要守的语义只有一条：**用户在提交之后又敲了实际内容就别抹掉**。只差空白不算。
+ */
+export function shouldClearChatDraft(current: string, submitted: string): boolean {
+  return current.trim() === submitted.trim()
+}
+

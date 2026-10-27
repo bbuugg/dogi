@@ -469,7 +469,7 @@ export function ScriptsPanel() {
             }}
           />
           <DialogFooter>
-            <Button variant="outline" onClick={() => setGroupEdit(null)}>
+            <Button variant="ghost" onClick={() => setGroupEdit(null)}>
               取消
             </Button>
             <Button disabled={!groupEdit?.name.trim()} onClick={() => void submitGroupEdit()}>
@@ -512,7 +512,7 @@ export function ScriptsPanel() {
               : '不勾选时，组内脚本会移到「未分组」。'}
           </p>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setPendingGroupDelete(null)}>
+            <Button variant="ghost" onClick={() => setPendingGroupDelete(null)}>
               取消
             </Button>
             <Button variant="destructive" onClick={() => void confirmGroupDelete()}>

@@ -13,6 +13,7 @@ import {
   sendableAttachments,
   type ChatAttachment,
 } from "@fizz/agent-kit/shared/lib/attachments";
+import { shouldClearChatDraft } from "@fizz/agent-kit/shared/lib/chat-draft";
 import { type MessageQuote } from "@fizz/agent-kit/shared/lib/quotes";
 import type { SlashCommandContext } from "@fizz/agent-kit/shared/lib/slash-commands";
 import {
@@ -174,7 +175,10 @@ export function useMainComposerProps(
    * 回填兜底也一并去掉：只有真发出去才会调用这里，不需要「先清再还」。
    */
   const clearDraftAfterStarted = (draft: string): void => {
-    if (latestDraftRef.current === draft) textInput.clear();
+    // 比的是**两边都 trim 过**的内容：提交出去的是 trim 后的正文，而输入框里往往还留着
+    // 尾随空格 / 换行（顺手回车、粘贴带换行、输入法上屏）—— 直接比原文会判成「用户又改过」，
+    // 于是消息发出去了、输入框却没清空。判据见 `shouldClearChatDraft`。
+    if (shouldClearChatDraft(latestDraftRef.current, draft)) textInput.clear();
   };
 
   return {

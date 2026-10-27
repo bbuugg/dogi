@@ -5,7 +5,7 @@
  * 所以把几条边界钉住。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { clearChatDraft, loadChatDraft, saveChatDraft } from './chat-draft'
+import { clearChatDraft, loadChatDraft, saveChatDraft, shouldClearChatDraft } from './chat-draft'
 
 const PREFIX = 'fizz.agent.chat.draft.v1:'
 
@@ -77,5 +77,28 @@ describe('chat-draft', () => {
     expect(() => saveChatDraft('conv-a', '写不进去')).not.toThrow()
     expect(loadChatDraft('conv-a')).toBeNull()
     expect(() => clearChatDraft('conv-a')).not.toThrow()
+  })
+})
+
+describe('shouldClearChatDraft', () => {
+  it('提交后没动过 → 收草稿', () => {
+    expect(shouldClearChatDraft('docker ps', 'docker ps')).toBe(true)
+  })
+
+  it('只差尾随空白 / 换行 → 仍然收（用户报的「发出去了框没清空」）', () => {
+    expect(shouldClearChatDraft('docker ps ', 'docker ps')).toBe(true)
+    expect(shouldClearChatDraft('docker ps\n', 'docker ps')).toBe(true)
+    expect(shouldClearChatDraft('  docker ps\n\n', 'docker ps')).toBe(true)
+    expect(shouldClearChatDraft('\ndocker ps', 'docker ps')).toBe(true)
+  })
+
+  it('提交后真的又敲了字 → 保留（不能抹掉用户新写的内容）', () => {
+    expect(shouldClearChatDraft('docker ps -a', 'docker ps')).toBe(false)
+    expect(shouldClearChatDraft('next', 'docker ps')).toBe(false)
+  })
+
+  it('用户把内容全删了再发一遍 → 收草稿', () => {
+    expect(shouldClearChatDraft('', '')).toBe(true)
+    expect(shouldClearChatDraft('   ', '')).toBe(true)
   })
 })

@@ -540,6 +540,60 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
 export type AgentApp = ReturnType<typeof agentAppFrom>;
 
 /**
+ * 登录失效的「收口窗口」（毫秒）。
+ *
+ * ## 为什么需要一个窗口，而不是清一次就完
+ *
+ * 401 钩子在**响应到达的那一刻**同步跑；而同一批并发请求的 reject 是**之后**才陆续落到各自的
+ * `catch` 里的 —— 连接后的 `refresh()` 一次并发二十来个 GET，加上各面板自己的首屏加载，
+ * 每一个失败的分支都会弹一条自己的话（「刷新失败：未授权：请重新登录」「读取文件失败：…」）。
+ * 它们分散在后续好几拍微任务 / 宏任务里，**清一次必然被下一拍重新填满**（实测反馈：被踢回
+ * 登录页时头顶挂着一整屏 toast，而那一屏已经没有任何上下文解释它们）。
+ *
+ * 所以在窗口内每一拍都 `dismiss()` 清场，只在**最后一拍**落我们自己那一条。400ms 足够盖住
+ * 那一批请求的尾随 catch，又短到用户不会觉得「卡了一下才提示」。
+ */
+const SESSION_EXPIRED_SWEEP_MS = [0, 60, 180, 400] as const;
+
+/** 固定 id：窗口内再来几条 401 也只是把同一条顶到最新，不会叠成一摞 */
+const SESSION_EXPIRED_TOAST_ID = "fizz-session-expired";
+
+/** 当前窗口的定时器：新一批 401 到达时要先撤掉旧的，否则两条时间线会互相抢着 dismiss */
+let sessionExpiredTimers: number[] = [];
+
+/** 撤掉正在跑的收口窗口（重开一个之前 / 组件卸载时都要调） */
+function clearSessionExpiredWindow(): void {
+  for (const timer of sessionExpiredTimers) window.clearTimeout(timer);
+  sessionExpiredTimers = [];
+}
+
+/**
+ * 清场 + 只留一条「登录已过期」。
+ *
+ * 只由 401 钩子调用。重复调用是安全的：撤掉上一轮窗口、重新开一个（`disconnect()` 本身幂等）。
+ */
+function announceSessionExpired(): void {
+  clearSessionExpiredWindow();
+  toast.dismiss();
+  const lastIndex = SESSION_EXPIRED_SWEEP_MS.length - 1;
+  SESSION_EXPIRED_SWEEP_MS.forEach((delay, index) => {
+    sessionExpiredTimers.push(
+      window.setTimeout(() => {
+        // 这一拍里各调用方自己的 catch 可能刚弹完，一起收掉
+        toast.dismiss();
+        if (index !== lastIndex) return;
+        sessionExpiredTimers = [];
+        toast.error("登录已过期，请重新登录", {
+          id: SESSION_EXPIRED_TOAST_ID,
+          // 自动消失：登录页上不该留一条要用户手动关的提示
+          duration: 6000,
+        });
+      }, delay),
+    );
+  });
+}
+
+/**
  * 应用级视图：绑定**当前活跃会话**，并承担全部全局副作用。
  *
  * 这是唯一的「副作用宿主」—— 状态 WS 订阅、连接后全量对账、401 收场、从后台回来
@@ -575,28 +629,17 @@ export function useAgentApp(): AgentApp {
        */
       useAgentStore.getState().disconnect();
       /**
-       * 401 是「整条连接作废」，不是某一次请求的事 —— 而同一时刻在飞的请求（连接后的
-       * `refresh()` 一次并发二十来个 GET，加上各个面板自己的首屏加载）会**各自**弹一条
-       * 报错，且都是 `duration: Infinity`（错误不该自己消失）。谁也不负责收，于是用户被
-       * 踢回登录页时头顶挂着一串「未授权：请重新登录」—— 那一屏已经没有任何上下文解释它们。
-       *
-       * 所以在这里一次性收口：先全清，再补一条说得清的话（自动消失，不占登录页）。
+       * 收口交给 `announceSessionExpired()`（见它上面的注释）：单个 `dismiss()` 只能清掉
+       * **此刻**已经弹出来的那些，而同一批请求的尾随 catch 会在后面几拍继续弹 —— 所以那边
+       * 用一个 400ms 的窗口反复清，最后只留一条。
        */
-      toast.dismiss();
-      /**
-       * 同一批请求的 reject 是在**同一轮微任务**里陆续回调的：上面那次 dismiss 之后，
-       * 后面几条「未授权」还会再弹出来（面板自己的首屏加载各自 catch 一次）。所以再排一个
-       * 微任务兜尾 —— 它排在那一批之后，能把尾巴一起收掉。
-       */
-      queueMicrotask(() => {
-        toast.dismiss();
-        toast.error("登录已过期，请重新登录", {
-          id: "fizz-session-expired",
-          duration: 6000,
-        });
-      });
+      announceSessionExpired();
     });
-    return () => setUnauthorizedHandler(null);
+    return () => {
+      setUnauthorizedHandler(null);
+      // 卸载（换会话 / 换宿主）时把在跑的窗口撤掉，别让定时器在已经没界面的地方弹 toast
+      clearSessionExpiredWindow();
+    };
   }, []);
 
   /**

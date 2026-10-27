@@ -256,7 +256,7 @@ export function GitCloneDialog({
           */}
           {busy ? (
             <>
-              <Button variant="outline" disabled={canceling} onClick={cancel}>
+              <Button variant="ghost" disabled={canceling} onClick={cancel}>
                 {canceling ? <Loader2 className="size-4 animate-spin" /> : null}
                 {tr('取消克隆')}
               </Button>
@@ -266,7 +266,7 @@ export function GitCloneDialog({
             </>
           ) : (
             <>
-              <Button variant="outline" onClick={() => onOpenChange(false)}>
+              <Button variant="ghost" onClick={() => onOpenChange(false)}>
                 {tr('取消')}
               </Button>
               <Button disabled={!canSubmit} onClick={submit}>

@@ -83,3 +83,78 @@ export function computeSuggestions(input: string, historyCmds: string[]): string
 export function isTrackableInput(data: string): boolean {
   return data.length > 0 && !/[\u0000-\u001f\u007f]/.test(data)
 }
+
+// ---------------------------------------------------------------------------
+// 命令行跟踪（带光标位置）
+// ---------------------------------------------------------------------------
+
+/**
+ * 本地跟踪的一条命令行：**文本 + 光标偏移**。
+ *
+ * 为什么必须有光标：预测的历史是「用户敲的行首前缀」，而 shell 的行编辑允许把光标挪到
+ * 中间改字。以前这里只存一段字符串，方向键一到就**整段清空**（当成不可跟踪的控制输入），
+ * 于是「左移进 `docker ps` 中间 → 删掉一个字符 → 再敲回去」之后，缓冲里只剩下最后敲的
+ * 那个字符 —— 预测拿着 `r` 去套历史，给出的当然是 `rm` / `rsync` 这类毫不相干的建议。
+ * 跟踪光标之后，这一整类「在行中间编辑」的场景都能正确累积。
+ */
+export interface InputLine {
+  /** 已敲入的整行文本（不含光标） */
+  text: string
+  /** 光标位置（0..text.length）。只在 `caret === text.length` 时才允许多行尾补全 */
+  caret: number
+}
+
+/** 空行（清空跟踪时的唯一常量，避免各处新建对象） */
+export const EMPTY_INPUT_LINE: InputLine = { text: '', caret: 0 }
+
+/** 夹到 [0, text.length] */
+function clampCaret(line: InputLine, caret: number): number {
+  return Math.min(Math.max(caret, 0), line.text.length)
+}
+
+/**
+ * 把一段输入事件套用到跟踪行上。返回 **null** = 这段输入无法在本地复现
+ * （Ctrl 组合键、Tab、历史召回、粘贴里的换行…），调用方必须清空跟踪并收起建议。
+ *
+ * 只认**在提示符上编辑命令行**的那几个键：左右方向键、Home/End、退格、Delete、
+ * 可打印文本。别的控制序列一律 null —— 宁可清空重来，也不要猜错（猜错的表现是
+ * 预测拿一条根本不存在的行去套历史）。
+ *
+ * ⚠️ 方向键在**应用光标模式**下是 `\x1bOD` / `\x1bOC`（DECCKM，vim / tmux 会开）。
+ * 两种写法都按同一次光标移动处理：行内编辑的语义没有区别。
+ */
+export function trackInputLine(line: InputLine, data: string): InputLine | null {
+  // 光标移动：不改文本，只挪位置
+  if (data === '\x1b[D' || data === '\x1bOD') {
+    return { text: line.text, caret: clampCaret(line, line.caret - 1) }
+  }
+  if (data === '\x1b[C' || data === '\x1bOC') {
+    return { text: line.text, caret: clampCaret(line, line.caret + 1) }
+  }
+  // 行首 / 行尾：Home = \x1b[H / \x1b[1~ / Ctrl+A，End = \x1b[F / \x1b[4~ / Ctrl+E
+  if (data === '\x1b[H' || data === '\x1b[1~' || data === '\x01') {
+    return { text: line.text, caret: 0 }
+  }
+  if (data === '\x1b[F' || data === '\x1b[4~' || data === '\x05') {
+    return { text: line.text, caret: line.text.length }
+  }
+  // 退格：删光标**前**一个字符
+  if (data === '\x7f' || data === '\x08') {
+    if (line.caret === 0) return line
+    const text = line.text.slice(0, line.caret - 1) + line.text.slice(line.caret)
+    return { text, caret: line.caret - 1 }
+  }
+  // Delete（\x1b[3~）：删光标**处**那个字符
+  if (data === '\x1b[3~') {
+    if (line.caret >= line.text.length) return line
+    const text = line.text.slice(0, line.caret) + line.text.slice(line.caret + 1)
+    return { text, caret: line.caret }
+  }
+  // 可打印文本：插在光标处（粘贴一段也照此处理）
+  if (isTrackableInput(data)) {
+    const text = line.text.slice(0, line.caret) + data + line.text.slice(line.caret)
+    return { text, caret: line.caret + data.length }
+  }
+  return null
+}
+

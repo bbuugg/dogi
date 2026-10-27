@@ -4,6 +4,7 @@ import { CheckIcon, ChevronRightIcon, CircleIcon } from "lucide-react"
 import { DropdownMenu as DropdownMenuPrimitive } from "radix-ui"
 import { useDismissFocusGuard } from "./focus-dismiss"
 import { resolveCollisionPadding } from "./safe-area"
+import { stopPortalClick } from "./portal-click-guard"
 
 function DropdownMenu({
   ...props
@@ -36,6 +37,7 @@ function DropdownMenuContent({
   onPointerDown,
   onPointerDownOutside,
   onCloseAutoFocus,
+  onClick,
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.Content>) {
   // 指针关闭不回焦（否则触发器会被 :focus-visible 描成主色边框），见 focus-dismiss.ts
@@ -47,6 +49,12 @@ function DropdownMenuContent({
         data-slot="dropdown-menu-content"
         sideOffset={sideOffset}
         collisionPadding={resolveCollisionPadding(props.collisionPadding)}
+        // 菜单项上的点击**不往挂载它的那一行冒**（React 的事件沿 React 树走，portal 也照冒），
+        // 否则「侧栏项目行 → 更多 → 点菜单项」会先把那一行点了（跳去新建会话页）。见 portal-click-guard.ts
+        onClick={(event) => {
+          stopPortalClick(event)
+          onClick?.(event)
+        }}
         onPointerDown={(event) => {
           dismissFocus.markPointer()
           onPointerDown?.(event)
@@ -244,6 +252,7 @@ function DropdownMenuSubTrigger({
 
 function DropdownMenuSubContent({
   className,
+  onClick,
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.SubContent>) {
   // 子菜单没有 `onCloseAutoFocus`（Radix 的 SubContent 不挂 FocusScope），
@@ -252,6 +261,11 @@ function DropdownMenuSubContent({
     <DropdownMenuPrimitive.SubContent
       {...props}
       data-slot="dropdown-menu-sub-content"
+      // 同 Content：子菜单也是 portal，点击不冒到外面那一行
+      onClick={(event) => {
+        stopPortalClick(event)
+        onClick?.(event)
+      }}
       className={cn(
         // 子菜单面板与主面板同一套观感（浅边框 + 大圆角 + 投影）
         "z-50 min-w-[8rem] origin-(--radix-dropdown-menu-content-transform-origin) overflow-hidden rounded-xl border border-border bg-popover p-1 text-popover-foreground data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95",

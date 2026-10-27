@@ -15,10 +15,12 @@
  */
 import { memo, useEffect, useRef, useState, type ReactNode } from 'react'
 import { CheckCircle2, Circle, FileText, ImageOff, Loader2, RefreshCw } from 'lucide-react'
+import { toast } from 'sonner'
 import { ImageViewer } from '@fizz/ui/image-viewer'
 import { SpinnerButton } from '@fizz/ui/spinner-button'
 import type { ToolUIPart } from 'ai'
 import { useStickToBottom } from 'use-stick-to-bottom'
+import { saveImageLocally } from '@fizz/agent-kit/shared/lib/image-download'
 import { AskFollowupCard } from '@fizz/agent-kit/shared/ai-elements/followup-card'
 import { useConversationOptional } from '@fizz/agent-kit/shared/ai-elements/conversation'
 import { MessageResponse } from '@fizz/agent-kit/shared/ai-elements/message'
@@ -1032,6 +1034,11 @@ export const PartView = memo(
  * 图片的 src 统一经 `loadMediaObjectUrl` 解析：web 同源直用；desktop 没有服务端口，
  * 走 IPC 桥 fetch 成 blob objectURL。加载失败给一个明确的占位（不吞错误）。
  * PDF 渲染成文件 chip（浏览器里直接内嵌 PDF 预览的收益小、泄露面大 —— 只展示文件名）。
+ *
+ * 图片点开的是共享的 `ImageViewer`（全屏缩放 / 旋转 / 平移）。它的下载按钮是**按需渲染**的
+ * —— 不传 `onDownload` 就没有那颗按钮，所以消息附件以前只能看不能存。这里把下载接上：
+ * `src` 已经是可 fetch 的地址（web 同源 / desktop 的 `blob:`），落盘与 Markdown 正文里的图
+ * 走同一份实现（`saveImageLocally`），文件名用附件自己的 `name`（带扩展名就原样用）。
  */
 function FilePartView({ part }: { part: Extract<AgentMessagePart, { type: 'file' }> }) {
   const tr = useT()
@@ -1040,6 +1047,8 @@ function FilePartView({ part }: { part: Extract<AgentMessagePart, { type: 'file'
   const [failed, setFailed] = useState(false)
   /** 全屏查看器开关：点图打开 */
   const [zoomOpen, setZoomOpen] = useState(false)
+  /** 下载中去抖：blob 往返期间禁掉按钮，免得连点叠出多个下载 */
+  const [downloading, setDownloading] = useState(false)
 
   useEffect(() => {
     if (!isImage) return
@@ -1074,6 +1083,16 @@ function FilePartView({ part }: { part: Extract<AgentMessagePart, { type: 'file'
       </span>
     )
   }
+  const download = (): void => {
+    if (downloading) return
+    setDownloading(true)
+    void saveImageLocally(src, { name: part.name, mime: part.mediaType })
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err)
+        toast.error(tr('下载失败：{error}', { error: msg }))
+      })
+      .finally(() => setDownloading(false))
+  }
   return (
     <>
       <img
@@ -1082,7 +1101,13 @@ function FilePartView({ part }: { part: Extract<AgentMessagePart, { type: 'file'
         onClick={() => setZoomOpen(true)}
         className="max-h-60 max-w-64 cursor-zoom-in rounded-lg border border-border object-cover"
       />
-      <ImageViewer src={src} alt={part.name} open={zoomOpen} onOpenChange={setZoomOpen} />
+      <ImageViewer
+        src={src}
+        alt={part.name}
+        open={zoomOpen}
+        onOpenChange={setZoomOpen}
+        onDownload={download}
+      />
     </>
   )
 }

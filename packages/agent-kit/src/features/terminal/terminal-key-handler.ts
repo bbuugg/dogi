@@ -10,6 +10,7 @@
  */
 import type { Terminal } from '@xterm/xterm'
 import type { TerminalProcess } from '@fizz/agent-client/web-host'
+import type { InputLine } from '@fizz/agent-kit/shared/lib/terminal-prediction'
 import type { ZmodemController } from './zmodem-controller'
 
 export interface TerminalKeyHandlerOptions {
@@ -22,8 +23,8 @@ export interface TerminalKeyHandlerOptions {
   /** ZMODEM 控制器：传输中 / 排水期内 Ctrl+C 要变成「中止传输」 */
   zmodemRef: { current: ZmodemController | null }
   fontSizeRef: { current: number }
-  /** 本地输入缓冲（判断「用户这 1.2s 里有没有又敲字」，见 Ctrl+C 的延时兜底） */
-  inputBufRef: { current: string }
+  /** 本地跟踪的命令行（判断「用户这 1.2s 里有没有又敲字」，见 Ctrl+C 的延时兜底） */
+  inputBufRef: { current: InputLine }
   applyFontSize: (size: number) => void
   /** Ctrl+0：回到当前环境的缺省字号 */
   resetFontSize: () => void
@@ -124,7 +125,7 @@ export function attachTerminalKeyHandler(options: TerminalKeyHandlerOptions): vo
         if (proc?.stop) {
           window.setTimeout(() => {
             // 这期间用户可能已经又敲了新命令：只在「没有新输入」时才补这一刀
-            if (inputBufRef.current.length > 0) return
+            if (inputBufRef.current.text.length > 0) return
             proc.stop?.()
           }, 1200)
         }

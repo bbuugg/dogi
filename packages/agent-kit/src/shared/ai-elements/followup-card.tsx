@@ -151,13 +151,16 @@ function isYesNoQuestion(q: NormalizedQuestion): boolean {
  * 若只剩当前这题没答就顺移一题，保证点了有反馈），全部答完才变回「提交」。
  * 单题没有这个状态，仍是「没答 = 禁用提交」。
  *
- * ⚠️ 多题时卡片**宽高都钉成固定值**（`h-[18rem] w-[min(100%,26rem)]`）：卡片原本宽是
- * `w-fit`、高随内容 —— 一题一屏之后宽度跟着当前题的长短变、高度跟着选项多少变，
- * 翻页时卡片四周来回跳，看着像在抖。固定高度还有个副作用要处理：**内容超了得能滚**，
- * 所以题面（顶部描述行 + 题号徽标 + 题干）`shrink-0` 钉住，只有选项区
- * `grow min-h-0 overflow-y-auto` 滚 —— 题干始终看得见，选项再多也撑不破卡片。
- * 单题没有翻页抖动问题，所以只封顶（`max-h-[18rem]`），保持「内容多高就多高」的紧凑感。
- * （用 `grow` 而非 `flex-1`：`flex-basis: auto` 才能让「高度 auto + max-height」的容器
+ * ⚠️ 多题时卡片**宽度钉成固定值**（`w-[min(100%,26rem)]`），高度只给**下限**
+ * （`min-h-[18rem]`）：卡片原本宽是 `w-fit`、高随内容 —— 一题一屏之后宽度跟着当前题的
+ * 长短变，翻页时卡片左右来回跳，所以宽度钉死；高度留一个下限让短题不至于把导航条顶到
+ * 卡片中间，**超过下限就跟着内容长**。
+ *
+ * ⚠️ **选项区不滚动**（原来的 `overflow-y-auto` + 固定 `h-[18rem]` 已撤）：带滚动条时
+ * 最后一两个选项只露半行，而选项正是这张卡的全部内容 —— 用户要的是「一眼看全、直接点」，
+ * 不是「先滚一下」。选项再多也让卡片长高，高过一屏时由**消息区**自己滚（卡片在正常文档流
+ * 里，不会撑破布局）。单题那个 `max-h-[18rem]` 同理，一并去掉。
+ * （用 `grow` 而非 `flex-1`：`flex-basis: auto` 才能让「高度 auto + min-height」的容器
  * 正确按内容做内在尺寸计算，`flex-1` 的 `0%` 基准在嵌套 flex 里容易把中间层压成 0 高。）
  *
  * ⚠️ 「其他」那个自由输入框的焦点：**只有刚勾上「其他」的那一刻才聚焦**。原来靠 `autoFocus`，
@@ -283,9 +286,9 @@ function FollowupForm({
     <div
       className={cn(
         'flex flex-col rounded-lg border border-primary/30 bg-primary/5 px-3 py-2.5',
-        // 多题：宽 + 高都钉死 —— 一题一屏后若跟着内容伸缩，翻页时卡片四周会来回跳；
-        // 单题：宽度照旧跟内容，高度只封顶（见文件头「固定高度 + 内部滚动」）
-        multiple ? 'h-[18rem] w-[min(100%,26rem)]' : 'max-h-[18rem] w-fit max-w-full'
+        // 多题：宽度钉死（翻页时卡片左右不跳），高度只给下限 —— 选项多了跟着长，
+        // 不再固定 18rem + 内部滚动（见文件头「选项区不滚动」）
+        multiple ? 'min-h-[18rem] w-[min(100%,26rem)]' : 'w-fit max-w-full'
       )}
       onKeyDown={(e) => {
         if (!multiple) return
@@ -324,8 +327,8 @@ function FollowupForm({
       {note && <p className="mb-2 shrink-0 text-xs text-muted-foreground">{note}</p>}
 
       {/* 当前这一题。`key` 跟着题走 —— 换题 = 重挂载，滑入动画才会重放。
-          题面（题号徽标 + 题干）`shrink-0` 钉住不动，
-          只有下面的选项区 `overflow-y-auto` 滚 —— 题干始终看得见。 */}
+          题面（题号徽标 + 题干）与选项区都**不设高度上限**：选项全量铺开、不滚，
+          内容高过一屏时由消息区滚（见文件头「选项区不滚动」）。 */}
       <div
         key={current.id}
         className={cn(
@@ -341,7 +344,7 @@ function FollowupForm({
           {/* 题干**换行不截断**：这是用户真正要读的内容，截断等于把问题吃掉一半 */}
           <span className="min-w-0 grow break-words text-sm text-foreground">{current.question}</span>
         </div>
-        <div className="flex min-h-0 grow flex-col gap-0.5 overflow-y-auto pl-0.5">
+        <div className="flex grow flex-col gap-0.5 pl-0.5">
           {shownOptions.map((opt) => {
             const checked = (selected[current.id] ?? []).includes(opt.label)
             const Icon = current.multiSelect

@@ -20,41 +20,20 @@ import { Download, ImageOff, RotateCw } from 'lucide-react'
 import { Skeleton } from '@fizz/ui/skeleton'
 import { ImageViewer } from '@fizz/ui/image-viewer'
 import { cn } from '@fizz/agent-kit/shared/lib/utils'
-import { fetchBlob, triggerBlobDownload } from '@fizz/agent-client/download-file'
 import { getAgentHostOrNull } from '@fizz/agent-client/host'
+import { saveImageLocally } from '@fizz/agent-kit/shared/lib/image-download'
 import { fetchServerScreenshot, isServerScreenshotUrl } from '@fizz/agent-kit/shared/lib/media-url'
 import { useT } from '@fizz/agent-kit/shared/lib/language'
 
-/** 按 MIME 猜扩展名（URL 里没有可用文件名时用） */
-function extOf(mime: string): string {
-  if (mime.includes('jpeg') || mime.includes('jpg')) return 'jpg'
-  if (mime.includes('gif')) return 'gif'
-  if (mime.includes('webp')) return 'webp'
-  if (mime.includes('svg')) return 'svg'
-  return 'png'
-}
-
-/** 下载的文件名：URL 末段带像样的扩展名就用它，否则按 alt + MIME 拼一个 */
-function fileNameOf(src: string, alt: string | undefined, mime: string): string {
-  const last = new URL(src, location.href).pathname.split('/').pop() ?? ''
-  const dot = last.lastIndexOf('.')
-  if (dot > 0 && last.length - dot <= 5) return last
-  return `${(alt || last || 'image').replace(/\.[^/.]+$/, '')}.${extOf(mime)}`
-}
-
 /**
- * 下载图片：先 fetch 成 blob 再触发一次本地保存。
+ * 下载图片：blob 往返由 `saveImageLocally` 统一做（与消息附件的下载同一份实现）。
  *
- * 为什么不直接给 `<a href download>`：跨域图片上 `download` 属性会被浏览器忽略（退化成打开
- * 新标签页），聊天里的图大量来自外链 —— 必须自己过一道 blob（与 Streamdown 自带下载同思路，
- * 但它失败时开新标签页，这儿保持一致）。MIME 不可信时按 png 落盘，图片照样打得开。
+ * 拉不到时退化成**打开原图**（消息里的图大量是外链，跨域限制下这条路至少还能让用户
+ * 右键另存）。桌面端截图那份字节已经预取好了，不走兜底 —— 那时打开 `blob:` 也没有意义。
  */
 async function downloadImage(src: string, alt: string | undefined, screenshot?: Blob): Promise<void> {
   try {
-    // Desktop screenshot bytes are already available; other URLs must use the browser's fetch.
-    // The desktop host fetch strips origins, so it must never receive external image URLs or blob URLs.
-    const blob = screenshot ?? (await fetchBlob(src, { fetchImpl: globalThis.fetch }))
-    triggerBlobDownload(blob, fileNameOf(src, alt, blob.type))
+    await saveImageLocally(src, { name: alt, blob: screenshot })
   } catch {
     if (!screenshot) window.open(src, '_blank', 'noopener')
   }

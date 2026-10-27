@@ -4,6 +4,7 @@ import { ContextMenu as ContextMenuPrimitive } from "radix-ui"
 import { ChevronRightIcon, CheckIcon } from "lucide-react"
 import { useDismissFocusGuard } from "./focus-dismiss"
 import { resolveCollisionPadding } from "./safe-area"
+import { stopPortalClick } from "./portal-click-guard"
 
 function ContextMenu({
   ...props
@@ -62,6 +63,7 @@ function ContextMenuContent({
   onPointerDown,
   onPointerDownOutside,
   onCloseAutoFocus,
+  onClick,
   ...props
 }: React.ComponentProps<typeof ContextMenuPrimitive.Content> & {
   side?: "top" | "right" | "bottom" | "left"
@@ -74,6 +76,12 @@ function ContextMenuContent({
         {...props}
         data-slot="context-menu-content"
         collisionPadding={resolveCollisionPadding(props.collisionPadding)}
+        // 菜单项上的点击不冒到「被右键的那一行」（React 事件沿 React 树走，portal 也照冒）：
+        // 否则脚本卡片右键 → 点「移出分组」会连带把卡片的 onClick 跑了（打开编辑框）。见 portal-click-guard.ts
+        onClick={(event) => {
+          stopPortalClick(event)
+          onClick?.(event)
+        }}
         onPointerDown={(event) => {
           dismissFocus.markPointer()
           onPointerDown?.(event)

@@ -42,7 +42,12 @@ import {
   getTerminalScrollback,
   useTerminalScrollback
 } from '@fizz/agent-kit/shared/lib/terminal-prefs'
-import { computeSuggestions, isTrackableInput } from '@fizz/agent-kit/shared/lib/terminal-prediction'
+import {
+  computeSuggestions,
+  EMPTY_INPUT_LINE,
+  trackInputLine,
+  type InputLine
+} from '@fizz/agent-kit/shared/lib/terminal-prediction'
 import { useAgentStore } from '@fizz/agent-kit/shared/lib/stores/agent-store'
 import { useVirtualKeyBar } from '@fizz/agent-kit/shared/hooks/useVirtualKeyBar'
 import { useThemeRevision } from '@fizz/agent-kit/shared/lib/code-theme'
@@ -591,9 +596,9 @@ export function TerminalPanel({
     [historyScope, setHistoryEntries]
   )
 
-  // 预测下拉框的本地缓冲与建议状态：缓冲走 ref（按键闭包读写），建议走 state
+  // 预测下拉框的本地跟踪行与建议状态：跟踪行走 ref（按键闭包读写），建议走 state
   //（快照里带上缓冲文本：下拉框渲染要用它拆「已敲 / 待补」两段，不能在渲染期读 ref）
-  const inputBufRef = useRef('')
+  const inputBufRef = useRef<InputLine>(EMPTY_INPUT_LINE)
   const suggestionsRef = useRef<string[]>([])
   const activeIndexRef = useRef(0)
   const [suggestions, setSuggestions] = useState<{
@@ -619,7 +624,7 @@ export function TerminalPanel({
 
   /** 重置本地跟踪缓冲（Ctrl+C / 控制键 / 会话退出后，缓冲与 shell 已对不上） */
   const clearInputTracking = useCallback((): void => {
-    inputBufRef.current = ''
+    inputBufRef.current = EMPTY_INPUT_LINE
     clearSuggestions()
   }, [clearSuggestions])
 
@@ -693,16 +698,24 @@ export function TerminalPanel({
     if (suggestions) positionDropdown()
   }, [suggestions, positionDropdown])
 
-  /** 按当前输入缓冲重算建议（历史优先，常见命令兜底；预测关了直接收起） */
+  /** 按当前跟踪行重算建议（历史优先，常见命令兜底；预测关了直接收起） */
   const recomputeSuggestions = useCallback((): void => {
     // 预测随「命令历史」一起启用：没有历史作用域（容器工作台的终端）就没有历史可依，不弹
     if (!historyScope || !getTerminalCommandPrediction()) {
       clearSuggestions()
       return
     }
-    const buf = inputBufRef.current
-    const trimmed = buf.trimEnd()
-    if (!trimmed) {
+    const line = inputBufRef.current
+    const trimmed = line.text.trimEnd()
+    /**
+     * 只在**光标停在行尾**时给建议。
+     *
+     * 补全是「往回填掉还没敲的部分」：接受时是把 `建议.slice(已敲长度)` 写进 PTY，
+     * 写进去落在**光标处**。光标在行中间时这个后缀会插到句子中间（`docker ps` 光标停在
+     * `docker` 后面接受 `docker ps -a` → `docker -a ps`），与用户看到的完全不同。
+     * 所以行内编辑仍然跟踪（缓冲不丢，见 `trackInputLine`），但**不弹**建议。
+     */
+    if (!trimmed || line.caret !== line.text.length) {
       clearSuggestions()
       return
     }
@@ -710,7 +723,7 @@ export function TerminalPanel({
     const top = computeSuggestions(trimmed, historyRef.current.map((e) => e.cmd))
     suggestionsRef.current = top
     activeIndexRef.current = 0
-    setSuggestions(top.length ? { items: top, index: 0, buf } : null)
+    setSuggestions(top.length ? { items: top, index: 0, buf: line.text } : null)
   }, [clearSuggestions, historyScope])
 
   /** 切换高亮建议（Ctrl+↑/↓ 循环） */
@@ -722,7 +735,7 @@ export function TerminalPanel({
       setSuggestions({
         items: suggestionsRef.current,
         index: activeIndexRef.current,
-        buf: inputBufRef.current
+        buf: inputBufRef.current.text
       })
     },
     []
@@ -733,10 +746,10 @@ export function TerminalPanel({
     const items = suggestionsRef.current
     if (!items.length) return
     const full = items[activeIndexRef.current] ?? items[0]
-    const buf = inputBufRef.current
-    const suffix = full.slice(buf.length)
+    const typed = inputBufRef.current.text
+    const suffix = full.slice(typed.length)
     if (suffix) processRef.current?.write(suffix)
-    inputBufRef.current = full
+    inputBufRef.current = { text: full, caret: full.length }
     clearSuggestions()
   }, [clearSuggestions])
 
@@ -772,9 +785,25 @@ export function TerminalPanel({
         processRef.current?.write(data)
         return
       }
-      // 下拉框开着时只吃「接受（→）」与「Ctrl+↑/↓ 换选」这几个键；
-      // 普通 ↑/↓/← 一律放行 —— 它们是 shell 的历史与光标移动。
+      /**
+       * 下拉框开着时只吃这三个键：接受（→）、Ctrl+↑/↓ 换选、以及 **Esc 收起**。
+       * 其余（↑/↓/←）一律放行 —— 它们是 shell 的历史与光标移动。
+       *
+       * ⚠️ Esc 必须**本地吃掉、绝不转发给 shell**。
+       *
+       * 那个 `\x1b` 单字节在 bash 里是「meta 前缀」：readline 收到后会一直等下一位，
+       * 好把 `\e` + `x` 认成一个 meta 绑定。此时用户再按方向键（`\e[D`），bash 看到的
+       * 是 `\e\e` —— 没有这个绑定，于是把前两个字节当无效序列丢掉，剩下的 `[D` 当普通
+       * 字符**插进命令行**。用户看到的就是「Esc 取消预测后再按方向键，终端里冒出
+       * `[D` / `[C`」（用户报的正是这个）。预测下拉框是我们自己的 UI，收起它没有任何理由
+       * 去打扰 shell。
+       */
       if (suggestionsRef.current.length > 0) {
+        if (data === '\x1b') {
+          // 只收下拉框：跟踪行不动（shell 那一行还在，光标位置也没变）
+          clearSuggestions()
+          return
+        }
         if (data === '\x1b[C') {
           acceptSuggestion()
           return
@@ -788,25 +817,33 @@ export function TerminalPanel({
           return
         }
       }
-      // 缓冲跟踪（含回车记录历史 / 退格 / Ctrl+C 清行），随后原样交给 shell
+      // 跟踪（回车记历史 / 退格 / 方向键挪光标 / Ctrl+C 清行），随后原样交给 shell
       if (data === '\r' || data === '\n') {
-        const cmd = inputBufRef.current.trim()
+        const cmd = inputBufRef.current.text.trim()
         if (cmd) recordCommand(cmd)
         clearInputTracking()
-      } else if (data === '\x7f' || data === '\x08') {
-        inputBufRef.current = inputBufRef.current.slice(0, -1)
-        recomputeSuggestions()
-      } else if (data === '\x03') {
-        clearInputTracking()
-      } else if (!isTrackableInput(data)) {
-        clearInputTracking()
       } else {
-        inputBufRef.current += data
-        recomputeSuggestions()
+        // 认不出的输入（Tab 补全、历史召回、Ctrl 组合键…）→ trackInputLine 返回 null，
+        // 这里清空跟踪：宁可下一条重新开始，也不要拿一条和 shell 对不上的行去套历史
+        const next = trackInputLine(inputBufRef.current, data)
+        if (next) {
+          inputBufRef.current = next
+          recomputeSuggestions()
+        } else {
+          clearInputTracking()
+        }
       }
       processRef.current?.write(data)
     },
-    [recordCommand, clearInputTracking, recomputeSuggestions, acceptSuggestion, moveActive, restart]
+    [
+      recordCommand,
+      clearInputTracking,
+      clearSuggestions,
+      recomputeSuggestions,
+      acceptSuggestion,
+      moveActive,
+      restart
+    ]
   )
 
 /**
@@ -1694,7 +1731,7 @@ export function TerminalPanel({
             className="absolute z-10 max-h-56 w-80 overflow-y-auto rounded-md border border-border bg-popover/95 p-1 text-xs shadow-lg backdrop-blur"
           >
             <div className="px-2 py-1 text-muted-foreground">
-              命令预测 · → 接受 · Ctrl+↑/↓ 选择
+              命令预测 · → 接受 · Ctrl+↑/↓ 选择 · Esc 收起
             </div>
             {suggestions.items.map((item, i) => {
               const buf = suggestions.buf
