@@ -177,7 +177,7 @@ function FloatShell({ initialConversationId }: { initialConversationId?: string 
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <Toaster theme={theme} position="top-center" />
+      <Toaster theme={theme} position="bottom-right" />
       <FloatTitleBar
         projectName={projectName}
         listOpen={listOpen}

@@ -90,6 +90,18 @@ export function attachTerminalKeyHandler(options: TerminalKeyHandlerOptions): vo
         // 中断前敲了一半的命令，下一条命令的预测 / 历史记录都会串上前缀
         processRef.current?.write('\x03')
         clearInputTracking()
+        /**
+         * 视口拉回底部 —— **这一步不能省**。
+         *
+         * xterm 的 `scrollOnUserInput`（默认开）只在**它自己**收到输入时生效：
+         * `_keyDown` 里先问自定义处理器，返回 false 就 `return` 了，后面那句
+         * 「滚到底部」根本走不到；而我们是直写 PTY（`processRef.write('\x03')`），
+         * 也没经过它的 data 事件。于是「滚上去看历史 → 按 Ctrl+C」的表现是：
+         * 底部的提示符照常刷新，视角却留在上面 —— 用户以为 Ctrl+C 没生效。
+         *
+         * 只在**中断**这一支滚：有选区时那一下是「复制」，正在读历史的人不该被拽下来。
+         */
+        term.scrollToBottom()
         /*
          * ⚠️ Ctrl+C 也不能只发 `\x03`：那是「请中断」，程序可以自己捕获后继续跑
          * （`npx vite` / 各种 watch 模式都会吞掉 SIGINT 只做热重启），用户看到的

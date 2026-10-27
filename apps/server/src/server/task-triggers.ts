@@ -10,7 +10,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { parseExpression } from 'cron-parser'
-import type { TaskTrigger, TaskTriggerInput } from '@fizz/contracts/types'
+import type { AgentWorkspace, TaskTrigger, TaskTriggerInput } from '@fizz/contracts/types'
 import type {
   TaskTriggerCreateInput,
   TaskTriggerCreateResult,
@@ -31,6 +31,29 @@ export function isValidCron(expr: string): boolean {
   } catch {
     return false
   }
+}
+
+/**
+ * 定时任务绑的工作区必须「记录还在 + **目录还在**」。
+ *
+ * 与新建会话(`POST /api/conversations`)同一套判据 —— 工作区只在 `addWorkspace` 那一刻
+ * stat 过磁盘,之后目录被删 / 被移走,登记记录照旧在(`workspace-health` 的巡检只给界面
+ * 打 `dirMissing` 红标,**不拦任何写入**)。会话是用户在面前手动建的,那边一拦就有人看见;
+ * 定时任务无人值守,建的时候不拦,就只能在到点那一刻于调度器深处炸掉 —— 用户看到的只是
+ * 「这条任务从此不动,也不知道为什么」。
+ *
+ * 不绑工作区(每次触发自动建临时工作区)不归这里管:那条路不依赖任何用户目录。
+ */
+export async function requireUsableTriggerWorkspace(workspaceId: string): Promise<AgentWorkspace> {
+  const ws = domain.getWorkspace(workspaceId)
+  if (!ws) throw new Error(`项目不存在:${workspaceId}`)
+  // `path` 为空的虚拟工作区(「任务」/「项目助手」)没有目录概念,跳过
+  if (ws.path && !(await domain.isWorkspaceDirAvailable(ws.path))) {
+    throw new Error(
+      `工作区目录不存在:${ws.path}(可能已被删除或移动),请重新选择工作区或改用「每次运行自动创建」`
+    )
+  }
+  return ws
 }
 
 /**
@@ -137,12 +160,12 @@ function triggerSummary(trigger: TaskTrigger): TaskTriggerSummary {
  * `target`(模型配置 / 模型)由调用方从**当前这一轮**继承下来 —— 触发会话要用的模型不该让
  * 模型自己挑(见 ProjectToolsDeps.triggers 的注释)。
  */
-export function createTaskTriggerFromTool(
+export async function createTaskTriggerFromTool(
   input: TaskTriggerCreateInput,
   target?: { configId: string; modelId: string }
-): TaskTriggerCreateResult {
-  const ws = domain.getWorkspace(input.workspaceId)
-  if (!ws) throw new Error(`项目不存在:${input.workspaceId}`)
+): Promise<TaskTriggerCreateResult> {
+  // 与 HTTP 入口同源:工作区记录在 + 目录也在,否则这条任务到点必炸
+  const ws = await requireUsableTriggerWorkspace(input.workspaceId)
   const name = input.name?.trim()
   const prompt = input.prompt?.trim()
   if (!name) throw new Error('任务名不能为空')

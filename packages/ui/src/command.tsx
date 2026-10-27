@@ -163,7 +163,18 @@ function CommandItem({
     <CommandPrimitive.Item
       data-slot="command-item"
       className={cn(
-        "relative flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-hidden select-none data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50 data-[selected=true]:bg-primary-soft data-[selected=true]:text-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 [&_svg:not([class*='text-'])]:text-muted-foreground",
+        /*
+         * 选中项用 `primary-subtle`（22% 主题色）而不是 `primary-soft`（13%）。
+         *
+         * 两个原因：
+         * 1. 与全应用的分档约定一致 —— hover 用 soft、**选中 / 当前项用 subtle**
+         *    （见 AgentSidebar / DesktopSettingsPanel / MobileSettingsPanel）；
+         * 2. `--primary-soft` 是「13% 主题色混进 `--background`」，而命令面板铺的是
+         *    `--popover`。暗色下 background 0.145、popover 0.205，soft 算出来才 0.224
+         *    —— 比面板底色只亮一点点，选中行几乎看不出来（用户实测反馈）。
+         *    subtle 落在 0.278，与侧栏选中行同一档，暗色下才分得清。
+         */
+        "relative flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-hidden select-none data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50 data-[selected=true]:bg-primary-subtle data-[selected=true]:text-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 [&_svg:not([class*='text-'])]:text-muted-foreground",
         className
       )}
       {...props}

@@ -96,7 +96,7 @@ const wsBatcher = createWsBatcher({
   }
 })
 
-/** 已经挂过 destroyed 监听的 webContents（避免重复挂） */
+/** 已经挂过生命周期监听的 webContents（避免重复挂） */
 const hooked = new WeakSet<WebContents>()
 let registered = false
 
@@ -132,16 +132,55 @@ function finish(streamId: string, error?: string): void {
   safeSend(handle.sender, AGENT_IPC.sseEnd, error ? { streamId, error } : { streamId })
 }
 
-/** 窗口销毁时把它的流全收掉（否则读流会挂着继续往已销毁的 webContents 推） */
-function hookDestroy(sender: WebContents): void {
+/** 把这个 webContents 的流全收掉（页没了，读流不该继续往它推） */
+function dropStreamsOf(sender: WebContents): void {
+  for (const [id, handle] of streams) {
+    if (handle.sender !== sender) continue
+    streams.delete(id)
+    handle.controller.abort()
+  }
+}
+
+/**
+ * 收掉这个 webContents 开的 WS 桥。顺序与 `wsClose` 一致：**先冲尾巴、再摘 owner、
+ * 最后 close**（合批器发消息时按 streamId 找发送方，见 `onSend` / `onclose` 的注释）。
+ */
+function dropWsOf(sender: WebContents): void {
+  for (const [id, owner] of wsOwners) {
+    if (owner !== sender) continue
+    wsBatcher.flush(id)
+    wsOwners.delete(id)
+    const socket = wsStreams.get(id)
+    wsStreams.delete(id)
+    try {
+      socket?.close()
+    } catch {
+      // 已经关了
+    }
+  }
+}
+
+/**
+ * 挂窗口 / 页面的生命周期收尾。幂等（`hooked` 挡重复挂）。
+ *
+ * 两个时机，缺一不可：
+ * - **窗口销毁**（`destroyed`）：常规退出路径；
+ * - **整页导航**（`did-start-navigation`，主框架、非同文档）：dev 的 HMR 全量刷新、
+ *   DevTools 的 Reload 都走这条 —— `webContents` **没有**销毁，但旧页那份 JS 上下文
+ *   已经丢了，它开的桥再也没人认领。不收的话：服务端那条 SSH 会话 / `/api/state`
+ *   订阅照跑（白占一条连接、多一份推送），而且那些 streamId 一直被主进程占着，
+ *   渲染端重载后序号归零就会撞上「streamId 已存在」（见 `apps/desktop/src/renderer/host.ts`
+ *   的 `bridgeIdPrefix`）。
+ *
+ * PTY **不在这里收**：它不占 streamId，且 node-pty 会话没有「跨页面接管」的协议
+ * （`sessionId` 只活在旧页内存里）；在重载时杀掉可能误伤用户正在跑的构建，
+ * 所以宁可留给 `destroyed` 那道兜底。
+ */
+function hookLifecycle(sender: WebContents): void {
   if (hooked.has(sender)) return
   hooked.add(sender)
   sender.once('destroyed', () => {
-    for (const [id, handle] of streams) {
-      if (handle.sender !== sender) continue
-      streams.delete(id)
-      handle.controller.abort()
-    }
+    dropStreamsOf(sender)
     // 它开的终端也一并杀掉（shell 是给人交互用的，窗口都没了就没人看了）
     for (const [id, owner] of ptyOwners) {
       if (owner !== sender) continue
@@ -149,22 +188,12 @@ function hookDestroy(sender: WebContents): void {
       getPtySession(id)?.kill()
     }
     // 它开的 WebSocket 桥也一并关掉（状态推送 / 工作台，没人看了就该断）
-    for (const [id, owner] of wsOwners) {
-      if (owner !== sender) continue
-      /*
-       * 这里**只冲、不删**：合批器发消息时也要按 streamId 查 `wsOwners`（见 `onSend`），
-       * 现在删就会把还在缓冲的尾巴静默丢掉 —— 窗口没了 `safeSend` 反正也发不出去，
-       * 但条目必须留着让 flush 走完正常路径，之后随 `wsOwners.delete` 一起消失。
-       */
-      wsBatcher.flush(id)
-      wsOwners.delete(id)
-      try {
-        wsStreams.get(id)?.close()
-      } catch {
-        // 已经关了
-      }
-      wsStreams.delete(id)
-    }
+    dropWsOf(sender)
+  })
+  sender.on('did-start-navigation', (details) => {
+    if (!details.isMainFrame || details.isSameDocument) return
+    dropStreamsOf(sender)
+    dropWsOf(sender)
   })
 }
 
@@ -217,7 +246,7 @@ export function registerAgentTransportIpc(): void {
     AGENT_IPC.sseOpen,
     async (event, input: AgentSseOpenRequest): Promise<AgentSseOpenResult> => {
       const sender = event.sender
-      hookDestroy(sender)
+      hookLifecycle(sender)
       // 同一 streamId 重开：先把旧的收掉，否则两条读流会把同一段 delta 推两遍
       const previous = streams.get(input.streamId)
       if (previous) {
@@ -271,7 +300,7 @@ export function registerAgentTransportIpc(): void {
     if (!port) return { ok: false, error: '进程内后端还没就绪' }
     if (wsStreams.has(input.streamId)) return { ok: false, error: 'streamId 已存在' }
     const sender = event.sender
-    hookDestroy(sender)
+    hookLifecycle(sender)
 
     let socket: WebSocket
     try {
@@ -362,7 +391,7 @@ export function registerAgentTransportIpc(): void {
     try {
       const sender = event.sender
       // 与 SSE 同一套收尾：窗口销毁时把它开的终端一起收掉
-      hookDestroy(sender)
+      hookLifecycle(sender)
       const sessionId = openPtySession(input, {
         // ⚠️ 这两条回调都是**窗口销毁之后**仍可能被调到的（见 safeSend 的注释）：
         // 应用退出时 will-quit 杀掉 shell，node-pty 才异步把尾包输出与 exit 送进来。

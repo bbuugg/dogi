@@ -311,7 +311,7 @@ export const EN: Record<string, string> = {
   '应用中…': 'Applying…',
   '访问地址': 'Access URL',
   '在系统浏览器里打开': 'Open in system browser',
-  '没找到对外网卡，只能在本机用': 'No external network interface found; only local access via',
+  '没找到对外网卡，只能在本机用': 'No external network interface found; only local access is available.',
   '登录用户名': 'Login username',
   '登录密码': 'Login password',
   '凭据改过了：点右边应用（会重启监听，已连接的页面需要重新登录）': 'Credentials changed: click apply on the right (restarts listening; connected pages must sign in again)',
@@ -367,6 +367,9 @@ export const EN: Record<string, string> = {
   '命令预测': 'Command prediction',
   '记录命令历史': 'Record command history',
   '记录已执行的命令，供预测和「命令历史」使用；关闭后不再新增记录。': 'Record executed commands for prediction and “Command history”; when off no new entries are added.',
+  '滚动缓冲': 'Scrollback',
+  '一个终端标签能往上翻多少行，超出后最早的行会被丢掉。每个标签各占一份内存，行数调很大又同时开很多标签要留意。': 'How many lines a terminal tab can scroll back through; once it fills up the oldest lines are dropped. Each tab keeps its own buffer in memory, so keep an eye on it when using a large value with many tabs.',
+  '{n} 行': '{n} lines',
   '默认终端': 'Default terminal',
   '正在检测可用终端…': 'Detecting available terminals…',
   '跟随系统默认': 'Follow system default',
@@ -374,9 +377,7 @@ export const EN: Record<string, string> = {
   '默认使用 {name}': 'Use {name} by default',
   '宿主没提供可选的终端，只能用平台默认。': 'The host does not expose selectable terminals; only the platform default is available.',
 
-  '启动后自动检查新版本；': 'Checks for updates automatically on launch; ',
-  '下载和安装都由你手动确认': 'downloads and installs are always confirmed by you',
-  '下载和安装都由你手动确认。': 'downloads and installs are always confirmed by you.',
+  '启动后自动检查新版本': 'Checks for updates automatically on launch; ',
   '当前不是安装包启动，自动更新不可用。': 'Auto-update is unavailable because this is not a packaged build.',
   '再检查一次': 'Check again',
   '正在检查…': 'Checking…',
@@ -1264,6 +1265,7 @@ export const EN: Record<string, string> = {
 
   // ---- 输入区 pills / 侧栏 / 状态栏菜单 / 手机版设置 ----
   '未指定工作区': 'No workspace',
+  '（目录不存在）': ' (directory missing)',
   '工作区：Agent 只能读写这个目录里的东西': 'Workspace: the agent can only read and write inside this directory',
   '浏览器工具：已开启（来源：{source}）': 'Browser tools: on (source: {source})',
   '浏览器工具：已关闭（点开开启，并可选来源）': 'Browser tools: off (click to enable and pick a source)',

@@ -103,6 +103,11 @@ export function WorkspacePicker({
         {workspaces.map((workspace) => (
           <SelectItem key={workspace.id} value={workspace.id}>
             {workspace.name}
+            {/* 目录被删 / 被移走（服务端巡检标的 `dirMissing`）：照旧可选 —— 选它是合法的
+                （比如目录马上就回来了），但要让人先看见，别等保存 / 发送时才被服务端打回 */}
+            {workspace.dirMissing ? (
+              <span className="text-muted-foreground">{t('（目录不存在）')}</span>
+            ) : null}
           </SelectItem>
         ))}
         {(actions ?? []).map((action) => (

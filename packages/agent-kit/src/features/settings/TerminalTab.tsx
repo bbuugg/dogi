@@ -7,7 +7,7 @@
  * 不用重开终端。
  */
 import { useEffect, useState } from 'react'
-import { ClipboardPaste, Copy, History, Sparkles, SquareTerminal } from 'lucide-react'
+import { ClipboardPaste, Copy, History, ScrollText, Sparkles, SquareTerminal } from 'lucide-react'
 import type { ShellDetectResult } from '@fizz/shells'
 import { Switch } from '@fizz/ui/switch'
 import type { AgentApp } from '@fizz/agent-kit/shared/hooks/useAgentApp'
@@ -16,10 +16,14 @@ import {
   setTerminalCommandPrediction,
   setTerminalCopyOnSelect,
   setTerminalPasteOnRightClick,
+  setTerminalScrollback,
+  TERMINAL_SCROLLBACK_OPTIONS,
   useTerminalCommandHistoryEnabled,
   useTerminalCommandPrediction,
   useTerminalCopyOnSelect,
-  useTerminalPasteOnRightClick
+  useTerminalPasteOnRightClick,
+  useTerminalScrollback,
+  type TerminalScrollback
 } from '@fizz/agent-kit/shared/lib/terminal-prefs'
 import { setTerminalShell, useTerminalShell } from '@fizz/agent-kit/shared/lib/terminal-shell'
 import { ChoiceChips } from '@fizz/agent-kit/features/settings/ChoiceChips'
@@ -34,6 +38,7 @@ export function TerminalTab({ app }: { app: AgentApp }) {
   const pasteOnRightClick = useTerminalPasteOnRightClick()
   const commandPrediction = useTerminalCommandPrediction()
   const commandHistoryEnabled = useTerminalCommandHistoryEnabled()
+  const scrollback = useTerminalScrollback()
 
   /** 默认终端（设置里配，工具条「终端」主按钮用它） */
   const defaultShell = useTerminalShell()
@@ -137,6 +142,26 @@ export function TerminalTab({ app }: { app: AgentApp }) {
             {commandHistoryEnabled ? tr('已开启') : tr('已关闭')}
           </label>
         </div>
+      </section>
+
+      <section className="space-y-2">
+        <div className="flex items-center gap-1.5 text-sm font-medium">
+          <ScrollText className="size-3.5" />
+          {tr('滚动缓冲')}
+        </div>
+        <p className="text-xs leading-4 text-muted-foreground">
+          {tr('一个终端标签能往上翻多少行，超出后最早的行会被丢掉。每个标签各占一份内存，行数调很大又同时开很多标签要留意。')}
+        </p>
+        <ChoiceChips
+          ariaLabel={tr('滚动缓冲')}
+          value={String(scrollback)}
+          // 选项只来自 TERMINAL_SCROLLBACK_OPTIONS，回填的值一定合法（prefs 里还有一道校验）
+          onChange={(v) => setTerminalScrollback(Number(v) as TerminalScrollback)}
+          options={TERMINAL_SCROLLBACK_OPTIONS.map((n) => ({
+            value: String(n),
+            label: tr('{n} 行', { n })
+          }))}
+        />
       </section>
 
       <section className="space-y-2">

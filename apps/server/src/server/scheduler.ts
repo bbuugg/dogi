@@ -226,6 +226,21 @@ async function processFire(triggerId: string): Promise<TriggerFireResult> {
       `[triggers] 定时任务「${trigger.name}」绑的工作区已不存在（${trigger.workspaceId}），本次改用临时工作区`
     )
   }
+  /**
+   * 绑的工作区**还在登记表里、目录却没了**（被删 / 被移走 / 换了位置）：拒跑。
+   *
+   * 这里**不**退化到临时工作区 —— 绑项目就是为了在那个仓库里干活，退化等于让它在空目录里
+   * 「跑成功」：产物落在别处，用户看到的是「跑完了但什么都没变」，比不跑更难查。
+   * 也不静默放行到 `startTurn`：那时错误发生在会话深处，只是又一个看不到的失败。
+   *
+   * 与新建会话（`POST /api/conversations`）同一条判据、同一句人话；`path` 为空的虚拟工作区
+   * 没有目录概念，跳过。抛出去由 `fireTrigger` 的 catch 记日志 —— 任务保持原样，等用户修好。
+   */
+  if (workspace?.path && !(await domain.isWorkspaceDirAvailable(workspace.path))) {
+    throw new Error(
+      `定时任务「${trigger.name}」绑定的工作区目录不存在：${workspace.path}（可能已被删除或移动）：请编辑它重新选择工作区`
+    )
+  }
   workspace ??= await domain.ensureScratchWorkspace(conversationId)
   // 外部 Agent 要一个真实 cwd 才能起进程（与 chat-turn 同一条判据）：虚拟工作区
   // （`path` 为空）在这里就拒跑，别等建完会话再 400

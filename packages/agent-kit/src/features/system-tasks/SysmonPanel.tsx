@@ -210,7 +210,7 @@ function HostBar({ sysmon }: { sysmon: SysmonController }): React.JSX.Element {
   const stale = sysmon.error !== null
 
   return (
-    <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/60 px-3 py-1.5 text-[0.6875rem] text-muted-foreground">
+    <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1.5 text-[0.6875rem] text-muted-foreground">
       <span className="inline-flex items-center gap-1.5">
         <Server className="size-3.5 shrink-0" />
         <span className="font-medium text-foreground">{snapshot?.os.hostname || '服务端'}</span>
@@ -368,7 +368,7 @@ function StatCards({ sysmon }: { sysmon: SysmonController }): React.JSX.Element 
   if (!snapshot) {
     // 占位卡也照真卡片的骨架长（标题 + 数值 + 两条内容），比四个纯灰方块更像「在加载」
     return (
-      <div className="grid shrink-0 gap-2 border-b border-border/60 p-2 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid shrink-0 gap-2 p-2 sm:grid-cols-2 xl:grid-cols-4">
         {[0, 1, 2, 3].map((index) => (
           <div
             key={index}
@@ -392,7 +392,7 @@ function StatCards({ sysmon }: { sysmon: SysmonController }): React.JSX.Element 
   const shownDisks = disks.slice(0, 3)
 
   return (
-    <div className="grid shrink-0 gap-2 border-b border-border/60 p-2 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="grid shrink-0 gap-2 p-2 sm:grid-cols-2 xl:grid-cols-4">
       {/* CPU */}
       <StatCard
         icon={<Cpu className="size-3" />}
@@ -408,7 +408,7 @@ function StatCards({ sysmon }: { sysmon: SysmonController }): React.JSX.Element 
           {snapshot.cpuSpeedGHz != null ? ` · ${snapshot.cpuSpeedGHz.toFixed(2)} GHz` : ''}
         </div>
         {/* 只画 CPU 一条线：内存有自己那张卡，两条线挤在这个高度里只会互相看不清 */}
-        <div className="rounded border border-border/50 bg-background/40 px-1 py-0.5">
+        <div className="bg-background/40 px-1 py-0.5">
           <Sparkline cpu={history.map((h) => h.cpuLoad)} mem={[]} height={30} />
         </div>
         <CoreStrip values={snapshot.cpuLoadPerCore} />
@@ -509,7 +509,7 @@ function ProcessToolbar({ sysmon }: { sysmon: SysmonController }): React.JSX.Ele
   const truncated = sysmon.tasks?.truncated ?? false
 
   return (
-    <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border/60 px-3 py-1.5">
+    <div className="flex shrink-0 flex-wrap items-center gap-2 px-3 py-1.5">
       <div className="relative w-56 max-w-[50vw]">
         <Search className="pointer-events-none absolute left-2 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />
         <Input
@@ -611,7 +611,7 @@ function SortHeader({
 function ProcessTableHead({ sysmon }: { sysmon: SysmonController }): React.JSX.Element {
   return (
     <thead className="sticky top-0 z-10 bg-background/95 backdrop-blur">
-      <tr className="border-b border-border/60">
+      <tr>
         <SortHeader label="名称 / 命令行" sortKey="name" sysmon={sysmon} />
         <SortHeader label="PID" sortKey="pid" sysmon={sysmon} align="right" className="w-16" />
         <SortHeader label="用户" sysmon={sysmon} className="hidden w-28 md:table-cell" />
@@ -722,7 +722,7 @@ function ProcessTable({
           <tr
             key={proc.pid}
             className={cn(
-              'border-b border-border/30 transition-colors hover:bg-secondary/50',
+              'transition-colors hover:bg-secondary/50',
               proc.self && 'bg-destructive/5'
             )}
           >

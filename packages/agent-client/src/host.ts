@@ -489,7 +489,14 @@ export interface RemoteAccessInput {
 export interface RemoteAccessState {
   enabled: boolean
   port: number
-  /** 局域网访问地址（浏览器直接打开就是 web 工作台）；没有对外网卡时是 null */
+  /**
+   * 全部可用的局域网访问地址（每块非回环 IPv4 一条，私网段在前）。
+   *
+   * 为什么是列表：多网卡机器（WiFi / 有线 / VMware / Docker / WSL / Tailscale）里
+   * 系统给的枚举顺序不代表「别人连得上的那块」，只显示一条经常是虚拟网卡。
+   */
+  urls: string[]
+  /** `urls` 的第一条（旧字段，兼容既有调用点）；没有对外网卡时是 null */
   url: string | null
   /** 登录凭据：web 端连接页填这两个（启用时生成并固定，重启不变） */
   username: string

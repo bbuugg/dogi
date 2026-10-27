@@ -37,7 +37,15 @@ import { getRequestListener } from '@hono/node-server'
 export interface RemoteAccessInfo {
   running: boolean
   port: number
-  /** 局域网访问地址（取一块非回环 IPv4）；没有对外网卡时是 null */
+  /**
+   * **全部**可用的局域网访问地址（每块非回环 IPv4 一条，私网段在前）。
+   *
+   * 多网卡机器上「哪一块才是别人能连到的」只有用户自己知道（WiFi / 有线 / VMware /
+   * Docker / WSL / Tailscale 混在一起），所以这里全列出来让人挑，不替用户猜。
+   * 没有对外网卡时是空数组。
+   */
+  urls: string[]
+  /** `urls` 的第一条（保留旧字段，兼容既有调用点）；没有对外网卡时是 null */
   url: string | null
   username: string
   password: string
@@ -109,14 +117,40 @@ function resolveMobileDir(hint?: string): string | null {
   return null
 }
 
-/** 从非回环网卡挑一个 IPv4，拼出「别人能用浏览器打开」的地址 */
-function lanUrl(port: number): string | null {
+/**
+ * 列出**所有**可用的访问地址（每块非回环 IPv4 一条）。
+ *
+ * 为什么不再只挑一个：`networkInterfaces()` 的枚举顺序由系统决定，多网卡机器
+ * （WiFi + 有线 + VMware / VirtualBox / Docker / WSL / Tailscale）里第一条经常是
+ * 一块虚拟网卡 —— 用户把那个地址抄给别人，对方在局域网里根本打不开，还会以为功能坏了。
+ * 全列出来让人自己挑，比猜一个「最像的」可靠。
+ *
+ * 排序：私网段优先（192.168 → 10 → 172.16-31），其余（公网 / 虚拟网卡）靠后；
+ * 169.254.*（APIPA 自分配，只在本机链路有效）直接丢掉。
+ */
+function listUrls(port: number): string[] {
+  const found: string[] = []
   for (const addrs of Object.values(networkInterfaces())) {
     for (const addr of addrs ?? []) {
-      if (addr.family === 'IPv4' && !addr.internal) return `http://${addr.address}:${port}`
+      if (addr.family !== 'IPv4' || addr.internal) continue
+      if (addr.address.startsWith('169.254.')) continue
+      found.push(addr.address)
     }
   }
-  return null
+  /** 私网段档位：越小越像「真正的局域网」 */
+  const rank = (ip: string): number => {
+    if (ip.startsWith('192.168.')) return 0
+    if (ip.startsWith('10.')) return 1
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return 2
+    return 3
+  }
+  /** 按四段数值比大小（字符串比较会把 .10 排到 .2 前面） */
+  const numeric = (ip: string): number =>
+    ip.split('.').reduce((acc, part) => acc * 256 + (Number(part) || 0), 0)
+  // 同一地址可能挂在多块网卡上（有线 + 网桥），去重后再排
+  return [...new Set(found)]
+    .sort((a, b) => rank(a) - rank(b) || numeric(a) - numeric(b))
+    .map((ip) => `http://${ip}:${port}`)
 }
 
 /** 随机密码：去掉易混字符（0/O、1/l/I），8 位够局域网用了 */
@@ -139,6 +173,7 @@ export async function startRemoteAccess(opts: {
   const next: RemoteAccessInfo = {
     running: false,
     port: opts.port,
+    urls: [],
     url: null,
     username: opts.username,
     password: opts.password,
@@ -189,7 +224,9 @@ export async function startRemoteAccess(opts: {
 
     server = httpServer
     next.running = true
-    next.url = lanUrl(opts.port)
+    // 监听成功后才算「这些地址现在真的能连」—— 端口占用失败时列表留空，界面显示 error
+    next.urls = listUrls(opts.port)
+    next.url = next.urls[0] ?? null
   } catch (err) {
     next.error = err instanceof Error ? err.message : String(err)
   }
@@ -201,7 +238,7 @@ export async function startRemoteAccess(opts: {
 export function stopRemoteAccess(): void {
   server?.close()
   server = null
-  if (info) info = { ...info, running: false, url: null }
+  if (info) info = { ...info, running: false, urls: [], url: null }
   // 鉴权随关闭一并撤掉：进程内路径本就不走它，留着只会让下一次启用前状态含糊
   delete process.env.FIZZ_AUTH_USER
   delete process.env.FIZZ_AUTH_PASS
@@ -215,6 +252,7 @@ export function getRemoteAccessInfo(): RemoteAccessInfo {
     info ?? {
       running: false,
       port: 0,
+      urls: [],
       url: null,
       username: 'fizz',
       password: '',

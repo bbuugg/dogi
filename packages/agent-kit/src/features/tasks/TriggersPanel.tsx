@@ -251,6 +251,16 @@ export function TriggersPanel() {
   const enabledCount = triggers.list.filter((t) => t.enabled).length
 
   /**
+   * 选中那条绑的工作区**目录没了**（服务端巡检标的 `dirMissing`）：调度器到点会拒跑
+   * （见 `scheduler.processFire`：不退化到临时工作区，免得产物落到别处还显示「跑完了」）。
+   * 这里明说一句，否则用户只会看到「这条任务再也不动了」。
+   */
+  const selectedWorkspaceMissing = !!(
+    selected?.workspaceId &&
+    app.workspaces.find((w) => w.id === selected.workspaceId)?.dirMissing
+  )
+
+  /**
    * 归属那一行的文案：没绑 = 「每次运行自动创建」（这是**正常状态**，不是缺失）；
    * 绑了但项目已被删 = 兜底名（触发时会自动退化成临时工作区，见调度器）。
    */
@@ -411,6 +421,9 @@ export function TriggersPanel() {
                       <FolderPlus className="size-3 shrink-0" />
                     )}
                     <span className="truncate">{workspaceNameOf(selected.workspaceId)}</span>
+                    {selectedWorkspaceMissing ? (
+                      <span className="shrink-0 text-destructive">（目录不存在，触发会被跳过）</span>
+                    ) : null}
                   </p>
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">

@@ -51,7 +51,7 @@ function AppGate() {
       */}
       <Toaster
         theme={theme}
-        position="top-center"
+        position="bottom-right"
         offset={{ top: 'calc(var(--safe-area-inset-top, 0px) + 0.5rem)' }}
         mobileOffset={{ top: 'calc(var(--safe-area-inset-top, 0px) + 0.5rem)' }}
       />

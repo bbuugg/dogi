@@ -43,7 +43,7 @@ function AppGate() {
 
   return (
     <>
-      <Toaster theme={theme} position="top-center" />
+      <Toaster theme={theme} position="bottom-right" />
       {host.showConnectionGate && !app.connection ? (
         <ConnectGate
           initial={app.connection}

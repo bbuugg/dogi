@@ -9,7 +9,12 @@
  */
 import type { TaskTriggerInput } from '@fizz/contracts/types'
 import { domain, triggerDomain } from '@/lib/server/state'
-import { buildTriggerRecord, isValidCron, saveTriggerAndSync } from '@/lib/server/task-triggers'
+import {
+  buildTriggerRecord,
+  isValidCron,
+  requireUsableTriggerWorkspace,
+  saveTriggerAndSync
+} from '@/lib/server/task-triggers'
 import { jsonError, parseJsonBody } from '@/app/api/_lib/auth'
 import { fail } from '@/app/api/_lib/http'
 
@@ -23,9 +28,14 @@ export async function POST(request: Request) {
   const body = await parseJsonBody<TaskTriggerInput>(request)
   if (!body) return jsonError(400, '缺少请求体')
   // 工作区可选:不选 = 每次触发自动建临时工作区(与「新建会话不选工作区」同一套语义)。
-  // 给了就必须是登记过的 —— 否则触发时才炸,用户还看不出是哪一步错了。
-  if (body.workspaceId && !domain.getWorkspace(body.workspaceId)) {
-    return jsonError(400, '工作区不存在，请重新选择')
+  // 给了就必须是登记过的**且目录还在** —— 与新建会话同一套判据:定时任务无人值守,
+  // 建的时候不拦,就只能在到点那一刻于调度器深处炸掉,用户还看不出是哪一步错了。
+  if (body.workspaceId) {
+    try {
+      await requireUsableTriggerWorkspace(body.workspaceId)
+    } catch (err) {
+      return fail(err)
+    }
   }
   if (!body.name?.trim()) return jsonError(400, '请填写名称')
   // 目标必须明确选过：触发时没人值守，缺了只会在调度器里报错（不存在「第一份可用配置」兜底）。

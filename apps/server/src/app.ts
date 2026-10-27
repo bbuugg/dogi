@@ -18,7 +18,7 @@ import { resolveClientIp, setClientIp } from './lib/rate-limit'
 import { compareRoutePaths, mountRouteModule, routePathFromModuleKey, type RouteModule } from './next-route'
 
 const NAME = 'fizz-server'
-const VERSION = '0.0.4'
+const VERSION = '0.0.5'
 
 /**
  * 编译期收集全部 Next 风格路由模块（`api/**\/route.ts`）。
@@ -163,7 +163,6 @@ export function createApp(options: CreateAppOptions = {}): Hono {
     const mod = ROUTE_MODULES[key]
     if (mod) mountRouteModule(app, key, mod)
   }
-  console.log(`[server] 已挂载 ${keys.length} 个路由模块`)
 
   // ---------- Mobile 产物托管（/m/*） + 手机浏览器自动跳转 ----------
   // 产物位置：apps/mobile/dist-server（`npm run build:mobile:hosted` 的产物，base=/m/）。

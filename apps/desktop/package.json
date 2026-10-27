@@ -1,6 +1,6 @@
 {
   "name": "@fizz/desktop",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "Fizz",
   "private": true,
   "repository": {
@@ -157,6 +157,17 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "../../docker",
+        "to": "docker",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../../.dockerignore",
+        "to": ".dockerignore"
       }
     ],
     "npmRebuild": false,

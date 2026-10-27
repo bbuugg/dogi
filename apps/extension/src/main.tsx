@@ -20,6 +20,7 @@ import { getAgentHost, setServerBase } from '@fizz/agent-client/host'
 import { normalizeServerBase } from '@fizz/agent-client/api'
 import { bootstrapLanguage, hydrateConnection } from '@fizz/agent-kit'
 import { setSingleTabMode } from '@fizz/agent-kit/shared/lib/panel-store'
+import { setVirtualKeyBar } from '@fizz/agent-kit/shared/hooks/useVirtualKeyBar'
 import { bootstrapColorTheme } from '@fizz/agent-kit/shared/hooks/useColorTheme'
 // ⚠️ `@/...` 指向**手机版**的 src（见 vite.config.ts / tsconfig.json 的别名说明）
 import { App } from '@/app/App'
@@ -31,6 +32,16 @@ import './index.css'
  * 必须在任何 `openTab` 之前定下语义，否则第一帧会先按多标签建出旧标签。
  */
 setSingleTabMode(true)
+
+/**
+ * 终端底部那条虚拟快捷键盘（Esc / Ctrl / Tab / 方向键）**在扩展里一律不要**。
+ *
+ * 那条键条补的是「软键盘没有修饰键与功能键」，而扩展跑在**桌面 Chrome** 上、有实体键盘。
+ * 自动判据（`useVirtualKeyBar` 的输入能力媒体查询）本来就能判定它是精确指针，这里显式关掉是
+ * 为了兜住「扩展跑在触屏笔记本上」那种机器 —— 那台机器仍然有实体键盘，不该给终端塞一条
+ * 手机键条。与 `setSingleTabMode` 同样在首帧前定下（模块级开关，见该 hook 文件头）。
+ */
+setVirtualKeyBar(false)
 
 const container = document.getElementById('root')
 if (!container) throw new Error('找不到 #root 容器')

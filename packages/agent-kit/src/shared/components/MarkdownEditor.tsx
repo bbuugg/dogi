@@ -480,7 +480,7 @@ export function MarkdownEditor({
 
   return (
     <div className="markdown-editor flex h-full min-h-0 flex-col bg-background">
-      <header className="flex h-9 shrink-0 items-center gap-1 border-b px-2">
+      <header className="flex h-9 shrink-0 items-center gap-1 px-2">
         <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={label}>
           {label}
         </span>

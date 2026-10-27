@@ -88,6 +88,9 @@ export const CHAT_PILL =
  * `p-0!` 一并压掉内边距：`size-8!` 锁死 32px 后，`px-3` 会把内容盒挤到只剩 8px，图标跟着缩水。
  *
  * hover 与 `CHAT_PILL` 完全同款（无底色、只染主题色），原因见上面那段。
+ *
+ * ⚠️ 唯一的例外是**权限 pill 的图标**：它的颜色是档位语义（琥珀 = 完全访问的警示），
+ * 不许被 hover 染成主题色 —— 那边用 `!` 压掉了这条规则，见 `PermissionIcon`。
  */
 export const CHAT_ICON_PILL =
   'flex size-8! shrink-0 items-center justify-center rounded-full! border-none bg-transparent p-0! text-foreground shadow-none! outline-none transition-all hover:bg-transparent! hover:text-primary focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:bg-transparent! dark:hover:bg-transparent! [&_svg]:transition-colors hover:[&_svg]:text-primary'
@@ -782,7 +785,13 @@ function PermissionIcon({ mode }: { mode: AiPermissionMode }) {
       <Icon
         className={cn(
           'size-3.5',
-          mode === 'full' ? 'text-amber-600 dark:text-amber-500' : 'text-muted-foreground'
+          /*
+           * 两个 `!` 压掉 pill 的 `hover:[&_svg]:text-primary`（父选择器 `[&_svg]` 的特异度
+           * 高于图标自己这个 class，不加 `!` 必输）：这枚图标的颜色是**档位语义**
+           * —— 琥珀 = 完全访问的警示，hover 时被染成主题色等于把警示抹掉，用户明确要求
+           * 权限图标 hover 不许变主色调。其余 pill 的 hover 染色不受影响（那条规则还在）。
+           */
+          mode === 'full' ? 'text-amber-600! dark:text-amber-500!' : 'text-muted-foreground!'
         )}
       />
     </span>

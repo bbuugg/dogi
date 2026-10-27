@@ -4,9 +4,17 @@
  * 运行脚本对话框：选脚本 + 选主机，确认后在主区域开一条连到该主机的终端标签，
  * 脚本内容以**终端输入**的方式写进去（逐行回车，执行过程在终端里可见）。
  *
- * 实例**全 App 只有一个**（`ScriptRunHost`，挂在外壳顶层）：入口有两处 —— 脚本清单的卡片、
- * 命令面板的二级视图（选中即运行），谁都不自己渲染一份，只调 `openRunScriptDialog()`
- * （见 `shared/lib/script-run.ts` 里为什么）。
+ * 实例**全 App 只有一个**（`ScriptRunHost`，挂在外壳顶层）：入口是脚本清单的卡片，
+ * 谁都不自己渲染一份，只调 `openRunScriptDialog()`（见 `shared/lib/script-run.ts` 里为什么）。
+ *
+ * ## 每次运行都是**新开一条终端标签**（= 新建一条连接）
+ *
+ * 这是刻意保留的：从脚本清单发起意味着「我在管这批脚本」，目标主机要自己挑、执行现场
+ * 要干净可辨 —— 复用某条正开着的终端会把两件事的输出搅在一起，也让人分不清脚本到底
+ * 跑在哪台机器上。`openHostTab` 每次都生成新 seq、新 `TerminalPanel`、新会话。
+ *
+ * 想「不重连、在当前终端里立刻跑」的是**命令面板**那个入口：它在当前视图就是终端时
+ * 就地写入（见 `features/scripts/run-script-command.ts`），根本不进这个对话框。
  *
  * 从 dogi 的 `features/scripts/RunScriptDialog.tsx` 平移，关键差别：
  * - dogi 是「连上主机后 `writeWhenReady`」，fizz 没有那条同步通道 —— 改成把脚本内容
@@ -89,7 +97,13 @@ export function RunScriptDialog({
   const host = app.sshHosts.find((h) => h.id === selectedHost)
   const canRun = Boolean(script && host) && !running
 
-  /** 打开运行目标：SSH 主机 → 主机标签；本地终端 → 本机终端标签（都把脚本内容带上） */
+  /**
+   * 打开运行目标：SSH 主机 → 新开一条主机标签（= 新建连接）；
+   * 本地终端 → 新开一条本机终端标签。两者都把脚本内容带上，由终端就绪时写入。
+   *
+   * 这里**不查有没有同主机的活终端**：从脚本清单发起就该是一条干净的新现场，
+   * 理由见文件头「每次运行都是新开一条终端标签」。
+   */
   const openTarget = (target: HostConfig, scriptInput: string): void => {
     if (target.kind === 'local') {
       const local = target as LocalHostConfig
@@ -104,9 +118,9 @@ export function RunScriptDialog({
         autoCommand: local.autoCommand,
         scriptInput
       })
-    } else {
-      openHostTab(target as SshHostConfig, { scriptInput })
+      return
     }
+    openHostTab(target as SshHostConfig, { scriptInput })
   }
 
   const handleRun = (): void => {

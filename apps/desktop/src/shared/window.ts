@@ -144,7 +144,9 @@ export function isDesktopSettingsTab(value: unknown): value is DesktopSettingsTa
 export interface RemoteAccessState {
   enabled: boolean
   port: number
-  /** 局域网访问地址（浏览器直接打开就是 web 工作台）；没有对外网卡时是 null */
+  /** 全部可用的局域网访问地址（每块非回环 IPv4 一条，私网段在前）；没有对外网卡时是空数组 */
+  urls: string[]
+  /** `urls` 的第一条（旧字段，兼容既有调用点）；没有对外网卡时是 null */
   url: string | null
   /** 登录凭据：web 端连接页填这两个（启用时生成并固定，重启不变） */
   username: string

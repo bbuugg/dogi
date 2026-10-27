@@ -37,3 +37,23 @@ apps/desktop/public/monaco-editor
 # 与 server / web 构建无关
 build/icon.ico
 *.log
+
+# ── 打包态的构建上下文 ────────────────────────────────────────────────────────
+# 桌面端把 `docker/` 和 extraResources（web-dist / mobile-dist / acp / plugins / skills）
+# 一起放进安装目录的 resources/，**那个目录就是容器镜像的构建上下文**
+# （见 apps/server/src/server/lib/docker.ts 的 findRepoRoot）。
+# 这份 .dockerignore 也会被拷到 resources/ 下，所以这里要按打包后的文件名挡一遍：
+# 下面这些 Dockerfile 一条都不 COPY，别让每次 docker build 白传几百 MB。
+# 仓库根不存在这些名字，对本仓库自己的构建无影响。
+web-dist
+mobile-dist
+app.asar
+app.asar.unpacked
+*.asar
+*.exe
+*.dll
+*.pak
+*.bin
+*.dat
+LICENSES.chromium.html
+locales

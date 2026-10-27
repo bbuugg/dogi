@@ -400,6 +400,42 @@ function RemoteAccessSection() {
   if (!save) return null
 
   /**
+   * 要列出来的地址。`urls` 是主进程按网卡现算的；`state.url` 那条兜底只为**热更新时
+   * 遇到旧 preload**（它不知道 `urls` 这个字段）不至于让整块面板崩掉。
+   */
+  const urls = state?.urls ?? (state?.url ? [state.url] : [])
+
+  /**
+   * 一条地址：地址 + 复制 + 在系统浏览器里打开。
+   *
+   * 每一条都挂「打开」—— 服务端绑的是 `0.0.0.0`，**本机对上面每个地址都能打开**，
+   * 所以这个按钮不存在「主进程替你挑」的问题；反倒是逐条点开、哪个能加载就是哪个
+   * 网卡有效，比看 IP 猜快得多。
+   */
+  const addressRow = (u: string, muted = false): ReactNode => (
+    <div
+      key={u}
+      className={
+        muted ? 'flex items-center gap-2 text-muted-foreground' : 'flex items-center gap-2'
+      }
+    >
+      {muted && <span className="shrink-0">{tr('本机')}</span>}
+      <code className="min-w-0 flex-1 truncate">{u}</code>
+      {copyButton(u, tr('访问地址'))}
+      <IconTip label={tr('在系统浏览器里打开')}>
+        <Button
+          size="icon-xs"
+          variant="ghost"
+          aria-label={tr('在系统浏览器里打开')}
+          onClick={() => void host.openExternal?.(u)}
+        >
+          <ExternalLink />
+        </Button>
+      </IconTip>
+    </div>
+  )
+
+  /**
    * 落一次改动。`withCreds` 表示把凭据草稿一起推过去 —— 主进程会**重启监听**才生效
    * （服务端只在启动时读 `FIZZ_AUTH_*`，见 agent-host 的 remote-access.ts）。
    */
@@ -459,27 +495,18 @@ function RemoteAccessSection() {
 
       {state?.enabled && (
         <div className="space-y-2 rounded-md border border-border/60 bg-muted/20 p-2.5 text-xs">
-          {state.url ? (
-            <div className="flex items-center gap-2">
-              <span className="shrink-0 text-muted-foreground">{tr('访问地址')}</span>
-              <code className="min-w-0 flex-1 truncate">{state.url}</code>
-              {copyButton(state.url, tr('访问地址'))}
-              <IconTip label={tr('在系统浏览器里打开')}>
-                <Button
-                  size="icon-xs"
-                  variant="ghost"
-                  aria-label={tr('在系统浏览器里打开')}
-                  onClick={() => void host.openExternal?.(state.url ?? '')}
-                >
-                  <ExternalLink />
-                </Button>
-              </IconTip>
-            </div>
-          ) : (
-            <div className="text-muted-foreground">
-              {tr('没找到对外网卡，只能在本机用')} <code>http://127.0.0.1:{state.port}</code>
-            </div>
-          )}
+          <div className="space-y-1">
+            <span className="text-muted-foreground">{tr('访问地址')}</span>
+            {urls.map((u) => addressRow(u))}
+            {urls.length === 0 && (
+              <div className="text-muted-foreground">{tr('没找到对外网卡，只能在本机用')}</div>
+            )}
+            {/*
+              回环固定列一条：别的设备用不上，但「同机的隧道 / 反向代理」要填的就是它
+              （公网访问最常见的接法就是把 7801 转出去），所以不能只写在「没网卡」的兜底里。
+            */}
+            {addressRow(`http://127.0.0.1:${state.port}`, true)}
+          </div>
           {/* 登录凭据可改：改完点下面的对勾应用（主进程按新凭据重启监听，已连接的页面要重登） */}
           <div className="flex items-center gap-2">
             <span className="shrink-0 text-muted-foreground">{tr('用户名')}</span>

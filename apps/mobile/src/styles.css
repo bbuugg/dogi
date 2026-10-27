@@ -263,6 +263,22 @@
   padding-bottom: var(--safe-area-inset-bottom, 0px);
 }
 
+/*
+ * 抽屉的内容区**恒满宽**（`app/mobile-dialog.tsx` 的内层滚动容器）。
+ *
+ * 调用方给 `DialogContent` 的那些宽度类（`sm:max-w-md`、`max-w-md` …）是给**桌面居中弹窗**
+ * 写的：抽屉是贴着屏幕底边的整条，内容缩成 400px 贴左边、右边空一大片就不对了。
+ * 手机宽度下它们多半本来就不生效，但扩展的 side panel 拖宽后 `sm:` 会真的命中 ——
+ * 于是同一条规则要能压住**带 `sm:` 前缀**的宽度类，所以写成不带分层属性的普通规则
+ * （分层之外压得住 utilities），并且选择器带两个属性选择器（≥ 任何单选类名的宽度类）。
+ *
+ * 宽度超过 `sm` 后弹窗会切成居中形态（见 `mobile-dialog.tsx` 文件头），那条路不经过
+ * 这里 —— 桌面版的 `sm:max-w-*` 该生效就生效。
+ */
+[data-mobile-dialog] [data-slot='mobile-dialog-body'] {
+  max-width: none;
+}
+
 ::selection {
   color: var(--background);
   background-color: var(--primary);

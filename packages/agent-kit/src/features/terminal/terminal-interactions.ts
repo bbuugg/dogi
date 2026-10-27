@@ -107,7 +107,15 @@ export function attachTerminalInteractions(options: TerminalInteractionsOptions)
     if (!getTerminalCopyOnSelect()) return
     const selection = term.getSelection()
     if (!selection) return
-    void navigator.clipboard.writeText(selection)
+    /**
+     * 非安全上下文（用 `http://192.168.x.x` 打开 web 端 / 远程访问）里 `navigator.clipboard`
+     * **整个不存在**，直接调会抛 TypeError 把选区回调打断（表现为选不中、拖选卡住）。
+     * 与上面右键粘贴同一道守卫。默认开启后这条路径每次拖选都会走，必须挡住。
+     */
+    const clipboard = navigator.clipboard
+    if (!clipboard?.writeText) return
+    // 写失败（页面没聚焦 / 权限被拒）不打断拖选：粘一次就知道没成，别每选一次弹一次错
+    void clipboard.writeText(selection).catch(() => {})
   })
 
   return () => {

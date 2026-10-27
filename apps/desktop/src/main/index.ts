@@ -248,6 +248,8 @@ function remoteAccessState(): RemoteAccessState {
   return {
     enabled: info.running,
     port: cfg.port,
+    // 全列出来：多网卡机器上「哪一块能连」只有用户自己知道（见 remote-access.ts 的 listUrls）
+    urls: info.urls,
     url: info.url,
     username: info.username,
     password: info.password,

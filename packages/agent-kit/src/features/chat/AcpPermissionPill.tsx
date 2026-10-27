@@ -43,11 +43,16 @@ export function AcpPermissionPill({ app }: { app: AgentApp }) {
         aria-label={t("权限答复：{label}", { label: t(ACP_PERMISSION_LABELS[mode]) })}
       >
         {/* mx-auto 居中：SelectTrigger 自带 justify-between，单个子元素会被顶到左边 */}
+        {/*
+          图标上的 `!` 与内置权限 pill（composer.tsx 的 PermissionIcon）同一处理：
+          压掉 `CHAT_ICON_PILL` 的 `hover:[&_svg]:text-primary`，让档位语义色
+          （琥珀 = 完全放行）在 hover 时保持不变。
+        */}
         <span className="mx-auto flex items-center">
           {mode === "allow" ? (
-            <ShieldAlert className="size-3.5 text-amber-600 dark:text-amber-500" />
+            <ShieldAlert className="size-3.5 text-amber-600! dark:text-amber-500!" />
           ) : (
-            <ShieldCheck className="size-3.5 text-muted-foreground" />
+            <ShieldCheck className="size-3.5 text-muted-foreground!" />
           )}
         </span>
       </SelectTrigger>

@@ -189,7 +189,7 @@ export function SystemMonitorBadge({ api }: { api: AgentApi | null }) {
                     </span>
                   </span>
                 </div>
-                <div className="rounded-md border border-border/60 bg-muted/20 px-1.5 py-1">
+                <div className="bg-muted/20 px-1.5 py-1">
                   <Sparkline cpu={history.map((h) => h.cpuLoad)} mem={history.map((h) => h.memUsedPercent)} />
                 </div>
               </div>

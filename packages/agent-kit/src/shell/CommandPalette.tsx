@@ -14,9 +14,9 @@
  * 最后才轮到关面板（拦截挂在 CommandDialog 的 onEscapeKeyDown 上，Radix 层）。
  * 面板高度固定，二级切换不改变外观，只有功能与列表内容变化。
  */
+import { ScriptPaletteList } from '@fizz/agent-kit/features/scripts/ScriptPaletteList'
 import type { AgentApp } from '@fizz/agent-kit/shared/hooks/useAgentApp'
 import { useT } from '@fizz/agent-kit/shared/lib/language'
-import { openRunScriptDialog } from '@fizz/agent-kit/shared/lib/script-run'
 import { formatShortcut } from '@fizz/agent-kit/shared/lib/shortcuts'
 import { openFilesTab, openLogsTab, openSysmonTab, openTunnelTab } from '@fizz/agent-kit/shared/lib/tool-tabs'
 import type { HostConfig } from '@fizz/contracts/types'
@@ -225,8 +225,10 @@ export function CommandPalette({
                   </span>
                 </CommandItem>
                 {/* 运行脚本：带二级 —— 根级只放入口（脚本一多，全铺在命令列表里就没法用了）。
-                    二级里**选中一个脚本 = 运行它**（弹「运行脚本」对话框挑主机），不是打开编辑：
-                    编辑在脚本清单那一页的卡片上（`scripts:list`），命令面板只负责「马上跑一下」。
+                    二级里**选中一个脚本 = 运行它**，不是打开编辑：编辑在脚本清单那一页的
+                    卡片上（`scripts:list`），命令面板只负责「马上跑一下」。
+                    跑在哪：当前视图就是一条终端时**就地写进去**（不弹窗、不重连，见
+                    `features/scripts/run-script-command.ts`），否则弹「运行脚本」对话框挑主机。
                     一个脚本都没有时不出这一行：点进去是空列表，等于一个死入口 */}
                 {app.scripts.length > 0 && (
                   <CommandItem
@@ -438,29 +440,10 @@ export function CommandPalette({
             autoFocus
           />
           {/* 过滤交给 cmdk 本地做（脚本清单就在内存里，不用打接口）；
-              右侧标出分组，名字相近的脚本靠它分辨（`title` 里给完整描述） */}
+              分段与排序在 `ScriptPaletteList`（与清单页同一口径，手机版共用同一份） */}
           <CommandList className="min-h-0 max-h-none flex-1">
             <CommandEmpty>{t("没有匹配的脚本。")}</CommandEmpty>
-            <CommandGroup heading={t("脚本")}>
-              {app.scripts.map((script) => {
-                const groupName = app.scriptGroups.find((g) => g.id === script.groupId)?.name
-                return (
-                  <CommandItem
-                    key={script.id}
-                    value={`${script.name} ${groupName ?? ''}`}
-                    keywords={['script', '脚本', 'run', '运行', script.name]}
-                    title={script.description?.trim() || script.name}
-                    onSelect={run(() => openRunScriptDialog(script.id))}
-                  >
-                    <FileCode2 />
-                    <span className="truncate">{script.name}</span>
-                    <span className="ml-auto max-w-40 shrink-0 truncate text-xs text-muted-foreground">
-                      {groupName ?? t('未分组')}
-                    </span>
-                  </CommandItem>
-                )
-              })}
-            </CommandGroup>
+            <ScriptPaletteList app={app} run={run} />
           </CommandList>
         </>
       ) : (

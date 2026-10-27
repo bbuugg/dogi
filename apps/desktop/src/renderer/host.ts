@@ -475,9 +475,27 @@ interface BridgeSocket {
 
 const bridgeSockets = new Map<string, BridgeSocket>()
 let bridgeSeq = 0
+/**
+ * ⚠️ 光有自增序号不够 —— 「唯一」这件事是在**主进程**那边判的。
+ *
+ * 序号是**渲染端上下文内**的模块变量，而主进程的 `wsStreams` 是**全进程一张表**，
+ * 于是下面两种情形一定会撞号：
+ * - **整页重载**（dev 的 HMR 全量刷新 / DevTools 的 Reload）：`bridgeSeq` 回到 0，
+ *   可旧页开的连接还活着 —— 主进程只在 webContents `destroyed`（窗口关掉）时收它们，
+ *   重载不算销毁（`transport-ipc.ts` 里另有一道 `did-start-navigation` 的收尾）；
+ * - **多窗口**：主窗口 / 会话浮窗 / 设置窗口各是一份 JS 上下文，各自从 0 数。
+ *
+ * 撞号后主进程的 `wsOpen` 直接回 `streamId 已存在`，渲染端把它当「连接已断开」的
+ * reason 交给终端 —— 用户看到的就是「刚连上就报 streamId 已存在然后断开」。
+ * 给每个上下文生成一次的随机前缀把两把钥匙错开，代价为零。
+ *
+ * （SSE 那边一直是 `sse-${seq}-${Date.now()}`，天然错开，所以从没出过这个问题。
+ *   这里别退回「只用序号」。）
+ */
+const bridgeIdPrefix = Math.random().toString(36).slice(2, 8)
 
 function openBridgeSocket(path: string, readyMarker: () => void): BridgeSocket {
-  const streamId = `ws-${++bridgeSeq}`
+  const streamId = `ws-${bridgeIdPrefix}-${++bridgeSeq}`
   const socket: BridgeSocket = {
     streamId,
     messageSubs: new Set(),

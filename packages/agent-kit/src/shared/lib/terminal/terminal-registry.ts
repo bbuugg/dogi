@@ -26,6 +26,14 @@ export interface TerminalHandle {
   read(maxChars?: number): string
   /** 把原始输入写进 PTY（等同于用户在键盘上敲） */
   write(data: string): void
+  /**
+   * 把键盘焦点落到这条终端上（光标进 xterm，用户可以接着敲）。
+   *
+   * 给「命令面板就地跑完脚本」这类**替用户发起了动作**的入口用：动作结束后焦点该回到
+   * 用户刚才待着的地方，而不是留在已经关掉的弹窗 / body 上。时机（要不要等弹窗退场）
+   * 由调用方决定，见 `features/scripts/run-script-command.ts`。
+   */
+  focus(): void
   /** 底层进程是否还活着（false = 已退出，工具该拒绝而不是静默丢弃） */
   isAlive(): boolean
   /**
@@ -82,6 +90,39 @@ export function getTerminal(tabKey: string): TerminalHandle | undefined {
 /** 列出所有登记在册的终端（工具 `list_terminal_sessions` 用） */
 export function listTerminals(): TerminalHandle[] {
   return [...terminals.values()]
+}
+
+/**
+ * 按标签 key 取一条**可以往里写**的终端：登记在册 + 不是容器 + 进程还活着。
+ *
+ * 给「命令面板就地运行脚本」用（见 `features/scripts/run-script-command.ts`）：那个入口
+ * 的语义是「**当前视图就是终端，脚本直接在这条终端里跑**」，所以它要的不是「某台主机
+ * 有没有终端」，而是「顶在这一格的那条终端还能不能写」。
+ *
+ * 三条拒绝的理由：
+ * - 没登记 = 那条标签还没有 `TerminalPanel` 实例（或在别的设备上开着），写进去会静默丢；
+ * - `container` = 容器工作台那条纯文本通道，脚本是「主机侧」的东西，写错地方比不写更糟；
+ * - `isAlive()` 为假 = 进程已退出 / 正在重连，写进去没人接。
+ *
+ * ⚠️ 这里**不判断「终端忙不忙」**：xterm 侧看不出远端前台进程，靠输出活跃度猜会误判
+ * （`tail -f`、构建日志都在刷）。活着就写 —— 用户看得见那条终端正在显示什么。
+ */
+export function liveTerminal(tabKey: string | null | undefined): TerminalHandle | null {
+  if (!tabKey) return null
+  const handle = terminals.get(tabKey)
+  if (!handle || handle.kind === 'container' || !handle.isAlive()) return null
+  return handle
+}
+
+/**
+ * 把键盘焦点落到某条终端上（那条终端没登记 = 什么都不做）。
+ *
+ * 只负责「调一下句柄」这一件事：**什么时候**落焦点是调用方的判断 —— 命令面板那种
+ * Radix 对话框会在退场结束后把焦点还给「打开前的元素」，太早落会被它拿走，
+ * 所以那里还得补一拍（见 `features/scripts/run-script-command.ts`）。
+ */
+export function focusTerminal(tabKey: string): void {
+  terminals.get(tabKey)?.focus()
 }
 
 /** 某条终端自报「我现在被看着」（可见性变化时调用） */

@@ -291,7 +291,7 @@ export function HostMonitorBadge({
                     </span>
                   </span>
                 </div>
-                <div className="rounded-md border border-border/60 bg-muted/20 px-1.5 py-1">
+                <div className="bg-muted/20 px-1.5 py-1">
                   <Sparkline
                     cpu={history.map((h) => h.cpuPercent)}
                     mem={history.map((h) => h.memPercent)}

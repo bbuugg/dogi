@@ -227,6 +227,12 @@ function TriggerForm({
       ? editing.workspaceId
       : null
   )
+  /**
+   * 选中的工作区记录：目录被删 / 被移走时（服务端巡检标的 `dirMissing`）要**当场**提示。
+   * 保存会被服务端以「工作区目录不存在」打回（定时任务无人值守，建的时候不拦就只能在到点
+   * 那一刻炸），所以别让人填完一整张表单才发现。
+   */
+  const selectedWorkspace = workspaceId ? workspaces.find((w) => w.id === workspaceId) : undefined
   const [mode, setMode] = useState<Mode>(editing ? triggerMode(editing) : 'cron')
   const [name, setName] = useState(editing?.name ?? '')
   const [cron, setCron] = useState(editing?.cron ?? CRON_PRESETS[1].expr)
@@ -436,6 +442,12 @@ function TriggerForm({
             />
           </div>
         </div>
+        {selectedWorkspace?.dirMissing ? (
+          <p className="flex items-start gap-1.5 text-xs leading-5 text-destructive">
+            <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+            这个工作区的目录已不存在（{selectedWorkspace.path}），保存会被拒绝：请重新选择工作区，或改用「每次运行自动创建」。
+          </p>
+        ) : null}
         <p className="text-xs leading-5 text-muted-foreground">
           {workspaceId
             ? '每次触发都在这个工作区里跑一轮会话。'

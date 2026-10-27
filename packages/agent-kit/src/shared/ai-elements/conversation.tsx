@@ -17,6 +17,9 @@
  *    跟着变，库的 ResizeObserver 会把它当成 positive resize 而去贴底。用户正翻着历史时
  *    这就会把视图**突然拽到底部**（实测反馈）。所以宽度一变且用户不在底部时主动 stopScroll。
  * 4. 对外提供 isAtBottom / scrollToBottom / holdScroll，给「回到底部」按钮与折叠块用。
+ * 5. **用户自己往上滚时立刻退出跟随**（见 `attachScroll` 里的 wheel / touch 监听）——
+ *    库自带的「上滚即停」在我们这套样式 + 流式场景下两条判定同时失效，只靠它会一直
+ *    被拽回底部。
  */
 import { Button } from "@fizz/ui/button";
 import { cn } from "@fizz/agent-kit/shared/lib/utils";
@@ -134,13 +137,66 @@ export const Conversation = ({
    * 顺带把「窗口缩放」也覆盖了：那是同一类布局变化，同样不该把视图甩到底部。
    */
   const widthObserverRef = useRef<ResizeObserver | null>(null);
+  /** 用户上滚监听的卸载函数（与 widthObserver 同生命周期，节点换了要摘掉） */
+  const userScrollCleanupRef = useRef<(() => void) | null>(null);
   const attachScroll = useCallback(
     (el: HTMLDivElement | null) => {
       // 先把节点交给库（它要挂 scroll / wheel 监听、并从 ref 读 scrollTop）
       scrollRef(el);
       widthObserverRef.current?.disconnect();
       widthObserverRef.current = null;
+      userScrollCleanupRef.current?.();
+      userScrollCleanupRef.current = null;
       if (!el) return;
+      /**
+       * 用户主动上滚 → 立刻退出跟随。
+       *
+       * 为什么库自带的「上滚即停」在这里不管用（两条判定同时失效）：
+       *
+       * 1. **wheel 那条**：库从事件 target 往上找第一个 `getComputedStyle(el).overflow`
+       *    ∈ `{scroll, auto}` 的祖先，然后才认「这一滚是不是发生在滚动容器上」。而我们的
+       *    容器是 `overflow-y-auto overflow-x-hidden`（见下面类名注释：必须禁掉横向滚动），
+       *    计算值会序列化成 `"hidden auto"` —— 永远匹配不上，它一路走到没有父元素就
+       *    `return`，**上滚完全不记账**。
+       * 2. **scroll 那条**：库在回调里先判 `state.resizeDifference`，非 0 就 return
+       *    （它没法区分「新内容到了」和「内容重排变高」）。流式输出时内容每帧都在长高，
+       *    ResizeObserver 每帧都写一个非 0 的 difference，于是用户的 scroll 事件被整段丢掉。
+       *
+       * 两条一起失效 = 用户一边往上翻、AI 一边输出，`isAtBottom` 一直是 true，下一帧
+       * 内容长高就被 `scrollToBottom` 拉回底部（用户实测：终端助手面板里根本翻不上去）。
+       * 所以这里自己判「用户想往上」，直接 `stopScroll()` 把库的 isAtBottom 置 false ——
+       * 它后续那些 resize 贴底在 rAF 里一查 `!isAtBottom` 就 bail。
+       */
+      const onWheel = (e: WheelEvent): void => {
+        if (e.deltaY < 0) {
+          stopScroll();
+          return;
+        }
+        // 往下滚且已经贴底：把跟随锁回来。流式期间库的 handleScroll 会被 resize 挡掉，
+        // 不主动锁的话「滚回底部」之后要等这一轮结束才恢复跟随
+        if (el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_THRESHOLD_PX) {
+          scrollToBottom({ animation: "instant" });
+        }
+      };
+      /** 触摸（手机 / 触屏本）：手指往下移 = 内容往上翻 = 用户在往回看 */
+      let touchY: number | null = null;
+      const onTouchStart = (e: TouchEvent): void => {
+        touchY = e.touches[0]?.clientY ?? null;
+      };
+      const onTouchMove = (e: TouchEvent): void => {
+        const y = e.touches[0]?.clientY ?? null;
+        // 2px 死区：手指按住时的轻微抖动不该算「上滚」
+        if (y !== null && touchY !== null && y - touchY > 2) stopScroll();
+        touchY = y;
+      };
+      el.addEventListener("wheel", onWheel, { passive: true });
+      el.addEventListener("touchstart", onTouchStart, { passive: true });
+      el.addEventListener("touchmove", onTouchMove, { passive: true });
+      userScrollCleanupRef.current = () => {
+        el.removeEventListener("wheel", onWheel);
+        el.removeEventListener("touchstart", onTouchStart);
+        el.removeEventListener("touchmove", onTouchMove);
+      };
       /** 上一帧的尺寸；`null` = 首次回调（只记录，不当成一次变化） */
       let prevWidth: number | null = null;
       let prevHeight: number | null = null;
@@ -187,8 +243,14 @@ export const Conversation = ({
     [scrollRef, stopScroll, scrollToBottom]
   );
 
-  // 组件卸载时摘掉观察器（节点被换掉时由 attachScroll 自己 disconnect）
-  useEffect(() => () => widthObserverRef.current?.disconnect(), []);
+  // 组件卸载时摘掉观察器与用户上滚监听（节点被换掉时由 attachScroll 自己清）
+  useEffect(
+    () => () => {
+      widthObserverRef.current?.disconnect();
+      userScrollCleanupRef.current?.();
+    },
+    []
+  );
 
   // 切换会话 / 消息装载完成：本帧 paint 之前瞬时落底（不要平滑动画）
   useLayoutEffect(() => {

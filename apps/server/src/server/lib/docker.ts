@@ -552,9 +552,18 @@ const REPO_ROOT_MARKER = 'docker/container-project/runtime.Dockerfile'
 /**
  * 定位仓库根目录 —— 构建上下文要用它（`docker build ... <repoRoot>`）。
  *
- * 从 `process.cwd()` 往上找 `docker/container-project/runtime.Dockerfile`：
- * 服务端始终从项目根（= 仓库根）启动，`process.cwd()` 就是起点。
- * 允许 `FIZZ_REPO_ROOT` 覆盖（把 server 单独拷出去跑的场景）。
+ * 候选顺序：**打包态的 `resourcesPath`** → 从 `process.cwd()` 逐级往上。
+ *
+ * - 开发 / 自建 server：cwd 就是仓库根，往上几步内必然命中标记文件；
+ * - **打包后的桌面端**：cwd 是安装目录（用户甚至可能从任意目录启动），往上找永远找不到仓库。
+ *   electron-builder 的 `extraResources` 把 `docker/` 与 `skills/` 一起放进
+ *   `process.resourcesPath` —— 那正是 Dockerfile 里 `COPY docker/...` 与 `COPY skills`
+ *   的起点，所以它本身就是「构建上下文根」。
+ *
+ * 判据仍是同一个标记文件：dev 下 `process.resourcesPath` 指向 Electron 自带的 resources
+ * （里面没有 `docker/`），这一条自然落空、继续走 cwd，不需要额外区分平台。
+ *
+ * 允许 `FIZZ_REPO_ROOT` 覆盖（把 server 单独拷出去跑 / 想用别的上下文构建的场景）。
  *
  * ⚠️ 判据是**容器型项目**的基础 Dockerfile（流程节点的 `docker/agent-flow/` 已删）。
  * `container-projects/image.ts` 与 `lifecycle.ts` 都依赖这个函数，改判据要三处一起看。
@@ -562,12 +571,18 @@ const REPO_ROOT_MARKER = 'docker/container-project/runtime.Dockerfile'
 export function findRepoRoot(): string {
   const override = process.env.FIZZ_REPO_ROOT?.trim()
   if (override) return resolve(override)
+
+  const resourcesPath = (process as unknown as { resourcesPath?: string }).resourcesPath
+  const candidates: string[] = resourcesPath ? [resourcesPath] : []
   let dir = process.cwd()
   for (let i = 0; i < 8; i++) {
-    if (existsSync(join(dir, REPO_ROOT_MARKER))) return dir
+    candidates.push(dir)
     const parent = dirname(dir)
     if (parent === dir) break
     dir = parent
+  }
+  for (const candidate of candidates) {
+    if (existsSync(join(candidate, REPO_ROOT_MARKER))) return candidate
   }
   throw new Error(
     `找不到仓库根目录（里面应有 ${REPO_ROOT_MARKER}）；可用 FIZZ_REPO_ROOT 指定`

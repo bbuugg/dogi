@@ -38,11 +38,13 @@ import { clampCompositionOverflow } from '@fizz/agent-kit/shared/lib/terminal-im
 import { supportsTouch } from '@fizz/agent-kit/shared/lib/supports-touch'
 import {
   getTerminalCommandHistoryEnabled,
-  getTerminalCommandPrediction
+  getTerminalCommandPrediction,
+  getTerminalScrollback,
+  useTerminalScrollback
 } from '@fizz/agent-kit/shared/lib/terminal-prefs'
 import { computeSuggestions, isTrackableInput } from '@fizz/agent-kit/shared/lib/terminal-prediction'
 import { useAgentStore } from '@fizz/agent-kit/shared/lib/stores/agent-store'
-import { useIsMobile } from '@fizz/agent-kit/shared/hooks/useIsMobile'
+import { useVirtualKeyBar } from '@fizz/agent-kit/shared/hooks/useVirtualKeyBar'
 import { useThemeRevision } from '@fizz/agent-kit/shared/lib/code-theme'
 import { buildTheme } from '@fizz/agent-kit/features/terminal/terminal-theme'
 import { attachTerminalInteractions } from '@fizz/agent-kit/features/terminal/terminal-interactions'
@@ -276,6 +278,17 @@ export function TerminalPanel({
     const container = containerRef.current
     if (term && container) term.options.theme = buildTheme(container)
   }, [themeRevision])
+  /** 滚动缓冲行数（设置 → 终端）：改了立刻生效，不用重开标签（见下面的 effect） */
+  const scrollbackLines = useTerminalScrollback()
+  /**
+   * 滚动缓冲是可写选项（xterm 的 `IOptions.scrollback`），改完直接赋给现有实例 ——
+   * 重建 xterm 会把屏幕上的内容和正在跑的会话一起丢掉，为一行配置不值当。
+   * 实例还没建时（首帧）什么都不用做：创建时已经按当时的值设过了。
+   */
+  useEffect(() => {
+    const term = termRef.current
+    if (term) term.options.scrollback = scrollbackLines
+  }, [scrollbackLines])
   /** 订阅的清理函数（输入 + 输出 + 退出，effect 内赋值，卸载 / 重建时调用） */
   let cleanupSubs: (() => void) | null = null
   /** onReady 的 ref：effect 只跑一次，回调要用最新值（否则闭包里是首帧的空函数） */
@@ -360,6 +373,8 @@ export function TerminalPanel({
         return text.length > maxChars ? text.slice(text.length - maxChars) : text
       },
       write: (data: string) => processRef.current?.write(data),
+      // 焦点落回 xterm（脚本跑完后把光标还给用户）。读 ref 而不是闭包：term 换代不影响登记
+      focus: () => termRef.current?.focus(),
       isAlive: () => !!processRef.current && !exitedRef.current,
       // 输出活动：给 `run_in_terminal` 判「安静了多久」，见 outputActivityRef 的说明
       outputSeq: () => outputActivityRef.current.seq,
@@ -448,9 +463,14 @@ export function TerminalPanel({
     return () => window.removeEventListener('dragleave', onWindowDragLeave)
   }, [])
 
-  /** 手机端虚拟键盘缺修饰键 / 功能键：底部快捷键条用的「粘连」修饰键状态。
-   *  开启后作用于下一次按键（软键盘字符或底部功能键），发完即复位。 */
-  const isMobile = useIsMobile()
+  /**
+   * 底部虚拟键条是否显示。判据是**输入能力**（只有手指可用）而不是视口宽度 ——
+   * 这条键条补偿的是「软键盘没有 Esc / Ctrl / Tab」，跟窗口多宽无关。详见
+   * `shared/hooks/useVirtualKeyBar.ts` 文件头（扩展 / 窄窗口 / 手机横屏三种情形）。
+   */
+  const showKeyBar = useVirtualKeyBar()
+  /** 虚拟键条用的「粘连」修饰键状态：开启后作用于下一次按键（软键盘字符或底部功能键），
+   *  发完即复位。 */
   const [mods, setMods] = useState<ModsState>(NO_MODS)
   const modsRef = useRef<ModsState>(NO_MODS)
   /**
@@ -942,6 +962,12 @@ export function TerminalPanel({
     const term = new Terminal({
       fontSize,
       lineHeight: 1.25,
+      /*
+       * 能往上翻多少行（设置 → 终端 → 滚动缓冲）。不写就是 xterm 的默认 1000 行 ——
+       * 一次 `npm test` / `cat 大文件` 就顶满，再往上就没了。
+       * 创建期先按当前偏好设一次；之后改设置由上面那个 effect 直接写 `term.options`。
+       */
+      scrollback: getTerminalScrollback(),
       /* 终端字体栈与 dogi（上级目录）保持一致：Cascadia Mono 优先（Windows Terminal /
          VS 自带，字形最接近现代终端），依次回落 JetBrains Mono → Consolas → Courier New。
          原来的 `ui-monospace, SFMono-Regular, 'SF Mono', Menlo, …` 是 macOS 优先的栈，
@@ -1130,6 +1156,18 @@ export function TerminalPanel({
          */
         let connectSettled = false
         /**
+         * 原始输出缓冲的**字节解码器**（只喂 `rawOutputRef`，不参与渲染 —— 渲染那条路
+         * 由 ZMODEM 控制器负责，见下面的 `zm.consume`）。
+         *
+         * ⚠️ `onData` 给的是 `Uint8Array`。直接 `raw.text += data` 会走
+         * `Array.prototype.toString`，把整段输出拼成「3,10,45,45,…」一串逗号分隔的数字
+         * —— 终端助手 `run_in_terminal` 读到的就是这串数字（用户实测的症状）。
+         *
+         * 流式解码还顺带修正了量纲：`raw.offset` 从此按**字符**累计，与 `raw.text.length`
+         * 同量纲，`readSince` 的切片才不会在中文 / emoji 上切歪（按字节算必然错位）。
+         */
+        const rawDecoder = new TextDecoder(sshCharset)
+        /**
          * 运行脚本：终端就绪时把待写入的脚本输入（逐行回车）写进 PTY，写一次即清空。
          * SSH 由 `ready` 帧触发，本机终端由首帧输出触发（见下面的调用点）。
          */
@@ -1164,8 +1202,9 @@ export function TerminalPanel({
           // 原始输出留一份给 AI 工具取增量（见 rawOutputRef 的说明）。
           // 摊还裁剪：超过 2 倍上限才切一次，别让每个 chunk 都拷一遍几十 KB
           const raw = rawOutputRef.current
-          raw.offset += data.length
-          raw.text += data
+          const chunk = rawDecoder.decode(data, { stream: true })
+          raw.offset += chunk.length
+          raw.text += chunk
           if (raw.text.length > RAW_OUTPUT_KEEP * 2) raw.text = raw.text.slice(-RAW_OUTPUT_KEEP)
           // 收到首帧输出 = 连接已就绪（`ready` 帧之外再兜一道）：收起连接进度卡片
           if (!connectSettled) {
@@ -1775,8 +1814,11 @@ export function TerminalPanel({
         <TerminalFab actions={fabActions} />
       </div>
       {error && <div className="px-3 pb-2 text-xs text-muted-foreground">{error}</div>}
-      {/* 手机端虚拟键盘缺修饰键 / 功能键：底部常驻快捷键条（占布局高度，不浮在终端上层）。
+      {/* 虚拟键盘缺修饰键 / 功能键：底部常驻快捷键条（占布局高度，不浮在终端上层）。
           修饰键（Ctrl/Alt/Shift）是「粘连」式，开启后作用于下一次按键（软键盘字符或功能键）再自动复位。
+
+          显示条件见 `useVirtualKeyBar()`：按**输入能力**判（只有手指可用），不看窗口宽度 ——
+          扩展 / 桌面窄窗口都有实体键盘，不该有这条；手机横屏超过 768px 反而该有。
 
           ⚠️ **别用 `margin-bottom` 吃 `--kb-inset` 把这条抬到键盘上方**（曾经这么做，已撤）：
           它是 `flex h-full flex-col` 里 `shrink-0` 的最后一项，margin 算进**外尺寸**参与 flex
@@ -1785,7 +1827,7 @@ export function TerminalPanel({
           **高度链**解决：`useKeyboardInset` 把「应用高度 = innerHeight − 键盘遮挡」写进
           <html> 的 `--app-height`，整条链缩到键盘上沿，这条自然就在键盘上方
           （见 lib/keyboard-inset.ts 文件头）。 */}
-      {isMobile && (
+      {showKeyBar && (
         <div
           className="grid shrink-0 grid-cols-7 gap-1 border-t border-border bg-background p-1.5"
           // pointerdown 时就记下「终端里本来有没有焦点」—— 等 click 已经晚了，浏览器在

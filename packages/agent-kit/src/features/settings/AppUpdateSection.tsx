@@ -55,7 +55,7 @@ export function AppUpdateSection() {
         {tr('软件更新')}
       </div>
       <p className="text-xs leading-4 text-muted-foreground">
-        {tr('启动后自动检查新版本；')}<b>{tr('下载和安装都由你手动确认')}</b>{tr('。')}
+        {tr('启动后自动检查新版本')}
       </p>
 
       {status && !status.supported && (
