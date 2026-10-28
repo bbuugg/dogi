@@ -1283,6 +1283,7 @@ export class AgentDomain {
       ...existing,
       // `null` 显式赋 undefined（JSON 落盘时字段被丢弃）= 清除，回到全文
       contextSummary: summary ?? undefined,
+      // 手动压缩已经把持久化历史切好，旧的自动固化点作废（避免两层摘要叠加）
       ...(summary ? { autoSummary: undefined } : {}),
       updatedAt: Date.now()
     }

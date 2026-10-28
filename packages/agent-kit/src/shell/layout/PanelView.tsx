@@ -678,7 +678,7 @@ function PanelTabItem({
    * 「刷新」= 让**这一个标签的内容**重新加载。
    *
    * 两条路（由 `reloadTab` 按标签类型分派）：
-   * - **对话标签** → 「重新加载这条会话」（等价于刷新页面后点开它：mastra 拉服务端权威
+   * - **对话标签** → 「重新加载这条会话」（等价于刷新页面后点开它：内置 拉服务端权威
    *   历史、acp 走 `session/load` 回放）。刻意**不走卸载重挂** —— `ConversationTab` 重挂
    *   并不会重新拉消息（消息在 store 里），只会把右侧面板的终端 / 文件现场一起拆掉。
    * - **工具标签** → `requestReloadTab` 的卸载重挂（接口页重发请求、插件面重新 `render()`）。
@@ -980,7 +980,7 @@ function useGroupActions(): GroupActions {
    * 标签右键的「刷新」。按标签类型分派 —— 两者是**完全不同**的动作，别合并：
    *
    * - **对话标签** → `reloadConversation`：等价于「刷新页面 → 点开这个会话」，
-   *   mastra 拉服务端权威历史、acp 走 `session/load` 回放。**不卸载重挂**：
+   *   内置 拉服务端权威历史、acp 走 `session/load` 回放。**不卸载重挂**：
    *   `ConversationTab` 重挂不会重新拉消息（消息在 store 里），只会把右侧面板的终端 /
    *   文件现场一起拆掉。
    * - **工具标签** → `requestReloadTab` 的卸载重挂（接口页重发请求、插件面重新 `render()`）。

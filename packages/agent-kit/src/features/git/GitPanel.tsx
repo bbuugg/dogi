@@ -1624,7 +1624,7 @@ export function GitPanel({
             </label>
           </div>
           <DialogFooter>
-            <Button variant="ghost" className="h-8!" onClick={() => setStashOpen(false)}>
+            <Button data-dialog-dismiss="" variant="ghost" className="h-8!" onClick={() => setStashOpen(false)}>
               取消
             </Button>
             <SpinnerButton
@@ -1725,7 +1725,7 @@ export function GitPanel({
           </div>
 
           <DialogFooter>
-            <Button variant="ghost" className="h-8!" onClick={() => setNewBranchOpen(false)}>
+            <Button data-dialog-dismiss="" variant="ghost" className="h-8!" onClick={() => setNewBranchOpen(false)}>
               取消
             </Button>
             <SpinnerButton
@@ -1966,7 +1966,7 @@ export function GitPanel({
           </div>
 
           <DialogFooter>
-            <Button variant="ghost" className="h-8!" onClick={() => setRemoteOpen(false)}>
+            <Button data-dialog-dismiss="" variant="ghost" className="h-8!" onClick={() => setRemoteOpen(false)}>
               关闭
             </Button>
           </DialogFooter>

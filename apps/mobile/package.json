@@ -1,6 +1,6 @@
 {
   "name": "@fizz/mobile",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "Fizz 安卓壳：Capacitor + 独立 vite 工程（本地 www，服务端地址登录时配置）",
   "private": true,
   "type": "module",
@@ -12,9 +12,9 @@
     "add:android": "cap add android",
     "assets": "node scripts/copy-assets.mjs",
     "icons": "node scripts/generate-icons.mjs",
-    "sync": "cap sync android && npm run assets",
+    "sync": "cap sync android && npm run assets && node scripts/set-android-version.mjs",
     "open": "cap open android",
-    "build:android": "cap build android"
+    "build:android": "node scripts/set-android-version.mjs && cap build android"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",

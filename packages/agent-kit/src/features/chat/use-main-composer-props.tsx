@@ -133,8 +133,8 @@ export function useMainComposerProps(
   const running = streaming;
   const slashContext: SlashCommandContext = { app, running };
   /**
-   * 插话能力：只给 **mastra 后端的已打开会话** —— steer 依赖服务端把消息注入
-   * mastra 循环，ACP 会话的协议给不了；初始页（还没有会话）也没有「当前这一轮」可插。
+   * 插话能力：只给 **内置后端的已打开会话** —— steer 依赖服务端把消息注入
+   * 内置 循环，ACP 会话的协议给不了；初始页（还没有会话）也没有「当前这一轮」可插。
    */
   const canSteer = !!app.activeConversationId && !isAcp;
   /**
@@ -310,7 +310,7 @@ export function useMainComposerProps(
     // 工具条排在审批卡之上：它常驻、位置固定，审批卡插在它与输入框之间
     above: (
       <>
-        {/* 浏览器 / MCP 开关只在 mastra（本地）链路生效：browser_* 工具与提示词里的浏览器
+        {/* 浏览器 / MCP 开关只在 内置（本地）链路生效：browser_* 工具与提示词里的浏览器
             说明只在那边注入，ACP 走外部 agent，这套开关对它无效。
             ⚠️ 但 ACP 下**不能整行不渲染** —— 这一行高 32px，少了它输入框卡片会往上跳，
             在「开始新对话」页切「内置 ↔ 外部 Agent」时整块输入区上下抖。用同高占位顶住。 */}
@@ -340,7 +340,7 @@ export function useMainComposerProps(
     below: app.activeConversationId ? null : <WorkspaceSelect app={app} />,
     leading: (
       <>
-        {/* 上传附件：mastra 会话专属（ACP 链路只发纯文本）——排在最左，与 ainav 的回形针一致 */}
+        {/* 上传附件：内置会话专属（ACP 链路只发纯文本）——排在最左，与 ainav 的回形针一致 */}
         {!isAcp && opts.onPickFiles && (
           <AttachmentUploadButton
             disabled={!activeWorkspace}
@@ -351,7 +351,7 @@ export function useMainComposerProps(
             onMenuOpen={opts.onRefreshUploadProviders}
           />
         )}
-        {/* 工具权限：非 ACP 会话用内置三档 `permissionMode` —— 只有 mastra 那条路读它
+        {/* 工具权限：非 ACP 会话用内置三档 `permissionMode` —— 只有 内置 那条路读它
             （runAgent → tools 的 guardWrite）。ACP 那边要控权限是 agent 自己发
             session/request_permission，所以这里给的是**答复策略**（确认 / 完全放行，按会话记住）；
             agent 自己的模式（opencode 的 build / plan）在右侧模型选择器之后 */}

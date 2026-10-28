@@ -17,7 +17,7 @@
  *    `agent-host.mjs` / `bootstrap.mjs` 之外的代码路径用的，不能据此判死。
  *
  * ## 为什么不用正则直接扫原文
- * 实测踩过的坑：`runtime.mjs` 里 Mastra 的提示词模板含
+ * 注意：`runtime.mjs` 里内置的提示词模板含
  * `move items from "In Progress" to "Done"`，朴素正则会把它当成包名 `In Progress`，
  * 于是每次构建都报一个不存在的依赖。所以这里先做一遍**轻量词法扫描**，把注释、字符串、
  * 模板字面量、正则字面量摘出去，只在「剩下的代码影子」上匹配 import/export/require。

@@ -46,7 +46,7 @@ export function ComposerToolbar({ app, children }: { app: AgentApp; children?: R
 }
 
 /**
- * ACP 会话下的**同高占位**：这一排（浏览器 / MCP）是「给 mastra 链路装能力」的开关，
+ * ACP 会话下的**同高占位**：这一排（浏览器 / MCP）是「给 内置 链路装能力」的开关，
  * 外部 Agent 自带工具、不读这两个字段，所以按钮不能给。
  *
  * 但**不能整行不渲染**：`ChatPanel` 的 `above` 槽位里少了这一行，输入框卡片会往上跳

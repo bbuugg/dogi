@@ -32,6 +32,8 @@
  * 5. **4.x 移除了 maxBuffer**（改流式收集，没有上限）。大仓库的超大 status / diff 不会再
  *    像 execFile 时代那样直接把进程杀掉，diff 的 400k 字符截断仍由 route 自己负责。
  */
+import { existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { simpleGit, type SimpleGit } from 'simple-git'
 import type { GitCommitDiffResult, GitCommitFileStat } from './types'
 
@@ -54,8 +56,16 @@ export interface GitRun {
  * outputHandler 里抓 stderr 的闭包是按调用隔离的，共享实例会把不同命令的 stderr 串在一起。
  */
 export function gitPanel(cwd: string, timeoutMs: number = GIT_TIMEOUT_MS): SimpleGit {
+  // ⚠️ simple-git 在 baseDir 不存在时会**同步抛错**（"Cannot use simple-git on a directory
+  // that does not exist"），而这个 throw 发生在命令执行 / try-catch 之外 —— `git()` 的
+  // try/catch 抓不到它，`repoRoot` / 各 git 路由就会直接崩成 500（用户删掉某个工作区 / 会话
+  // 目录后最容易撞上）。
+  // 这里把「目录不存在」收敛成「肯定不是 git 仓库」：兜底到系统临时目录（一定存在、且不是
+  // 仓库），让后续的 git 命令自然以非 0 退出码失败，调用方照旧拿到 ok:false / null，
+  // 而不是一记未捕获异常。正常仓库路径不受影响（baseDir 仍是真实目录）。
+  const baseDir = existsSync(cwd) ? cwd : tmpdir()
   const client = simpleGit({
-    baseDir: cwd,
+    baseDir,
     // 每条命令前置 `-c core.quotePath=false`：中文等非 ASCII 路径不转义成带引号的八进制
     config: ['core.quotePath=false'],
     // 进程级已兜底 GIT_TERMINAL_PROMPT（见头注释第 2/3 条），这里放行让它穿透守卫

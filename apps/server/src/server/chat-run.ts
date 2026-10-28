@@ -32,7 +32,7 @@ export interface ChatRun {
   requestId: string
   conversationId: string
   workspaceId: string
-  backend: 'mastra' | 'acp'
+  backend: 'builtin' | 'acp'
   /** 用户点「停止」时 abort 它（runAgent / runAcpAgent 的 signal） */
   controller: AbortController
   /**
@@ -43,7 +43,7 @@ export interface ChatRun {
    */
   commandStops: Map<string, () => void>
   /**
-   * 这一轮的**活权限档**（内置 mastra 三档：full / confirm / readonly）。
+   * 这一轮的**活权限档**（内置 Agent 三档：full / confirm / readonly）。
    *
    * 工具集一轮建一次，静态档会把权限快照死在整轮里；`runAgent` 拿的是
    * `() => run.permissionMode` 这个 getter，闸门**每次工具调用现取** —— 用户在
@@ -56,7 +56,7 @@ export interface ChatRun {
    * 运行中插话（steer）的收件箱：POST /api/chat/steer 把消息 push 进来，
    * agent 循环在下一个工具步骤边界经 `pollSteer` 消费（见 packages/agent 的
    * `onIterationComplete`）。abort / 收尾兜底后清空（见 chat-turn 的收尾链）。
-   * 只有 mastra 后端的 run 会收（steer 路由对 acp 会话直接 400）。
+   * 只有 内置后端的 run 会收（steer 路由对 acp 会话直接 400）。
    */
   steerInbox: AgentChatMessage[]
   /** ACP 轮次的中止要杀进程（只 abort signal 不够）：会话坐标 */
@@ -169,6 +169,23 @@ export function compactFrames(frames: ChatStreamFrame[]): ChatStreamFrame[] {
       }
       continue
     }
+    // 交接文档的流式增量：同 phase 且相邻时合并。摘要可能连续吐几千个 delta，
+    // 不合并会把帧日志撑爆（4000 帧上限），回放时更早的事件就被挤掉。
+    if (
+      event?.type === 'context-compaction-delta' &&
+      prevEvent?.type === 'context-compaction-delta' &&
+      prevEvent.phase === event.phase
+    ) {
+      out[out.length - 1] = {
+        ...(prev as ChatStreamFrame),
+        event: {
+          type: 'context-compaction-delta',
+          phase: event.phase,
+          delta: prevEvent.delta + event.delta
+        }
+      }
+      continue
+    }
     out.push(frame)
   }
   return out
@@ -178,7 +195,7 @@ export function compactFrames(frames: ChatStreamFrame[]): ChatStreamFrame[] {
 export function createRun(input: {
   conversationId: string
   workspaceId: string
-  backend: 'mastra' | 'acp'
+  backend: 'builtin' | 'acp'
   acpTarget?: { agentId: string; conversationId: string }
   /** 这一轮助手消息的落盘 id（客户端给的；缺省收尾时自生成，见 ChatRun.assistantMessageId） */
   assistantMessageId?: string

@@ -171,7 +171,7 @@ export async function startAssistantTurn(input: AssistantSendInput): Promise<Sta
    */
   const history = [...(input.history ?? []), userMessage]
 
-  const run = createRun({ conversationId: input.sessionId, workspaceId: '', backend: 'mastra' })
+  const run = createRun({ conversationId: input.sessionId, workspaceId: '', backend: 'builtin' })
   markDirty(['activeRuns'])
 
   // 审批:与聊天同一套四 kind 选项与超时;不发 conversation:* 广播(助手没有跨页场景)

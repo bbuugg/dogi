@@ -112,7 +112,7 @@ export function PluginDialog({
         </div>
 
         <DialogFooter>
-          <Button variant="ghost" size="sm" disabled={busy} onClick={onClose}>
+          <Button data-dialog-dismiss="" variant="ghost" size="sm" disabled={busy} onClick={onClose}>
             {request.cancelLabel || '取消'}
           </Button>
           <Button size="sm" disabled={busy} onClick={() => void submit()}>

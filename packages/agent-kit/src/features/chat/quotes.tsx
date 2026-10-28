@@ -194,6 +194,35 @@ export function MessageQuoteLayer({ onQuote }: { onQuote: (quote: MessageQuote) 
         sync()
       })
     }
+    /**
+     * 点「任何地方」都能取消选中 —— 包括消息区之外（侧栏、标签条、输入框、空白处）。
+     *
+     * 浏览器的默认行为只在**可选中的文字**上清选区：点在 `user-select: none` 的界面元素
+     * （外壳、按钮、标签条）上时选区会保留，于是浮层一直挂着，用户只能回到消息里点一下
+     * 才能收掉。
+     *
+     * 判据只有两条：
+     * - 点在浮层自己身上 → 交给按钮的 onClick（它们的 `pointerdown` 已 preventDefault）；
+     * - 其余**任何位置**（消息正文、侧栏、标签条、输入框、空白处）→ 清选区并收掉浮层。
+     *
+     * 消息正文**不排除**：清掉旧选区正是浏览器的默认行为（重新拖选会立刻建一个新的），
+     * 而消息里那些 `user-select: none` 的按钮 / 卡片头不会清 —— 那正是「点了没收掉」的来源。
+     * 唯一让路的是 `shift + 点`（扩选），那是浏览器的活。
+     *
+     * 用 `mousedown` 而不是 `pointerdown`：移动端滚动列表时 `pointerdown` 先到，
+     * 边滚边清会把「选一段正在输出的内容再滚着看」这条路堵死；`mousedown` 只在
+     * 真正的按下（点击）时来，滚动不会触发。
+     */
+    const onMouseDown = (event: MouseEvent): void => {
+      if (event.button !== 0 || event.shiftKey) return
+      const target = event.target as Element | null
+      if (target?.closest('[data-quote-layer]')) return
+      const sel = window.getSelection()
+      if (!sel || sel.isCollapsed) return
+      sel.removeAllRanges()
+      hide()
+    }
+    document.addEventListener('mousedown', onMouseDown, true)
     document.addEventListener('selectionchange', schedule)
     /**
      * 滚动 / 改窗口大小：**重算位置，而不是藏起来**。流式输出期间消息区一直在自动滚，
@@ -205,6 +234,7 @@ export function MessageQuoteLayer({ onQuote }: { onQuote: (quote: MessageQuote) 
     return () => {
       if (queued) cancelAnimationFrame(queued)
       window.clearTimeout(ackTimerRef.current)
+      document.removeEventListener('mousedown', onMouseDown, true)
       document.removeEventListener('selectionchange', schedule)
       window.removeEventListener('scroll', schedule, true)
       window.removeEventListener('resize', schedule)

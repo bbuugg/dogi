@@ -1,5 +1,4 @@
-import { Agent } from "@mastra/core/agent";
-import { asSchema, generateText, tool } from "ai";
+import { asSchema, stepCountIs, streamText, tool } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createDeepSeek } from "@ai-sdk/deepseek";
@@ -518,18 +517,41 @@ var DEFAULT_COMPACTION_SETTINGS = {
 * fizz 支持的模型窗口跨度很大（32k~1M），16384 的固定预留放到小窗口上会占掉一半，
 * 于是按窗口封顶到 25%（**唯一的机械适配，不改机制**）。
 */
-function resolveCompactionSettings(contextWindow, overrides) {
+/** 保留区的下限：再怎么让位也要留这么多原文，否则模型连「刚才在干什么」都不知道 */
+var MIN_KEEP_TOKENS = 1024;
+function resolveCompactionSettings(contextWindow, overrides, fixedTokens = 0) {
 	const merged = {
 		...DEFAULT_COMPACTION_SETTINGS,
 		...overrides
 	};
 	const reserveTokens = Math.min(merged.reserveTokens, compactionReserveTokens(contextWindow));
-	const keepRecentTokens = Math.min(merged.keepRecentTokens, Math.max(1024, Math.floor((contextWindow - reserveTokens) * .8)));
+	/** 留给「消息」的预算：窗口 − 预留 − 压缩动不了的那块 */
+	const budget = contextWindow - reserveTokens - Math.max(0, fixedTokens);
+	const keepRecentTokens = Math.min(merged.keepRecentTokens, Math.max(MIN_KEEP_TOKENS, Math.floor(budget * .8)));
 	return {
 		...merged,
 		reserveTokens,
 		keepRecentTokens
 	};
+}
+/**
+* 留给「消息」的预算（token）。≤ `MIN_KEEP_TOKENS` 时压缩注定压不到触发线以下 ——
+* 该压的是系统提示词 / 工具定义，不是历史，调用方据此跳过（别再白付摘要调用）。
+*/
+function compactionBudget(contextWindow, settings, fixedTokens) {
+	return contextWindow - settings.reserveTokens - Math.max(0, fixedTokens);
+}
+/**
+* 摘要正文的 token 预算（写进 prompt 的软约束）。
+*
+* 取保留区的 40%：摘要 + 保留区一起要能塞进「窗口 − 预留 − base」里，给摘要留四成
+* 已经偏宽松，但它是**软**约束 —— 真正的保险是调用方压不下去时直接不压（见
+* `compactionBudget`），而不是靠模型听话。
+*
+* 下限 1500：再小的窗口也得容得下「目标 / 已完成 / 待办」这几段，否则摘要等于没用。
+*/
+function summaryBudgetTokens(keepRecentTokens) {
+	return Math.max(1500, Math.min(8e3, Math.floor(keepRecentTokens * .4)));
 }
 function shouldCompact(contextTokens, contextWindow, settings) {
 	if (!settings.enabled) return false;
@@ -567,51 +589,6 @@ function assistantContextTokens(msg) {
 	const direct = msg.usage.contextTokens;
 	if (direct && direct > 0) return direct;
 	return calculateContextTokens(msg.usage);
-}
-/**
-* pi 的 `estimateContextTokens`：**最后一条带 usage 的助手消息**的 usage + 其后消息的估算。
-*
-* 这是压缩触发与圆环的共同口径。找不到 usage（老数据 / 上游没报）时退回「逐条估算」，
-* 并补上 `baseTokens`（系统提示词 + 工具 schema；pi 的消息数组里含系统提示词，fizz 不含）。
-*
-* ⚠️ fizz 的结构差异：工具结果内嵌在助手消息的 `tool-call.output` 上，不像 pi 那样是
-* 独立的后继消息。所以「usage 之后」的 trailing 里**不含**这一轮刚产出的工具结果
-* （最多几千 token，被 16k 的预留盖住）。要做到分毫不差得先把两者拆开，不值得。
-*/
-async function estimateContextTokens(messages, opts = {}) {
-	let lastUsageIndex = null;
-	let usageTokens = 0;
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const m = messages[i];
-		if (!m || m.role !== "assistant" || !m.usage) continue;
-		const tokens = assistantContextTokens(m);
-		if (tokens > 0) {
-			lastUsageIndex = i;
-			usageTokens = tokens;
-			break;
-		}
-	}
-	if (lastUsageIndex === null) {
-		let estimated = 0;
-		for (const m of messages) estimated += estimateMessagesTokens(await toModelMessages([m]));
-		return {
-			tokens: estimated + (opts.baseTokens ?? 0),
-			usageTokens: 0,
-			trailingTokens: estimated,
-			lastUsageIndex: null
-		};
-	}
-	let trailingTokens = 0;
-	for (let i = lastUsageIndex + 1; i < messages.length; i++) {
-		const m = messages[i];
-		if (m) trailingTokens += estimateMessagesTokens(await toModelMessages([m]));
-	}
-	return {
-		tokens: usageTokens + trailingTokens,
-		usageTokens,
-		trailingTokens,
-		lastUsageIndex
-	};
 }
 var SUMMARIZATION_SYSTEM_PROMPT = [
 	"You are a context summarization assistant. Your task is to read a conversation between a user and an AI assistant, then produce a structured summary following the exact format specified.",
@@ -703,20 +680,44 @@ Create a concise checkpoint of the user's request and the progress shown above. 
 
 Only summarize information explicitly present above. Do not infer or recreate later messages.`;
 /**
-* token 估算：**pi 的 `estimateTokens` 公式** —— `Math.ceil(chars / 4)`。
+* 宽字符（CJK / 假名 / 谚文 / 全角符号）的个数。
 *
-* pi 按消息角色分别数 char 数（正文 / 思考 / toolCall 的 name + JSON 参数 / 工具结果正文），
-* 这里在展平后的文本上用同一个除数，等价。
+* 只扫码点、不建数组：工具结果动辄几十万字符，`text.match(/…/g)` 会分配一个
+* 等长的字符串数组（纯中文时就是几十万个元素），在压缩判断这种每步都跑的热路径上
+* 是纯粹的浪费。`charCodeAt` 的循环没有分配，V8 能把它编成很紧的循环。
+*/
+function countWideChars(text) {
+	let wide = 0;
+	for (let i = 0; i < text.length; i += 1) {
+		const c = text.charCodeAt(i);
+		if (c < 11904) continue;
+		if (c <= 40959 || c >= 44032 && c <= 55215 || c >= 63744 && c <= 64255 || c >= 65072 && c <= 65103 || c >= 65281 && c <= 65376 || c >= 65504 && c <= 65510) wide += 1;
+	}
+	return wide;
+}
+/**
+* token 估算：**CJK 加权的 pi 公式**。
 *
-* ⚠️ 已知取舍（照搬 pi 带来的）：一个汉字在 JS 字符串里算 1 个 char → 0.25 token，
-* 而真实约 1~1.5 token。**纯中文会话会被低估 4~6 倍**，压缩触发因此偏晚。
-* 这是 pi 的行为，fizz 不再额外加权；真出现超窗就走 `runAgent` 的 overflow 恢复。
+* pi 原式是 `Math.ceil(chars / 4)` —— 为英文写的。一个汉字在 JS 字符串里只算 1 个
+* char，于是被估成 0.25 token，而主流分词器里它接近 1~1.5 token：**纯中文会话被
+* 低估 4~6 倍**（AGENTS.md 这种全文注入的中文文档、中文工具结果都吃这个亏）。
+*
+* 「触发线按真实 usage、切点按这个低估的估算」这种半截修法会带来两种不对称的坏结果：
+* - 明明按真实用量该切掉 80k，实际只切了 20k 估算（≈ 真实 20k），界面报「压到 40k」
+*   而真实请求还有 100k，跑一个工具就又满了（用户实测的 120k → 40k → 120k 就是这个）；
+* - 压缩后的上下文仍按低估值判阈值 → 该压不压。
+*
+* 所以这里改成：宽字符按 1 token、其余按 4 字符 1 token。**纯 ASCII 的结果与 pi 逐字节
+* 相同**（`wide = 0` 时就是 `ceil(len / 4)`），只有中日韩内容会变准 —— 这不是「加一层
+* 压缩」，只是把同一把尺子换成和上游一致的刻度。
 */
 function estimateTokens(text) {
-	return text ? Math.ceil(text.length / 4) : 0;
+	if (!text) return 0;
+	const wide = countWideChars(text);
+	return wide + Math.ceil((text.length - wide) / 4);
 }
-/** pi 的 `ESTIMATED_IMAGE_CHARS`：一张图按 4800 字符（= 1200 token）估 */
-var ESTIMATED_IMAGE_CHARS = 4800;
+/** 一张图按 1200 token 估（pi 的 `ESTIMATED_IMAGE_CHARS = 4800` 字符 ÷ 4） */
+var ESTIMATED_IMAGE_TOKENS = 1200;
 /** 工具结果的文本值（AI SDK 的 `output` 有 text / json / error-text 几种形状） */
 function toolOutputText(output) {
 	if (typeof output === "string") return output;
@@ -728,90 +729,213 @@ function toolOutputText(output) {
 	return output === void 0 ? "" : JSON.stringify(output);
 }
 /**
-* 一条消息的「字符数」，口径对齐 pi 的 `estimateTokens`：
+* 一条消息的 token 数，口径对齐 pi 的 `estimateTokens`（哪些部分算、哪些不算）：
 * 正文 + 思考 + toolCall 的 `name` 与 `JSON.stringify(arguments)` + 工具结果正文；
-* 图片按 `ESTIMATED_IMAGE_CHARS` 折成字符。
+* 图片按 `ESTIMATED_IMAGE_TOKENS` 直接计。
+*
+* ⚠️ 这里**直接产 token**，不再是「先数字符再除 4」：CJK 加权后除数是可变的
+* （见 `estimateTokens`），先合并字符数再除会把宽窄字符混在一起算错。
 */
-function estimateMessageChars(m) {
+function estimateMessageTokens(m) {
 	const { content } = m;
-	if (typeof content === "string") return content.length;
+	if (typeof content === "string") return estimateTokens(content);
 	if (!Array.isArray(content)) return 0;
-	let chars = 0;
+	let tokens = 0;
 	for (const part of content) switch (part.type) {
 		case "text":
 		case "reasoning":
-			chars += String(part.text ?? "").length;
+			tokens += estimateTokens(String(part.text ?? ""));
 			break;
 		case "image":
-			chars += ESTIMATED_IMAGE_CHARS;
+			tokens += ESTIMATED_IMAGE_TOKENS;
 			break;
 		case "tool-call":
-			chars += String(part.toolName ?? "").length + JSON.stringify(part.input ?? {}).length;
+			tokens += estimateTokens(String(part.toolName ?? "") + JSON.stringify(part.input ?? {}));
 			break;
-		case "tool-result": chars += toolOutputText(part.output).length;
+		case "tool-result": tokens += estimateTokens(toolOutputText(part.output));
 	}
-	return chars;
+	return tokens;
 }
 /**
 * 一组消息的 token 数（导出：runAgent 要用它算「本轮实际请求的上下文」）。
 *
-* 逐条 `ceil(chars / 4)` 再求和 —— 与 pi 的 `sumTokens` 一致（不是先把总字符数加完再除）。
+* 逐条求和 —— 与 pi 的 `sumTokens` 一致（不是先把总字符数加完再除）。
 */
 function estimateMessagesTokens(messages) {
 	let sum = 0;
-	for (const m of messages) sum += Math.ceil(estimateMessageChars(m) / 4);
+	for (const m of messages) sum += estimateMessageTokens(m);
 	return sum;
 }
 /**
-* 把一条 **Mastra format-2** 消息（`MastraDBMessage`）展平成文本。
+* 上下文占用的**唯一口径**：有可用真值就用真值（+ 其后的增量估算），没有才全量估算。
 *
-* ⚠️ 为什么不能直接把它当 `ModelMessage` 丢给 `messageToText`：两者的 content
-* 形状根本不同 —— Mastra 的是 `{ format: 2, parts: [...] }`，而 `messageToText`
-* 认的是 AI SDK 的 `string | ContentPart[]`。传错类型**不会报错**：`messageToText`
-* 走到 `Array.isArray(content)` 为 false、`typeof content === 'string'` 也为 false 的
-* 分支，返回空串 —— 整份上下文被估成 0，圆环永远显示「没用量」（与 AGENTS.md 记的
-* `reasoning-delta`、file part 形状那类「写错静默丢弃」同一个坑）。
+* 全仓只准用这一个式子回答「现在多满」：圆环、压缩触发、压缩卡片的 before/after
+* 都走它，三处数字因此永远对得上。
 *
-* part 形状同样是 AI SDK v4 UIMessage 那一套（与 `onIterationComplete` 里注入插话时
-* 手写的 file part 一致）：文本在 `text`、工具调用是 `tool-invocation`。只抠对
-* **token 估算有意义**的那几类，认不出来的跳过（宁可低估，不要抛错拖垮整轮）。
+* 为什么真值优先：
+* - 上游报的 usage 是**唯一的事实**，估算只是它的近似；
+* - 估算的分词刻度（CJK 加权）各家差 20%~50%，一旦用它当判据，就会「估算说超了其实没超」。
+*
+* 为什么还要估算：真值只覆盖**已经发出去的那一次**，其后的新增（本轮新消息、刚产出的
+* 工具结果）只能估 —— 这是 `realWithTail` 里 tail 的部分。
+*
+* @param realWithTail 真值 + 其后新增内容的估算；没有真值时传 0
+* @param fallbackEstimate 一条真值都没有时的全量估算（首轮 / 刚压缩过）
 */
-function mastraMessageChars(m) {
-	const content = m?.content;
-	if (!content || typeof content !== "object") return 0;
-	const parts = content.parts;
-	if (!Array.isArray(parts)) return 0;
-	let chars = 0;
-	for (const part of parts) {
-		const type = part?.type;
-		if (type === "text" || type === "reasoning") {
-			if (typeof part.text === "string") chars += part.text.length;
-		} else if (type === "file" || type === "image") chars += ESTIMATED_IMAGE_CHARS;
-		else if (type === "tool-invocation") {
-			const inv = part.toolInvocation;
-			const name = String(inv?.toolName ?? part.toolName ?? "?");
-			if (inv?.args !== void 0) chars += name.length + JSON.stringify(inv.args).length;
-			if (inv?.result !== void 0) {
-				const r = inv.result;
-				chars += (typeof r === "string" ? r : JSON.stringify(r ?? null)).length;
-			}
+function contextUsed(realWithTail, fallbackEstimate) {
+	return realWithTail > 0 ? realWithTail : fallbackEstimate;
+}
+/**
+* 每个会话最近一次测到的「消息之外」开销（系统提示词 + 工具 schema）。
+*
+* 手动压缩那条路（`POST /api/chat/compress`）不建 agent，拿不到 `estimateBaseTokens`；
+* 不补这块，它报的 before/after 就只有消息部分，和圆环（含 base）差一个 base ——
+* 用户会看到「压完 32k，圆环还是 100k」。`runAgent` 每轮把测到的值记在这里兜底。
+*
+* 只活在进程内存里：重启后第一轮之前是空，退化成「只算消息」（老行为），不影响正确性。
+*/
+var baseTokensByConversation = /* @__PURE__ */ new Map();
+function rememberBaseTokens(conversationId, tokens) {
+	if (!conversationId || !Number.isFinite(tokens) || tokens <= 0) return;
+	if (baseTokensByConversation.size > 200) {
+		const oldest = baseTokensByConversation.keys().next().value;
+		if (oldest !== void 0) baseTokensByConversation.delete(oldest);
+	}
+	baseTokensByConversation.set(conversationId, Math.round(tokens));
+}
+/** 交接摘要的固定开头：轮中压缩靠它认出「这条是上一次的摘要」 */
+var SUMMARY_MARKER = "（以下是对先前对话的交接摘要，替代原始历史）";
+function messageText(m) {
+	if (!m) return "";
+	const c = m.content;
+	if (typeof c === "string") return c;
+	if (!Array.isArray(c)) return "";
+	return c.map((part) => part.type === "text" ? String(part.text ?? "") : "").filter(Boolean).join("\n");
+}
+function isSummaryMessage(m) {
+	return !!m && m.role === "user" && messageText(m).startsWith(SUMMARY_MARKER);
+}
+/** 最早的「有 tool-call 但还没有 tool-result」的那条消息下标；没有 = -1 */
+function pendingToolCallIndex(messages) {
+	const resolved = /* @__PURE__ */ new Set();
+	for (let i = messages.length - 1; i >= 0; i -= 1) {
+		const content = messages[i]?.content;
+		if (!Array.isArray(content)) continue;
+		for (const raw of content) {
+			const part = raw;
+			if (part.type === "tool-result" && part.toolCallId) resolved.add(part.toolCallId);
+			else if (part.type === "tool-call" && part.toolCallId && !resolved.has(part.toolCallId)) return i;
 		}
 	}
-	return chars;
+	return -1;
+}
+/** 从 ModelMessage 里抽文件操作清单（`<read-files>` / `<modified-files>`） */
+function extractModelFileOps(messages, ops) {
+	for (const m of messages) {
+		const content = m.content;
+		if (!Array.isArray(content)) continue;
+		for (const raw of content) {
+			const part = raw;
+			if (part.type !== "tool-call") continue;
+			const path = typeof part.input?.path === "string" ? part.input.path : void 0;
+			if (!path) continue;
+			if (part.toolName === "read_file") ops.read.add(path);
+			else if (part.toolName === "write_file" || part.toolName === "edit_file") ops.modified.add(path);
+		}
+	}
 }
 /**
-* 一组 **Mastra format-2** 消息的 token 估算。
+* 轮中压缩：工具步边界上把**在途消息**（`ModelMessage[]`）压一次，下一步请求立刻变小。
 *
-* 给 `runAgent` 的 `onIterationComplete` 用：那里的 `ctx.messages` 是 Mastra 的
-* `MastraDBMessage[]`（format 2），不能走 `estimateMessagesTokens`（见上）。
-* 这是 pi 的**兜底估算**（`estimateContextTokens` 找不到带 usage 的助手消息时的分支）。
-* finish 时圆环会换成上游真实 usage（`calculateContextTokens`），两者会有几个百分点的
-* 跳变 —— pi 也是这个行为：流式中估、结束后按真实用量。
+* 与 `compactHistory` 的差别只在输入：那边是落盘的 `AgentChatMessage`（有 id、能落检查点），
+* 这边是已经转换好的模型消息（没有 id，**落不了检查点**）。所以它只做「本轮自救」，
+* 下一轮由 pre-flight 按真实大小重压一次。
 */
-function estimateMastraMessagesTokens(messages) {
-	let sum = 0;
-	for (const m of messages) sum += Math.ceil(mastraMessageChars(m) / 4);
-	return sum;
+async function compactModelMessages(messages, opts) {
+	const unchanged = {
+		messages,
+		compressed: null,
+		summary: null
+	};
+	if (messages.length === 0) return unchanged;
+	const baseTokens = Math.max(0, opts.baseTokens ?? 0);
+	const settings = resolveCompactionSettings(opts.contextWindow, opts.settings, baseTokens);
+	const estimated = baseTokens + estimateMessagesTokens(messages);
+	const beforeTokens = contextUsed(opts.triggerTokens ?? 0, estimated);
+	if (!opts.force && !shouldCompact(beforeTokens, opts.contextWindow, settings)) return unchanged;
+	/**
+	* 与 `compactHistory` 同一条闸：`系统提示词 + 工具定义` 已经吃掉预算时，压也压不到
+	* 触发线以下。这里更贵 —— 每个工具步边界都会白调一次摘要模型。
+	*/
+	if (compactionBudget(opts.contextWindow, settings, baseTokens) <= 1024) return unchanged;
+	const tokens = messages.map((m) => estimateMessagesTokens([m]));
+	let cutIndex = 0;
+	let accumulated = 0;
+	for (let i = messages.length - 1; i >= 0; i -= 1) {
+		accumulated += tokens[i] ?? 0;
+		if (accumulated >= settings.keepRecentTokens) {
+			cutIndex = i;
+			break;
+		}
+	}
+	const pending = pendingToolCallIndex(messages);
+	if (pending >= 0 && pending < cutIndex) cutIndex = pending;
+	if (cutIndex <= 0) return unchanged;
+	const summarized = messages.slice(0, cutIndex);
+	const kept = messages.slice(cutIndex);
+	/**
+	* **上一次轮中压缩的产物**：一条轮中压缩可能压过不止一次，那时 `messages[0]` 就是
+	* 上一份摘要。它不能当普通对话再摘要一遍（等于「摘要的摘要」，每压一次丢一层信息），
+	* 要当 `previous-summary` 传，只摘要它**之后**的新消息。
+	*/
+	const previousSummary = isSummaryMessage(summarized[0]) ? messageText(summarized[0]) : void 0;
+	const fresh = previousSummary ? summarized.slice(1) : summarized;
+	if (fresh.length === 0) return unchanged;
+	const conversationText = serializeConversation(fresh);
+	if (!conversationText.trim()) return unchanged;
+	const fileOps = createFileOps();
+	extractModelFileOps(summarized, fileOps);
+	opts.onSummaryStart?.({
+		beforeTokens,
+		summarizedTurns: fresh.length,
+		keptTurns: kept.length
+	});
+	const onDelta = opts.onSummaryDelta ? (delta) => opts.onSummaryDelta?.({
+		delta,
+		phase: "checkpoint"
+	}) : void 0;
+	const text = `${SUMMARY_MARKER}\n\n${await generateSummaryFromText(conversationText, opts.model, previousSummary, opts.signal, void 0, onDelta, summaryBudgetTokens(settings.keepRecentTokens))}${formatFileOperations(fileOps)}`;
+	const firstKept = kept[0];
+	let result;
+	if (firstKept?.role === "user") {
+		const content = firstKept.content;
+		result = [{
+			...firstKept,
+			content: [{
+				type: "text",
+				text
+			}, ...typeof content === "string" ? [{
+				type: "text",
+				text: content
+			}] : content]
+		}, ...kept.slice(1)];
+	} else result = [{
+		role: "user",
+		content: [{
+			type: "text",
+			text
+		}]
+	}, ...kept];
+	return {
+		messages: result,
+		compressed: {
+			beforeTokens,
+			afterTokens: baseTokens + estimateMessagesTokens(result),
+			summarizedTurns: fresh.length,
+			keptTurns: kept.length
+		},
+		summary: text
+	};
 }
 /**
 * 把一条工具定义折成「模型实际看到的那部分文本」：描述 + 入参 JSON Schema。
@@ -998,37 +1122,64 @@ function assertSummary(text, finishReason, label) {
 	if (!trimmed) throw new Error(`${label} failed: empty summary`);
 	return trimmed;
 }
+/**
+* 跑一次摘要，并把增量逐块交出去。
+*
+* ⚠️ **流式只影响展示，不影响落盘语义**：正文要等 `textStream` 走完、`finishReason`
+* 拿到且 `assertSummary` 通过后才返回。调用方据此才写 `autoSummary` / `contextSummary`
+* —— 中途 abort / 抛错时不会留下半份摘要。`onDelta` 只负责把已生成的片段推给界面。
+*/
+async function streamSummaryText(args) {
+	const result = streamText({
+		model: resolveModel(args.model),
+		system: args.system,
+		messages: [{
+			role: "user",
+			content: args.prompt
+		}],
+		...args.signal ? { abortSignal: args.signal } : {}
+	});
+	let text = "";
+	for await (const delta of result.textStream) {
+		if (!delta) continue;
+		text += delta;
+		args.onDelta?.(delta);
+	}
+	const finishReason = await result.finishReason;
+	return assertSummary(text, finishReason, args.label);
+}
 /** 一次摘要调用（初始 prompt / 增量 prompt 走同一条路，pi 的 `generateSummaryWithUsage`） */
-async function generateSummary(messages, model, previousSummary, signal, customInstructions) {
+async function generateSummaryFromText(conversationText, model, previousSummary, signal, customInstructions, onDelta, budgetTokens) {
 	let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
 	if (customInstructions) basePrompt = `${basePrompt}\n\nAdditional focus: ${customInstructions}`;
-	let promptText = `<conversation>\n${serializeConversation(messages)}\n</conversation>\n\n`;
+	if (budgetTokens) basePrompt = `${basePrompt}
+
+Length budget: the whole summary must stay within about ${budgetTokens} tokens. It is re-sent with every request, so its length is a direct cost. If it would exceed that, drop the least useful details (finished sub-tasks, superseded decisions, verbose examples) instead of growing — but never drop file paths, function names, error messages, open blockers, or the user's stated constraints.`;
+	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
 	if (previousSummary) promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
 	promptText += basePrompt;
-	const { text, finishReason } = await generateText({
-		model: resolveModel(model),
+	return streamSummaryText({
+		model,
 		system: SUMMARIZATION_SYSTEM_PROMPT,
-		messages: [{
-			role: "user",
-			content: promptText
-		}],
-		...signal ? { abortSignal: signal } : {}
+		prompt: promptText,
+		label: "Summarization",
+		signal,
+		...onDelta ? { onDelta } : {}
 	});
-	return assertSummary(text, finishReason, "Summarization");
+}
+async function generateSummary(messages, model, previousSummary, signal, customInstructions, onDelta, budgetTokens) {
+	return generateSummaryFromText(serializeConversation(messages), model, previousSummary, signal, customInstructions, onDelta, budgetTokens);
 }
 /** 切点落在回合中间时，为被切掉的那半截单独生成一份小摘要（pi 的 turn-prefix） */
-async function generateTurnPrefixSummary(messages, model, signal) {
-	const promptText = `# Conversation\n${serializeConversation(messages)}\n\n# Instructions\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
-	const { text, finishReason } = await generateText({
-		model: resolveModel(model),
+async function generateTurnPrefixSummary(messages, model, signal, onDelta) {
+	return streamSummaryText({
+		model,
 		system: SUMMARIZATION_SYSTEM_PROMPT,
-		messages: [{
-			role: "user",
-			content: promptText
-		}],
-		...signal ? { abortSignal: signal } : {}
+		prompt: `# Conversation\n${serializeConversation(messages)}\n\n# Instructions\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`,
+		label: "Turn prefix summarization",
+		signal,
+		...onDelta ? { onDelta } : {}
 	});
-	return assertSummary(text, finishReason, "Turn prefix summarization");
 }
 /**
 * 上下文压缩主入口：**pi 的 `prepareCompaction` + `compact` 合并版**。
@@ -1049,7 +1200,6 @@ async function compactHistory(history, opts) {
 		summarizedUpTo: null
 	};
 	if (history.length === 0) return unchanged;
-	const settings = resolveCompactionSettings(opts.contextWindow, opts.settings);
 	const baseTokens = Math.max(0, opts.baseTokens ?? 0);
 	/** 逐条估算：历史是调用方传进来的全量，逐条转一次比整份转再猜要准 */
 	const tokens = [];
@@ -1060,17 +1210,42 @@ async function compactHistory(history, opts) {
 	const checkpointIndex = hasCheckpoint ? cachedIndex : 0;
 	const assembled = hasCheckpoint ? withSummary(history, cachedIndex, cached.text) : history;
 	/**
-	* pi 的 `_checkCompaction`：
-	* 1. 触发量 = **最后一条助手消息的 usage**（真实值），拿不到才退回逐条估算；
-	* 2. 「压缩点之前产生的助手消息」不参与判定 —— 否则压完的下一轮会拿着压缩前的
-	*    大 usage 立刻再压一次（这正是 pi 用 compaction entry 的时间戳挡掉的东西）。
+	* 压缩动不了的那两块：系统提示词 / 工具 schema，以及**已有摘要本身**。
+	*
+	* 摘要也必须算进去 —— 它每轮都原样发出去、且不参与任何压缩。增量合并几次之后
+	* 它本身就可能吃掉小半个窗口，那时保留区还按 20000 算，压完必然还在触发线以上。
+	*/
+	const fixedTokens = baseTokens + (hasCheckpoint ? estimateTokens(cached.text) : 0);
+	const settings = resolveCompactionSettings(opts.contextWindow, opts.settings, fixedTokens);
+	/**
+	* 触发量 = `max(即将发出去的那份估算, 上一轮最后一次请求的真实 usage)`。
+	*
+	* - **必须估「即将发出去的那份」**：`assembled` 才是这一轮真正发给模型的数组；
+	*   上一轮的 usage 只代表上一轮，中间一旦发生过切片（手动检查点 / 轮中压缩），
+	*   两者就不是一回事。
+	* - **真实 usage 只当兜底下限**，而且必须在它**不早于检查点**时才采信：压完之后
+	*   那条 usage 代表的是压缩前的大小，再拿它取 max 就会「压完立刻又判超」。
 	*/
 	const lastAssistant = [...history].reverse().find((m) => m.role === "assistant");
 	const checkpointAt = cached?.at ?? 0;
-	const staleUsage = hasCheckpoint && (!lastAssistant || lastAssistant.createdAt <= checkpointAt);
-	const directTokens = staleUsage ? 0 : assistantContextTokens(lastAssistant);
-	const beforeTokens = directTokens > 0 ? directTokens : (await estimateContextTokens(assembled, { baseTokens })).tokens;
-	const overBudget = !staleUsage && shouldCompact(beforeTokens, opts.contextWindow, settings);
+	const realUsage = hasCheckpoint && (!lastAssistant || lastAssistant.createdAt <= checkpointAt) ? 0 : assistantContextTokens(lastAssistant);
+	/**
+	* 「即将发出去的那份」的**纯估算**：检查点之后的消息 + 摘要正文 + base。
+	*
+	* ⚠️ 不能用 `estimateContextTokens(assembled)` —— 它内部会去捞「最后一条带 usage 的
+	* 助手消息」，而那条 usage 可能早于检查点（就是 `usageIsStale` 要挡的东西），
+	* 一捞回来就等于把陈旧值又算进去了。这里只求和 `tokens`（已经按条算好），不做二次推断。
+	*/
+	let assembledTokens = baseTokens + (hasCheckpoint ? estimateTokens(cached.text) : 0);
+	for (let i = checkpointIndex; i < history.length; i += 1) assembledTokens += tokens[i] ?? 0;
+	/** 真值之后新增的部分（通常就是本轮那条 user 消息） */
+	let trailingTokens = 0;
+	for (let i = history.length - 1; i >= 0; i -= 1) {
+		if (history[i] === lastAssistant) break;
+		trailingTokens += tokens[i] ?? 0;
+	}
+	const beforeTokens = contextUsed(realUsage + trailingTokens, assembledTokens);
+	const overBudget = shouldCompact(beforeTokens, opts.contextWindow, settings);
 	if (!opts.force && !overBudget) {
 		if (!hasCheckpoint) {
 			if (opts.conversationId) clearAutoSummaryCache(opts.conversationId);
@@ -1089,6 +1264,23 @@ async function compactHistory(history, opts) {
 			summarizedUpTo: null
 		};
 	}
+	/**
+	* 预算被「压缩动不了的东西」吃光了：`系统提示词 + 工具 + 已有摘要` 已经把窗口顶到
+	* 触发线附近，历史再怎么切也回不到阈值以下。这时**不再调摘要模型** —— 每轮白付一次
+	* 调用、还会把请求前缀改掉（上游缓存全废），换来的只是「摘要了 1 轮、占用没降」。
+	* 把原因交回调用方，让界面说人话。
+	*/
+	if (compactionBudget(opts.contextWindow, settings, fixedTokens) <= 1024) return hasCheckpoint ? {
+		history: assembled,
+		compressed: null,
+		reused: true,
+		summary: null,
+		summarizedUpTo: null,
+		skipped: "no-budget"
+	} : {
+		...unchanged,
+		skipped: "no-budget"
+	};
 	const cut = findCutPoint(history, checkpointIndex, history.length, settings.keepRecentTokens, tokens);
 	const historyEnd = cut.isSplitTurn ? cut.turnStartIndex : cut.firstKeptIndex;
 	if (historyEnd <= checkpointIndex) return hasCheckpoint ? {
@@ -1096,17 +1288,37 @@ async function compactHistory(history, opts) {
 		compressed: null,
 		reused: true,
 		summary: null,
-		summarizedUpTo: null
-	} : unchanged;
+		summarizedUpTo: null,
+		skipped: "below-keep"
+	} : {
+		...unchanged,
+		skipped: "below-keep"
+	};
 	const summarizeSlice = history.slice(checkpointIndex, historyEnd);
 	const turnPrefixSlice = cut.isSplitTurn ? history.slice(cut.turnStartIndex, cut.firstKeptIndex) : [];
 	const fileOps = createFileOps();
 	extractFileOps(summarizeSlice, fileOps);
 	extractFileOps(turnPrefixSlice, fileOps);
 	if (cachedIndex > 0 && cached) extractFileOps(history.slice(0, cachedIndex), fileOps);
+	const summarizedTurns = historyEnd - checkpointIndex;
+	const keptTurns = history.length - cut.firstKeptIndex;
+	opts.onSummaryStart?.({
+		beforeTokens,
+		summarizedTurns,
+		keptTurns
+	});
+	const checkpointDelta = opts.onSummaryDelta ? (delta) => opts.onSummaryDelta?.({
+		delta,
+		phase: "checkpoint"
+	}) : void 0;
+	const turnPrefixDelta = opts.onSummaryDelta ? (delta) => opts.onSummaryDelta?.({
+		delta,
+		phase: "turn-prefix"
+	}) : void 0;
+	const budget = summaryBudgetTokens(settings.keepRecentTokens);
 	let summary;
-	if (cut.isSplitTurn && turnPrefixSlice.length > 0) summary = `${summarizeSlice.length > 0 ? await generateSummary(await toModelMessages(summarizeSlice), opts.model, cached?.text, opts.signal, opts.customInstructions) : cached?.text ?? "No prior history."}\n\n---\n\n**Turn Context (split turn):**\n\n${await generateTurnPrefixSummary(await toModelMessages(turnPrefixSlice), opts.model, opts.signal)}`;
-	else summary = await generateSummary(await toModelMessages(summarizeSlice), opts.model, cached?.text, opts.signal, opts.customInstructions);
+	if (cut.isSplitTurn && turnPrefixSlice.length > 0) summary = `${summarizeSlice.length > 0 ? await generateSummary(await toModelMessages(summarizeSlice), opts.model, cached?.text, opts.signal, opts.customInstructions, checkpointDelta, budget) : cached?.text ?? "No prior history."}\n\n---\n\n**Turn Context (split turn):**\n\n${await generateTurnPrefixSummary(await toModelMessages(turnPrefixSlice), opts.model, opts.signal, turnPrefixDelta)}`;
+	else summary = await generateSummary(await toModelMessages(summarizeSlice), opts.model, cached?.text, opts.signal, opts.customInstructions, checkpointDelta, budget);
 	const text = `${summary}${formatFileOperations(fileOps)}`;
 	const firstKept = history[cut.firstKeptIndex];
 	const result = withSummary(history, cut.firstKeptIndex, text);
@@ -1128,8 +1340,8 @@ async function compactHistory(history, opts) {
 		compressed: {
 			beforeTokens,
 			afterTokens,
-			summarizedTurns: historyEnd - checkpointIndex,
-			keptTurns: history.length - cut.firstKeptIndex
+			summarizedTurns,
+			keptTurns
 		},
 		reused: false,
 		summary: text,
@@ -3343,13 +3555,7 @@ async function fetchByHttp(target, timeout, abortSignal) {
 		if (abortSignal) abortSignal.removeEventListener("abort", onAbort);
 	}
 }
-/**
-* 构建 web_fetch 工具（返回单键 ToolSet，便于在 agent 端与其它工具合并）。
-*
-* `root` = 工作区根，只用于「正文过长时把全文落进 `.fizz/tool-output/`」——
-* 落在工作区内 read_file 才读得回来（数据目录在 resolveInside 边界外，见 output-log.ts）。
-*/
-function buildWebFetchTool(root) {
+function buildWebFetchTool(root, stopHooks = {}) {
 	return { web_fetch: tool({
 		description: "抓取网页并整理成结构化 Markdown 返回给模型。默认用 Node 原生 fetch 取静态 HTML（更快更轻量）；设置 engine=\"browser\" 则改用 Playwright 无头浏览器跑 JS 渲染（适合 SPA / 动态内容、搜索结果页）。适合：联网查资料、读文档 / 博客 / 文章、从网页提取链接继续深挖。页面过长时会只回开头结尾，并把全文落盘到工作区文件（结果里给出相对路径与行号）；其余部分用 read_file 的 offset/limit 接着读，也可以用 search_files 检索。只读、不写任何文件。browser 引擎依赖 playwright + chromium（`npm i playwright && npx playwright install chromium`）。",
 		inputSchema: z.object({
@@ -3359,6 +3565,24 @@ function buildWebFetchTool(root) {
 			maxChars: z.number().optional().describe(`返回 Markdown 的最大字符数，默认 ${DEFAULT_MAX_CHARS}，范围 1000–100000。默认值已够判断页面内容；一般不要调大 —— 需要看某一段时用落盘文件的 offset/limit 更省。`)
 		}),
 		execute: async ({ url, engine, timeoutMs, maxChars }, options) => {
+			/**
+			* **每条抓取一个自己的 AbortController**，并与「整轮中止」的信号并联：
+			* - 用户点卡片上的「停止」→ 只 abort 这一条（宿主通过 `stopHooks` 拿到入口）；
+			* - 用户点输入框的「停止」/ 断连 → `options.abortSignal` 触发，一起 abort。
+			*
+			* 不这么做的话，卡片上那颗停止钮只能退化成「中止整轮」，而抓一个卡住的境外站点
+			* 动辄等 30s，用户没理由为此废掉整轮对话。
+			*/
+			const stopCtrl = new AbortController();
+			const outerSignal = options.abortSignal;
+			const onOuterAbort = () => stopCtrl.abort();
+			if (outerSignal) {
+				if (outerSignal.aborted) stopCtrl.abort();
+				else outerSignal.addEventListener("abort", onOuterAbort, { once: true });
+			}
+			const signal = stopCtrl.signal;
+			const toolCallId = options.toolCallId ?? "";
+			if (toolCallId) stopHooks.onStart?.(toolCallId, () => stopCtrl.abort());
 			const clampedMax = Math.max(1e3, Math.min(1e5, Math.trunc(maxChars ?? DEFAULT_MAX_CHARS)));
 			const timeout = Math.max(1e3, Math.min(6e4, Math.trunc(timeoutMs ?? DEFAULT_TIMEOUT$1)));
 			let target;
@@ -3368,14 +3592,17 @@ function buildWebFetchTool(root) {
 			} catch {
 				return `web_fetch 收到非法 URL：${url}。请传入形如 https://example.com 的完整地址。`;
 			}
-			if (options.abortSignal?.aborted) return "web_fetch 已被中止（未发起请求）。";
+			if (signal.aborted) return "web_fetch 已被中止（未发起请求）。";
 			try {
-				return await formatPage(engine === "browser" ? await fetchByBrowser(target, timeout, options.abortSignal) : await fetchByHttp(target, timeout, options.abortSignal), target.toString(), clampedMax, root);
+				return await formatPage(engine === "browser" ? await fetchByBrowser(target, timeout, signal) : await fetchByHttp(target, timeout, signal), target.toString(), clampedMax, root);
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
-				if (options.abortSignal?.aborted) return "web_fetch 已被用户中止（点了「停止」），本轮不再重试。";
+				if (signal.aborted) return "web_fetch 已被用户中止（点了「停止」），本轮不再重试。";
 				if (/timeout|超时|timed out/i.test(msg)) return `web_fetch 抓取 ${url} 超时（${timeout}ms 内没拿到响应）。常见原因是该站点在本机网络不可达（如境外站点被墙）或响应极慢；不要原样重试，可改抓可达的镜像 / 文档站，或把 timeoutMs 调大（上限 60000）再试一次。`;
 				return `web_fetch 抓取 ${url} 失败：${msg}`;
+			} finally {
+				if (toolCallId) stopHooks.onEnd?.(toolCallId);
+				outerSignal?.removeEventListener("abort", onOuterAbort);
 			}
 		}
 	}) };
@@ -3400,7 +3627,7 @@ function resolveDataDir() {
 *
 * 1. **落在 server 侧，不在 Electron 主进程**。本项目的能力都在 `apps/server`（Hono），
 *    桌面端只是进程内直连同一个 server —— 记在主进程就等于 Web 端看不见，所以本文件
-*    在 `@fizz/workspace`（零 Electron、零 Mastra），web 与 desktop 共享同一份。
+*    在 `@fizz/workspace`（零 Electron、零引擎依赖），web 与 desktop 共享同一份。
 *
 * 2. **命名空间是运行时注册的，不是编译期枚举**。dogi 的 `HostLogScope` 写死六个值，
 *    新增功能要改类型 + 改 UI 两张静态表；这里改成 `registerNamespace()` 注册进一张
@@ -5748,11 +5975,11 @@ function fileToolsPlugin(root, options) {
 * 全局只读的联网工具插件：web_fetch + screenshot。不依赖工作区，任何会话都可用
 * （无工作区时 `root` 传空串 = 超长正文只截断不落盘，见 spillToWorkspace）。
 */
-function webToolsPlugin(root) {
+function webToolsPlugin(root, stopHooks = {}) {
 	return {
 		name: "builtin:web-tools",
 		apply(ctx) {
-			ctx.tools.registerAll(buildWebFetchTool(root), {
+			ctx.tools.registerAll(buildWebFetchTool(root, stopHooks), {
 				priority: 0,
 				origin: BUILTIN_ORIGIN,
 				source: "builtin:web_fetch"
@@ -5859,7 +6086,7 @@ async function guardToolCall(name, source, input, options, deps, mode) {
 * 给工具集套上钩子：`tool:call` 可改写入参、`tool:result` 可改写返回
 * （钩子名与范式见 `@fizz/plugin` 的 hooks.ts）。
 *
-* 只包「有 `execute` 的工具」——AI SDK / Mastra 的工具约定；没有 `execute` 的对象
+* 只包「有 `execute` 的工具」——AI SDK 的工具约定；没有 `execute` 的对象
 * **原样返回**，保持引用不变（测试里的假工具就是这种）。
 *
 * 钩子里抛的错**不吞**：照常冒出去变成一次 tool-error（仓库「不许静默失败」的价值观）。
@@ -5887,19 +6114,16 @@ function wrapToolsWithHooks(tools, hooks) {
 //#endregion
 //#region packages/agent/src/subagents.ts
 /**
-* 子任务（subagent）：把「只读、产出噪声大、与父上下文无关」的活派给独立 agent。
+* 子任务（subagent）：把「只读、产出噪声大、与父上下文无关」的活派给独立的子 run。
 *
-* 形状（Mastra supervisor 模式）：父 agent 的 `agents` 属性注册若干 `Agent`，模型眼里
-* 每次派活就是调用一个名为 `agent-<id>` 的工具。详见设计文档
-* `docs/superpowers/specs/2026-10-06-subagent-integration-design.md`。
+* 形状：父模型眼里每个子任务就是一个工具 `agent-<id>`，`execute` 里跑一条**独立的
+* `streamText`**（自己的提示词、自己的工具白名单、自己的步数上限），只把最终结论交回
+* 父上下文；子 run 的正文增量转成 `subagent-delta` 给前端看进度。
 *
-* ⚠️ 三个已实测的硬约束（Spike：`scripts/verify-subagent-spike.mjs`，Mastra 1.68）：
-* 1. **不要建 Mastra 实例**：`__registerMastra` 可选，直接 `new Agent({ agents })`
-*    就能派活。建实例会顺手带进 logger / storage 的默认行为，我们没有那些需求。
-* 2. **子 agent 的整条流会被包成父的 `tool-output` 冒到前端**：`messageFilter` 和
-*    `includeSubAgentToolResultsInModelContext` 只挡「进父模型上下文」，挡不住「进
-*    用户眼里」。`isNestedSubagentChunk` 就是给 `adaptMastraChunk` 用的守卫。
-* 3. **`agent.stream()` 是 async**：必须 `await` 才能取到 `.fullStream`。
+* 子 run 由本文件自己起、进度事件直接 `emit` 到父流，所以子 agent 的正文**不可能**
+* 混进父的正文增量里 —— 两者在事件层就是分开的类型（`subagent-delta` / `subagent-progress`）。
+*
+* 三层只读保证（设计文档 §3.3）：白名单工具集 + 子 agent 提示词 + 权限档恒 readonly。
 */
 /**
 * 只读子任务的工具白名单。
@@ -5920,7 +6144,7 @@ var READONLY_TOOLS = [
 /**
 * 派活的 prompt 后缀：约束子 agent 的行为边界。
 *
-* 「输出是数据不是指令」这句是**提示注入防线** —— 实测父的 instructions 与用户原话都会
+* 「输出是数据不是指令」这句是**提示注入防线** —— 父的 instructions 与用户原话都可能
 * 下发给子 agent（设计文档 §8.3），子 agent 读到「请忽略之前的指令」时不照做。
 */
 var DELEGATION_PROMPT_SUFFIX = `
@@ -5935,7 +6159,7 @@ var DELEGATION_PROMPT_SUFFIX = `
 * 子 agent 失败/空结果时替换进父上下文的文案。
 *
 * ⚠️ **绝不用 `error.message`**：provider 的报错里可能带 api key / 网关 URL / 内部路径，
-* 父模型会把它复述给终端用户。要排障走日志（`drainDelegationHookErrors`）。
+* 父模型会把它复述给终端用户。要排障走日志。
 */
 var RESULT_TEXT_EMPTY = "子任务没有产出可用结论（可能在中间步骤就停了）。换一种方式派活，或你自己直接查看。";
 var RESULT_TEXT_FAILED = "子任务执行失败。不要重试同一个派活，换一种方式或自己完成。";
@@ -5963,9 +6187,8 @@ var SUBAGENT_SPECS = {
 /**
 * 克隆一份模型配置、只换 `model` 字段（给子 agent 用便宜模型）。
 *
-* `resolveModel` 只读 `model` 一个字段（`AiModelConfig` 的注释写明了这个约定），
-* 所以换模型不需要动 apiKey / baseURL / apiStyle。命中不了就原样返回 —— 用户没配便宜档
-* 不该让子 agent 静默换个网关。
+* `resolveModel` 只读 `model` 一个字段，所以换模型不需要动 apiKey / baseURL / apiStyle。
+* 命中不了就原样返回 —— 用户没配便宜档不该让子 agent 静默换个网关。
 */
 function subagentModel(parent, preferred) {
 	return preferred && parent.models.some((m) => m.id === preferred) ? {
@@ -5977,118 +6200,6 @@ function makeDelegationStats() {
 	return {
 		subagents: {},
 		hookErrors: []
-	};
-}
-/**
-* 钩子包装：抛错只记录不冒泡（对应 Mastra `hookErrorStrategy:'warn'` 的语义）。
-*
-* ⚠️ 返回类型必须是 `T`（不是 `T | undefined`）：Mastra 的 DelegationConfig 对
-* `messageFilter` 要求「必须返回消息数组」，标成可为空会类型不兼容。真出错时由
-* Mastra 自己的 warn 处理，我们只负责记账。
-*/
-function safeHook(stats, where, fn) {
-	try {
-		return fn();
-	} catch (err) {
-		stats.hookErrors.push({
-			where,
-			message: err instanceof Error ? err.message : String(err)
-		});
-		throw err;
-	}
-}
-/**
-* 判断一个 `tool-output.payload.output` 是不是**子 agent 的流**。
-*
-* 实测（设计文档 §8.2）：父派活时 Mastra 会把子 run 的每个 chunk 原样包成父的
-* `tool-output`，形状是
-* `{ type:'text-delta', runId:<子runId>, from:'AGENT'|'USER', payload:{ text } }`。
-* 其中 `payload.text` 与父正文增量的形状**完全一致** —— 不过滤就会被当成父的正文本发。
-*
-* 判定用「有自己的 runId + 有 type 字段」，不列举具体 type（Mastra 跨版本会变形状）。
-*/
-function isNestedSubagentChunk(output) {
-	if (!output || typeof output !== "object") return false;
-	const c = output;
-	return typeof c.runId === "string" && typeof c.type === "string";
-}
-/**
-* 把派活的 tool-result **output 收敛成一句人话**。非派活工具原样返回。
-*
-* Mastra 给的是整个 `DelegationResult`（实测形状）：
-*
-* ```jsonc
-* { text: '结论…',
-*   subAgentThreadId: '…', subAgentResourceId: '…',
-*   subAgentToolResults: [{ toolName:'read_file', result:'<整份文件内容>' }, …] }
-* ```
-*
-* ⚠️ 除了 `text` 一个都不能留 —— 实测一次 `read_file` 就把整份 package.json（52 行）
-* 塞进了 `subAgentToolResults`，而它接着会：
-* 1. **被原样写进会话历史**（等于把整份文件抄一份进对话 JSON，刷新后继续带着跑）；
-* 2. 让卡片展开成一片原始 JSON，用户要的结论埋在底下；
-* 3. 白占内存（这一轮事件、落盘、回放各存一份）。
-*
-* 父模型读的是上下文里的 tool 消息（那一路由 `resultText` 改写管着），所以删掉这些
-* 字段不影响模型看到的东西，纯粹是少存少渲染一堆噪音。
-*
-* `[ref: xxx]` 也一并去掉：那是 `enableResultReferences` 的内部句柄，给人看没有意义。
-*/
-function slimDelegationOutput(toolName, output) {
-	if (!toolName.startsWith("agent-")) return output;
-	if (output === null || typeof output !== "object") return output;
-	const record = output;
-	return (typeof record.text === "string" ? record.text : "").replace(/\[ref:[^\]]*\]/g, "").trim() || "（这个子任务没有产出文本结论）";
-}
-/**
-* 构造 `delegation` 选项（`agent.stream(messages, { delegation })` 用）。
-*
-* 每条设置的理由见设计文档 §3.4。这里刻意**只读不改父语义**：钩子只做
-* 「截历史 / 封顶步数 / 追加约束 / 改写失败文案 / 连败停止」。
-*/
-function buildDelegation(stats, opts = {}) {
-	const failures = /* @__PURE__ */ new Map();
-	return {
-		/** 后续派活可原文复用上轮结果，父模型不用转述 */
-		enableResultReferences: true,
-		/** 子 agent 的嵌套工具结果不进父模型上下文（只给文本） */
-		includeSubAgentToolResultsInModelContext: false,
-		/** 我们钩子的 bug 不该杀死整轮 */
-		hookErrorStrategy: "warn",
-		messageFilter(ctx) {
-			return safeHook(stats, "messageFilter", () => ctx.messages.slice(-4));
-		},
-		onDelegationStart(ctx) {
-			return safeHook(stats, "onDelegationStart", () => {
-				return {
-					proceed: true,
-					modifiedMaxSteps: SUBAGENT_SPECS[ctx.primitiveId]?.maxSteps ?? 8,
-					modifiedPrompt: ctx.prompt + DELEGATION_PROMPT_SUFFIX
-				};
-			});
-		},
-		onDelegationComplete(ctx) {
-			return safeHook(stats, "onDelegationComplete", () => {
-				const id = ctx.primitiveId;
-				recordSubagentUsage(stats, id, ctx.result?.usage);
-				if (!ctx.success) {
-					const n = (failures.get(id) ?? 0) + 1;
-					failures.set(id, n);
-					if (n >= MAX_CONSECUTIVE_FAILURES) {
-						failures.delete(id);
-						return {
-							resultText: RESULT_TEXT_BAIL,
-							feedback: RESULT_TEXT_FAILED,
-							bail: true
-						};
-					}
-					return { resultText: RESULT_TEXT_FAILED };
-				}
-				failures.delete(id);
-				return (ctx.result?.text ?? "").trim() ? void 0 : { resultText: RESULT_TEXT_EMPTY };
-			});
-		},
-		...opts.conversationId ? { __conversationId: opts.conversationId } : {}
 	};
 }
 /**
@@ -6120,29 +6231,302 @@ function recordSubagentUsage(stats, id, usage) {
 	if (reasoning || prev.reasoningTokens) next.reasoningTokens = (prev.reasoningTokens ?? 0) + reasoning;
 	stats.subagents[id] = next;
 }
-/** 建一组子 agent 实例（每次调用现建，与父 agent 同一节奏，代价只是几个配置对象） */
-function buildSubagents(ids, opts) {
+/**
+* 建一组派活工具：`agent-<id>`。不启用子任务时调用方不传 ids，这里不会被调用。
+*
+* 每次 `runAgent` 现建（与父同一节奏，代价只是几个对象）；`failures` 也是**每轮一份**，
+* 跨轮不共享 —— 上一轮连续失败不该影响这一轮的判断。
+*/
+function buildDelegationTools(ids, opts) {
+	const failures = /* @__PURE__ */ new Map();
 	const out = {};
+	const allTools = {
+		...buildAgentTools(opts.workspacePath, {
+			permissionMode: "readonly",
+			skills: []
+		}),
+		...buildWebFetchTool(opts.workspacePath ?? ""),
+		...buildGitReadTool(opts.workspacePath)
+	};
 	for (const id of ids) {
 		const spec = SUBAGENT_SPECS[id];
 		if (!spec) throw new Error(`未知的 subagent id：${id}`);
-		const tools = filterToolSet({
-			...buildAgentTools(opts.workspacePath, {
-				permissionMode: "readonly",
-				skills: []
-			}),
-			...buildWebFetchTool(opts.workspacePath ?? ""),
-			...buildGitReadTool(opts.workspacePath)
-		}, [...spec.includeTools, "web_fetch"]);
-		out[id] = new Agent({
-			id: `fizz-subagent-${id}`,
-			name: spec.id,
-			instructions: spec.instructions,
-			model: resolveModel(spec.preferredModelId ? subagentModel(opts.model, spec.preferredModelId) : opts.subagentModel ?? opts.model),
-			tools
-		});
+		const tools = filterToolSet(allTools, [...spec.includeTools, "web_fetch"]);
+		const model = resolveModel(spec.preferredModelId ? subagentModel(opts.model, spec.preferredModelId) : opts.subagentModel ?? opts.model);
+		out[`agent-${id}`] = {
+			description: spec.description,
+			inputSchema: z.object({ task: z.string().describe("要交给这个子任务的具体问题 / 目标。写清楚要找什么、要看哪里。") }),
+			execute: async (input, options) => {
+				const toolCallId = options?.toolCallId ?? "";
+				const task = (input?.task ?? "").trim();
+				if (!task) return RESULT_TEXT_EMPTY;
+				const signal = options?.abortSignal ?? opts.signal;
+				opts.emit({
+					type: "subagent-progress",
+					toolCallId,
+					toolName: `agent-${id}`
+				});
+				try {
+					const result = streamText({
+						model,
+						system: spec.instructions + DELEGATION_PROMPT_SUFFIX,
+						messages: [{
+							role: "user",
+							content: task
+						}],
+						tools,
+						stopWhen: stepCountIs(spec.maxSteps),
+						...signal ? { abortSignal: signal } : {}
+					});
+					for await (const part of result.fullStream) {
+						const p = part;
+						if (p.type === "text-delta" && typeof p.text === "string" && p.text) opts.emit({
+							type: "subagent-delta",
+							toolCallId,
+							delta: p.text
+						});
+						else if (p.type === "tool-call" && typeof p.toolName === "string") opts.emit({
+							type: "subagent-progress",
+							toolCallId,
+							toolName: p.toolName,
+							...typeof p.toolCallId === "string" ? { childToolCallId: p.toolCallId } : {}
+						});
+					}
+					const usage = await Promise.resolve(result.totalUsage).catch(() => void 0);
+					recordSubagentUsage(opts.stats, id, usage);
+					const text = (await Promise.resolve(result.text).catch(() => "")).trim();
+					if (!text) return RESULT_TEXT_EMPTY;
+					failures.delete(id);
+					return text;
+				} catch (err) {
+					console.error(`[subagent] ${id} 执行失败：`, err);
+					const n = (failures.get(id) ?? 0) + 1;
+					failures.set(id, n);
+					if (n >= MAX_CONSECUTIVE_FAILURES) {
+						failures.delete(id);
+						return RESULT_TEXT_BAIL;
+					}
+					return RESULT_TEXT_FAILED;
+				}
+			}
+		};
 	}
 	return out;
+}
+//#endregion
+//#region packages/agent/src/engine.ts
+/**
+* 内置 agent 的流式引擎：**AI SDK 的 `streamText` + 多步工具循环**，把它的 part 映射成
+* fizz 自己的 `AgentStreamEvent`。
+*
+* 直接用 AI SDK 的 part 契约（`text-delta` / `tool-call` / `finish-step` …）：
+* 字段名稳定、没有额外的 `payload` 包装，所以「字段写错 → 静默失效」这类问题只可能
+* 出在本文件的一处映射里（`adaptStreamPart`），排查成本最低。
+*
+* 本文件只负责「跑一轮、吐事件」，不碰领域逻辑（压缩、插话、用量记账都在 `agent.ts`）。
+*/
+/** 把 tool 的 execute 套一层信号量：并发超限就排队，不改变返回值 */
+function limitToolConcurrency(tools, limit) {
+	if (!Number.isFinite(limit) || limit <= 0) return tools;
+	let active = 0;
+	const waiting = [];
+	const acquire = () => active < limit ? Promise.resolve().then(() => {
+		active += 1;
+	}) : new Promise((resolve) => waiting.push(() => {
+		active += 1;
+		resolve();
+	}));
+	const release = () => {
+		active -= 1;
+		const next = waiting.shift();
+		if (next) next();
+	};
+	const out = {};
+	for (const [name, tool] of Object.entries(tools)) {
+		const execute = tool.execute;
+		if (typeof execute !== "function") {
+			out[name] = tool;
+			continue;
+		}
+		out[name] = {
+			...tool,
+			execute: async (...args) => {
+				await acquire();
+				try {
+					return await execute(...args);
+				} finally {
+					release();
+				}
+			}
+		};
+	}
+	return out;
+}
+/** 把 AI SDK 的一个 fullStream part 折成 fizz 的事件；不是内容就返回 null */
+function adaptStreamPart(part) {
+	if (!part || typeof part !== "object") return null;
+	const p = part;
+	const type = typeof p.type === "string" ? p.type : "";
+	const text = (v) => typeof v === "string" ? v : "";
+	switch (type) {
+		case "text-delta": return {
+			type: "text-delta",
+			delta: text(p.text)
+		};
+		case "reasoning-delta": return {
+			type: "reasoning-delta",
+			delta: text(p.text)
+		};
+		/**
+		* 入参开始流式生成：只有 id + 工具名，还没有内容。转成一条空增量 ——
+		* 卡片据此**先建出来**，标题马上是对的（否则要等完整 tool-call，卡片会先显示
+		* 一会儿「工具调用」）。
+		*/
+		case "tool-input-start": return {
+			type: "tool-call-delta",
+			toolCallId: text(p.id) || text(p.toolCallId),
+			...text(p.toolName) ? { toolName: text(p.toolName) } : {},
+			inputTextDelta: ""
+		};
+		case "tool-input-delta": return {
+			type: "tool-call-delta",
+			toolCallId: text(p.id) || text(p.toolCallId),
+			inputTextDelta: text(p.delta)
+		};
+		case "tool-call": return {
+			type: "tool-call",
+			toolCallId: text(p.toolCallId) || text(p.id),
+			toolName: text(p.toolName),
+			input: p.input ?? p.args ?? null
+		};
+		case "tool-result": return {
+			type: "tool-result",
+			toolCallId: text(p.toolCallId) || text(p.id),
+			toolName: text(p.toolName),
+			output: p.output
+		};
+		/** 工具自己抛错：仍然要落一条 result（带 isError），否则卡片永远转圈 */
+		case "tool-error": return {
+			type: "tool-result",
+			toolCallId: text(p.toolCallId) || text(p.id),
+			toolName: text(p.toolName),
+			output: errorText(p.error),
+			isError: true
+		};
+		case "error": return {
+			type: "error",
+			message: errorText(p.error)
+		};
+		default: return null;
+	}
+}
+function errorText(err) {
+	if (err instanceof Error) return err.message;
+	if (typeof err === "string") return err;
+	try {
+		return JSON.stringify(err) ?? String(err);
+	} catch {
+		return String(err);
+	}
+}
+/**
+* 起一轮。调用方 `for await` 消费 `events`，结束后 `await done` 拿收尾信息。
+*
+* 时序要点：
+* - `prepareStep` 在**每次请求之前**调用（含第一次，stepNumber=0），返回值里的 `messages`
+*   就是下一步真正发出去的内容 —— 插话注入和轮中压缩都挂在这里；
+* - `prepareStep` **只在「还有下一步」时才会被调**，所以它天然不会出现
+*   「最后一步之后再压一次」的情形，不需要额外的 `isFinal` 判断；
+* - `finish` / `finish-step` part 带 usage：前者是整轮累计，后者是单步 —— 别混用。
+*/
+function runEngine(opts) {
+	const tools = limitToolConcurrency(opts.tools, opts.toolCallConcurrency ?? 0);
+	const result = streamText({
+		model: opts.model,
+		system: opts.system,
+		messages: opts.messages,
+		tools,
+		stopWhen: stepCountIs(Math.max(1, opts.maxSteps)),
+		...opts.abortSignal ? { abortSignal: opts.abortSignal } : {},
+		...opts.modelSettings ? {
+			...opts.modelSettings.maxOutputTokens !== void 0 ? { maxOutputTokens: opts.modelSettings.maxOutputTokens } : {},
+			...opts.modelSettings.temperature !== void 0 ? { temperature: opts.modelSettings.temperature } : {}
+		} : {},
+		prepareStep: async ({ messages, stepNumber }) => {
+			const next = await opts.onStepBoundary?.({
+				messages,
+				stepNumber
+			});
+			return next ? { messages: next } : void 0;
+		}
+	});
+	let finishReason = "other";
+	let totalUsage;
+	let lastStepUsage;
+	let error;
+	let settle;
+	const done = new Promise((resolve) => {
+		settle = resolve;
+	});
+	/**
+	* `done` 在生成器的 `finally` 里收尾：调用方可能中途 `break`（用户停止 / 看门狗），
+	* 那时生成器会被 `return()`，finally 照常执行。
+	*
+	* ⚠️ 不能让 `done` 自己再 `for await` 一遍同一个流 —— 两个消费者会把事件对半分。
+	* 也不能 `await result.finishReason`：流没跑完时它可能永远不 resolve。
+	*/
+	/**
+	* `FIZZ_DEBUG_CHUNKS=1`：把**本次出现过的 part 类型**逐个打一次（附原始片段）。
+	*
+	* 排障用。认不出来的类型在这里会露出来 —— 否则某个内容没渲染时，只能靠猜是「上游没发」
+	* 还是「我们没认出来」。只在首次出现时打，避免流式期间刷屏。
+	*/
+	const debugParts = process.env.FIZZ_DEBUG_CHUNKS === "1";
+	const seenPartTypes = /* @__PURE__ */ new Set();
+	async function* generate() {
+		try {
+			for await (const part of result.fullStream) {
+				const p = part;
+				if (debugParts && typeof p.type === "string" && !seenPartTypes.has(p.type)) {
+					seenPartTypes.add(p.type);
+					console.log("[chunk] 首次出现的 part 类型：" + p.type + " " + JSON.stringify(part).slice(0, 300));
+				}
+				if (p.type === "finish-step") {
+					if (p.usage) lastStepUsage = p.usage;
+					if (typeof p.finishReason === "string") finishReason = p.finishReason;
+					continue;
+				}
+				if (p.type === "finish") {
+					if (p.totalUsage) totalUsage = p.totalUsage;
+					if (typeof p.finishReason === "string") finishReason = p.finishReason;
+					continue;
+				}
+				if (p.type === "abort") {
+					finishReason = "aborted";
+					continue;
+				}
+				const event = adaptStreamPart(part);
+				if (!event) continue;
+				if (event.type === "error") error = p.error ?? event.message;
+				yield event;
+			}
+		} catch (err) {
+			error = err;
+			throw err;
+		} finally {
+			if (opts.abortSignal?.aborted && finishReason === "other") finishReason = "aborted";
+			settle({
+				finishReason,
+				totalUsage,
+				lastStepUsage,
+				error
+			});
+		}
+	}
+	return {
+		events: generate(),
+		done
+	};
 }
 //#endregion
 //#region packages/agent/src/retry.ts
@@ -6174,20 +6558,18 @@ function isRetryableNetworkError(err) {
 /**
 * 判断错误是否是「上游这一轮返回了空响应」。
 *
-* Mastra 在流式收尾时，若这一次 step 的 finishReason 落到 `"other"`（AI SDK 对
-* 非标准 / 缺失的 finish_reason 一律归到这里）**且整步没有任何内容**（正文 / 思考 /
-* 工具调用都没有），会自己合成一条 `AGENT_STREAM_ERROR` 抛出来（见 @mastra/core
-* 的 agent 流消费）。它不是网络层错误，但性质一样：同一条请求重发通常就有内容了，
-* 所以并入「重发这一次请求」的重试路径。
+* 判据：`finishReason` 落到 `"other"`（AI SDK 对非标准 / 缺失的 finish_reason 一律归到
+* 这里）**且整轮没有任何内容**（正文 / 思考 / 工具调用都没有）。`runAgent` 在引擎收尾时
+* 按这个条件合成一条错误抛出来（见那里的注释）。它不是网络层错误，但性质一样：同一条
+* 请求重发通常就有内容了，所以并入「重发这一次请求」的重试路径。
 *
-* 识别不出来（Mastra 升级换了 id / 文案）就返回 false，照旧当普通错误下发 —— 宁可
-* 少重试，也不要把别的错误误判成空响应。
+* 用文案匹配而不是错误类型：错误是 `agent.ts` 里现造的，没有专用 class。
 */
 function isEmptyStreamOutputError(err) {
 	let cur = err;
 	for (let i = 0; i < 6 && cur instanceof Error; i++) {
 		const e = cur;
-		if (e.id === "AGENT_STREAM_ERROR" && e.message.includes("finishReason \"other\"")) return true;
+		if (e.message.includes("finishReason \"other\"")) return true;
 		cur = e.cause;
 	}
 	return false;
@@ -6227,36 +6609,22 @@ function sleepWithSignal(ms, signal) {
 //#endregion
 //#region packages/agent/src/agent.ts
 /**
-* 对话编排（基于 Mastra 的 Agent）。
+* 对话编排（直接基于 AI SDK 的 `streamText`，多步循环在 `./engine`）。
 *
-* 为什么用 Mastra 而不是像桌面端那样直接调 `streamText`：
-* - 它的 `Agent` 直接吃 AI SDK 的工具集与模型实例（`ToolsInput` 含 `VercelTool`，
-*   `MastraModelConfig` 含 `LanguageModelV4`），所以**现有工具集与模型解析一行不用改**；
-* - 换来 memory / workflow / 工具审批 / 观测这些后面要用的能力，服务器端尤其需要。
+* 全链路只有**一个消息形状**（`ModelMessage`）：历史转换、压缩切点、token 估算、
+* 插话注入都作用在它上面；对外仍产出 `AgentStreamEvent`，三端渲染逻辑不变。
 *
 * 与桌面端保持一致的关键点：
 * - 系统提示词与工具集是同一份（./prompt 与 ./tools），技能也是同一套渐进式披露；
 * - 历史消息用同一份 `toModelMessages` 转（原生 tool-call/tool-result，不压成文本）；
 * - 事件仍产出桌面端同款的 `AgentStreamEvent`，所以三个端的消息渲染逻辑可以一致。
 */
-function str(value) {
-	return typeof value === "string" ? value : "";
-}
 function describeError(err) {
 	return err instanceof Error ? err.message : String(err);
 }
 /**
-* 从 Mastra 的 chunk 里抠出「原始错误对象」（用于判断能不能重试）。
-* 取值口径与 `adaptMastraChunk` 一致：`payload` 优先、顶层兜底。
-*/
-function chunkErrorOf(raw) {
-	if (!raw || typeof raw !== "object") return null;
-	const part = raw;
-	return (part.payload && typeof part.payload === "object" ? part.payload : part).error ?? null;
-}
-/**
 * 一次尝试里「重发同一条请求通常能成功」的错误：网络中断 **或** 上游返回了空响应
-* （Mastra 合成的 `AGENT_STREAM_ERROR`，见 ./retry 的两条判定）。
+* （`runAgent` 按 `finishReason === 'other'` + 零内容合成，见 ./retry 的两条判定）。
 */
 function isRetryableAttemptError(err) {
 	return isRetryableNetworkError(err) || isEmptyStreamOutputError(err);
@@ -6283,36 +6651,6 @@ function normalizeUsage(usage) {
 		...reasoningTokens !== void 0 ? { reasoningTokens } : {},
 		...cachedInputTokens !== void 0 ? { cachedInputTokens } : {}
 	};
-}
-/** `finish` chunk 里的两份 usage：整轮累计（记账）与单步（算上下文） */
-function finishUsageOf(raw) {
-	if (!raw || typeof raw !== "object") return null;
-	const part = raw;
-	if (str(part.type) !== "finish") return null;
-	const body = part.payload && typeof part.payload === "object" ? part.payload : part;
-	return {
-		total: normalizeUsage(body.totalUsage ?? body.usage),
-		step: normalizeUsage(body.usage)
-	};
-}
-/**
-* 从 AI SDK / Mastra 的 `finish` chunk 里抠出 usage。
-* 不是 finish chunk、或没带 usage —— 返回 null。
-*
-* 返回的是**整轮累计**（多步工具循环会把每一步都加起来），只用于记账
-* （`inputTokens` / `totalTokens`）。算上下文大小要用 `readChunkStepUsage`。
-*/
-function readChunkUsage(raw) {
-	return finishUsageOf(raw)?.total ?? null;
-}
-/**
-* `finish` chunk 里的**单步** usage —— 也就是「这一步请求实际发出去多少、回来多少」。
-*
-* 上下文圆环要的是这个：pi 的 `calculateContextTokens` 取「最后一条助手消息的 usage」，
-* 在多步循环里就是**最后一次请求**，不是整轮累计（累计会虚高好几倍）。
-*/
-function readChunkStepUsage(raw) {
-	return finishUsageOf(raw)?.step ?? null;
 }
 /**
 * 把原始用量 + 计时折成对外展示的统计（TPS 按「首字 → 结束」的生成窗口算）。
@@ -6344,111 +6682,6 @@ function buildTurnUsage(raw, startedAt, firstOutputAt, contextTokens, subagents)
 */
 var INPUT_DELTA_FLUSH_CHARS = 240;
 var INPUT_DELTA_FLUSH_MS = 60;
-/**
-* Mastra 流 chunk → `AgentStreamEvent`。
-*
-* 字段名做**防御式兼容**（`text`/`textDelta`/`delta`、`input`/`args`、`output`/`result`）：
-* Mastra 内部同时兼容 AI SDK v4/v5/v6/v7 的 chunk 形状，不同版本给的字段名不同，
-* 写死一个名字会在升级时静默丢内容（桌面端踩过同样的坑，见 AGENTS 的 adaptPart）。
-*/
-function adaptMastraChunk(raw, unknownChunks) {
-	if (!raw || typeof raw !== "object") return null;
-	const part = raw;
-	const type = str(part.type);
-	if (type === "tool-output") {
-		const nested = part.payload?.output;
-		if (isNestedSubagentChunk(nested)) {
-			const sub = nested;
-			const toolCallId = str(part.payload?.toolCallId) || str(part.toolCallId);
-			if (!toolCallId) return null;
-			const subBody = sub.payload && typeof sub.payload === "object" ? sub.payload : sub;
-			if (str(sub.type) === "text-delta") {
-				const text = str(subBody.text ?? subBody.textDelta ?? subBody.delta);
-				if (text) return {
-					type: "subagent-delta",
-					toolCallId,
-					delta: text
-				};
-				return null;
-			}
-			if (str(sub.type) === "tool-call") {
-				const toolName = str(subBody.toolName ?? subBody.name);
-				const childToolCallId = str(subBody.toolCallId) || str(subBody.id) || str(subBody.callId);
-				return {
-					type: "subagent-progress",
-					toolCallId,
-					...toolName ? { toolName } : {},
-					...childToolCallId ? { childToolCallId } : {}
-				};
-			}
-			return null;
-		}
-	}
-	const body = part.payload && typeof part.payload === "object" ? part.payload : part;
-	switch (type) {
-		case "text-delta": return {
-			type: "text-delta",
-			delta: str(body.text ?? body.textDelta ?? body.delta)
-		};
-		case "reasoning-delta": return {
-			type: "reasoning-delta",
-			delta: str(body.text ?? body.textDelta ?? body.delta)
-		};
-		case "tool-call": return {
-			type: "tool-call",
-			toolCallId: str(body.toolCallId ?? body.id),
-			toolName: str(body.toolName ?? body.name),
-			input: body.input ?? body.args ?? body.arguments ?? null
-		};
-		case "tool-call-input-streaming-start": return {
-			type: "tool-call-delta",
-			toolCallId: str(body.toolCallId ?? body.id),
-			...body.toolName ?? body.name ? { toolName: str(body.toolName ?? body.name) } : {},
-			inputTextDelta: ""
-		};
-		case "tool-call-delta": return {
-			type: "tool-call-delta",
-			toolCallId: str(body.toolCallId ?? body.id),
-			...body.toolName ?? body.name ? { toolName: str(body.toolName ?? body.name) } : {},
-			inputTextDelta: str(body.argsTextDelta ?? body.inputTextDelta ?? body.delta)
-		};
-		case "tool-result": return {
-			type: "tool-result",
-			toolCallId: str(body.toolCallId ?? body.id),
-			toolName: str(body.toolName ?? body.name),
-			output: slimDelegationOutput(str(body.toolName ?? body.name), body.output ?? body.result ?? null),
-			...body.isError ? { isError: true } : {}
-		};
-		case "tool-error": return {
-			type: "tool-result",
-			toolCallId: str(body.toolCallId ?? body.id),
-			toolName: str(body.toolName ?? body.name),
-			output: `工具执行失败: ${describeError(body.error)}`,
-			isError: true
-		};
-		case "error": return {
-			type: "error",
-			message: describeError(body.error)
-		};
-		case "abort": return {
-			type: "finish",
-			finishReason: "aborted"
-		};
-		case "start":
-		case "step-start":
-		case "step-finish":
-		case "finish":
-		case "text-start":
-		case "text-end":
-		case "reasoning-start":
-		case "reasoning-end":
-		case "tool-call-start":
-		case "tool-call-end": return null;
-		default:
-			if (type) unknownChunks?.add(type);
-			return null;
-	}
-}
 /**
 * 组装一次运行的静态部分（系统提示词 + 工具集）。
 *
@@ -6501,7 +6734,10 @@ function buildAgentSetup(opts) {
 		const name = mounted.plugin?.name ?? "匿名插件";
 		console.warn(`[agent] 插件挂载失败，本轮跳过：${name}`, err);
 	}
-	ctx.plugin(webToolsPlugin(opts.workspace.path ?? ""));
+	ctx.plugin(webToolsPlugin(opts.workspace.path ?? "", opts.commandStops ? {
+		onStart: (id, stop) => opts.commandStops.set(id, stop),
+		onEnd: (id) => opts.commandStops.delete(id)
+	} : {}));
 	const tools = wrapToolsWithApproval(ctx.tools.entries(), {
 		permissionMode: opts.permissionMode ?? "full",
 		...opts.getPermissionMode ? { getPermissionMode: opts.getPermissionMode } : {},
@@ -6518,24 +6754,14 @@ function buildAgentSetup(opts) {
 		ctx
 	};
 }
-/** 用静态部分 + 模型配置建一个 Mastra Agent（每次尝试现建，代价只是一个配置对象） */
-function newAgent(setup, model, subagents) {
-	return new Agent({
-		id: "fizz-agent",
-		name: "Fizz",
-		instructions: setup.instructions,
-		model: resolveModel(model),
-		tools: setup.tools,
-		...subagents ? { agents: subagents } : {}
-	});
-}
+/** 用静态部分 + 模型配置建一个 内置 Agent（每次尝试现建，代价只是一个配置对象） */
 /** 这一轮的序号（与时间戳拼成 turnId）：轮次之间可能重叠，得有个能区分的东西 */
 var turnSeq = 0;
 /**
 * 子任务空闲看门狗：父 agent 派活后，多久没有**任何子任务事件**就判定卡死。
 *
 * 60~120 秒是「模型在正常工作但还没吐字」的常见上限；慢模型 / 大仓库可调到更大，
-* 0 = 关闭。看门狗触发后中止**整轮**（Mastra 的 delegation 没有单独的取消句柄），
+* 0 = 关闭。看门狗触发后中止**整轮**（子 run 没有单独的取消句柄），
 * 用户会看到一条明确的 `子任务超时` 错误，而不是无限等待。
 */
 function resolveSubagentIdleTimeoutMs() {
@@ -6662,9 +6888,8 @@ async function runAgent(opts) {
 	};
 	/**
 	* 整轮的**唯一返回出口**（四个 return 点都走它：收尾 / 中止 / 异常 / 打日志）。除了
-	* 拼返回值，还负责把 delegation 钩子里记下的错误与派活用量打出来 ——
-	* `hookErrorStrategy:'warn'` 下钩子错误会被 Mastra 吃掉，不捞出来就是
-	* 「派活行为莫名不对但日志一片干净」（对齐仓库「不许静默失败」的价值观）。
+	* 拼返回值，还负责把派活过程里记下的错误与用量打出来 —— 那些错误只记录、不冒泡，
+	* 不打出来就是「派活行为莫名不对但日志一片干净」（对齐仓库「不许静默失败」的价值观）。
 	*
 	* 它同时是**唯一的收尾动作**：广播 `turn:finish` 并卸载本轮自建的 turn context
 	* （所以它是异步的）。调用点一律 `return finish(...)` 直接交出去，由 async 函数 flatten。
@@ -6766,6 +6991,7 @@ async function runAgent(opts) {
 		tools: toolsForModel
 	};
 	const baseTokens = await estimateBaseTokens(setupForModel.instructions, toolsForModel);
+	if (opts.conversationId) rememberBaseTokens(opts.conversationId, baseTokens);
 	agentSetup.hooks?.emit(HOOKS.turnStart, {
 		turnId,
 		workspaceId: opts.workspace.id,
@@ -6794,19 +7020,18 @@ async function runAgent(opts) {
 		* 累计值会把每一步都加一遍。
 		*/
 		let lastStepUsage = null;
+		/**
+		* 上一次**轮中压缩**之后的大小（`afterTokens`）。只用于冷却：见
+		* `onIterationComplete` 里那段注释。每次「尝试」各一份 —— 重试是从全量历史
+		* 重新起跑，上一份压缩结果已经不在了。
+		*/
+		let midTurnCompactAfter = null;
 		/** 收到几个带 usage 的 finish chunk：只有一个时才敢把「整轮累计」当单步用 */
 		let finishChunks = 0;
 		/** 本轮**最后一次请求**的上下文大小（见 `TurnUsage.contextTokens`） */
 		let contextTokens;
 		try {
-			const agent = newAgent(setupForModel, effectiveModel, (opts.subagents?.length && modelSettings.toolCall ? buildSubagents(opts.subagents, {
-				workspacePath: opts.workspace.path,
-				workspaceName: opts.workspace.name,
-				model: effectiveModel,
-				...opts.subagentModel ? { subagentModel: withModelApiStyle(opts.subagentModel) } : {},
-				skills: [],
-				permissionMode: "readonly"
-			}) : void 0) ?? void 0);
+			const contextWindow = opts.contextWindow ?? defaultContextWindowFromEnv();
 			/**
 			* 上下文压缩只有一层（pi 的 compaction）：`compactHistory` 在 history 层做
 			* 「摘要 + 保留近期原文」。它必须作用在 `toModelMessages` 之前 —— 保留起点要锚
@@ -6815,66 +7040,146 @@ async function runAgent(opts) {
 			* ⚠️ 别再往这里加「清旧工具结果」「按缓存冷热决定清不清」那一类层：它们会改动
 			* 请求前缀，而上游前缀缓存一断就按全价重读整段历史。前缀保持一致就够了。
 			*/
-			const contextWindow = opts.contextWindow ?? defaultContextWindowFromEnv();
 			const compacted = await compactHistory(opts.history, {
 				...opts.conversationId ? { conversationId: opts.conversationId } : {},
 				...opts.autoSummarySeed ? { seed: opts.autoSummarySeed } : {},
 				...opts.onAutoSummary ? { onAutoSummary: opts.onAutoSummary } : {},
+				...opts.onContextCompactionStart ? { onSummaryStart: opts.onContextCompactionStart } : {},
+				...opts.onContextCompactionDelta ? { onSummaryDelta: opts.onContextCompactionDelta } : {},
 				contextWindow,
 				baseTokens,
 				...forceCompact ? { force: true } : {},
 				model: effectiveModel,
 				signal: runSignal
 			});
-			if (compacted.compressed) opts.onContextCompressed?.(compacted.compressed);
+			if (compacted.compressed) {
+				opts.onContextCompressed?.({
+					...compacted.compressed,
+					...compacted.summary ? { summary: compacted.summary } : {}
+				});
+				emitEvent({
+					type: "context-usage",
+					used: compacted.compressed.afterTokens,
+					size: contextWindow,
+					base: baseTokens
+				});
+			}
 			const messages = await toModelMessages(compacted.history, {
 				resolveFileUrl: opts.resolveFileUrl,
 				allowImages: modelSettings.imageInput
 			});
 			/**
-			* 兜底值（估算）：一轮里**连一个 finish chunk 都没收到**（立刻中止 / 上游直接失败）时，
-			* 圆环至少还有个数。真正显示的值在下面用上游 usage 覆盖 —— 见 `lastStepUsage`。
+			* 兜底值（估算）：一轮里**连一个 usage 都没收到**（立刻中止 / 上游直接失败）时，
+			* 圆环至少还有个数。真正显示的值在收尾时用上游 usage 覆盖。
 			*/
 			contextTokens = baseTokens + estimateMessagesTokens(messages);
-			const result = await agent.stream(messages, {
-				maxSteps: opts.maxSteps ?? 80,
-				toolCallConcurrency: {
-					limit: resolveToolCallConcurrency(opts.toolCallConcurrency),
-					strategy: "called"
-				},
+			/**
+			* 子任务：每个 id 一个 `agent-<id>` 工具，`execute` 里跑一条独立的子 run
+			* （见 `subagents.ts`）。不启用时是空对象 —— 与没有这个能力时逐字节一致。
+			*/
+			const delegationTools = opts.subagents?.length && modelSettings.toolCall ? buildDelegationTools(opts.subagents, {
+				workspacePath: opts.workspace.path,
+				workspaceName: opts.workspace.name,
+				model: effectiveModel,
+				...opts.subagentModel ? { subagentModel: withModelApiStyle(opts.subagentModel) } : {},
 				/**
-				* 每次模型调用的参数（Mastra 的 `modelSettings` 直接透传给 AI SDK 的 CallSettings）：
-				* - `maxOutputTokens` = 模型设置里的输出上限（OpenAI 的 max_output_tokens /
-				*   max_completion_tokens；**含**思考 token）；
-				* - `temperature` 沿用配置上的旧字段（无 UI，手改数据文件才用得上）。
+				* 子 run 的事件**不经过父流**（它是工具里自己起的流），所以看门狗的心跳
+				* 必须在这里刷新 —— 否则一个跑了 3 分钟但一直在吐字的子任务会被当成卡死。
 				*/
+				emit: (event) => {
+					if ((event.type === "subagent-delta" || event.type === "subagent-progress") && event.toolCallId) {
+						const info = activeDelegations.get(event.toolCallId);
+						if (info) info.lastAt = Date.now();
+					}
+					emitEvent(event);
+				},
+				signal: runSignal,
+				stats
+			}) : {};
+			const engineTools = {
+				...toolsForModel,
+				...delegationTools
+			};
+			/** 上一次边界时 messages 的长度：只用来估「这一步新增的那部分」 */
+			let boundaryCount = messages.length;
+			const engine = runEngine({
+				model: resolveModel(effectiveModel),
+				system: setupForModel.instructions,
+				messages,
+				tools: engineTools,
+				maxSteps: opts.maxSteps ?? 80,
+				abortSignal: runSignal,
+				toolCallConcurrency: resolveToolCallConcurrency(opts.toolCallConcurrency),
 				...maxOutputTokens !== void 0 || temperature !== void 0 ? { modelSettings: {
 					...maxOutputTokens !== void 0 ? { maxOutputTokens } : {},
 					...temperature !== void 0 ? { temperature } : {}
 				} } : {},
-				abortSignal: runSignal,
-				delegation: buildDelegation(stats, { ...opts.workspace.id ? { conversationId: opts.workspace.id } : {} }),
-				onIterationComplete: async (ctx) => {
+				/**
+				* 工具步骤边界（下一次请求之前）。这里是唯一能安全介入的位置：
+				* 1. 推一帧 `context-usage`，让圆环在一轮之内也走；
+				* 2. 轮中压缩：压完返回新数组，下一步请求立刻变小（不落检查点）；
+				* 3. 消费一条运行中插话，追加成 user 消息。
+				*
+				* ⚠️ 不再需要 `isFinal` 判断 —— `prepareStep` 只在「还有下一步」时被调用，
+				* 天然不会出现「最后一步之后再压一次」。
+				*/
+				onStepBoundary: async ({ messages: current }) => {
+					let next = current;
 					/**
-					* 工具步骤边界：先把「当前上下文占多少」推一帧出去，让前端的上下文圆环
-					* **一轮之内**也跟着走（而不是只在 finish 时跳一下）。
-					*
-					* 这一步用的是 pi 的**兜底分支**（`estimateContextTokens` 找不到「带 usage 的
-					* 助手消息」时）：把消息逐条估出来求和。这里拿不到「这一步的 usage」——
-					* Mastra 的 `onIterationComplete` 不传它，而 finish chunk 与这个回调的先后
-					* 顺序没有保证，猜错就会推一个旧值。真正的权威值在 finish 时用上游 usage 覆盖
-					* （见下面的 `calculateContextTokens`），所以这里估算即可。
-					*
-					* `baseTokens` 是 messages 之外的那块（系统提示词 + 工具 schema），pi 的消息里
-					* 不含它，得补上；拿不到窗口就用环境变量兜底，与压缩判断同源。
+					* 显示与判据用**同一个数**：`真值 + 本步新增的估算`，没有真值才全量估算。
+					* 两条腿互相兜底 —— 估算漏了某种 part 形状时真实值兜住，真实值过期时
+					* （刚压缩完 / 第一步）估算兜住。
 					*/
+					const tailTokens = estimateMessagesTokens(next.slice(boundaryCount));
+					const estimatedAll = baseTokens + estimateMessagesTokens(next);
+					const observedContextTokens = contextUsed(lastStepUsage ? calculateContextTokens(lastStepUsage) + tailTokens : 0, estimatedAll);
 					emitEvent({
 						type: "context-usage",
-						used: baseTokens + estimateMastraMessagesTokens(ctx.messages),
-						size: opts.contextWindow ?? defaultContextWindowFromEnv()
+						used: observedContextTokens,
+						size: contextWindow,
+						base: baseTokens
 					});
+					/**
+					* 冷却：上一次轮中压缩没把上下文压下来时，再压一遍只会把刚写好的摘要再摘要
+					* 一次。要求自那以后真的增长 50% 才允许再压；上限卡在窗口上，别等到溢出。
+					*/
+					const cooldownCeiling = midTurnCompactAfter === null ? 0 : Math.min(midTurnCompactAfter * 1.5, contextWindow);
+					const cooled = midTurnCompactAfter !== null && observedContextTokens < cooldownCeiling;
+					if (!cooled) try {
+						const compactedMid = cooled ? null : await compactModelMessages(next, {
+							contextWindow,
+							baseTokens,
+							triggerTokens: observedContextTokens,
+							model: effectiveModel,
+							signal: runSignal,
+							...opts.onContextCompactionStart ? { onSummaryStart: opts.onContextCompactionStart } : {},
+							...opts.onContextCompactionDelta ? { onSummaryDelta: opts.onContextCompactionDelta } : {}
+						});
+						if (compactedMid?.compressed) {
+							next = compactedMid.messages;
+							midTurnCompactAfter = compactedMid.compressed.afterTokens;
+							/**
+							* `lastStepUsage` 是**压缩前**那一步的真实 usage，压缩后已经不代表当前
+							* 上下文了。作废它，让下一个边界退回逐条估算，直到拿到新的真实值。
+							*/
+							lastStepUsage = null;
+							opts.onContextCompressed?.({
+								...compactedMid.compressed,
+								...compactedMid.summary ? { summary: compactedMid.summary } : {}
+							});
+							emitEvent({
+								type: "context-usage",
+								used: compactedMid.compressed.afterTokens,
+								size: contextWindow,
+								base: baseTokens
+							});
+						}
+					} catch (err) {
+						console.error("[compaction] 轮中压缩失败：" + describeError(err));
+					}
+					boundaryCount = next.length;
 					const steer = await opts.pollSteer?.() ?? null;
-					if (!steer) return;
+					if (!steer) return next === current ? void 0 : next;
 					steered = true;
 					opts.onEvent?.({
 						type: "user-injected",
@@ -6882,51 +7187,56 @@ async function runAgent(opts) {
 					});
 					const steerText = steer.parts.filter((p) => p.type === "text").map((p) => p.text).join("\n").trim();
 					/**
-					* 插话带的附件（图片 / PDF）：注入的这条消息是 **Mastra format-2**，
-					* 它的 part 形状是 **AI SDK v4 UIMessage** 那一套 —— file part 是
-					* `{ type: 'file', mimeType, data }`，**不是**初始历史那条路上的
-					* `{ type: 'image', image: URL }`（那套由 `toModelMessages` 产出，喂给
-					* `agent.stream` 的入参）。两者别混：形状写错**不会报错**，附件会被静默丢掉
-					* （与 AGENTS.md 记的 `reasoning-delta` 同类坑）。断言见 scripts/verify-steer.mjs。
-					*
-					* `data` 要填**绝对地址**：Mastra 拿到 URL 后会自己去取（下载失败会替换成
-					* 占位文本，不会炸整轮）。绝对化策略由调用方注入（server 传的是
-					* UploadAdapter.resolveModelUrl），这里零存储知识 —— 与 toModelMessages
-					* 的 `resolveFileUrl` 同一条约定。
+					* 插话带的附件：这里是 **ModelMessage** 的 part 形状（与 `toModelMessages`
+					* 产出的那条路一致）。写错形状**不会报错**，附件会被静默丢掉。
 					*/
 					const allSteerFiles = steer.parts.flatMap((p) => p.type === "file" ? [{
 						mediaType: p.mediaType,
-						url: p.url
+						url: p.url,
+						name: p.name
 					}] : []);
 					const steerFiles = modelSettings.imageInput ? allSteerFiles : allSteerFiles.filter((f) => !f.mediaType.startsWith("image/"));
 					const omittedSteerImages = allSteerFiles.length - steerFiles.length;
 					const steerBody = [steerText, omittedSteerImages > 0 ? `（有 ${omittedSteerImages} 张图片因当前模型未开启图片输入被省略）` : ""].filter(Boolean).join("\n") || (steerFiles.length ? "（本条插话只带了附件，没有文字说明）" : "（本条插话没有可发送的内容）");
-					ctx.messages.push({
-						id: steer.id,
-						role: "user",
-						createdAt: new Date(steer.createdAt),
-						content: {
-							format: 2,
-							parts: [...steerFiles.map((f) => ({
-								type: "file",
-								mimeType: f.mediaType,
-								data: opts.resolveFileUrl ? opts.resolveFileUrl(f.url) : f.url
-							})), {
-								type: "text",
-								text: `【用户在任务运行中的插话】${steerBody}\n（这是运行中插话，不是新任务：把它纳入当前任务一并处理 —— 需要回答就回答、要改方向就改方向，但继续完成你原本在做的事，不要把它当成新任务从头开始，也不要丢掉原任务。回复时不要在开头复述或引用这段插话的原文与上面这个框题 —— 用户已经看到自己写了什么；直接接着干活，至多一句话带过。）`
-							}]
-						}
+					const steerContent = steerFiles.map((f) => {
+						const url = opts.resolveFileUrl ? opts.resolveFileUrl(f.url) : f.url;
+						return f.mediaType.startsWith("image/") ? {
+							type: "image",
+							image: url,
+							mediaType: f.mediaType
+						} : {
+							type: "file",
+							data: url,
+							mediaType: f.mediaType,
+							filename: f.name
+						};
 					});
-					return { continue: true };
+					/**
+					* ⚠️ 注入给模型的文本必须**带框**：插话是一条普通 user 消息，而模型天然把
+					* 「最后一条 user 消息」当成当前任务 —— 原样发的话，用户一句问话就会把整轮
+					* 任务接管过去。框里点明「这是运行中插话、不是新任务」，末尾再禁掉复述
+					* （不写这句时模型每轮续跑都会先客套 + 照抄插话原文）。
+					*
+					* 只改**模型上下文**：`user-injected` 广播出去的那条与落盘历史都保持用户原话。
+					*/
+					steerContent.push({
+						type: "text",
+						text: `【用户在任务运行中的插话】${steerBody}\n（这是运行中插话，不是新任务：把它纳入当前任务一并处理 —— 需要回答就回答、要改方向就改方向，但继续完成你原本在做的事，不要把它当成新任务从头开始，也不要丢掉原任务。回复时不要在开头复述或引用这段插话的原文与上面这个框题 —— 用户已经看到自己写了什么；直接接着干活，至多一句话带过。）`
+					});
+					next = [...next, {
+						role: "user",
+						content: steerContent
+					}];
+					boundaryCount = next.length;
+					return next;
 				}
 			});
 			/**
-			* ⚠️ 不能直接 `for await`：看门狗需要在「一个 chunk 都不来」时打断等待，
-			* 而 for-await 会一直挂在 `next()` 上（abortSignal 在部分 Mastra 版本里也
-			* 不会让流立刻结束）。手动拿迭代器，每次 `next()` 与「子任务剩余空闲时间」
-			* 赛跑。
+			* ⚠️ 不能直接 `for await`：看门狗需要在「一个事件都不来」时打断等待，
+			* 而 for-await 会一直挂在 `next()` 上。手动拿迭代器，每次 `next()` 与
+			* 「子任务剩余空闲时间」赛跑。
 			*/
-			const streamIterator = result.fullStream[Symbol.asyncIterator]();
+			const streamIterator = engine.events[Symbol.asyncIterator]();
 			let pendingChunk = streamIterator.next();
 			for (;;) {
 				if (runSignal.aborted) {
@@ -6956,70 +7266,67 @@ async function runAgent(opts) {
 					break;
 				}
 				if (idleTimedOut) {
-					fireSubagentWatchdog();
+					/**
+					* 定时器到点只是「父流这段时间没事件」，不等于子任务卡死 —— 子 run 的事件不走
+					* 父流，它可能正在正常吐字。真正的判定在 `fireSubagentWatchdog` 里（按每个
+					* 子任务各自的 `lastAt` 算），没判超时就继续等。
+					*/
+					if (!fireSubagentWatchdog()) continue;
 					pendingChunk.catch(() => void 0);
 					Promise.resolve(streamIterator.return?.()).catch(() => void 0);
 					break;
 				}
 				if (!chunkResult || chunkResult.done) break;
-				const chunk = chunkResult.value;
+				const event = chunkResult.value;
 				pendingChunk = streamIterator.next();
-				if (runSignal.aborted) {
-					pendingChunk.catch(() => void 0);
-					break;
+				if (event.type === "error") {
+					const rawError = event.raw;
+					if (isRetryableAttemptError(rawError)) throw rawError instanceof Error ? rawError : new Error(event.message);
 				}
-				if (process.env.FIZZ_DEBUG_CHUNKS === "1") console.log("[chunk]", JSON.stringify(chunk).slice(0, 500));
-				const chunkUsage = readChunkUsage(chunk);
-				if (chunkUsage) {
-					rawUsage = chunkUsage;
-					finishChunks++;
+				if (event.type === "tool-call") {
+					toolExecuted = true;
+					if (event.toolName.startsWith("agent-")) activeDelegations.set(event.toolCallId, {
+						toolName: event.toolName,
+						lastAt: Date.now()
+					});
 				}
-				const stepUsage = readChunkStepUsage(chunk);
-				if (stepUsage) lastStepUsage = stepUsage;
-				/**
-				* 子任务活动续命：不只看被转发出去的 text-delta / tool-call，**任何**子 run
-				* 的 chunk（尤其 reasoning）都算「它还活着」。看门狗判的是「子任务完全没动静」，
-				* 不是「没给用户看的内容」。
-				*/
-				const chunkRecord = chunk;
-				if (str(chunkRecord.type) === "tool-output") {
-					const nestedPayload = chunkRecord.payload;
-					if (isNestedSubagentChunk(nestedPayload?.output)) {
-						const nestedId = str(nestedPayload?.toolCallId) || str(chunkRecord.toolCallId);
-						const info = nestedId ? activeDelegations.get(nestedId) : void 0;
-						if (info) info.lastAt = Date.now();
-					}
+				if (event.type === "tool-result" && activeDelegations.has(event.toolCallId)) activeDelegations.delete(event.toolCallId);
+				if (event.type === "subagent-delta" || event.type === "subagent-progress") {
+					const info = activeDelegations.get(event.toolCallId);
+					if (info) info.lastAt = Date.now();
 				}
-				const event = adaptMastraChunk(chunk, opts.unknownChunks);
-				if (event) {
-					if (event.type === "error") {
-						const rawError = chunkErrorOf(chunk);
-						if (isRetryableAttemptError(rawError)) throw rawError instanceof Error ? rawError : new Error(event.message);
-					}
-					if (event.type === "tool-call") {
-						toolExecuted = true;
-						if (event.toolName.startsWith("agent-")) activeDelegations.set(event.toolCallId, {
-							toolName: event.toolName,
-							lastAt: Date.now()
-						});
-					}
-					if (event.type === "tool-result" && activeDelegations.has(event.toolCallId)) activeDelegations.delete(event.toolCallId);
-					if (firstOutputAt === null && event.type !== "finish" && event.type !== "error") firstOutputAt = Date.now();
-					emitEvent(event);
-				}
+				if (firstOutputAt === null && event.type !== "error") firstOutputAt = Date.now();
+				emitEvent(event);
 			}
+			/**
+			* ⚠️ 手动迭代 + `break` **不会**自动关掉生成器（只有 `for await` 会）。
+			* 不显式 `return()` 的话，引擎的 `finally` 不跑、`engine.done` 永远不 resolve ——
+			* 用户点停止后整轮就挂在这里。生成器已经跑完时 return() 是空操作。
+			*/
+			await Promise.resolve(streamIterator.return?.()).catch(() => void 0);
+			const finished = await engine.done;
+			/**
+			* 上游「空响应」：finishReason 归到 `other` 且整轮一个内容事件都没产出。
+			* 同一条请求重发通常就有内容，所以抛出去交给重试路径（`isEmptyStreamOutputError`
+			* 按这条文案识别）。中止不算 —— 那是用户主动停。
+			*/
+			if (!runSignal.aborted && finished.finishReason === "other" && firstOutputAt === null) throw new Error("上游返回空响应（finishReason \"other\"，整轮没有任何内容）");
 			if (!rawUsage) {
-				const holder = result;
-				const maybe = holder.totalUsage ?? holder.usage;
-				rawUsage = normalizeUsage(maybe && typeof maybe.then === "function" ? await Promise.resolve(maybe).catch(() => void 0) : maybe);
+				rawUsage = normalizeUsage(finished.totalUsage);
+				if (rawUsage) finishChunks = Math.max(finishChunks, 1);
+			}
+			if (!lastStepUsage) {
+				const stepUsage = normalizeUsage(finished.lastStepUsage);
+				if (stepUsage) lastStepUsage = stepUsage;
 			}
 			/**
 			* 上下文大小 = **最后一次请求上游真实上报的 input + output**（pi 的
 			* `calculateContextTokens`，见 `context.ts`）。一轮结束时最后一条消息就是助手回复，
 			* 「其后消息」为空，所以不需要再估 tail。
 			*
-			* 不再用 `baseTokens + estimateMessagesTokens` 当显示值：那是按字符估的（±20%），
-			* 而上游上报的 input 已经把系统提示词、工具 schema、缓存命中的部分全算在内了。
+			* 不再用 `baseTokens + estimateMessagesTokens` 当显示值：那是本地估的（CJK 加权后
+			* 已经贴近真实，但仍拿不到「上游到底发了多少」），而上游上报的 input 已经把
+			* 系统提示词、工具 schema、缓存命中的部分全算在内了。
 			* 只在拿不到 usage 时才退回估算（上面那个兜底值）。
 			*/
 			if (lastStepUsage) contextTokens = calculateContextTokens(lastStepUsage);

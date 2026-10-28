@@ -128,7 +128,14 @@ const createCoreSlice: StateCreator<AgentStore, [], [], CoreSlice> = (set, get) 
     if (!api) return { ok: false, reason: '还没有连接到服务端' }
     set({ contextCompressing: true })
     try {
-      const res = await api.compressContext(conversationId)
+      /**
+       * 压缩过程与自动压缩共用同一套 SSE 事件：`handleFrame` 收到
+       * `context-compaction-*` 后会在会话末尾渲染同一个折叠块（没有 assistantId =
+       * 不绑定到某条助手消息；见 `MessageList` 的 trailing compaction）。
+       */
+      const res = await api.compressContext(conversationId, (event) => {
+        get().handleFrame(conversationId, '', { type: 'event', requestId: '', event })
+      })
       if (res.ok && res.summary) {
         // 本地先同步检查点（即时反馈）；WS 的标脏推送随后会带同一份真值
         const summary = res.summary
@@ -137,11 +144,14 @@ const createCoreSlice: StateCreator<AgentStore, [], [], CoreSlice> = (set, get) 
             c.id === conversationId ? { ...c, contextSummary: summary } : c
           )
         }))
-        get().setContextNotice({ ...summary.stats, at: Date.now() })
         return { ok: true }
       }
+      // 没有可压缩的部分：把可能已经冒出来的流式块收掉
+      get().handleFrame(conversationId, '', { type: 'end', requestId: '' })
       return { ok: false, reason: res.reason ?? '压缩未执行' }
     } catch (err) {
+      // 摘要失败 / 中止：不留下半份流式文档（检查点也不会落）
+      get().handleFrame(conversationId, '', { type: 'end', requestId: '' })
       return { ok: false, reason: err instanceof Error ? err.message : String(err) }
     } finally {
       set({ contextCompressing: false })

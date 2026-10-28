@@ -158,6 +158,8 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
     activeConversationId: conversationId,
     // ---- 活跃会话那份现场（字段名与旧的全局单份一致，渲染层无感） ----
     messages: activeSlice?.messages ?? NO_MESSAGES,
+    /** 最近一次上下文交接文档（流式生成中 / 已完成）；null = 没有可展示的 */
+    compaction: activeSlice?.compaction ?? null,
     /** 协作会话的运行态（任务 / 消息 / Agent 状态 + 实时文本）；普通会话 = null */
     collab: activeSlice?.collab ?? null,
     /** 覆盖协作配置（画布拖拽 / 增删 Agent） */
@@ -282,7 +284,7 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
     /** 重新加载 acp 会话：当场再走一次 session/load，用 agent 侧回放整体重建消息列表 */
     reloadAcpSession: s.reloadAcpSession,
     /**
-     * 重新加载**这一条**会话（等价于「刷新页面 → 点开它」）：mastra 拉权威历史、
+     * 重新加载**这一条**会话（等价于「刷新页面 → 点开它」）：内置 拉权威历史、
      * acp 走 session/load 回放。错误块那颗「重新加载」按钮与标签右键的「刷新」都走它。
      */
     reloadConversation: s.reloadConversation,
@@ -348,7 +350,7 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
     /** 同一批工具调用的并发上限（1 = 串行）与设置动作 */
     toolCallConcurrency: s.toolCallConcurrency,
     setToolCallConcurrency: s.setToolCallConcurrency,
-    /** 选本轮后端：`{backend:'acp', configId:<agent id>}` 或 `{backend:'mastra', configId:<model id>}` */
+    /** 选本轮后端：`{backend:'acp', configId:<agent id>}` 或 `{backend:'builtin', configId:<model id>}` */
     setChatTarget: s.setChatTarget,
     /**
      * 新任务页选中 ACP agent 时探一次它的档位（模式 / 思考档）。

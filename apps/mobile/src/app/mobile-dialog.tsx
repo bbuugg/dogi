@@ -216,7 +216,7 @@ function DialogContent({
           className,
         )}
       >
-        {children}
+        {restoreDismissVariants(children)}
       </div>
       {showCloseButton && (
         <DrawerClose asChild>
@@ -245,6 +245,37 @@ function DialogHeader({ className, ...props }: React.ComponentProps<'div'>) {
       {...props}
     />
   )
+}
+
+/**
+ * 共享组件里的「取消 / 关闭」按钮曾统一是 `outline`，后来有一批被改成了 `ghost`
+ * （web / desktop 保持 ghost 不动）。手机上 ghost 贴在抽屉底边几乎看不出是按钮，
+ * 所以只在这里把**带 `data-dialog-dismiss` 的 ghost 按钮**升回 outline。
+ *
+ * 只下钻 Fragment 与原生标签（包住按钮的 div / 片段），不碰组件内部：`DialogFooter`
+ * 自己会在抽屉形态里再过一遍，避免把组件树重挂。
+ */
+function restoreDismissVariants(children: React.ReactNode): React.ReactNode {
+  return React.Children.map(children, (child) => {
+    if (!React.isValidElement(child)) return child
+    const props = child.props as {
+      variant?: string
+      'data-dialog-dismiss'?: unknown
+      children?: React.ReactNode
+    }
+    if (props['data-dialog-dismiss'] !== undefined && props.variant === 'ghost') {
+      return React.cloneElement(child as React.ReactElement<{ variant?: string }>, {
+        variant: 'outline',
+      })
+    }
+    const canDescend = child.type === React.Fragment || typeof child.type === 'string'
+    if (canDescend && props.children !== undefined) {
+      return React.cloneElement(child as React.ReactElement<{ children?: React.ReactNode }>, {
+        children: restoreDismissVariants(props.children),
+      })
+    }
+    return child
+  })
 }
 
 function DialogFooter({
@@ -277,7 +308,7 @@ function DialogFooter({
       )}
       {...props}
     >
-      {children}
+      {restoreDismissVariants(children)}
       {showCloseButton && (
         <DrawerClose asChild>
           <Button variant="outline">Close</Button>

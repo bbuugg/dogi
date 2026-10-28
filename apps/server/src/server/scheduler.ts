@@ -110,12 +110,12 @@ function dispatch(state: SchedulerState, run: () => Promise<unknown>): void {
  * 触发会话「拿什么跑」—— 后端 + 配置（+ 可选的模型）。
  *
  * 两种后端的语义差别很大，所以做成判别联合而不是「一堆可选字段」：
- * - `mastra`：配置 = `AiModelConfig.id`，模型**必选**（不存在「配置默认模型」）；
+ * - `builtin`：配置 = `AiModelConfig.id`，模型**必选**（不存在「配置默认模型」）；
  * - `acp`：配置 = `AcpAgentConfig.id`，模型可省（省 = agent 自己的默认，与手动会话
  *   的「跟随 agent 默认」同一套）。
  */
 type HeadlessTarget =
-  | { backend: 'mastra'; configId: string; modelId: string }
+  | { backend: 'builtin'; configId: string; modelId: string }
   | { backend: 'acp'; configId: string; modelId?: string }
 
 /**
@@ -162,7 +162,7 @@ function resolveHeadlessTarget(trigger: TaskTrigger): HeadlessTarget {
       `定时任务「${trigger.name}」绑定的模型「${modelId}」不在配置「${config.name}」里（可能已被删）：请重新选择模型`
     )
   }
-  return { backend: 'mastra', configId, modelId }
+  return { backend: 'builtin', configId, modelId }
 }
 
 async function processFire(triggerId: string): Promise<TriggerFireResult> {
@@ -248,7 +248,7 @@ async function processFire(triggerId: string): Promise<TriggerFireResult> {
     throw new Error(`定时任务「${trigger.name}」绑定的工作区没有目录，不能用外部 Agent（ACP 需要目录）`)
   }
 
-  // ⚠️ 动态 import：调度器会被构建配置当普通模块打包，绝不能在顶层把 mastra /
+  // ⚠️ 动态 import：调度器会被构建配置当普通模块打包，绝不能在顶层把 内置 /
   // agent 编排那一大串拖进启动路径 —— 只有真的要跑会话了才加载。
   const { startTurn, releaseUnattendedWaits } = await import('./chat-turn')
 
@@ -269,7 +269,7 @@ async function processFire(triggerId: string): Promise<TriggerFireResult> {
     /**
      * ACP 会话的权限答复策略：只有「完全访问」才自动放行 agent 发来的权限请求 ——
      * 无人值守时没人能点那张卡，`confirm` 会一路等到 10 分钟超时再拒绝（见上面的警告）。
-     * 内置模型（mastra）没有这个字段，它的等价物是本轮传下去的 `permissionMode`。
+     * 内置模型（内置）没有这个字段，它的等价物是本轮传下去的 `permissionMode`。
      */
     ...(target.backend === 'acp'
       ? { acpPermissionMode: permissionMode === 'full' ? ('allow' as const) : ('confirm' as const) }

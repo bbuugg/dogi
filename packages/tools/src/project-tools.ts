@@ -56,7 +56,7 @@ export interface ProjectToolsDeps {
     isInsideProjectsRoot(path: string, root?: string): boolean
     listDirs(path?: string): Promise<ProjectDirsResult>
   }
-  /** 给项目建会话:只建**内置 Agent(mastra)**会话,模型由注入方决定(见调用方注释) */
+  /** 给项目建会话:只建**内置 Agent(内置)**会话,模型由注入方决定(见调用方注释) */
   conversations: {
     createConversation(input: ConversationCreateInput): Promise<ConversationCreateResult>
   }

@@ -3,7 +3,7 @@
  * `create_conversation` 工具（`packages/tools` 不 import 领域包 / 服务端模块，
  * 见 project-tools.ts 头部的分层说明）。
  *
- * 只建**内置 Agent（mastra）**会话：ACP 会话创建时要先与外部 agent `session/new`
+ * 只建**内置 Agent（内置）**会话：ACP 会话创建时要先与外部 agent `session/new`
  * （还会 spawn 进程、失败要回收），那是界面「新建会话」弹窗的流程，不走工具这条路 ——
  * 工具描述里也写明这一点，模型不会用它去建 ACP 会话。
  *
@@ -45,7 +45,7 @@ export function createProjectConversation(
   const created = domain.saveConversation({
     workspaceId: workspace.id,
     ...(input.title?.trim() ? { title: input.title.trim() } : {}),
-    backend: 'mastra',
+    backend: 'builtin',
     ...(defaultTarget ? { configId: defaultTarget.configId, modelId: defaultTarget.modelId } : {})
   })
   return { id: created.id, title: created.title, workspaceId: created.workspaceId }

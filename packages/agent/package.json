@@ -1,7 +1,7 @@
 {
   "name": "@fizz/agent",
   "version": "0.1.0",
-  "description": "Fizz 的对话编排：基于 Mastra 的单轮 agent、系统提示词 / 历史消息转换 / 流事件适配、项目约束文档、上游模型探测，源码直接被打包",
+  "description": "Fizz 的对话编排：基于 AI SDK 的单轮 agent 循环、系统提示词 / 历史消息转换 / 流事件适配、上下文压缩、项目约束文档、上游模型探测，源码直接被打包",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
@@ -27,7 +27,6 @@
     "@fizz/plugin": "*",
     "@fizz/skills": "*",
     "@fizz/tools": "*",
-    "@mastra/core": "^1.68.0",
     "ai": "^7.0.99",
     "zod": "^4.6.7"
   },

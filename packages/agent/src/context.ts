@@ -26,7 +26,7 @@
  * - 输入输出都是本包 `toModelMessages` 的产物，内聚；
  * - 桌面端不走 `runAgent`（它自己调 streamText），所以这里不会误伤桌面端。
  */
-import { asSchema, generateText } from 'ai'
+import { asSchema, streamText } from 'ai'
 import { DEFAULT_CONTEXT_WINDOW, compactionReserveTokens } from '@fizz/contracts/types'
 import { resolveModel } from './resolve-model'
 import { toModelMessages } from './model-messages'
@@ -54,20 +54,61 @@ export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
  * fizz 支持的模型窗口跨度很大（32k~1M），16384 的固定预留放到小窗口上会占掉一半，
  * 于是按窗口封顶到 25%（**唯一的机械适配，不改机制**）。
  */
+/** 保留区的下限：再怎么让位也要留这么多原文，否则模型连「刚才在干什么」都不知道 */
+export const MIN_KEEP_TOKENS = 1024
+
 export function resolveCompactionSettings(
   contextWindow: number,
-  overrides?: Partial<CompactionSettings>
+  overrides?: Partial<CompactionSettings>,
+  /**
+   * **消息之外、压缩动不了的那部分**：系统提示词 + 工具 schema（`baseTokens`），
+   * 有检查点时再加已落盘摘要的 token。
+   *
+   * 保留区必须给这块让位：否则 `base + 摘要` 一旦吃掉大半窗口，`base + keep` 仍然
+   * 在触发线以上 —— 压完立刻又超、每轮白付一次摘要调用，而每次只摘要得动一两轮。
+   */
+  fixedTokens = 0
 ): CompactionSettings {
   const merged = { ...DEFAULT_COMPACTION_SETTINGS, ...overrides }
   const reserveTokens = Math.min(merged.reserveTokens, compactionReserveTokens(contextWindow))
+  /** 留给「消息」的预算：窗口 − 预留 − 压缩动不了的那块 */
+  const budget = contextWindow - reserveTokens - Math.max(0, fixedTokens)
   // 保留区不能把整个窗口吃掉，否则永远切不出「要压缩的那段」；
-  // 还要和触发线留 20% 余量 —— keep == 触发线时，压完立刻又满足触发条件，每轮重压一次
+  // 还要和触发线留 20% 余量 —— keep == 触发线时，压完立刻又满足触发条件，每轮重压一次。
+  // 上限取 `max(MIN_KEEP, budget × 0.8)`：预算被吃光时退到下限（能压多少算多少），
+  // 但仍然允许调用方显式给一个更小的 override（测试 / 特殊场景）。
   const keepRecentTokens = Math.min(
     merged.keepRecentTokens,
-    Math.max(1024, Math.floor((contextWindow - reserveTokens) * 0.8))
+    Math.max(MIN_KEEP_TOKENS, Math.floor(budget * 0.8))
   )
   return { ...merged, reserveTokens, keepRecentTokens }
 }
+
+/**
+ * 留给「消息」的预算（token）。≤ `MIN_KEEP_TOKENS` 时压缩注定压不到触发线以下 ——
+ * 该压的是系统提示词 / 工具定义，不是历史，调用方据此跳过（别再白付摘要调用）。
+ */
+export function compactionBudget(
+  contextWindow: number,
+  settings: CompactionSettings,
+  fixedTokens: number
+): number {
+  return contextWindow - settings.reserveTokens - Math.max(0, fixedTokens)
+}
+
+/**
+ * 摘要正文的 token 预算（写进 prompt 的软约束）。
+ *
+ * 取保留区的 40%：摘要 + 保留区一起要能塞进「窗口 − 预留 − base」里，给摘要留四成
+ * 已经偏宽松，但它是**软**约束 —— 真正的保险是调用方压不下去时直接不压（见
+ * `compactionBudget`），而不是靠模型听话。
+ *
+ * 下限 1500：再小的窗口也得容得下「目标 / 已完成 / 待办」这几段，否则摘要等于没用。
+ */
+function summaryBudgetTokens(keepRecentTokens: number): number {
+  return Math.max(1500, Math.min(8000, Math.floor(keepRecentTokens * 0.4)))
+}
+
 
 export function shouldCompact(
   contextTokens: number,
@@ -101,14 +142,6 @@ export function calculateContextTokens(usage: {
   return usage.totalTokens || usage.inputTokens + usage.outputTokens
 }
 
-/** pi 的 `ContextUsageEstimate`，字段一一对应 */
-export interface ContextUsageEstimate {
-  tokens: number
-  usageTokens: number
-  trailingTokens: number
-  lastUsageIndex: number | null
-}
-
 /**
  * 一条助手消息代表的上下文大小（pi 的 `getAssistantUsage` + `calculateContextTokens`）。
  *
@@ -123,57 +156,6 @@ function assistantContextTokens(msg: AgentChatMessage | undefined): number {
   const direct = msg.usage.contextTokens
   if (direct && direct > 0) return direct
   return calculateContextTokens(msg.usage)
-}
-
-/**
- * pi 的 `estimateContextTokens`：**最后一条带 usage 的助手消息**的 usage + 其后消息的估算。
- *
- * 这是压缩触发与圆环的共同口径。找不到 usage（老数据 / 上游没报）时退回「逐条估算」，
- * 并补上 `baseTokens`（系统提示词 + 工具 schema；pi 的消息数组里含系统提示词，fizz 不含）。
- *
- * ⚠️ fizz 的结构差异：工具结果内嵌在助手消息的 `tool-call.output` 上，不像 pi 那样是
- * 独立的后继消息。所以「usage 之后」的 trailing 里**不含**这一轮刚产出的工具结果
- * （最多几千 token，被 16k 的预留盖住）。要做到分毫不差得先把两者拆开，不值得。
- */
-export async function estimateContextTokens(
-  messages: AgentChatMessage[],
-  opts: { baseTokens?: number } = {}
-): Promise<ContextUsageEstimate> {
-  let lastUsageIndex: number | null = null
-  let usageTokens = 0
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]
-    if (!m || m.role !== 'assistant' || !m.usage) continue
-    const tokens = assistantContextTokens(m)
-    if (tokens > 0) {
-      lastUsageIndex = i
-      usageTokens = tokens
-      break
-    }
-  }
-
-  if (lastUsageIndex === null) {
-    let estimated = 0
-    for (const m of messages) estimated += estimateMessagesTokens(await toModelMessages([m]))
-    return {
-      tokens: estimated + (opts.baseTokens ?? 0),
-      usageTokens: 0,
-      trailingTokens: estimated,
-      lastUsageIndex: null
-    }
-  }
-
-  let trailingTokens = 0
-  for (let i = lastUsageIndex + 1; i < messages.length; i++) {
-    const m = messages[i]
-    if (m) trailingTokens += estimateMessagesTokens(await toModelMessages([m]))
-  }
-  return {
-    tokens: usageTokens + trailingTokens,
-    usageTokens,
-    trailingTokens,
-    lastUsageIndex
-  }
 }
 
 /* ---------------- 摘要提示词（pi 原文，逐字照搬） ---------------- */
@@ -274,21 +256,56 @@ Create a concise checkpoint of the user's request and the progress shown above. 
 Only summarize information explicitly present above. Do not infer or recreate later messages.`
 
 /**
- * token 估算：**pi 的 `estimateTokens` 公式** —— `Math.ceil(chars / 4)`。
+ * 宽字符（CJK / 假名 / 谚文 / 全角符号）的个数。
  *
- * pi 按消息角色分别数 char 数（正文 / 思考 / toolCall 的 name + JSON 参数 / 工具结果正文），
- * 这里在展平后的文本上用同一个除数，等价。
- *
- * ⚠️ 已知取舍（照搬 pi 带来的）：一个汉字在 JS 字符串里算 1 个 char → 0.25 token，
- * 而真实约 1~1.5 token。**纯中文会话会被低估 4~6 倍**，压缩触发因此偏晚。
- * 这是 pi 的行为，fizz 不再额外加权；真出现超窗就走 `runAgent` 的 overflow 恢复。
+ * 只扫码点、不建数组：工具结果动辄几十万字符，`text.match(/…/g)` 会分配一个
+ * 等长的字符串数组（纯中文时就是几十万个元素），在压缩判断这种每步都跑的热路径上
+ * 是纯粹的浪费。`charCodeAt` 的循环没有分配，V8 能把它编成很紧的循环。
  */
-export function estimateTokens(text: string): number {
-  return text ? Math.ceil(text.length / 4) : 0
+function countWideChars(text: string): number {
+  let wide = 0
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text.charCodeAt(i)
+    // 0x2E80 以下是 ASCII / 拉丁扩展 / 希腊 / 西里尔 —— 全是窄字符，先快速跳过
+    if (c < 0x2e80) continue
+    if (
+      c <= 0x9fff || // CJK 部首、假名、CJK 统一表意文字
+      (c >= 0xac00 && c <= 0xd7af) || // 谚文音节
+      (c >= 0xf900 && c <= 0xfaff) || // CJK 兼容表意文字
+      (c >= 0xfe30 && c <= 0xfe4f) || // CJK 兼容形式
+      (c >= 0xff01 && c <= 0xff60) || // 全角 ASCII（，。：；！？等）
+      (c >= 0xffe0 && c <= 0xffe6) // 全角符号（￥ ￡ 等）
+    ) {
+      wide += 1
+    }
+  }
+  return wide
 }
 
-/** pi 的 `ESTIMATED_IMAGE_CHARS`：一张图按 4800 字符（= 1200 token）估 */
-const ESTIMATED_IMAGE_CHARS = 4800
+/**
+ * token 估算：**CJK 加权的 pi 公式**。
+ *
+ * pi 原式是 `Math.ceil(chars / 4)` —— 为英文写的。一个汉字在 JS 字符串里只算 1 个
+ * char，于是被估成 0.25 token，而主流分词器里它接近 1~1.5 token：**纯中文会话被
+ * 低估 4~6 倍**（AGENTS.md 这种全文注入的中文文档、中文工具结果都吃这个亏）。
+ *
+ * 「触发线按真实 usage、切点按这个低估的估算」这种半截修法会带来两种不对称的坏结果：
+ * - 明明按真实用量该切掉 80k，实际只切了 20k 估算（≈ 真实 20k），界面报「压到 40k」
+ *   而真实请求还有 100k，跑一个工具就又满了（用户实测的 120k → 40k → 120k 就是这个）；
+ * - 压缩后的上下文仍按低估值判阈值 → 该压不压。
+ *
+ * 所以这里改成：宽字符按 1 token、其余按 4 字符 1 token。**纯 ASCII 的结果与 pi 逐字节
+ * 相同**（`wide = 0` 时就是 `ceil(len / 4)`），只有中日韩内容会变准 —— 这不是「加一层
+ * 压缩」，只是把同一把尺子换成和上游一致的刻度。
+ */
+export function estimateTokens(text: string): number {
+  if (!text) return 0
+  const wide = countWideChars(text)
+  return wide + Math.ceil((text.length - wide) / 4)
+}
+
+/** 一张图按 1200 token 估（pi 的 `ESTIMATED_IMAGE_CHARS = 4800` 字符 ÷ 4） */
+const ESTIMATED_IMAGE_TOKENS = 1200
 
 /** 工具结果的文本值（AI SDK 的 `output` 有 text / json / error-text 几种形状） */
 function toolOutputText(output: unknown): string {
@@ -302,104 +319,278 @@ function toolOutputText(output: unknown): string {
 }
 
 /**
- * 一条消息的「字符数」，口径对齐 pi 的 `estimateTokens`：
+ * 一条消息的 token 数，口径对齐 pi 的 `estimateTokens`（哪些部分算、哪些不算）：
  * 正文 + 思考 + toolCall 的 `name` 与 `JSON.stringify(arguments)` + 工具结果正文；
- * 图片按 `ESTIMATED_IMAGE_CHARS` 折成字符。
+ * 图片按 `ESTIMATED_IMAGE_TOKENS` 直接计。
+ *
+ * ⚠️ 这里**直接产 token**，不再是「先数字符再除 4」：CJK 加权后除数是可变的
+ * （见 `estimateTokens`），先合并字符数再除会把宽窄字符混在一起算错。
  */
-function estimateMessageChars(m: ModelMessage): number {
+function estimateMessageTokens(m: ModelMessage): number {
   const { content } = m
-  if (typeof content === 'string') return content.length
+  if (typeof content === 'string') return estimateTokens(content)
   if (!Array.isArray(content)) return 0
-  let chars = 0
+  let tokens = 0
   for (const part of content as Array<{ type: string } & Record<string, unknown>>) {
     switch (part.type) {
       case 'text':
       // pi 把 thinking 也算进上下文（它确实占 token）
       case 'reasoning':
-        chars += String(part.text ?? '').length
+        tokens += estimateTokens(String(part.text ?? ''))
         break
       case 'image':
-        chars += ESTIMATED_IMAGE_CHARS
+        tokens += ESTIMATED_IMAGE_TOKENS
         break
       case 'tool-call':
-        chars += String(part.toolName ?? '').length + JSON.stringify(part.input ?? {}).length
+        tokens += estimateTokens(
+          String(part.toolName ?? '') + JSON.stringify(part.input ?? {})
+        )
         break
       case 'tool-result':
-        chars += toolOutputText(part.output).length
+        tokens += estimateTokens(toolOutputText(part.output))
         break
       default:
         break
     }
   }
-  return chars
+  return tokens
 }
 
 /**
  * 一组消息的 token 数（导出：runAgent 要用它算「本轮实际请求的上下文」）。
  *
- * 逐条 `ceil(chars / 4)` 再求和 —— 与 pi 的 `sumTokens` 一致（不是先把总字符数加完再除）。
+ * 逐条求和 —— 与 pi 的 `sumTokens` 一致（不是先把总字符数加完再除）。
  */
 export function estimateMessagesTokens(messages: ModelMessage[]): number {
   let sum = 0
-  for (const m of messages) sum += Math.ceil(estimateMessageChars(m) / 4)
+  for (const m of messages) sum += estimateMessageTokens(m)
   return sum
 }
 
 /**
- * 把一条 **Mastra format-2** 消息（`MastraDBMessage`）展平成文本。
+ * 上下文占用的**唯一口径**：有可用真值就用真值（+ 其后的增量估算），没有才全量估算。
  *
- * ⚠️ 为什么不能直接把它当 `ModelMessage` 丢给 `messageToText`：两者的 content
- * 形状根本不同 —— Mastra 的是 `{ format: 2, parts: [...] }`，而 `messageToText`
- * 认的是 AI SDK 的 `string | ContentPart[]`。传错类型**不会报错**：`messageToText`
- * 走到 `Array.isArray(content)` 为 false、`typeof content === 'string'` 也为 false 的
- * 分支，返回空串 —— 整份上下文被估成 0，圆环永远显示「没用量」（与 AGENTS.md 记的
- * `reasoning-delta`、file part 形状那类「写错静默丢弃」同一个坑）。
+ * 全仓只准用这一个式子回答「现在多满」：圆环、压缩触发、压缩卡片的 before/after
+ * 都走它，三处数字因此永远对得上。
  *
- * part 形状同样是 AI SDK v4 UIMessage 那一套（与 `onIterationComplete` 里注入插话时
- * 手写的 file part 一致）：文本在 `text`、工具调用是 `tool-invocation`。只抠对
- * **token 估算有意义**的那几类，认不出来的跳过（宁可低估，不要抛错拖垮整轮）。
+ * 为什么真值优先：
+ * - 上游报的 usage 是**唯一的事实**，估算只是它的近似；
+ * - 估算的分词刻度（CJK 加权）各家差 20%~50%，一旦用它当判据，就会「估算说超了其实没超」。
+ *
+ * 为什么还要估算：真值只覆盖**已经发出去的那一次**，其后的新增（本轮新消息、刚产出的
+ * 工具结果）只能估 —— 这是 `realWithTail` 里 tail 的部分。
+ *
+ * @param realWithTail 真值 + 其后新增内容的估算；没有真值时传 0
+ * @param fallbackEstimate 一条真值都没有时的全量估算（首轮 / 刚压缩过）
  */
-function mastraMessageChars(m: { content?: unknown }): number {
-  const content = m?.content
-  if (!content || typeof content !== 'object') return 0
-  const parts = (content as { parts?: unknown }).parts
-  if (!Array.isArray(parts)) return 0
-  let chars = 0
-  for (const part of parts as Array<Record<string, unknown>>) {
-    const type = part?.type
-    if (type === 'text' || type === 'reasoning') {
-      // pi 把思考也算进上下文
-      if (typeof part.text === 'string') chars += part.text.length
-    } else if (type === 'file' || type === 'image') {
-      // 图片 / 附件：pi 的 ESTIMATED_IMAGE_CHARS
-      chars += ESTIMATED_IMAGE_CHARS
-    } else if (type === 'tool-invocation') {
-      const inv = part.toolInvocation as Record<string, unknown> | undefined
-      const name = String(inv?.toolName ?? part.toolName ?? '?')
-      if (inv?.args !== undefined) chars += name.length + JSON.stringify(inv.args).length
-      if (inv?.result !== undefined) {
-        const r = inv.result
-        chars += (typeof r === 'string' ? r : JSON.stringify(r ?? null)).length
-      }
-    }
-    // step-start / source …：不进估算
+export function contextUsed(realWithTail: number, fallbackEstimate: number): number {
+  return realWithTail > 0 ? realWithTail : fallbackEstimate
+}
+
+/**
+ * 每个会话最近一次测到的「消息之外」开销（系统提示词 + 工具 schema）。
+ *
+ * 手动压缩那条路（`POST /api/chat/compress`）不建 agent，拿不到 `estimateBaseTokens`；
+ * 不补这块，它报的 before/after 就只有消息部分，和圆环（含 base）差一个 base ——
+ * 用户会看到「压完 32k，圆环还是 100k」。`runAgent` 每轮把测到的值记在这里兜底。
+ *
+ * 只活在进程内存里：重启后第一轮之前是空，退化成「只算消息」（老行为），不影响正确性。
+ */
+const baseTokensByConversation = new Map<string, number>()
+
+export function rememberBaseTokens(conversationId: string, tokens: number): void {
+  if (!conversationId || !Number.isFinite(tokens) || tokens <= 0) return
+  if (baseTokensByConversation.size > 200) {
+    const oldest = baseTokensByConversation.keys().next().value
+    if (oldest !== undefined) baseTokensByConversation.delete(oldest)
   }
-  return chars
+  baseTokensByConversation.set(conversationId, Math.round(tokens))
+}
+
+export function rememberedBaseTokens(conversationId: string): number | undefined {
+  return baseTokensByConversation.get(conversationId)
+}
+
+/** 交接摘要的固定开头：轮中压缩靠它认出「这条是上一次的摘要」 */
+const SUMMARY_MARKER = '（以下是对先前对话的交接摘要，替代原始历史）'
+
+function messageText(m: ModelMessage | undefined): string {
+  if (!m) return ''
+  const c = m.content
+  if (typeof c === 'string') return c
+  if (!Array.isArray(c)) return ''
+  return c
+    .map((part) => (part as { type?: string; text?: string }).type === 'text' ? String((part as { text?: string }).text ?? '') : '')
+    .filter(Boolean)
+    .join('\n')
+}
+
+function isSummaryMessage(m: ModelMessage | undefined): boolean {
+  return !!m && m.role === 'user' && messageText(m).startsWith(SUMMARY_MARKER)
+}
+
+/** 最早的「有 tool-call 但还没有 tool-result」的那条消息下标；没有 = -1 */
+function pendingToolCallIndex(messages: ModelMessage[]): number {
+  const resolved = new Set<string>()
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const content = messages[i]?.content
+    if (!Array.isArray(content)) continue
+    for (const raw of content) {
+      const part = raw as { type?: string; toolCallId?: string }
+      if (part.type === 'tool-result' && part.toolCallId) resolved.add(part.toolCallId)
+      else if (part.type === 'tool-call' && part.toolCallId && !resolved.has(part.toolCallId)) return i
+    }
+  }
+  return -1
+}
+
+/** 从 ModelMessage 里抽文件操作清单（`<read-files>` / `<modified-files>`） */
+function extractModelFileOps(messages: ModelMessage[], ops: FileOperations): void {
+  for (const m of messages) {
+    const content = m.content
+    if (!Array.isArray(content)) continue
+    for (const raw of content) {
+      const part = raw as { type?: string; toolName?: string; input?: Record<string, unknown> }
+      if (part.type !== 'tool-call') continue
+      const path = typeof part.input?.path === 'string' ? part.input.path : undefined
+      if (!path) continue
+      if (part.toolName === 'read_file') ops.read.add(path)
+      else if (part.toolName === 'write_file' || part.toolName === 'edit_file') ops.modified.add(path)
+    }
+  }
+}
+
+export interface CompactMessagesResult {
+  /** 压缩后的消息（未压缩时与输入同一引用） */
+  messages: ModelMessage[]
+  compressed: {
+    beforeTokens: number
+    afterTokens: number
+    summarizedTurns: number
+    keptTurns: number
+  } | null
+  summary: string | null
 }
 
 /**
- * 一组 **Mastra format-2** 消息的 token 估算。
+ * 轮中压缩：工具步边界上把**在途消息**（`ModelMessage[]`）压一次，下一步请求立刻变小。
  *
- * 给 `runAgent` 的 `onIterationComplete` 用：那里的 `ctx.messages` 是 Mastra 的
- * `MastraDBMessage[]`（format 2），不能走 `estimateMessagesTokens`（见上）。
- * 这是 pi 的**兜底估算**（`estimateContextTokens` 找不到带 usage 的助手消息时的分支）。
- * finish 时圆环会换成上游真实 usage（`calculateContextTokens`），两者会有几个百分点的
- * 跳变 —— pi 也是这个行为：流式中估、结束后按真实用量。
+ * 与 `compactHistory` 的差别只在输入：那边是落盘的 `AgentChatMessage`（有 id、能落检查点），
+ * 这边是已经转换好的模型消息（没有 id，**落不了检查点**）。所以它只做「本轮自救」，
+ * 下一轮由 pre-flight 按真实大小重压一次。
  */
-export function estimateMastraMessagesTokens(messages: Array<{ content?: unknown }>): number {
-  let sum = 0
-  for (const m of messages) sum += Math.ceil(mastraMessageChars(m) / 4)
-  return sum
+export async function compactModelMessages(
+  messages: ModelMessage[],
+  opts: {
+    contextWindow: number
+    baseTokens?: number
+    /** 上游最后一次请求的真实上下文（有就优先于逐条估算） */
+    triggerTokens?: number
+    settings?: Partial<CompactionSettings>
+    model: AiModelConfig
+    signal?: AbortSignal
+    force?: boolean
+    onSummaryStart?: (info: CompactionSummaryStart) => void
+    onSummaryDelta?: (info: CompactionSummaryDelta) => void
+  }
+): Promise<CompactMessagesResult> {
+  const unchanged: CompactMessagesResult = { messages, compressed: null, summary: null }
+  if (messages.length === 0) return unchanged
+
+  const baseTokens = Math.max(0, opts.baseTokens ?? 0)
+  const settings = resolveCompactionSettings(opts.contextWindow, opts.settings, baseTokens)
+  const estimated = baseTokens + estimateMessagesTokens(messages)
+  // 调用方给的 triggerTokens 是「真值 + 尾部估算」；没给才退回全量估算
+  const beforeTokens = contextUsed(opts.triggerTokens ?? 0, estimated)
+  if (!opts.force && !shouldCompact(beforeTokens, opts.contextWindow, settings)) return unchanged
+  /**
+   * 与 `compactHistory` 同一条闸：`系统提示词 + 工具定义` 已经吃掉预算时，压也压不到
+   * 触发线以下。这里更贵 —— 每个工具步边界都会白调一次摘要模型。
+   */
+  if (compactionBudget(opts.contextWindow, settings, baseTokens) <= MIN_KEEP_TOKENS) {
+    return unchanged
+  }
+
+  const tokens = messages.map((m) => estimateMessagesTokens([m]))
+  let cutIndex = 0
+  let accumulated = 0
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    accumulated += tokens[i] ?? 0
+    if (accumulated >= settings.keepRecentTokens) {
+      cutIndex = i
+      break
+    }
+  }
+  // 未完成的工具调用必须留在保留区，否则摘要会把 call 和后面的 result 拆开
+  const pending = pendingToolCallIndex(messages)
+  if (pending >= 0 && pending < cutIndex) cutIndex = pending
+  if (cutIndex <= 0) return unchanged
+
+  const summarized = messages.slice(0, cutIndex)
+  const kept = messages.slice(cutIndex)
+  /**
+   * **上一次轮中压缩的产物**：一条轮中压缩可能压过不止一次，那时 `messages[0]` 就是
+   * 上一份摘要。它不能当普通对话再摘要一遍（等于「摘要的摘要」，每压一次丢一层信息），
+   * 要当 `previous-summary` 传，只摘要它**之后**的新消息。
+   */
+  const previousSummary = isSummaryMessage(summarized[0]) ? messageText(summarized[0]) : undefined
+  const fresh = previousSummary ? summarized.slice(1) : summarized
+  if (fresh.length === 0) return unchanged
+  const conversationText = serializeConversation(fresh)
+  if (!conversationText.trim()) return unchanged
+
+  const fileOps = createFileOps()
+  extractModelFileOps(summarized, fileOps)
+
+  opts.onSummaryStart?.({
+    beforeTokens,
+    // 报「这次新摘要了几条」（合并上一份摘要时不算它自己）
+    summarizedTurns: fresh.length,
+    keptTurns: kept.length
+  })
+  const onDelta = opts.onSummaryDelta
+    ? (delta: string) => opts.onSummaryDelta?.({ delta, phase: 'checkpoint' })
+    : undefined
+  const summary = await generateSummaryFromText(
+    conversationText,
+    opts.model,
+    previousSummary,
+    opts.signal,
+    undefined,
+    onDelta,
+    summaryBudgetTokens(settings.keepRecentTokens)
+  )
+  const text = `${SUMMARY_MARKER}\n\n${summary}${formatFileOperations(fileOps)}`
+
+  const firstKept = kept[0]
+  let result: ModelMessage[]
+  if (firstKept?.role === 'user') {
+    // 避免连续两条 user：摘要并进保留区第一条 user 消息
+    const content = firstKept.content
+    const merged: ModelMessage = {
+      ...firstKept,
+      content: [
+        { type: 'text', text },
+        ...(typeof content === 'string'
+          ? [{ type: 'text' as const, text: content }]
+          : (content as Array<{ type: 'text' } | { type: 'image' } | { type: 'file' }>))
+      ]
+    } as ModelMessage
+    result = [merged, ...kept.slice(1)]
+  } else {
+    result = [{ role: 'user', content: [{ type: 'text', text }] }, ...kept]
+  }
+
+  return {
+    messages: result,
+    compressed: {
+      beforeTokens,
+      afterTokens: baseTokens + estimateMessagesTokens(result),
+      summarizedTurns: fresh.length,
+      keptTurns: kept.length
+    },
+    summary: text
+  }
 }
 
 /**
@@ -669,44 +860,129 @@ function assertSummary(text: string, finishReason: string | undefined, label: st
   return trimmed
 }
 
+/** 交接文档的两段：先摘要历史，切回合时再补一段 turn-prefix */
+export type CompactionSummaryPhase = 'checkpoint' | 'turn-prefix'
+
+export interface CompactionSummaryDelta {
+  delta: string
+  phase: CompactionSummaryPhase
+}
+
+export interface CompactionSummaryStart {
+  beforeTokens: number
+  summarizedTurns: number
+  keptTurns: number
+}
+
+/**
+ * 跑一次摘要，并把增量逐块交出去。
+ *
+ * ⚠️ **流式只影响展示，不影响落盘语义**：正文要等 `textStream` 走完、`finishReason`
+ * 拿到且 `assertSummary` 通过后才返回。调用方据此才写 `autoSummary` / `contextSummary`
+ * —— 中途 abort / 抛错时不会留下半份摘要。`onDelta` 只负责把已生成的片段推给界面。
+ */
+async function streamSummaryText(args: {
+  model: AiModelConfig
+  system: string
+  prompt: string
+  label: string
+  signal: AbortSignal | undefined
+  onDelta?: (delta: string) => void
+}): Promise<string> {
+  const result = streamText({
+    model: resolveModel(args.model),
+    system: args.system,
+    messages: [{ role: 'user', content: args.prompt }],
+    ...(args.signal ? { abortSignal: args.signal } : {})
+  })
+
+  let text = ''
+  for await (const delta of result.textStream) {
+    if (!delta) continue
+    text += delta
+    args.onDelta?.(delta)
+  }
+  const finishReason = await result.finishReason
+  return assertSummary(text, finishReason, args.label)
+}
+
 /** 一次摘要调用（初始 prompt / 增量 prompt 走同一条路，pi 的 `generateSummaryWithUsage`） */
+async function generateSummaryFromText(
+  conversationText: string,
+  model: AiModelConfig,
+  previousSummary: string | undefined,
+  signal: AbortSignal | undefined,
+  customInstructions?: string,
+  onDelta?: (delta: string) => void,
+  /**
+   * 摘要正文的 token 预算（软约束，写进 prompt）。
+   *
+   * 为什么需要：摘要**每轮都原样发出去、且不参与任何压缩**。`UPDATE_SUMMARIZATION_PROMPT`
+   * 又是「PRESERVE all existing information」—— 几次增量合并之后它会单调膨胀，最后
+   * 吃掉小半个窗口，那时历史压到保留区也没用（`base + 摘要 + 保留区` 本身就超标）。
+   * 只给指令、不设 `maxOutputTokens`：硬截断会撞 `finishReason === 'length'`，
+   * 而 `assertSummary` 会因此拒收整份摘要（宁可摘要长一点，也不能落不下检查点）。
+   */
+  budgetTokens?: number
+): Promise<string> {
+  let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT
+  if (customInstructions) basePrompt = `${basePrompt}\n\nAdditional focus: ${customInstructions}`
+  if (budgetTokens) {
+    basePrompt = `${basePrompt}
+
+Length budget: the whole summary must stay within about ${budgetTokens} tokens. It is re-sent with every request, so its length is a direct cost. If it would exceed that, drop the least useful details (finished sub-tasks, superseded decisions, verbose examples) instead of growing — but never drop file paths, function names, error messages, open blockers, or the user's stated constraints.`
+  }
+
+  let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`
+  if (previousSummary) promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`
+  promptText += basePrompt
+
+  return streamSummaryText({
+    model,
+    system: SUMMARIZATION_SYSTEM_PROMPT,
+    prompt: promptText,
+    label: 'Summarization',
+    signal,
+    ...(onDelta ? { onDelta } : {})
+  })
+}
+
 async function generateSummary(
   messages: ModelMessage[],
   model: AiModelConfig,
   previousSummary: string | undefined,
   signal: AbortSignal | undefined,
-  customInstructions?: string
+  customInstructions?: string,
+  onDelta?: (delta: string) => void,
+  budgetTokens?: number
 ): Promise<string> {
-  let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT
-  if (customInstructions) basePrompt = `${basePrompt}\n\nAdditional focus: ${customInstructions}`
-
-  let promptText = `<conversation>\n${serializeConversation(messages)}\n</conversation>\n\n`
-  if (previousSummary) promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`
-  promptText += basePrompt
-
-  const { text, finishReason } = await generateText({
-    model: resolveModel(model),
-    system: SUMMARIZATION_SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: promptText }],
-    ...(signal ? { abortSignal: signal } : {})
-  })
-  return assertSummary(text, finishReason, 'Summarization')
+  return generateSummaryFromText(
+    serializeConversation(messages),
+    model,
+    previousSummary,
+    signal,
+    customInstructions,
+    onDelta,
+    budgetTokens
+  )
 }
 
 /** 切点落在回合中间时，为被切掉的那半截单独生成一份小摘要（pi 的 turn-prefix） */
 async function generateTurnPrefixSummary(
   messages: ModelMessage[],
   model: AiModelConfig,
-  signal: AbortSignal | undefined
+  signal: AbortSignal | undefined,
+  onDelta?: (delta: string) => void
 ): Promise<string> {
   const promptText = `# Conversation\n${serializeConversation(messages)}\n\n# Instructions\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`
-  const { text, finishReason } = await generateText({
-    model: resolveModel(model),
+  return streamSummaryText({
+    model,
     system: SUMMARIZATION_SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: promptText }],
-    ...(signal ? { abortSignal: signal } : {})
+    prompt: promptText,
+    label: 'Turn prefix summarization',
+    signal,
+    ...(onDelta ? { onDelta } : {})
   })
-  return assertSummary(text, finishReason, 'Turn prefix summarization')
 }
 
 export interface CompactHistoryResult {
@@ -726,6 +1002,15 @@ export interface CompactHistoryResult {
   } | null
   /** 复用了上次的检查点（本轮没有调摘要模型） */
   reused: boolean
+  /**
+   * 没压成的原因（`compressed === null` 时给调用方一句准确的话，别再统一说
+   * 「历史还没超出保留区」—— 那句话在「系统提示词已经把预算吃光」时是误导）。
+   *
+   * - `below-keep`：检查点之后的历史还不够一个保留区，没什么可摘要的；
+   * - `no-budget`：`系统提示词 + 工具定义（+ 已有摘要）` 已经吃掉预算，压缩压不到
+   *   触发线以下 —— 该减的是提示词 / 工具，不是历史。
+   */
+  skipped?: 'below-keep' | 'no-budget'
   /** 这次生成的摘要正文（含文件清单）；复用 / 未压缩时为 null */
   summary: string | null
   /**
@@ -756,6 +1041,13 @@ export async function compactHistory(
     seed?: { keepFromMessageId: string; text: string; at?: number }
     /** 摘要**真的重算**时回调（供 server 落盘） */
     onAutoSummary?: (entry: { keepFromMessageId: string; text: string }) => void
+    /**
+     * 交接文档开始生成（切点已定、马上就要调摘要模型）。
+     * 只用于展示，不代表摘要一定成功 —— 失败 / 中止时不会有对应的 `context-compressed`。
+     */
+    onSummaryStart?: (info: CompactionSummaryStart) => void
+    /** 交接文档的流式增量（仅展示；完整正文校验通过后才会落检查点） */
+    onSummaryDelta?: (info: CompactionSummaryDelta) => void
     contextWindow: number
     baseTokens?: number
     /** 覆盖 pi 的默认参数（reserveTokens / keepRecentTokens） */
@@ -777,7 +1069,6 @@ export async function compactHistory(
   }
   if (history.length === 0) return unchanged
 
-  const settings = resolveCompactionSettings(opts.contextWindow, opts.settings)
   const baseTokens = Math.max(0, opts.baseTokens ?? 0)
 
   /** 逐条估算：历史是调用方传进来的全量，逐条转一次比整份转再猜要准 */
@@ -794,20 +1085,44 @@ export async function compactHistory(
   const assembled = hasCheckpoint ? withSummary(history, cachedIndex, cached!.text) : history
 
   /**
-   * pi 的 `_checkCompaction`：
-   * 1. 触发量 = **最后一条助手消息的 usage**（真实值），拿不到才退回逐条估算；
-   * 2. 「压缩点之前产生的助手消息」不参与判定 —— 否则压完的下一轮会拿着压缩前的
-   *    大 usage 立刻再压一次（这正是 pi 用 compaction entry 的时间戳挡掉的东西）。
+   * 压缩动不了的那两块：系统提示词 / 工具 schema，以及**已有摘要本身**。
+   *
+   * 摘要也必须算进去 —— 它每轮都原样发出去、且不参与任何压缩。增量合并几次之后
+   * 它本身就可能吃掉小半个窗口，那时保留区还按 20000 算，压完必然还在触发线以上。
+   */
+  const fixedTokens = baseTokens + (hasCheckpoint ? estimateTokens(cached!.text) : 0)
+  const settings = resolveCompactionSettings(opts.contextWindow, opts.settings, fixedTokens)
+
+  /**
+   * 触发量 = `max(即将发出去的那份估算, 上一轮最后一次请求的真实 usage)`。
+   *
+   * - **必须估「即将发出去的那份」**：`assembled` 才是这一轮真正发给模型的数组；
+   *   上一轮的 usage 只代表上一轮，中间一旦发生过切片（手动检查点 / 轮中压缩），
+   *   两者就不是一回事。
+   * - **真实 usage 只当兜底下限**，而且必须在它**不早于检查点**时才采信：压完之后
+   *   那条 usage 代表的是压缩前的大小，再拿它取 max 就会「压完立刻又判超」。
    */
   const lastAssistant = [...history].reverse().find((m) => m.role === 'assistant')
   const checkpointAt = cached?.at ?? 0
-  const staleUsage = hasCheckpoint && (!lastAssistant || lastAssistant.createdAt <= checkpointAt)
-  const directTokens = staleUsage ? 0 : assistantContextTokens(lastAssistant)
-  const beforeTokens =
-    directTokens > 0
-      ? directTokens
-      : (await estimateContextTokens(assembled, { baseTokens })).tokens
-  const overBudget = !staleUsage && shouldCompact(beforeTokens, opts.contextWindow, settings)
+  const usageIsStale = hasCheckpoint && (!lastAssistant || lastAssistant.createdAt <= checkpointAt)
+  const realUsage = usageIsStale ? 0 : assistantContextTokens(lastAssistant)
+  /**
+   * 「即将发出去的那份」的**纯估算**：检查点之后的消息 + 摘要正文 + base。
+   *
+   * ⚠️ 不能用 `estimateContextTokens(assembled)` —— 它内部会去捞「最后一条带 usage 的
+   * 助手消息」，而那条 usage 可能早于检查点（就是 `usageIsStale` 要挡的东西），
+   * 一捞回来就等于把陈旧值又算进去了。这里只求和 `tokens`（已经按条算好），不做二次推断。
+   */
+  let assembledTokens = baseTokens + (hasCheckpoint ? estimateTokens(cached!.text) : 0)
+  for (let i = checkpointIndex; i < history.length; i += 1) assembledTokens += tokens[i] ?? 0
+  /** 真值之后新增的部分（通常就是本轮那条 user 消息） */
+  let trailingTokens = 0
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    if (history[i] === lastAssistant) break
+    trailingTokens += tokens[i] ?? 0
+  }
+  const beforeTokens = contextUsed(realUsage + trailingTokens, assembledTokens)
+  const overBudget = shouldCompact(beforeTokens, opts.contextWindow, settings)
 
   if (!opts.force && !overBudget) {
     if (!hasCheckpoint) {
@@ -826,6 +1141,25 @@ export async function compactHistory(
     return { history: assembled, compressed: null, reused: true, summary: null, summarizedUpTo: null }
   }
 
+  /**
+   * 预算被「压缩动不了的东西」吃光了：`系统提示词 + 工具 + 已有摘要` 已经把窗口顶到
+   * 触发线附近，历史再怎么切也回不到阈值以下。这时**不再调摘要模型** —— 每轮白付一次
+   * 调用、还会把请求前缀改掉（上游缓存全废），换来的只是「摘要了 1 轮、占用没降」。
+   * 把原因交回调用方，让界面说人话。
+   */
+  if (compactionBudget(opts.contextWindow, settings, fixedTokens) <= MIN_KEEP_TOKENS) {
+    return hasCheckpoint
+      ? {
+          history: assembled,
+          compressed: null,
+          reused: true,
+          summary: null,
+          summarizedUpTo: null,
+          skipped: 'no-budget'
+        }
+      : { ...unchanged, skipped: 'no-budget' }
+  }
+
   // ② 切点：只在上次检查点之后找（之前的内容已经在摘要里了）
   const cut = findCutPoint(
     history,
@@ -838,8 +1172,15 @@ export async function compactHistory(
   // 没有可摘要的（切点落在起点上）：不压，有检查点就继续用
   if (historyEnd <= checkpointIndex) {
     return hasCheckpoint
-      ? { history: assembled, compressed: null, reused: true, summary: null, summarizedUpTo: null }
-      : unchanged
+      ? {
+          history: assembled,
+          compressed: null,
+          reused: true,
+          summary: null,
+          summarizedUpTo: null,
+          skipped: 'below-keep'
+        }
+      : { ...unchanged, skipped: 'below-keep' }
   }
 
   const summarizeSlice = history.slice(checkpointIndex, historyEnd)
@@ -853,7 +1194,21 @@ export async function compactHistory(
   // 上一次检查点的文件清单继续向前继承（pi 的 `extractFileOperations`）
   if (cachedIndex > 0 && cached) extractFileOps(history.slice(0, cachedIndex), fileOps)
 
+  const summarizedTurns = historyEnd - checkpointIndex
+  const keptTurns = history.length - cut.firstKeptIndex
+  opts.onSummaryStart?.({ beforeTokens, summarizedTurns, keptTurns })
+
+  const checkpointDelta = opts.onSummaryDelta
+    ? (delta: string) => opts.onSummaryDelta?.({ delta, phase: 'checkpoint' })
+    : undefined
+  const turnPrefixDelta = opts.onSummaryDelta
+    ? (delta: string) => opts.onSummaryDelta?.({ delta, phase: 'turn-prefix' })
+    : undefined
+
   // ③ 摘要：有旧摘要就增量合并，否则生成初始检查点
+  //    摘要长度给一个软预算（见 `generateSummaryFromText` 的 `budgetTokens`）：
+  //    它每轮都发出去且不参与压缩，膨胀了会把「保留区」挤到没有。
+  const budget = summaryBudgetTokens(settings.keepRecentTokens)
   let summary: string
   if (cut.isSplitTurn && turnPrefixSlice.length > 0) {
     const historyText =
@@ -863,13 +1218,16 @@ export async function compactHistory(
             opts.model,
             cached?.text,
             opts.signal,
-            opts.customInstructions
+            opts.customInstructions,
+            checkpointDelta,
+            budget
           )
         : (cached?.text ?? 'No prior history.')
     const prefixText = await generateTurnPrefixSummary(
       await toModelMessages(turnPrefixSlice),
       opts.model,
-      opts.signal
+      opts.signal,
+      turnPrefixDelta
     )
     summary = `${historyText}\n\n---\n\n**Turn Context (split turn):**\n\n${prefixText}`
   } else {
@@ -878,7 +1236,9 @@ export async function compactHistory(
       opts.model,
       cached?.text,
       opts.signal,
-      opts.customInstructions
+      opts.customInstructions,
+      checkpointDelta,
+      budget
     )
   }
 
@@ -906,8 +1266,8 @@ export async function compactHistory(
     compressed: {
       beforeTokens,
       afterTokens,
-      summarizedTurns: historyEnd - checkpointIndex,
-      keptTurns: history.length - cut.firstKeptIndex
+      summarizedTurns,
+      keptTurns
     },
     reused: false,
     summary: text,

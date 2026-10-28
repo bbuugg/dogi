@@ -4,6 +4,7 @@
  * 从 `TerminalPanel` 拆出来的原因很单纯：这些是**纯函数 + 一个无状态按钮**，
  * 跟终端的会话生命周期、PTY、xterm 实例毫无关系。
  */
+import { useCallback, useEffect, useRef } from 'react'
 import { cn } from '@fizz/agent-kit/shared/lib/utils'
 
 /** 手机端虚拟键盘缺修饰键 / 功能键：底部快捷键条用的「粘连」修饰键状态。 */
@@ -59,29 +60,93 @@ export function transformChar(data: string, m: ModsState): string {
 
 export const hasAnyMod = (m: ModsState): boolean => m.ctrl || m.alt || m.shift || m.meta
 
+/** 长按开始连发的等待时间 */
+const REPEAT_DELAY = 400
+/** 连发间隔 */
+const REPEAT_INTERVAL = 70
+
 /** 手机端底部快捷键条上的单个键（粘连修饰键高亮） */
 export function MobileKey({
   label,
   active,
   onClick,
-  ariaLabel
+  ariaLabel,
+  repeat = false
 }: {
   label: string
   active?: boolean
   onClick: () => void
   ariaLabel?: string
+  /** 长按连续触发（方向键 / 翻页键） */
+  repeat?: boolean
 }) {
+  const holdTimer = useRef<number | null>(null)
+  const repeatTimer = useRef<number | null>(null)
+  /** 这一轮按下已经进入连发：用来吞掉松手时浏览器补发的那次 click */
+  const repeating = useRef(false)
+  const onClickRef = useRef(onClick)
+  onClickRef.current = onClick
+
+  const clearTimers = useCallback(() => {
+    if (holdTimer.current !== null) {
+      window.clearTimeout(holdTimer.current)
+      holdTimer.current = null
+    }
+    if (repeatTimer.current !== null) {
+      window.clearInterval(repeatTimer.current)
+      repeatTimer.current = null
+    }
+  }, [])
+
+  useEffect(() => clearTimers, [clearTimers])
+
+  const start = useCallback(() => {
+    clearTimers()
+    repeating.current = false
+    holdTimer.current = window.setTimeout(() => {
+      holdTimer.current = null
+      repeating.current = true
+      onClickRef.current()
+      repeatTimer.current = window.setInterval(() => onClickRef.current(), REPEAT_INTERVAL)
+    }, REPEAT_DELAY)
+  }, [clearTimers])
+
+  const stop = useCallback(() => {
+    clearTimers()
+  }, [clearTimers])
+
+  const handleClick = useCallback(() => {
+    if (repeating.current) {
+      repeating.current = false
+      return
+    }
+    onClickRef.current()
+  }, [])
+
   return (
     <button
       type="button"
       aria-label={ariaLabel ?? label}
       aria-pressed={active}
-      onClick={onClick}
+      onClick={repeat ? handleClick : onClick}
+      onPointerDown={
+        repeat
+          ? (e) => {
+              if (e.pointerType === 'mouse' && e.button !== 0) return
+              start()
+            }
+          : undefined
+      }
+      onPointerUp={repeat ? stop : undefined}
+      onPointerLeave={repeat ? stop : undefined}
+      onPointerCancel={repeat ? stop : undefined}
+      onContextMenu={repeat ? (e) => e.preventDefault() : undefined}
       className={cn(
-        'flex h-8 w-full min-w-0 select-none items-center justify-center rounded border px-0.5 text-xs font-medium transition-colors',
+        'flex h-8 w-full min-w-0 select-none items-center justify-center px-0.5 text-xs font-medium transition-colors',
+        repeat && 'touch-manipulation',
         active
-          ? 'border-primary bg-primary text-primary-foreground'
-          : 'border-border bg-background text-foreground hover:bg-accent active:bg-accent/70'
+          ? 'bg-primary text-primary-foreground'
+          : 'bg-background text-foreground hover:bg-accent active:bg-accent/70'
       )}
     >
       {label}

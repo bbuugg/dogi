@@ -39,9 +39,7 @@ export function PendingSteers({
   const running = app.streaming;
   return (
     <div className="flex flex-col border-b border-border px-3 py-2">
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span className="mb-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+      <span className="mb-1 flex items-center gap-1.5 text-xs text-muted-foreground">
             <Zap className="size-3.5" />
             <span className="min-w-0 flex-1">
               {running
@@ -50,15 +48,6 @@ export function PendingSteers({
             </span>
             <span className="shrink-0">{t("拖动左侧把手可调整顺序")}</span>
           </span>
-        </TooltipTrigger>
-        <TooltipContent
-          side="bottom"
-          align="start"
-          className="max-w-80 text-left text-pretty"
-        >
-          {t("插入的消息不算新的一轮：agent 在下一个工具步骤边界直接看到它、当场调整方向，列表顺序就是生效顺序（排在前面的先被看到）。点 ✎ 写回输入框改内容、点 ✕ 移除。本轮已停止 / 失败时这些插话不会再生效：点 ➤ 会把这一条当新一轮的普通消息发出去，其余没处理的会在你下次发消息时自动转入待发送队列（内容不会丢）。")}
-        </TooltipContent>
-      </Tooltip>
       {/* 固定高度 + 内部滚动：与队列列表同一套尺寸，条数再多也不顶高输入框 */}
       <div
         className={cn(

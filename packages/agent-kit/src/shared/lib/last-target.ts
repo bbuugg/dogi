@@ -25,8 +25,9 @@ export function loadLastTarget(): LastTarget | null {
     if (!raw) return null
     const parsed = JSON.parse(raw) as LastTarget | null
     if (!parsed || typeof parsed.configId !== 'string' || !parsed.configId) return null
-    if (parsed.backend !== 'mastra' && parsed.backend !== 'acp') return null
-    return parsed
+    // 旧版本的取值可能还留在 localStorage 里：只认 acp，其余按内置后端读
+    if (parsed.backend !== 'acp' && parsed.backend !== 'builtin') return null
+    return parsed.backend === 'acp' ? parsed : { ...parsed, backend: 'builtin' }
   } catch {
     return null
   }

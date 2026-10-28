@@ -700,11 +700,16 @@ export function ModelsTab({ app }: { app: AgentApp }) {
       <Dialog open={modelEditing !== null} onOpenChange={(open) => !open && closeModelDialog()}>
         {/*
           弹窗本身**不滚动**：标题与底部按钮固定，只有中间内容区内部滚动。
-          高度用 max-h 封顶（85dvh），scroll 容器靠 flex-1 + min-h-0 收缩 ——
+          高度用 max-h 封顶（桌面 85dvh），scroll 容器靠 flex-1 + min-h-0 收缩 ——
           直接给 DialogContent 加 overflow-y-auto 会让整张弹窗（含按钮）一起滚，
           在小屏上按钮会被滚到看不见的地方。
+
+          手机（<768px）直接铺到「视口 − 1rem」：85dvh 扣掉上下安全区 / 浏览器工具栏后，
+          字段区只剩一小截，输入窗口 / 输出上限时要反复滚动。桌面仍按内容高度收缩。
+          「导入会话 / 管理工作区」那两个弹窗没封顶、靠内容自然撑高；这个表单字段多，
+          不能完全照抄（会顶出屏幕、按钮够不到），所以移动端钉满视口 + 中间区内部滚动。
         */}
-        <DialogContent className="flex max-h-[85dvh] flex-col overflow-hidden">
+        <DialogContent className="flex max-h-[85dvh] flex-col overflow-hidden max-md:h-[calc(100dvh-1rem)] max-md:max-h-[calc(100dvh-1rem)]">
           <DialogHeader className="shrink-0">
             <DialogTitle>{modelEditing?.modelId ? tr('编辑模型') : tr('添加模型')}</DialogTitle>
           </DialogHeader>

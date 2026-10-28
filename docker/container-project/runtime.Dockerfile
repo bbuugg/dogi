@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # =============================================================================
-# 容器型项目的**基础镜像**：跑我们自己的 Mastra agent 运行时（不是 ACP CLI）。
+# 容器型项目的**基础镜像**：跑我们自己的内置 agent 运行时（不是 ACP CLI）。
 #
 #   docker build -t fizz/agent-runtime:latest -f docker/container-project/runtime.Dockerfile .
 #

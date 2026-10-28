@@ -39,22 +39,18 @@ export function isRetryableNetworkError(err: unknown): boolean {
 /**
  * 判断错误是否是「上游这一轮返回了空响应」。
  *
- * Mastra 在流式收尾时，若这一次 step 的 finishReason 落到 `"other"`（AI SDK 对
- * 非标准 / 缺失的 finish_reason 一律归到这里）**且整步没有任何内容**（正文 / 思考 /
- * 工具调用都没有），会自己合成一条 `AGENT_STREAM_ERROR` 抛出来（见 @mastra/core
- * 的 agent 流消费）。它不是网络层错误，但性质一样：同一条请求重发通常就有内容了，
- * 所以并入「重发这一次请求」的重试路径。
+ * 判据：`finishReason` 落到 `"other"`（AI SDK 对非标准 / 缺失的 finish_reason 一律归到
+ * 这里）**且整轮没有任何内容**（正文 / 思考 / 工具调用都没有）。`runAgent` 在引擎收尾时
+ * 按这个条件合成一条错误抛出来（见那里的注释）。它不是网络层错误，但性质一样：同一条
+ * 请求重发通常就有内容了，所以并入「重发这一次请求」的重试路径。
  *
- * 识别不出来（Mastra 升级换了 id / 文案）就返回 false，照旧当普通错误下发 —— 宁可
- * 少重试，也不要把别的错误误判成空响应。
+ * 用文案匹配而不是错误类型：错误是 `agent.ts` 里现造的，没有专用 class。
  */
 export function isEmptyStreamOutputError(err: unknown): boolean {
   let cur: unknown = err
   for (let i = 0; i < 6 && cur instanceof Error; i++) {
     const e = cur as Error & { id?: string }
-    if (e.id === 'AGENT_STREAM_ERROR' && e.message.includes('finishReason "other"')) {
-      return true
-    }
+    if (e.message.includes('finishReason "other"')) return true
     cur = (e as { cause?: unknown }).cause
   }
   return false

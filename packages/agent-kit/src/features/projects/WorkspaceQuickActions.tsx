@@ -15,7 +15,7 @@
  * 菜单结构固定成两段：上面是能直接点的动作（0 条时整段不渲染），下面一条分隔线 +
  * 「管理快捷功能…」。管理项**永远在最底部**，不会随条目多少上下漂。
  *
- * ⚠️ 触发器必须用 `<Button variant="ghost">` + `DropdownMenuTrigger asChild`，**不要手写
+ * ⚠️ 触发器必须用 `<Button variant="outline">` + `DropdownMenuTrigger asChild`，**不要手写
  * Tailwind 类**：手写那版（`rounded text-foreground/80 hover:bg-foreground/10`）的圆角是
  * `rounded`=4px，而 `Button` 走的是 `rounded-md`=`calc(var(--radius) - 2px)`=12px，
  * 与同排的「打开 / 终端 / 文件」对不上（也少了 focus 环与 disabled 态）。

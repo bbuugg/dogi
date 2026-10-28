@@ -296,7 +296,16 @@ async function fetchByHttp(
  * `root` = 工作区根，只用于「正文过长时把全文落进 `.fizz/tool-output/`」——
  * 落在工作区内 read_file 才读得回来（数据目录在 resolveInside 边界外，见 output-log.ts）。
  */
-export function buildWebFetchTool(root: string): ToolSet {
+/**
+ * 单条抓取的停止钩子（与 `execute_command` 的 `onCommandStart/End` 同一形状）：
+ * 登记 `toolCallId → 中止这一条的函数`，宿主据此让「停止」只停这一次抓取，整轮继续。
+ */
+export interface WebFetchStopHooks {
+  onStart?: (toolCallId: string, stop: () => void) => void
+  onEnd?: (toolCallId: string) => void
+}
+
+export function buildWebFetchTool(root: string, stopHooks: WebFetchStopHooks = {}): ToolSet {
   return {
     web_fetch: tool({
       description:
@@ -320,6 +329,25 @@ export function buildWebFetchTool(root: string): ToolSet {
           )
       }),
       execute: async ({ url, engine, timeoutMs, maxChars }, options) => {
+        /**
+         * **每条抓取一个自己的 AbortController**，并与「整轮中止」的信号并联：
+         * - 用户点卡片上的「停止」→ 只 abort 这一条（宿主通过 `stopHooks` 拿到入口）；
+         * - 用户点输入框的「停止」/ 断连 → `options.abortSignal` 触发，一起 abort。
+         *
+         * 不这么做的话，卡片上那颗停止钮只能退化成「中止整轮」，而抓一个卡住的境外站点
+         * 动辄等 30s，用户没理由为此废掉整轮对话。
+         */
+        const stopCtrl = new AbortController()
+        const outerSignal = options.abortSignal
+        const onOuterAbort = (): void => stopCtrl.abort()
+        if (outerSignal) {
+          if (outerSignal.aborted) stopCtrl.abort()
+          else outerSignal.addEventListener('abort', onOuterAbort, { once: true })
+        }
+        const signal = stopCtrl.signal
+        const toolCallId = options.toolCallId ?? ''
+        if (toolCallId) stopHooks.onStart?.(toolCallId, () => stopCtrl.abort())
+
         const clampedMax = Math.max(
           1000,
           Math.min(100_000, Math.trunc(maxChars ?? DEFAULT_MAX_CHARS))
@@ -337,18 +365,18 @@ export function buildWebFetchTool(root: string): ToolSet {
           return `web_fetch 收到非法 URL：${url}。请传入形如 https://example.com 的完整地址。`
         }
 
-        if (options.abortSignal?.aborted) return 'web_fetch 已被中止（未发起请求）。'
+        if (signal.aborted) return 'web_fetch 已被中止（未发起请求）。'
 
         try {
           const page =
             engine === 'browser'
-              ? await fetchByBrowser(target, timeout, options.abortSignal)
-              : await fetchByHttp(target, timeout, options.abortSignal)
+              ? await fetchByBrowser(target, timeout, signal)
+              : await fetchByHttp(target, timeout, signal)
           return await formatPage(page, target.toString(), clampedMax, root)
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
-          // 用户主动点了「停止」：别当成抓取失败，模型据此直接收场、不要重试
-          if (options.abortSignal?.aborted) {
+          // 用户主动点了「停止」（单条或整轮）：别当成抓取失败，模型据此直接收场、不要重试
+          if (signal.aborted) {
             return 'web_fetch 已被用户中止（点了「停止」），本轮不再重试。'
           }
           // 超时单独说清：国内访问境外站点（google / github 等）时 connect 阶段就可能
@@ -362,6 +390,10 @@ export function buildWebFetchTool(root: string): ToolSet {
             )
           }
           return `web_fetch 抓取 ${url} 失败：${msg}`
+        } finally {
+          // 无论成功 / 失败 / 中止都要注销，否则停止表会一直挂着一个已经结束的条目
+          if (toolCallId) stopHooks.onEnd?.(toolCallId)
+          outerSignal?.removeEventListener('abort', onOuterAbort)
         }
       }
     })

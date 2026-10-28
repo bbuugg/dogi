@@ -9,7 +9,7 @@
  * 容器内 `agent-host.mjs` 直接 `import('./runtime.mjs')`。
  */
 
-/** 单轮对话编排（Mastra agent + 流事件适配）—— 容器内 agent 的心脏 */
+/** 单轮对话编排（引擎 agent + 流事件适配）—— 容器内 agent 的心脏 */
 export { runAgent } from '@fizz/agent'
 
 /** 内置文件 / 命令工具集（带路径安全与审批）；`root` 传容器内的 `/workspace` */

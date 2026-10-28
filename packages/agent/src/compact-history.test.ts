@@ -8,15 +8,25 @@
  * 且请求前缀每轮都变（缓存全废），但界面上完全看不出来。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { generateText } from 'ai'
+import { streamText } from 'ai'
 import { calculateContextTokens, clearAutoSummaryCache, compactHistory } from './context'
 import type { AgentChatMessage, AiModelConfig } from '@fizz/contracts/types'
 
 vi.mock('./resolve-model', () => ({ resolveModel: () => ({}) }))
 vi.mock('ai', async (importOriginal) => {
   const actual = await importOriginal<typeof import('ai')>()
-  return { ...actual, generateText: vi.fn() }
+  return { ...actual, streamText: vi.fn() }
 })
+
+/** 假流：按给定片段逐个吐，最后给出 finishReason（与真实 streamText 的最小形状一致） */
+function fakeStream(chunks: string[], finishReason = 'stop'): never {
+  return {
+    textStream: (async function* () {
+      for (const chunk of chunks) yield chunk
+    })(),
+    finishReason: Promise.resolve(finishReason)
+  } as never
+}
 
 /** 2000 个 ASCII 字符 ≈ 500 token */
 const LONG = 'x'.repeat(2000)
@@ -96,11 +106,11 @@ function firstText(m: AgentChatMessage | undefined): string {
 }
 
 describe('compactHistory（pi 的 compaction）', () => {
-  const gen = vi.mocked(generateText)
+  const gen = vi.mocked(streamText)
 
   beforeEach(() => {
     gen.mockReset()
-    gen.mockResolvedValue({ text: '摘要正文' } as never)
+    gen.mockImplementation(() => fakeStream(['摘要正文']))
     clearAutoSummaryCache()
   })
 
@@ -166,11 +176,35 @@ describe('compactHistory（pi 的 compaction）', () => {
     expect(gen).not.toHaveBeenCalled()
   })
 
-  it('压缩点之前产生的 usage 不参与判定（陈旧 usage 不会重复压缩）', async () => {
+  it('同一份历史再调一次：复用检查点，不重复摘要', async () => {
     await compactHistory(chatHistory(8), OPTS)
-    // 历史涨到 14 轮（估算远超阈值），但没有任何消息晚于检查点 —— pi 的 compaction
-    // boundary 判定：这时不能拿压缩前的 usage 再压一次
-    const r = await compactHistory(chatHistory(14), OPTS)
+    const again = await compactHistory(chatHistory(8), OPTS)
+    expect(again.reused).toBe(true)
+    expect(again.compressed).toBeNull()
+    expect(gen).toHaveBeenCalledTimes(1)
+  })
+
+  it('早于检查点的 usage 不参与判定（否则压完立刻又压）', async () => {
+    await compactHistory(chatHistory(8), OPTS)
+    /**
+     * 同一份历史，把最后一条助手消息的 usage 设成远超阈值。它早于检查点（压缩前那一轮
+     * 的真实值），必须被忽略 —— 否则「压完 → 立刻判超 → 再压」就是死循环。
+     * 判据只看「即将发出去的那份」的估算：摘要 + 保留区 ≈ 1100 < 触发线 2976。
+     */
+    const messages = chatHistory(8)
+    const last = messages[messages.length - 1]!
+    messages[messages.length - 1] = {
+      ...last,
+      usage: {
+        inputTokens: 29_990,
+        outputTokens: 10,
+        totalTokens: 30_000,
+        contextTokens: 30_000,
+        durationMs: 1,
+        tps: 1
+      }
+    }
+    const r = await compactHistory(messages, OPTS)
     expect(r.reused).toBe(true)
     expect(r.compressed).toBeNull()
     expect(gen).toHaveBeenCalledTimes(1)
@@ -252,12 +286,94 @@ describe('compactHistory（pi 的 compaction）', () => {
     ).toBe(51_234)
   })
 
+  it('摘要流式回调：先 start，再按顺序吐 delta，正文与终稿一致', async () => {
+    gen.mockImplementation(() => fakeStream(['## Goal\n', '完成交接']))
+    const starts: unknown[] = []
+    const deltas: Array<{ delta: string; phase: string }> = []
+    const r = await compactHistory(chatHistory(8), {
+      ...OPTS,
+      onSummaryStart: (info) => starts.push(info),
+      onSummaryDelta: (info) => deltas.push(info)
+    })
+    expect(starts).toHaveLength(1)
+    expect(starts[0]).toMatchObject({
+      beforeTokens: expect.any(Number),
+      summarizedTurns: expect.any(Number),
+      keptTurns: expect.any(Number)
+    })
+    expect(deltas.map((d) => d.delta).join('')).toBe('## Goal\n完成交接')
+    expect(deltas.every((d) => d.phase === 'checkpoint')).toBe(true)
+    expect(r.summary).toContain('## Goal')
+  })
+
+  it('切回合时第二段摘要以 turn-prefix 相位流出', async () => {
+    const phases: string[] = []
+    const r = await compactHistory(toolHistory(8), {
+      conversationId: 'conv-split-stream',
+      contextWindow: 4000,
+      model: MODEL,
+      onSummaryDelta: (info) => phases.push(info.phase)
+    })
+    expect(r.compressed).not.toBeNull()
+    expect(phases).toContain('checkpoint')
+    expect(phases).toContain('turn-prefix')
+  })
+
   it('摘要输出被截断（finishReason=length）时抛错，不落检查点', async () => {
-    gen.mockResolvedValue({ text: '半截摘要', finishReason: 'length' } as never)
+    gen.mockImplementation(() => fakeStream(['半截摘要'], 'length'))
     const entries: unknown[] = []
     await expect(
       compactHistory(chatHistory(8), { ...OPTS, onAutoSummary: (e) => entries.push(e) })
     ).rejects.toThrow(/incomplete/)
     expect(entries).toHaveLength(0)
+  })
+})
+
+/**
+ * 保留区必须给「压缩动不了的那块」让位。
+ *
+ * 用户实测的死循环：128k 窗口、系统提示词 + 工具定义很大，保留区还是固定 20000，
+ * 于是 `base + 20000` 仍在触发线以上 —— 压完立刻又超、下一轮又压，而每次只能
+ * 摘要一两轮（检查点之后刚好就是一个保留区）。占用一点没降，还白付摘要调用。
+ *
+ * 现在 `resolveCompactionSettings` 按 `窗口 − 预留 − base` 的 80% 算保留区，
+ * 保证「压完能落到触发线以下」；预算被吃光时直接返回 `no-budget`、不调模型。
+ */
+describe('保留区按预算收缩（base 吃掉窗口时）', () => {
+  const gen = vi.mocked(streamText)
+
+  beforeEach(() => {
+    gen.mockReset()
+    gen.mockImplementation(() => fakeStream(['摘要', '正文']))
+  })
+
+  /** 窗口 10000 → 预留 2500、触发线 7500；base 5000 只剩 2500 给消息 */
+  const BUDGET_OPTS = {
+    contextWindow: 10000,
+    baseTokens: 5000,
+    model: MODEL
+  }
+
+  it('base 占掉大半窗口时，压完真的落到触发线以下', async () => {
+    const r = await compactHistory(chatHistory(6), {
+      ...BUDGET_OPTS,
+      conversationId: 'conv-budget'
+    })
+    expect(r.compressed).not.toBeNull()
+    // 12 条 × 约 250 token + base 5000 = 8000+，越过 7500
+    expect(r.compressed!.beforeTokens).toBeGreaterThan(7500)
+    // 关键：压完在触发线以下 —— 旧口径（keep = 6000）根本切不动，压完仍是 8000
+    expect(r.compressed!.afterTokens).toBeLessThan(7500)
+  })
+
+  it('base 自己就顶到触发线：不调摘要模型，返回 no-budget', async () => {
+    const r = await compactHistory(chatHistory(6), {
+      ...BUDGET_OPTS,
+      baseTokens: 7600,
+      conversationId: 'conv-budget-dry'
+    })
+    expect(r.compressed).toBeNull()
+    expect(r.skipped).toBe('no-budget')
+    expect(gen).not.toHaveBeenCalled()
   })
 })

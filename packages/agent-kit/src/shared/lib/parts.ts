@@ -125,7 +125,7 @@ export function applyEvent(parts: AgentMessagePart[], event: AgentStreamEvent): 
     case 'subagent-delta': {
       // 子任务（subagent）的文本增量：折叠到**派活卡**（agent-<id> 那张）的
       // `subagentText` 上。找不到 id 就忽略 —— 父侧 tool-call 一定会先到
-      //（Mastra 先发 tool-call 再开始派），丢了这条只是少一帧增量。
+      //（引擎 先发 tool-call 再开始派），丢了这条只是少一帧增量。
       const index = next.findIndex((p) => p.type === 'tool-call' && p.toolCallId === event.toolCallId)
       if (index === -1) return next
       const call = next[index] as Extract<AgentMessagePart, { type: 'tool-call' }>
@@ -135,7 +135,7 @@ export function applyEvent(parts: AgentMessagePart[], event: AgentStreamEvent): 
 
     case 'subagent-progress': {
       // 子 agent 的工具进度：只记「最近在调什么 + 一共调了几次」。
-      // 同一个子侧调用可能被 Mastra 重复上报，按 childToolCallId 去重。
+      // 同一个子侧调用可能被 引擎 重复上报，按 childToolCallId 去重。
       const index = next.findIndex((p) => p.type === 'tool-call' && p.toolCallId === event.toolCallId)
       if (index === -1) return next
       const call = next[index] as Extract<AgentMessagePart, { type: 'tool-call' }>
@@ -228,10 +228,12 @@ export function applyEvent(parts: AgentMessagePart[], event: AgentStreamEvent): 
       return []
     case 'finish':
       return next
-    // context-compressed 是「通知」不是内容增量：不往 parts 里塞任何东西，
-    // 只是让 switch 对新类型保持穷尽（否则加一个新类型这里就要报错）。
-    // 它的展示由 useAgentApp 另行处理（见 handleFrame）。
+    // context-compressed / context-compaction-* 是「通知」不是内容增量：不往 parts
+    // 里塞任何东西，只是让 switch 对新类型保持穷尽（否则加一个新类型这里就要报错）。
+    // 交接文档的展示由 handleFrame 路由到单独的 compaction 状态。
     case 'context-compressed':
+    case 'context-compaction-start':
+    case 'context-compaction-delta':
       return next
     // context-usage 同理不是内容：它是 agent 报的上下文占用快照，
     // 由 handleFrame 挂到消息的 `contextUsage` 字段上，parts 里不留痕。
@@ -341,6 +343,29 @@ export function isCommandRunning(part: AgentMessagePart): boolean {
   return !hasOutput && !streamingInput
 }
 
+/**
+ * 卡片头部那颗「停止」钮**按条生效**的工具。
+ *
+ * 停止入口本来就是通用的（`POST /api/chat/command/stop` 只认 `requestId + toolCallId`，
+ * 服务端按 toolCallId 查 run 的停止表），所以新增一个可停工具只要**名字加进来 +
+ * 工具自己在执行期登记 stop**，不需要新接口、也不需要新按钮。
+ *
+ * 目前两类：
+ * - `execute_command`：杀那一棵进程树；
+ * - `web_fetch`：abort 这一次抓取（抓境外站点动辄等 30s，不该为它废掉整轮）。
+ */
+export const STOPPABLE_TOOLS: ReadonlySet<string> = new Set(['execute_command', 'web_fetch'])
+
+/**
+ * 「在飞且可单独停止」——判据与 `isCommandRunning` 同源（不看 `liveOutput`，理由见上），
+ * 只是工具集合更宽。渲染层用它决定停止钮是「只停这条」还是「中止整轮」。
+ */
+export function isStoppableToolRunning(part: AgentMessagePart): boolean {
+  if (part.type !== 'tool-call' || !STOPPABLE_TOOLS.has(part.toolName)) return false
+  const { hasOutput, streamingInput } = toolState(part)
+  return !hasOutput && !streamingInput
+}
+
 /** 消息里最后一段正文（列表预览 / 通知用） */
 export function textOf(message: AgentChatMessage): string {
   return message.parts
@@ -395,7 +420,7 @@ export const TOOL_LABELS: Record<string, string> = {
   delete_task_trigger: '删除定时任务',
   set_task_trigger_enabled: '启停定时任务',
   create_plugin: '创建插件',
-  // 子任务（subagent）派活：Mastra 的工具名就是 `agent-<subagentId>`，见
+  // 子任务（subagent）派活：引擎的工具名就是 `agent-<subagentId>`，见
   // packages/agent/src/subagents.ts 的 SUBAGENT_SPECS。不用图标区分主次，
   // 一张卡 + 「子任务 · xxx」的标题已经够读。
   'agent-explorer': '子任务 · 侦察',

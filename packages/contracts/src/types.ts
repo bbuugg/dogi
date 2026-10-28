@@ -316,13 +316,13 @@ export type AiPermissionMode = 'full' | 'confirm' | 'readonly'
 
 /**
  * AI Agent 后端：
- * - mastra：内置 Mastra Agent 驱动（复用模型配置），工具由应用自己提供
+ * - 内置：内置 Agent 驱动（复用模型配置），工具由应用自己提供
  * - acp：连接外部 ACP agent（如 opencode），应用作为 ACP 客户端
  *
  * ⚠️ 历史数据兼容：早期这个值叫 `'ai-sdk'`，已存的旧会话里还是旧字符串；
- * 运行时判断一律是 `=== 'acp'`（else 即 mastra），旧值不受影响。
+ * 运行时判断一律是 `=== 'acp'`（else 即内置 Agent），旧值不受影响。
  */
-export type AgentBackend = 'mastra' | 'acp'
+export type AgentBackend = 'builtin' | 'acp'
 
 // ---------- ask_followup_question：AI 向用户提结构化选择题 ----------
 
@@ -999,7 +999,7 @@ export interface AgentChatMessage {
    * 两条来源都写这里（同名同形，渲染端不分叉）：
    * - **ACP**：agent 侧通过 `usage_update` 上报，仅 ACP 会话会有；只在**本次会话进程内**
    *   有效（刷新就没了），跨刷新保留的是会话配置里的 `AgentConversation.acpContextUsage`；
-   * - **mastra**：`runAgent` 在每个工具步骤边界（`onIterationComplete`）估算后推来
+   * - **内置**：`runAgent` 在每个工具步骤边界（`onIterationComplete`）估算后推来
    *   （口径同 `TurnUsage.contextTokens`），圆环因此在一轮之内也持续刷新。
    */
   contextUsage?: AcpContextUsage
@@ -1078,6 +1078,13 @@ export interface AcpContextUsage {
   used: number
   /** 该 agent 的上下文窗口大小 */
   size: number
+  /**
+   * `used` 里**压缩动不了的那部分**：系统提示词 + 工具 schema 的估算。
+   *
+   * 只有内置 agent（内置）会带 —— 外部 ACP agent 的提示词在我们这儿算不出来。
+   * 界面用它回答「圆环为什么红了却压不动」：历史已经压到保留区，剩下的全是这块。
+   */
+  base?: number
 }
 
 /** ACP Session Modes 里的一个档位（agent 在 session/new·load 里广告，名字 / 语义全由 agent 自定义） */
@@ -1145,7 +1152,7 @@ export type AcpPermissionMode = 'confirm' | 'allow'
 // 多智能体协作（collab）
 // ---------------------------------------------------------------------------
 //
-// 一个 collab 会话 = 一个「主智能体」+ 若干可配置的内置 Agent（都是 Mastra Agent），
+// 一个 collab 会话 = 一个「主智能体」+ 若干可配置的内置 Agent（都是 内置 Agent），
 // 主智能体通过 `delegate_to_agent` / `delegate_many` 派活，子 Agent 共享同一个工作区。
 //
 // ⚠️ 这里只放**跨端契约**（渲染端要画布、服务端要持久化、agent 要编排）。运行时
@@ -1529,8 +1536,8 @@ export interface AgentConversation {
   title: string
   /**
    * 会话形态：
-   * - 缺省 / `'chat'` = 普通对话（内置 Mastra 或 ACP，由 `backend` 决定）；
-   * - `'collab'` = 多智能体协作（主智能体 + 可配置子 Agent，仅内置 Mastra）。
+   * - 缺省 / `'chat'` = 普通对话（内置 Agent 或 ACP，由 `backend` 决定）；
+   * - `'collab'` = 多智能体协作（主智能体 + 可配置子 Agent，仅内置 Agent）。
    */
   kind?: 'chat' | 'collab'
   /** 协作配置（仅 `kind: 'collab'`；运行态见独立的 `collab.json`） */
@@ -1540,14 +1547,14 @@ export interface AgentConversation {
   /**
    * 该会话使用的后端与选中项 —— **按会话独立**，创建 / 选择时显式落库；
    * 不存在「跟随工作区 / 跟随默认」的回退（未绑定的会话发不了对话轮，服务端 400）。
-   * `configId` 的含义由 `backend` 决定：`mastra` 下是 `AiModelConfig.id`，
+   * `configId` 的含义由 `backend` 决定：`builtin` 下是 `AiModelConfig.id`，
    * `acp` 下是 `AcpAgentConfig.id`（创建后锁定，不可换 agent）。
    */
   backend?: AgentBackend
   configId?: string
   /**
    * 进一步记住**用哪个上游模型**：
-   * - `mastra` 下是 `AiModelConfig.models` 的一项（必选，不存在「配置默认模型」）；
+   * - `builtin` 下是 `AiModelConfig.models` 的一项（必选，不存在「配置默认模型」）；
    * - `acp` 下是**外部 agent 自己广告的模型值**（`AcpModelChoices.options[].value`，
    *   每轮对话前用 `session/set_config_option` 下发）；未设置 = 用 agent 自己的默认
    *   （那是 agent 侧的缺省，不是 Fizz 的设置）。
@@ -1562,7 +1569,7 @@ export interface AgentConversation {
    *   能换的只有 `modelId`（agent 自己广告的模型，经 `session/set_config_option` 下发）；
    * - **消息不落本地**：acp 会话的交互记录保存在 agent 侧（opencode 们自己管），
    *   本地 `messages` 恒为空 —— 跨重启用 `session/load` 接回（后续接入）；
-   * - mastra 会话没有这个字段，消息照旧全量落盘。
+   * - 内置会话没有这个字段，消息照旧全量落盘。
    */
   acpSessionId?: string
   /**
@@ -1611,7 +1618,7 @@ export interface AgentConversation {
   /**
    * 上下文摘要检查点（手动压缩的产物，见 `ConversationContextSummary`）。
    * 存在时，组装发往模型的历史 = 摘要消息 + 检查点之后的原文 + 本轮输入。
-   * 仅内置 agent（mastra）会话会有；ACP 会话的上下文在 agent 侧，与本地无关。
+   * 仅内置 agent（内置）会话会有；ACP 会话的上下文在 agent 侧，与本地无关。
    */
   contextSummary?: ConversationContextSummary
   /**
@@ -1659,7 +1666,7 @@ export interface AgentConversation {
    *
    * 侧栏据此显示「分支自 xxx」；分叉本身只是一次带截取历史的复制（历史到
    * `upToMessageId` 含该条为止），原会话一字不动 —— 之后两个会话各自独立，
-   * 类似 `git checkout -b`。mastra 会话才有意义（ACP 的上下文在 agent 侧，签不了）。
+   * 类似 `git checkout -b`。内置会话才有意义（ACP 的上下文在 agent 侧，签不了）。
    */
   forkedFrom?: { conversationId: string; upToMessageId: string; createdAt: number }
 }
@@ -1857,7 +1864,7 @@ export type AgentStreamEvent =
     }
   | {
       /**
-       * 工具**入参的流式增量**：上游一边生成入参一边发（Mastra 的 `tool-call-delta`
+       * 工具**入参的流式增量**：上游一边生成入参一边发（引擎的 `tool-call-delta`
        * / `argsTextDelta`）。与 `tool-call` 的关系同 `text-delta` 之于 text part ——
        * 增量只喂渲染（卡片上能看到要写入的内容在长），收敛以完整 `tool-call` 为准。
        *
@@ -1870,7 +1877,7 @@ export type AgentStreamEvent =
       toolName?: string
       /**
        * 入参文本的增量（JSON 片段，按 toolCallId 依次拼接）。
-       * **可以为空串**：上游「入参开始流式生成」的那一帧（Mastra 的
+       * **可以为空串**：上游「入参开始流式生成」的那一帧（引擎的
        * `tool-call-input-streaming-start`）只有 id + 工具名、还没有内容，
        * 用它先把卡片建出来（标题立刻是「写入文件」而不是「工具调用」）。
        */
@@ -1917,7 +1924,7 @@ export type AgentStreamEvent =
        * —— 服务端在 turn 收尾按注入边界把 assistant 消息切片后与它一起原子落盘，
        * 顺序即真实时序（`[assistant(前段), user, assistant(后段)]`）。前端据此把
        * live 助手消息拆成两段、把这条 user 消息插进中间，后续增量写进新段。
-       * 只有 mastra 后端会产生这个事件（ACP 是外部 agent，协议给不了插话）。
+       * 只有 内置后端会产生这个事件（ACP 是外部 agent，协议给不了插话）。
        */
       type: 'user-injected'
       message: AgentChatMessage
@@ -1939,10 +1946,37 @@ export type AgentStreamEvent =
     }
   | {
       /**
+       * 上下文压缩**开始**：这一轮发出去之前，旧历史已经切好，马上要调模型生成
+       * 「交接文档」（结构化摘要）。
+       *
+       * 只在真的需要重算摘要时发（复用检查点 / 未超预算都不发）。与
+       * `context-compaction-delta` 成对出现；生成失败 / 中止时不会补 `context-compressed`，
+       * 前端按下一轮 / `end` 帧清掉进行中状态。
+       */
+      type: 'context-compaction-start'
+      beforeTokens: number
+      summarizedTurns: number
+      keptTurns: number
+    }
+  | {
+      /**
+       * 「交接文档」的流式增量。`phase` = 两段摘要中的哪一段（切点落在回合中间时，
+       * 会先摘要历史、再补一段 turn-prefix）；前端把两段拼成同一份文档。
+       */
+      type: 'context-compaction-delta'
+      delta: string
+      phase: 'checkpoint' | 'turn-prefix'
+    }
+  | {
+      /**
        * 上下文压缩：这一轮发出去之前，服务端把旧轮摘要掉了。
        *
        * 不是每轮都发 —— 只有真超预算才发；不超预算时这一帧不会出现，
        * 前端按「有这一帧」来判断，不要把它当成常规事件轮询。
+       *
+       * `summary` 是完整交接文档（含框架补的文件清单）。流式过程中已经通过
+       * `context-compaction-delta` 发过增量，这里是**权威终稿**：前端用它覆盖拼接结果，
+       * 避免增量与最终正文有细微出入（文件清单是流式结束后才补的）。
        *
        * ⚠️ 只有一种压缩（摘要）。曾经的 `kind: 'micro'`（清旧工具结果）已删除：
        * 它每轮都可能改动请求前缀，反而让上游前缀缓存反复失效。
@@ -1952,11 +1986,13 @@ export type AgentStreamEvent =
       afterTokens: number
       summarizedTurns: number
       keptTurns: number
+      /** 完整摘要正文；流式增量拼出来的那份以这里为准 */
+      summary?: string
     }
   | {
       /**
        * ACP agent 上报的**上下文占用**（`session/update` 的 `usage_update`），
-       * **也复用于内置 agent（mastra）每个工具步骤边界的实时估算**。
+       * **也复用于内置 agent（内置）每个工具步骤边界的实时估算**。
        *
        * `used` = 当前躺在上下文里的 tokens；`size` = 该 agent 的上下文窗口大小。
        *
@@ -1966,7 +2002,7 @@ export type AgentStreamEvent =
        *   只作展示，不参与本地压缩判断（ACP 的上下文在 agent 侧管理，本地压不了）。
        *   ACP 里 `usage_update` 标着 UNSTABLE，并非所有 agent 都实现：不发的 agent
        *   这一帧永远不出现，前端按「有这一帧」判断即可。
-       * - **mastra**：`runAgent` 在每个 `onIterationComplete`（= 一次 LLM 调用 + 其工具
+       * - **内置**：`runAgent` 在每个 `onIterationComplete`（= 一次 LLM 调用 + 其工具
        *   执行完成，即工具步骤边界）用 `baseTokens + estimateMessagesTokens(ctx.messages)`
        *   估一次当前上下文，发本帧 —— 圆环因此在**一轮之内**也跟着走，而不是只在 finish
        *   时跳一下。`size` 用的是该模型的窗口（与压缩触发同源）。
@@ -1980,6 +2016,14 @@ export type AgentStreamEvent =
       type: 'context-usage'
       used: number
       size: number
+      /**
+       * `used` 里**压缩动不了的那部分**（系统提示词 + 工具 schema 的估算）。
+       *
+       * 只在内置 agent 的帧里带。它解释了「压缩之后圆环为什么还是红的」：历史已经被
+       * 压到保留区，剩下的大头是提示词与工具定义，压缩机制管不到 —— 要降只能精简
+       * 项目文档 / 关掉不用的 MCP 工具。
+       */
+      base?: number
     }
 
 /**
@@ -2239,17 +2283,17 @@ export interface TaskTriggerTemplate {
   permissionMode?: AiPermissionMode
 
   /**
-   * 触发会话用哪个后端：`mastra`（内置模型，缺省）或 `acp`（外部 Agent）。
+   * 触发会话用哪个后端：`builtin`（内置模型，缺省）或 `acp`（外部 Agent）。
    *
    * 与手动新建会话同义 —— 选模型时选的就是「哪个后端 + 哪个配置」，所以它和下面那对
    * `configId` / `modelId` 是**一起**决定「拿什么跑这一轮」的。存量记录没有这个字段 =
-   * `mastra`（那时只支持内置模型）。
+   * `builtin`（那时只支持内置模型）。
    */
   backend?: AgentBackend
 
   /**
    * 触发会话用哪份配置，语义随 `backend` 变：
-   * - `mastra`：`AiModelConfig.id`，且**必须**与 `modelId` 一起给出（选模型时就是
+   * - `builtin`：`AiModelConfig.id`，且**必须**与 `modelId` 一起给出（选模型时就是
    *   「配置 · 模型」一对）：缺了就是没选，调度器会拒跑并报一句人话，
    *   **不存在**「回退到清单第一份可用配置」的隐式兜底；
    * - `acp`：`AcpAgentConfig.id`（外部 agent）。会话建好后**锁定**，与手动会话一样
@@ -2258,7 +2302,7 @@ export interface TaskTriggerTemplate {
   configId?: string
   /**
    * 进一步记住用哪个上游模型：
-   * - `mastra`：该配置下选中的模型（`AiModelConfig.models` 的一项，必选）；
+   * - `builtin`：该配置下选中的模型（`AiModelConfig.models` 的一项，必选）；
    * - `acp`：agent 自己广告的模型值（`AcpAgentConfig.models[].value`，可省 ——
    *   省 = 用 agent 自己的默认，与手动会话的「跟随 agent 默认」同一套语义）。
    *   这个值在 agent 升级后可能失效：调度器发现它不在 agent 当前广告的清单里时
@@ -2577,7 +2621,7 @@ export interface SshTunnelInput {
  * `SUBAGENT_SPECS` 一条）。
  *
  * ⚠️ 刻意放在 `contracts`：这个字符串联合被渲染端（展示清单 / 开关）与主进程
- * （建 subagent）共用，而 `contracts` 必须保持**零 Mastra**——从 `@fizz/agent`
+ * （建 subagent）共用，而 `contracts` 必须保持**零引擎依赖**——从 `@fizz/agent`
  * import 会把整条 provider 依赖链带进浏览器产物（同 `resolve-model` 不进根入口的原因）。
  */
 export type SubagentId = 'explorer' | 'reviewer'
@@ -2614,7 +2658,7 @@ export const DEFAULT_SUBAGENT_SETTINGS: SubagentSettings = { enabled: [] }
  * 给 UI 用的展示元数据（名称 + 一句话说明）。
  *
  * ⚠️ 刻意**放在 contracts** 而不是 `packages/agent`：渲染端（web / desktop 共用
- * `@fizz/agent-kit`）不能依赖 `@fizz/agent` —— 那会 Mastra + 整条 provider
+ * `@fizz/agent-kit`）不能依赖 `@fizz/agent` —— 那会 引擎 + 整条 provider
  * 依赖链进浏览器产物。agent 侧的真源是 `SUBAGENT_SPECS`，两边新增时同步改。
  */
 export const SUBAGENT_META: Record<SubagentId, { name: string; hint: string }> = {

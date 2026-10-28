@@ -205,7 +205,7 @@ export function ShortcutsTab({
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setPending(null)}>
+            <Button data-dialog-dismiss="" variant="ghost" onClick={() => setPending(null)}>
               {tr('取消')}
             </Button>
             <Button

@@ -290,6 +290,32 @@ const sleepReconnect = (
 // ---------------------------------------------------------------------------
 
 /**
+ * 上下文交接文档的展示态。
+ *
+ * `streaming` 由 `context-compaction-start` / `-delta` 驱动；`done` 由
+ * `context-compressed` 驱动，并用服务端终稿覆盖增量拼接结果（文件清单是流式结束后补的）。
+ * 中途失败 / 中止不会有 `context-compressed`，`end` 帧会把仍在 streaming 的那份丢掉。
+ */
+export interface ContextCompactionState {
+  status: "streaming" | "done";
+  text: string;
+  /** 正在生成哪一段（切回合时先是 checkpoint，再是 turn-prefix） */
+  phase: "checkpoint" | "turn-prefix" | null;
+  beforeTokens?: number;
+  afterTokens?: number;
+  summarizedTurns?: number;
+  keptTurns?: number;
+  /**
+   * 把交接文档渲染成哪条助手消息里的一个折叠块（与思考 part 同形态）。
+   * 缺省 = 找不到落点（理论上不会发生），此时不渲染。
+   */
+  messageId?: string;
+  /** 插在该消息第几个 part 之后；0 = 消息最前面。 */
+  afterPartIndex?: number;
+  updatedAt: number;
+}
+
+/**
  * 一个会话的**全部本地对话现场**。
  *
  * 以前这些全是全局单份（消息列表 / streaming / 当前轮 / 审批卡 / 提问表 / 队列 /
@@ -304,6 +330,13 @@ const sleepReconnect = (
  */
 export interface ConvSlice {
   messages: AgentChatMessage[];
+  /**
+   * 最近一次上下文交接文档（流式生成中 / 已完成）。
+   *
+   * 只用于展示，不参与消息落盘；检查点仍以服务端 `contextSummary` / `autoSummary` 为准。
+   * `status === 'streaming'` 时 `text` 是已生成的增量，`'done'` 时是服务端给的终稿。
+   */
+  compaction: ContextCompactionState | null;
   /** 这个会话正在流式（本地订着一轮，帧在往 `messages` 里追加） */
   streaming: boolean;
   /**
@@ -357,7 +390,7 @@ export interface ConvSlice {
    * 还能继续点别的消息」。
    */
   deleting: boolean;
-  /** 历史装载失败（mastra 拉存档 / acp session/load 回放）：由消息列表展示错误 + 重试 */
+  /** 历史装载失败（内置 拉存档 / acp session/load 回放）：由消息列表展示错误 + 重试 */
   error: string | null;
   /**
    * 模型请求正在重试：显示「第 N 次重试」的**单条**提示（每次重试自替换，屏幕上只留最新一条）。
@@ -488,6 +521,7 @@ function applyCollabEvent(
 
 const emptySlice = (): ConvSlice => ({
   messages: [],
+  compaction: null,
   streaming: false,
   replaying: false,
   request: null,
@@ -556,7 +590,7 @@ export interface ConversationSlice {
   chatTarget: {
     backend: AgentBackend;
     configId?: string;
-    /** mastra 下：这份配置里具体用哪个上游模型（`AiModelConfig.models` 的一项） */
+    /** 内置 下：这份配置里具体用哪个上游模型（`AiModelConfig.models` 的一项） */
     modelId?: string;
   } | null;
   /**
@@ -715,7 +749,7 @@ export interface ConversationSlice {
    * 两个入口都用它：消息里那条「⚠️ …」错误块下面的「重新加载」按钮，以及主区域标签
    * 右键菜单的「刷新」（对话标签走这条路，工具标签才走 `tab-reload` 的卸载重挂）。
    *
-   * mastra 走服务端权威历史覆盖、ACP 走 `session/load` 回放（与刷新页面后打开同源）；
+   * 内置 走服务端权威历史覆盖、ACP 走 `session/load` 回放（与刷新页面后打开同源）；
    * **正在生成时直接返回 `false`**（不做事），避免把流式现场盖掉。
    * 成功 `true`；失败 `false`（原因进 `error`，界面自己显示）。
    */
@@ -796,7 +830,7 @@ export interface ConversationSlice {
   ) => Promise<void>;
   /**
    * 把一条 ACP 会话的内容转成**内置 agent 会话**：现拉 agent 侧转录 → 洗成内置格式 →
-   * 新建一条 mastra 会话（同工作区、带历史）→ 刷新列表并切过去。
+   * 新建一条 内置会话（同工作区、带历史）→ 刷新列表并切过去。
    * 成功 `true`；拉不到转录 / 建会话失败 `false`（原因进 error）。
    *
    * `upToMessageId` 传了 = **「从某条消息起转为内置」**：历史只保留到该条（含）为止
@@ -838,7 +872,7 @@ export interface ConversationSlice {
   ) => Promise<boolean>;
   /**
    * 运行中插话：活跃会话在跑 → 递服务端收件箱（agent 下一个工具步骤边界注入）；
-   * 409 / 没在跑 → 回落普通发送。只有 mastra 会话支持（ACP 会话上服务端 400，
+   * 409 / 没在跑 → 回落普通发送。只有 内置会话支持（ACP 会话上服务端 400，
    * 这里把可用性判断留给命令面板的 `available`）。
    *
    * `files` 与 `text` 至少要有一个；附件随插话一起注入当前轮（回落普通发送时也带着）。
@@ -952,7 +986,7 @@ export const createConversationSlice: StateCreator<
 
   /**
    * 这个目标现在还能不能用：
-   * - mastra：配置还在，且 `modelId` 仍在这份配置的模型清单里；
+   * - 内置：配置还在，且 `modelId` 仍在这份配置的模型清单里；
    * - acp：agent 还在（模型值由 agent 自己广告，本地清单里查不到也放行）。
    *
    * 「配置在但记的那个模型下架了」**不算还活着** —— 界面据此显示「选择模型」，
@@ -1293,7 +1327,7 @@ export const createConversationSlice: StateCreator<
        * 拆成两次（先写 messages、后 bump seq）会漏出一个中间帧：那一帧消息已经渲染、
        * resetKey 却没变，滚动容器不做同步落底，内容高度暴增就交给库的 ResizeObserver
        * 用 spring 接管 —— 观感是「切进长会话时从顶部平滑滚到底部」。而且这两次写入
-       * 是否落在同一个 React 批里取决于调用链的 await 时序（mastra 与 acp 两条路径不同），
+       * 是否落在同一个 React 批里取决于调用链的 await 时序（内置 与 acp 两条路径不同），
        * 于是出现了「有的会话滚、有的不滚」。
        *
        * 静默刷新 / 每轮收尾的权威回拉刻意**不传** —— 那几种情况不能把正在翻历史的
@@ -1490,7 +1524,18 @@ export const createConversationSlice: StateCreator<
       return;
     }
     if (frame.type === "end") {
-      // 一轮真的结束了（收尾统一在 runRound / attachRun 的收场逻辑里做）
+      /**
+       * 一轮真的结束了（收尾统一在 runRound / attachRun 的收场逻辑里做）。
+       *
+       * 交接文档没等到 `context-compressed` 就结束了 = 摘要失败 / 本轮中止：
+       * `compactHistory` 不会落半份检查点，界面也不该留半份文档（会误导用户以为
+       * 已压缩）。已完成的那份不动。
+       */
+      writeSlice(conversationId, (s) =>
+        s.compaction?.status === "streaming"
+          ? { ...s, compaction: null }
+          : s,
+      );
       return;
     }
     if (frame.type !== "event" || !frame.event) return;
@@ -1500,9 +1545,92 @@ export const createConversationSlice: StateCreator<
     // (带上 conversationId,让收方只在「正看的这个会话」里动作)
     for (const action of uiActionsFromEvent(event, conversationId))
       dispatchProjectUiAction(action);
+    // 上下文交接文档：开始 / 增量只更新展示态，不动消息 parts（见 parts.ts）。
+    if (event.type === "context-compaction-start") {
+      writeSlice(conversationId, (s) => {
+        let liveIndex = -1;
+        for (let i = s.messages.length - 1; i >= 0; i -= 1) {
+          if (isSteerAssistant(s.messages[i], assistantId)) {
+            liveIndex = i;
+            break;
+          }
+        }
+        const live = liveIndex >= 0 ? s.messages[liveIndex] : undefined;
+        return {
+          ...s,
+          compaction: {
+            status: "streaming",
+            text: "",
+            phase: null,
+            beforeTokens: event.beforeTokens,
+            summarizedTurns: event.summarizedTurns,
+            keptTurns: event.keptTurns,
+            ...(live
+              ? { messageId: live.id, afterPartIndex: live.parts.length }
+              : {}),
+            updatedAt: Date.now(),
+          },
+        };
+      });
+      return;
+    }
+    if (event.type === "context-compaction-delta") {
+      writeSlice(conversationId, (s) => {
+        const prev = s.compaction;
+        const text = prev?.text ?? "";
+        // 切回合时第二段前面要补上服务端最终拼装用的分隔标题，否则界面里的
+        // 中间态和终稿对不上（终稿会覆盖，但流式期间看着会突兀）。
+        const splitPrefix =
+          event.phase === "turn-prefix" &&
+          prev?.phase !== "turn-prefix" &&
+          !text.includes("**Turn Context (split turn):**")
+            ? "\n\n---\n\n**Turn Context (split turn):**\n\n"
+            : "";
+        return {
+          ...s,
+          compaction: {
+            status: "streaming",
+            text: text + splitPrefix + event.delta,
+            phase: event.phase,
+            ...(prev?.beforeTokens !== undefined
+              ? { beforeTokens: prev.beforeTokens }
+              : {}),
+            ...(prev?.summarizedTurns !== undefined
+              ? { summarizedTurns: prev.summarizedTurns }
+              : {}),
+            ...(prev?.keptTurns !== undefined
+              ? { keptTurns: prev.keptTurns }
+              : {}),
+            ...(prev?.messageId ? { messageId: prev.messageId } : {}),
+            ...(prev?.afterPartIndex !== undefined
+              ? { afterPartIndex: prev.afterPartIndex }
+              : {}),
+            updatedAt: Date.now(),
+          },
+        };
+      });
+      return;
+    }
     // 上下文压缩是「通知」不是内容增量：不往消息列表里塞东西，
     // 只是告诉用户这一轮上下文被压过了（展示走 contextNotice，见 ChatPanel）。
     if (event.type === "context-compressed") {
+      writeSlice(conversationId, (s) => ({
+        ...s,
+        compaction: {
+          status: "done",
+          text: event.summary ?? s.compaction?.text ?? "",
+          phase: s.compaction?.phase ?? null,
+          beforeTokens: event.beforeTokens,
+          afterTokens: event.afterTokens,
+          summarizedTurns: event.summarizedTurns,
+          keptTurns: event.keptTurns,
+          ...(s.compaction?.messageId ? { messageId: s.compaction.messageId } : {}),
+          ...(s.compaction?.afterPartIndex !== undefined
+            ? { afterPartIndex: s.compaction.afterPartIndex }
+            : {}),
+          updatedAt: Date.now(),
+        },
+      }));
       get().setContextNotice({
         beforeTokens: event.beforeTokens,
         afterTokens: event.afterTokens,
@@ -1555,7 +1683,7 @@ export const createConversationSlice: StateCreator<
       // - **ACP agent** 上报（session/update 的 usage_update）——ACP 拿不到 finish.usage，
       //   圆环的数据只能走它；跨刷新保留的那份由**服务端**写进会话配置（见 chat-turn.ts
       //   的 setAcpContextUsage），客户端不重复这一步。
-      // - **内置 agent（mastra）** 在每个工具步骤边界估算后推来 —— 圆环因此在一轮之内
+      // - **内置 agent（内置）** 在每个工具步骤边界估算后推来 —— 圆环因此在一轮之内
       //   也持续更新，而不是只在 finish 时跳一下。
       // 都挂到**本轮 live 助手消息**上（`contextUsage`），圆环优先读它。
       // ⚠️ 悬垂时（没有 live 助手消息，如 attach 时该段已结束）静默跳过即可，
@@ -1575,7 +1703,12 @@ export const createConversationSlice: StateCreator<
             i === liveIndex
               ? {
                   ...message,
-                  contextUsage: { used: event.used, size: event.size },
+                  contextUsage: {
+                    used: event.used,
+                    size: event.size,
+                    // 「压缩动不了的那块」只有内置 agent 会带（ACP 没有），没有就别塞 undefined
+                    ...(event.base !== undefined ? { base: event.base } : {}),
+                  },
                 }
               : message,
           ),
@@ -2012,14 +2145,14 @@ export const createConversationSlice: StateCreator<
   };
 
   /**
-   * 打开会话后的历史装载：mastra 拉服务端落盘存档 + acp 走 agent 侧 `session/load` 回放。
+   * 打开会话后的历史装载：内置 拉服务端落盘存档 + acp 走 agent 侧 `session/load` 回放。
    * 从 `openConversation` 抽出，便于「加载失败 → 重试」复用同一段逻辑（重试不能再走
    * openConversation 的 id 去重早退）。失败统一写 slice 的 error，由消息列表展示错误 + 重试。
    */
   const loadConversation = async (conversationId: string): Promise<void> => {
     // 用户在装载期间自己改过选择时，收尾的恢复块不能再拿服务端那份盖回去（比对引用即可）
     const targetBefore = get().chatTarget;
-    // 拉服务端落盘的权威历史（mastra）；acp 服务端历史恒为空，这里只是走个过场
+    // 拉服务端落盘的权威历史（内置）；acp 服务端历史恒为空，这里只是走个过场
     // resetScroll：首次装载，消息写入与复位落底同帧（见 loadMessages 的 opts 注释）
     const fetched = await loadMessages(conversationId, {
       loadError: true,
@@ -2163,7 +2296,7 @@ export const createConversationSlice: StateCreator<
     /*
      * 收尾：撤掉「装载中」，并兜底再复位一次落底。
      *
-     * 消息本身的写入已经各自带上了 resetScroll（mastra 走 loadMessages、acp 走回放那块），
+     * 消息本身的写入已经各自带上了 resetScroll（内置 走 loadMessages、acp 走回放那块），
      * 这里的 bump 只为覆盖「压根没有消息可写」的窗口 —— 比如等会话清单期间用户就切走了、
      * 或回放没跑（缺 cwd / 非当前会话）。空会话落底本来就无副作用。
      */
@@ -3090,7 +3223,7 @@ export const createConversationSlice: StateCreator<
      * 标签、也不重挂 React 树（终端 / 面板现场都还在）。
      *
      * 两条路按后端分（与刷新页面后打开会话**完全同源**）：
-     * - **mastra**：拉服务端落盘的权威历史（`loadMessages`，覆盖式）。断线时本地渲染的
+     * - **内置**：拉服务端落盘的权威历史（`loadMessages`，覆盖式）。断线时本地渲染的
      *   那条「⚠️ 网络错误」会被真正的回复顶掉 —— 那正是用户刷新整页想达到的效果；
      * - **ACP**：消息在 agent 侧，只有 `session/load` 回放能重建（`reloadAcpSession`）。
      *
@@ -3221,7 +3354,7 @@ export const createConversationSlice: StateCreator<
     newCollabConversation: async (workspaceId) => {
       const preferred = preferredTarget();
       return get().newConversation(workspaceId, undefined, {
-        backend: "mastra",
+        backend: "builtin",
         ...(preferred
           ? { configId: preferred.configId, modelId: preferred.modelId }
           : {}),
@@ -3536,9 +3669,9 @@ export const createConversationSlice: StateCreator<
     /**
      * ACP 会话 → 内置 Agent 会话（侧栏会话行「更多」里的一项）。
      *
-     * 三步：拉转录（agent 侧 `session/load` 回放）→ 洗成内置格式 → 建一条 mastra 会话。
+     * 三步：拉转录（agent 侧 `session/load` 回放）→ 洗成内置格式 → 建一条 内置会话。
      * **不新增服务端路由**：`POST /api/conversations` 本来就收 `{ backend, messages }`，
-     * 且对 mastra 后端不做任何特判（历史直接进 `domain.saveConversation`）。
+     * 且对 内置后端不做任何特判（历史直接进 `domain.saveConversation`）。
      *
      * ⚠️ 转录必须**现拉**：acp 会话的本地 `messages` 恒为空（历史在 agent 侧）。
      * 拉不回来（agent 没广告 load / session 失效 / 找不到工作区目录）就明确失败 ——
@@ -3617,7 +3750,7 @@ export const createConversationSlice: StateCreator<
         const created = await api.createConversation({
           workspaceId: targetWorkspaceId,
           title: `${conv.title.trim() || "未命名会话"}（内置 Agent）`,
-          backend: "mastra",
+          backend: "builtin",
           // 转换产物整份作为新会话的历史（服务端整体写入）
           messages: toBuiltinHistory(history),
         });

@@ -195,7 +195,7 @@ export function NewContainerProjectDialog({
         </div>
 
         <DialogFooter>
-          <Button variant="ghost" disabled={busy} onClick={() => onOpenChange(false)}>
+          <Button data-dialog-dismiss="" variant="ghost" disabled={busy} onClick={() => onOpenChange(false)}>
             取消
           </Button>
           <Button disabled={!canSubmit} onClick={submit}>

@@ -623,8 +623,8 @@ export const API_ROUTES = {
    * 运行中插话（steer）：POST /api/chat/steer
    *
    * body `SteerInput`。把一句话递给该会话**正在跑的 run**，agent 在下一个工具步骤
-   * 边界把它作为 user 消息注入当前轮（spike 结论：Mastra `onIterationComplete` 里
-   * push `ctx.messages` + `continue: true`）。只有 mastra 会话支持（ACP 400）；
+   * 边界把它作为 user 消息注入当前轮（spike 结论：步骤边界回调 里
+   * push `ctx.messages` + `continue: true`）。只有 内置会话支持（ACP 400）；
    * 没有活跃 run 时回 **409**，客户端据此回落普通发送 —— 插话在空闲时语义上等价于发送。
    */
   chatSteer: "/api/chat/steer",
@@ -660,7 +660,7 @@ export const API_ROUTES = {
    * body `PermissionSetInput`（requestId + permissionMode）。工具集是**一轮建一次**的，
    * 权限档会被快照死在整轮里 —— 用户在运行中用输入框那颗 pill 切档时，靠这条请求把
    * 该 run 的**活档**改掉，闸门在**下一次工具调用**立刻按新档裁决（不必等下一轮）。
-   * 与 command/stop 同款「另开的一条 HTTP 请求」。只影响内置 mastra 那条路
+   * 与 command/stop 同款「另开的一条 HTTP 请求」。只影响内置 Agent 那条路
    * （ACP 是另一套 `acpPermissionMode`）。run 不存在 / 已结束 = 幂等空成功
    * （`{ updated: false }`）。
    */
@@ -686,7 +686,7 @@ export const API_ROUTES = {
    *
    * - POST /api/chat/compress：body `{ conversationId }`。把会话历史（从已有检查点
    *   之后算起）立即摘要成一段，落成新的摘要检查点 —— **不等超预算**，手动说了算。
-   *   仅内置 agent（mastra）会话可用。响应带压缩统计。
+   *   仅内置 agent（内置）会话可用。响应带压缩统计。
    * - GET /api/chat/context：返回 `{ budget }`（发往模型的历史 token 预算，前端
    *   圆环的分母；预算解析与「该瘦身了」提示线同一处：显式参数 > 环境变量 > 默认 80k）。
    */
@@ -1229,13 +1229,13 @@ export interface ConversationInput {
   id?: string;
   workspaceId: string;
   title?: string;
-  /** 会话形态（缺省 = 普通对话）；`collab` 仅支持内置 Mastra 后端 */
+  /** 会话形态（缺省 = 普通对话）；`collab` 仅支持内置 Agent 后端 */
   kind?: "chat" | "collab";
   /** 协作配置：创建 `kind: 'collab'` 时带上；缺省用 `DEFAULT_COLLAB_SETTINGS` */
   collab?: CollabSettings;
-  backend?: "mastra" | "acp";
+  backend?: "builtin" | "acp";
   configId?: string;
-  /** `mastra` 后端下选中的上游模型（`AiModelConfig.models` 的一项） */
+  /** `builtin` 后端下选中的上游模型（`AiModelConfig.models` 的一项） */
   modelId?: string;
   /**
    * ACP 会话绑定：导入 agent 侧既有会话（`session/list` 里的一项）时带上它的
@@ -1640,7 +1640,7 @@ export function resolveMaxRetries(override?: number): number {
 export const DEFAULT_TOOL_CALL_CONCURRENCY = 3;
 /** 下限：1 = 同一批工具调用完全串行 */
 export const MIN_TOOL_CALL_CONCURRENCY = 1;
-/** 上限：Mastra 自己的默认并发就是 10，再高没有收益、只会更容易压垮工具 */
+/** 上限：引擎自己的默认并发就是 10，再高没有收益、只会更容易压垮工具 */
 export const MAX_TOOL_CALL_CONCURRENCY = 10;
 
 /**
@@ -1672,15 +1672,15 @@ export interface ChatRequest {
    */
   files?: UploadFileRef[];
   /**
-   * 后端：acp = 外部 ACP agent 进程，mastra = 内置模型。会话必须显式绑定（创建 /
+   * 后端：acp = 外部 ACP agent 进程，内置 = 内置模型。会话必须显式绑定（创建 /
    * 选择时落库），服务端不再有任何「跟随工作区 / 跟随默认」的回退 —— 没带就 400。
-   * ⚠️ configId 的语义随 backend 变：acp → ACP agent id；mastra → 模型配置 id。
+   * ⚠️ configId 的语义随 backend 变：acp → ACP agent id；内置 → 模型配置 id。
    */
   backend?: AgentBackend;
   /** 会话显式绑定的配置 / agent id；缺失或悬空（被删了）一律 400，不再静默回退 */
   configId?: string;
   /**
-   * `mastra` 下：这份模型配置里用**哪一个**上游模型（`AiModelConfig.models` 的一项）。
+   * `builtin` 下：这份模型配置里用**哪一个**上游模型（`AiModelConfig.models` 的一项）。
    * 缺失或不在清单里 → 400（不存在「配置默认模型」）。`acp` 下可省（省 = agent 自己的默认）。
    */
   modelId?: string;
@@ -1699,7 +1699,7 @@ export interface ChatRequest {
   maxRetries?: number;
   /**
    * 同一批 tool-call 最多同时执行几个（1 = 串行，缺省 = `DEFAULT_TOOL_CALL_CONCURRENCY`）。
-   * 每一轮请求都带上（这个偏好存在客户端）；只影响内置 Mastra Agent 的工具执行。
+   * 每一轮请求都带上（这个偏好存在客户端）；只影响内置 Agent 的工具执行。
    */
   toolCallConcurrency?: number;
   /**
@@ -1803,7 +1803,7 @@ export interface AssistantSendInput {
    */
   history?: AgentChatMessage[];
   /**
-   * 这轮用的模型(只有内置 mastra agent,没有 ACP):配置 id + 配置下的模型 id。
+   * 这轮用的模型(只有内置 Agent agent,没有 ACP):配置 id + 配置下的模型 id。
    * 缺省 = 服务端取「第一份带模型的配置的第一个模型」;带了但悬空 / 不在清单 → 400 人话错误。
    */
   configId?: string;
@@ -1881,13 +1881,28 @@ export interface ChatActiveResult {
  *
  * `ok: true` 时带落库的检查点（含统计，前端横幅 / popover 直接展示）；
  * `ok: false` = 没压缩也没改动（如对话不足两轮），`reason` 说明原因，可以直接给用户看。
- * 摘要请求失败走 HTTP 5xx（`jsonError`），不走这个类型 —— 那是要明确报错的故障。
+ * 摘要请求失败走流里的 `error` 帧（HTTP 已经切到 SSE，改不了状态码）。
  */
 export interface ChatCompressResult {
   ok: boolean;
   reason?: string;
   summary?: ConversationContextSummary;
 }
+
+/**
+ * POST /api/chat/compress（手动压缩）的 SSE 帧。
+ *
+ * 与自动压缩共用同一组 `context-compaction-*` / `context-compressed` 事件 —— 手动压缩
+ * 也要把摘要过程实时显示成同一个折叠块，而不是只转圈等一个最终结果。
+ *
+ * - `event`：压缩过程事件（只会有上面那三种上下文压缩事件）
+ * - `result`：压缩结束的最终结果（成功 / 没有可压缩的部分）
+ * - `error`：摘要失败等运行时错误；客户端按失败处理，不落检查点
+ */
+export type ChatCompressFrame =
+  | { type: "event"; event: AgentStreamEvent }
+  | { type: "result"; result: ChatCompressResult }
+  | { type: "error"; message: string };
 
 /**
  * SSE 帧类型（`event:` 字段），data 统一是 `ChatStreamFrame`。

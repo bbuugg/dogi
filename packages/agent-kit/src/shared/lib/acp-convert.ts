@@ -1,10 +1,10 @@
 /**
- * ACP 会话 → 内置 agent（mastra）会话的内容转换：**纯函数**，不碰网络也不碰状态。
+ * ACP 会话 → 内置 agent（内置）会话的内容转换：**纯函数**，不碰网络也不碰状态。
  *
  * 为什么需要它：ACP 会话的历史**不在我们库里**（服务端落库时对 acp 强制清空 `messages`，
  * 见 `packages/workspace/src/domain.ts`），它是每次开会话时从外部 agent 侧
  * `session/load` 回放出来的（`conversation.ts` 的 loadConversation）。要「转成内置会话」，
- * 就得把那份回放结果原样搬进一条 mastra 会话的 `messages` —— 搬之前把内置侧不认的字段洗掉。
+ * 就得把那份回放结果原样搬进一条 内置会话的 `messages` —— 搬之前把内置侧不认的字段洗掉。
  *
  * 转换规则：**只做减法，且减的都是「内置侧不认 / 搬过去会误导」的字段，不动内容本身。**
  * - `text` / `reasoning` 原样保留（reasoning 喂模型时本来就被 `toModelMessages` 丢掉，

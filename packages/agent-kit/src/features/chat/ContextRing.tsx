@@ -29,7 +29,7 @@ import { turnIsAcp } from "@fizz/agent-kit/features/chat/session-backend";
  *
  * 会话类型在创建时就锁定，**被锁的整组不显示**（不是置灰）：
  * - acp 会话：只显示绑定的那个 agent 的模型（AI 模型组、其它 agent 一概不出）；
- * - mastra 会话：ACP 组不出；锁了配置的只显示那份配置；
+ * - 内置会话：ACP 组不出；锁了配置的只显示那份配置；
  * - 没有会话（空态）：两组全量可选。
  * 换类型只能新建会话。
  */
@@ -37,7 +37,7 @@ import { turnIsAcp } from "@fizz/agent-kit/features/chat/session-backend";
  * 上下文用量圆环：输入框操作行右侧的小环 + **点击**弹出的详情卡。
  *
  * 按会话类型分两条数据来源：
- * - **内置 agent（mastra）**：分子取最近一条助手消息落盘的 `usage.contextTokens`
+ * - **内置 agent（内置）**：分子取最近一条助手消息落盘的 `usage.contextTokens`
  *   —— 就是 pi 的 `calculateContextTokens`：**最后一次请求上游真实上报的 input + output**
  *   （不是本地按字符估的量）；分母取该会话选中模型的窗口（`resolveContextWindow`，
  *   与压缩触发同源）。详情卡里可**手动压缩**。
@@ -103,7 +103,7 @@ export function ContextRing({ app }: { app: AgentApp }) {
   /**
    * 带 `contextUsage` 的助手消息（从后往前找最后一条）。
    *
-   * 两条来源共用这一个 memo：ACP 是 agent 上报，内置 agent（mastra）是每个工具步骤
+   * 两条来源共用这一个 memo：ACP 是 agent 上报，内置 agent（内置）是每个工具步骤
    * 边界由服务端估推（见流事件 `context-usage`）—— 两者的落点都是消息上的
    * `contextUsage`，所以这里不需要按 isAcp 分叉。
    */
@@ -183,6 +183,27 @@ export function ContextRing({ app }: { app: AgentApp }) {
       liveContextUsage?.used ??
       lastUsage?.contextTokens ??
       null);
+  /**
+   * 「压缩动不了的那块」：系统提示词 + 工具 schema（只有内置 agent 的实时帧会带）。
+   *
+   * 这是「圆环红了但手动压缩说没得压」的唯一解释 —— 历史已经被压到保留区，
+   * 剩下的大头是提示词与工具定义，压缩机制管不到。所以它必须显示出来，
+   * 否则用户只会一遍遍点压缩。
+   *
+   * 取**最后一条带 `base` 的消息**而不是只认 `liveContextUsage`：一轮结束后实时那份
+   * 会被 finish 的权威值盖掉（见上面的优先级），但消息上的 `contextUsage` 还在，
+   * 这样「跑完了再点开卡片」也能看到这个数。
+   */
+  let usageBase: number | null = null;
+  if (!isAcp) {
+    for (let i = app.messages.length - 1; i >= 0; i -= 1) {
+      const base = app.messages[i]?.contextUsage?.base;
+      if (base != null) {
+        usageBase = base;
+        break;
+      }
+    }
+  }
   /** ACP 的窗口取 agent 上报的 size（本地模型配置对 ACP 不适用） */
   const contextWindow = isAcp && acpUsage ? acpUsage.size : localContextWindow;
   const triggerTokens = compactionTriggerTokens(contextWindow);
@@ -207,9 +228,30 @@ export function ContextRing({ app }: { app: AgentApp }) {
           : "stroke-muted-foreground";
 
   const compressing = app.contextCompressing;
+  /**
+   * 手动压缩能不能**真的压出东西** —— 判据与服务端同一条线：`即将发出去的那份 >
+   * 窗口 − 预留` 才切得动。
+   *
+   * 推导：切点按保留区 `keep = 0.8 × (窗口 − 预留 − base − 摘要)` 往前找，
+   * 只有「保留区之外还有原文」才切得出要摘要的那段；而
+   * `base + 摘要 + tail > 窗口 − 预留` 恰好蕴含 `tail > keep`。
+   * 反过来（没到触发线）切点前面只剩一个保留区，服务端只会回「没什么可压缩的」。
+   *
+   * 所以按钮直接置灰，别让用户点一次再吃一个错误提示。顺带的好处：没到触发线就压
+   * 会白白改掉请求前缀（上游缓存全废），本来也不该压。
+   */
+  // `triggerTokens` 就是「窗口 − 预留」，与圆环上那条线、服务端的触发线同源
+  const canCompact = !isAcp && used !== null && used > triggerTokens;
+  /** 置灰的原因：直接写在 title 上，省得用户猜 */
+  const compactBlockedReason = isAcp
+    ? t("外部 Agent 自己管理上下文，本地无法压缩")
+    : !canCompact
+      ? t("当前上下文还没到压缩线，压缩不会减少占用")
+      : undefined;
+
   const compress = async (): Promise<void> => {
     const res = await app.compressContextNow();
-    // 成功的反馈走压缩横幅（store 里设置 contextNotice）；失败这里直接报
+    // 成功后的摘要块 / 横幅由 store 的 SSE 事件驱动；失败这里直接报
     if (!res.ok) toast.error(t("手动压缩失败：{error}", { error: res.reason ?? t("未知错误") }));
   };
   const clear = async (): Promise<void> => {
@@ -298,6 +340,21 @@ export function ContextRing({ app }: { app: AgentApp }) {
               {percentText !== null && ` · ${percentText}%`}
             </span>
           </div>
+          {/* 手动压缩之后、下一轮跑完之前，手上没有任何上游实测值 —— 这个数是压缩后的
+              **估算**。不标出来就会被当成实测值读（「怎么压完还是 40k」）。 */}
+          {usedIsCheckpoint && (
+            <div className="text-muted-foreground">{t("（压缩后估算，下一轮起按上游实测值）")}</div>
+          )}
+          {/* 「压缩动不了的那块」：历史压到保留区之后，占用就剩它 —— 圆环红着但压不动
+              的原因只可能在这里（提示词 / 工具定义 / 已有摘要），点压缩是没用的。 */}
+          {usageBase !== null && (
+            <div className="flex items-baseline gap-1.5 text-muted-foreground">
+              <span>{t("其中系统提示词 + 工具")}</span>
+              <span className="font-medium text-foreground tabular-nums">
+                {usageBase.toLocaleString()}
+              </span>
+            </div>
+          )}
           {/* 上一轮的完整账目：上游上报的**整轮**输入（多步工具循环下是各 step 累加，
                         所以它不是上面的上下文占用）、输出、思考、速度。缺哪项（上游没报）就不显示 */}
           {lastUsage && (
@@ -404,7 +461,7 @@ export function ContextRing({ app }: { app: AgentApp }) {
 
           {/* 压缩相关的是内置 agent 专属：ACP 的上下文在 agent 侧，本地既看不见
                         压缩历史也没有可点的按钮（`compressContextNow` / `clearContextSummary`
-                        都是 mastra 那条路的事） */}
+                        都是 内置 那条路的事） */}
           {!isAcp && (
             <>
               <div className="border-t pt-2" />
@@ -439,11 +496,11 @@ export function ContextRing({ app }: { app: AgentApp }) {
                     variant="outline"
                     size="sm"
                     className="h-7 px-2.5 text-xs"
-                    disabled={compressing || app.streaming}
+                    disabled={compressing || app.streaming || !canCompact}
                     title={
                       app.streaming
                         ? t("这一轮还在进行中，请等它结束后再压缩")
-                        : undefined
+                        : compactBlockedReason
                     }
                     onClick={() => void compress()}
                   >

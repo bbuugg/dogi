@@ -4,7 +4,7 @@
  * 职责只有两件，别往这里加第三件：
  * 1. 把 `app` 里的清单灌给 `ModelPicker`（`models` / `acpAgents` / 默认窗口）；
  * 2. 按**活动会话**算出「该不该锁后端」：acp 会话只显示它绑定的那个 agent，
- *    已有 mastra 会话时不出 ACP 组（换类型 = 新建会话）；
+ *    已有 内置会话时不出 ACP 组（换类型 = 新建会话）；
  * 3. 读写 `chatTarget`（`setChatTarget` 会顺手探 ACP 档位、把目标持久化到会话目录）。
  *
  * 控件本身（分组 / 齿轮 / 手机拍平 / 勾选）全在 `ModelPicker` 里，定时任务表单复用的
@@ -36,7 +36,7 @@ export function ModelSelect({ app }: { app: AgentApp }) {
       value={app.chatTarget}
       onChange={app.setChatTarget}
       {...(lockedAgent ? { lockedAgent } : {})}
-      // mastra 会话 / 空态之外不出 ACP 组：有会话就换不了类型
+      // 内置会话 / 空态之外不出 ACP 组：有会话就换不了类型
       showAcp={!activeConversation}
       emptyTitle={t('这一轮用哪个模型 / 哪个外部 Agent（下一轮生效）')}
       // `defaultContextWindow` 是 `number | null`（服务端没配就是 null），

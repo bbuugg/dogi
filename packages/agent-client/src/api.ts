@@ -53,6 +53,7 @@ import {
 import { downloadFile, DownloadError } from "./download-file";
 import type {
   AgentBackend,
+  AgentStreamEvent,
   AcpAgentInput,
   AcpAgentView,
   AgentChatMessage,
@@ -61,6 +62,7 @@ import type {
   AgentWorkspace,
   AssistantSendInput,
   ChatActiveResult,
+  ChatCompressFrame,
   ChatCompressResult,
   ChatRequest,
   DetectedAcpAgent,
@@ -1166,7 +1168,7 @@ export function createApi(
        */
       workspaceId?: string;
       title?: string;
-      /** 会话形态（缺省 = 普通对话）；`collab` 只支持内置 Mastra 后端 */
+      /** 会话形态（缺省 = 普通对话）；`collab` 只支持内置 Agent 后端 */
       kind?: "chat" | "collab";
       /** 协作配置（仅 `kind: 'collab'`） */
       collab?: CollabSettings;
@@ -1182,7 +1184,7 @@ export function createApi(
        *
        * 目前唯一的调用方是「ACP 会话转内置 Agent」（见 `lib/acp-convert.ts`）：转换产物
        * 直接作为新会话的历史。服务端 `POST /api/conversations` 本来就收这个字段
-       * （对 mastra 后端不做任何特判，直接进 `domain.saveConversation`）。
+       * （对 内置后端不做任何特判，直接进 `domain.saveConversation`）。
        */
       messages?: AgentChatMessage[];
     }) =>
@@ -2253,14 +2255,42 @@ export function createApi(
 
     /**
      * 手动触发上下文压缩（落摘要检查点，原始消息不动）。
-     * `ok: false` = 没压缩也没改动（如不足两轮），`reason` 可直接展示；
-     * 摘要请求失败抛 ApiError（HTTP 5xx）。
+     *
+     * 走 SSE：压缩过程与自动压缩共用同一组 `context-compaction-*` 事件，界面显示同一个
+     * 流式折叠块。返回值仍是最终结果；`ok: false` = 没压缩也没改动（如不足两轮），
+     * `reason` 可直接展示。摘要失败抛 ApiError（从流里的 `error` 帧转来）。
      */
-    compressContext: (conversationId: string) =>
-      request<ChatCompressResult>(API_ROUTES.chatCompress, {
+    async compressContext(
+      conversationId: string,
+      onEvent?: (event: AgentStreamEvent) => void,
+    ): Promise<ChatCompressResult> {
+      const res = await fetchImpl(endpoint(API_ROUTES.chatCompress), {
         method: "POST",
+        headers: {
+          ...authHeaders(),
+          "content-type": "application/json",
+          accept: "text/event-stream",
+        },
         body: JSON.stringify({ conversationId }),
-      }),
+      });
+      if (!res.ok) {
+        if (res.status === 401) fireUnauthorized();
+        throw await toError(res);
+      }
+      // 老服务端不认识 Accept，仍回 JSON：直接吃下来，别把「没有 SSE 帧」当失败
+      if (!(res.headers.get("content-type") ?? "").includes("text/event-stream")) {
+        return (await res.json()) as ChatCompressResult;
+      }
+      let result: ChatCompressResult | null = null;
+      let failure: string | null = null;
+      await readSseFrames<ChatCompressFrame>(res, (frame) => {
+        if (frame.type === "event") onEvent?.(frame.event);
+        else if (frame.type === "result") result = frame.result;
+        else failure = frame.message;
+      });
+      if (failure) throw new ApiError(failure);
+      return result ?? { ok: false, reason: "压缩未返回结果" };
+    },
 
     /** 清除摘要检查点（回到全文历史；下次轮次不再携带摘要消息） */
     clearContextSummary: (conversationId: string) =>

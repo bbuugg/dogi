@@ -25,13 +25,13 @@ export async function POST(request: Request) {
     /** 缺省 = 用户没选项目：当场建临时工作区（见下） */
     workspaceId?: string
     title?: string
-    /** 会话形态（缺省 = 普通对话）；`collab` 只支持内置 Mastra 后端 */
+    /** 会话形态（缺省 = 普通对话）；`collab` 只支持内置 Agent 后端 */
     kind?: 'chat' | 'collab'
     /** 协作配置（仅 `kind: 'collab'`）；缺省用 `DEFAULT_COLLAB_SETTINGS` */
     collab?: CollabSettings
-    backend?: 'mastra' | 'acp'
+    backend?: 'builtin' | 'acp'
     configId?: string
-    /** 创建时确定的具体模型（mastra = 配置下的模型 id；acp = agent 广告的模型值） */
+    /** 创建时确定的具体模型（内置 = 配置下的模型 id；acp = agent 广告的模型值） */
     modelId?: string
     /** 导入 / 绑定 agent 侧既有会话：创建时就落 acpSessionId */
     acpSessionId?: string

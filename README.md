@@ -322,7 +322,7 @@ sudo chown -R $(id -u):$(id -g) /srv/my-project
 | --- | --- |
 | `packages/contracts` | 共享领域类型 + HTTP/SSE 契约 |
 | `packages/workspace` | 存储、会话真源、各领域业务逻辑 |
-| `packages/agent` | 模型解析、Mastra Agent、对话编排、子任务、协作运行时 |
+| `packages/agent` | 模型解析、agent 循环、对话编排、子任务、协作运行时 |
 | `packages/tools` | Agent 工具集（文件 / 命令 / 抓取 / 截图 / 浏览器 / Git 只读） |
 | `packages/skills` / `plugin` / `mcp` / `acp` | 技能发现、插件框架、MCP、外部 Agent 客户端 |
 | `packages/git` / `shells` | worktree 操作、本机 shell 探测 |

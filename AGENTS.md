@@ -19,9 +19,9 @@ Fizz 是自托管的 AI Agent 工作台：**所有能力跑在一个 Node 进程
 
 | 位置 | 职责 | 硬约束 |
 | --- | --- | --- |
-| `packages/contracts` | 领域类型 + HTTP/SSE 契约 | 零 Electron、零 Mastra；根入口不导出 `resolve-model` |
-| `packages/workspace` | 存储（JsonStore）、会话真源、领域逻辑 | 零 Electron、零 Mastra |
-| `packages/agent` | `resolveModel`、Mastra Agent、对话编排 | 零 Electron |
+| `packages/contracts` | 领域类型 + HTTP/SSE 契约 | 零 Electron、零 agent 运行时依赖；根入口不导出 `resolve-model` |
+| `packages/workspace` | 存储（JsonStore）、会话真源、领域逻辑 | 零 Electron、零 agent 运行时依赖 |
+| `packages/agent` | `resolveModel`、agent 循环（`engine.ts`）、对话编排 | 零 Electron |
 | `packages/tools` | Agent 工具集 + 项目级工具 | `project-tools` 只准挂给项目管理助手 |
 | `packages/skills` `plugin` `mcp` `acp` `git` `shells` | 技能 / 插件 / MCP / 外部 agent / worktree / shell 探测 | 零 Electron |
 | `packages/agent-client` | 能力层：api / host 契约 / 宿主兜底 | **零 React、零 JSX**；不得反向依赖 kit / ui / host / apps |

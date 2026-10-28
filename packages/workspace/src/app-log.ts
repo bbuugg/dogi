@@ -5,7 +5,7 @@
  *
  * 1. **落在 server 侧，不在 Electron 主进程**。本项目的能力都在 `apps/server`（Hono），
  *    桌面端只是进程内直连同一个 server —— 记在主进程就等于 Web 端看不见，所以本文件
- *    在 `@fizz/workspace`（零 Electron、零 Mastra），web 与 desktop 共享同一份。
+ *    在 `@fizz/workspace`（零 Electron、零引擎依赖），web 与 desktop 共享同一份。
  *
  * 2. **命名空间是运行时注册的，不是编译期枚举**。dogi 的 `HostLogScope` 写死六个值，
  *    新增功能要改类型 + 改 UI 两张静态表；这里改成 `registerNamespace()` 注册进一张

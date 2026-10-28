@@ -353,7 +353,7 @@ export function QuickActionsDialog({
                 </button>
               )}
             </span>
-            <Button variant="ghost" size="sm" onClick={onClose}>
+            <Button data-dialog-dismiss="" variant="ghost" size="sm" onClick={onClose}>
               {tr('关闭')}
             </Button>
           </div>
@@ -443,8 +443,11 @@ export function QuickActionsDialog({
               </div>
 
               {/* 按钮钉在底部、不进滚动区：表单再长也不用滚到底才能保存 */}
-              <div className="flex shrink-0 justify-end gap-2 border-t pt-3">
-                <Button variant="ghost" size="sm" onClick={() => setDraft(null)}>
+              <div
+                data-slot="dialog-footer"
+                className="flex shrink-0 justify-end gap-2 border-t pt-3"
+              >
+                <Button data-dialog-dismiss="" variant="ghost" size="sm" onClick={() => setDraft(null)}>
                   {tr('取消')}
                 </Button>
                 <Button size="sm" disabled={busy} onClick={() => void submitDraft()}>

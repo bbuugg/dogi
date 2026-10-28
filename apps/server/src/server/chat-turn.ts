@@ -72,7 +72,7 @@ export function releaseUnattendedWaits(requestId: string): void {
  * 删除消失时用时间近似，见 `ConversationContextSummary` 的字段注释）。
  * 原始消息不动 —— 压缩只发生在请求侧；自动压缩叠加在这份切片结果上照常工作。
  *
- * 容器型项目也走这一份（`container-projects/turn.ts`）：容器里跑的是同一个 Mastra 运行时，
+ * 容器型项目也走这一份（`container-projects/turn.ts`）：容器里跑的是同一个 引擎 运行时，
  * 它拿到的必须是同一份切片，压缩过的会话在容器里才不会整段重发。
  */
 export function historyForTurn(
@@ -270,7 +270,7 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
    */
   if (domain.getWorkspace(conversation.workspaceId)?.container) return startContainerTurn(input, opts)
 
-  // 用户消息落盘：mastra 会话全量落；acp 会话的消息保存在 agent 侧（session/load 接回），
+  // 用户消息落盘：内置会话全量落；acp 会话的消息保存在 agent 侧（session/load 接回），
   // 本地只留会话元数据 —— 首轮顺手把自动标题补上（与容器型项目共用同一份口径）
   const { userMessage, conversationTitle } = beginTurnUserMessage(input, conversation)
   const isAcpConversation = conversation.backend === 'acp'
@@ -664,11 +664,11 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
      * `resolveModelConfig` 自带人话错误，这里只接住并记日志，不往用户界面抛。
      */
     const subagentSettings = domain.getSubagentSettings()
-    const isCollab = backend === 'mastra' && conversation.kind === 'collab'
+    const isCollab = backend === 'builtin' && conversation.kind === 'collab'
     let subagentModel: AiModelConfig | undefined
     if (
       !isCollab &&
-      backend === 'mastra' &&
+      backend === 'builtin' &&
       subagentSettings.enabled.length > 0 &&
       subagentSettings.modelConfigId &&
       subagentSettings.modelId
@@ -760,13 +760,13 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
        */
       browser: browserToolNames.length > 0,
       /**
-       * 子任务（subagent）：只在 mastra 后端生效，且**要用户在设置里打开过**。
+       * 子任务（subagent）：只在 内置后端生效，且**要用户在设置里打开过**。
        * 缺省 / 空数组 = 不挂 `agents`，与没有这个能力时逐字节一致（runAgent 与
-       * `newAgent` 都不传这个字段，Mastra 的派活工具压根不会生成）。
+       * `newAgent` 都不传这个字段，引擎的派活工具压根不会生成）。
        * ACP 会话走下面的 runAcpAgent：外部 agent 自己管编排，不该被我们塞子任务。
        */
-      subagents: backend === 'mastra' && !isCollab ? subagentSettings.enabled : [],
-      ...(backend === 'mastra' && subagentModel ? { subagentModel } : {}),
+      subagents: backend === 'builtin' && !isCollab ? subagentSettings.enabled : [],
+      ...(backend === 'builtin' && subagentModel ? { subagentModel } : {}),
       /**
        * 上下文窗口按「这一轮真正选中的模型」解析：`resolveModelConfig` 已经把
        * `model` 覆盖成选中那个 id，所以直接用 `modelConfig.model` 查表即可。
@@ -783,7 +783,20 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
       onEvent,
       // 运行中插话：每个工具步骤边界从 run 的收件箱消费一条（agent 侧注入并强制续跑）
       pollSteer: async () => run.steerInbox.shift() ?? null,
-      // 上下文压缩：把统计推成一帧，让用户知道这一轮上下文被压过了。
+      // 上下文压缩：开始 / 增量 / 结束各推一帧。流式只用于展示，检查点仍由
+      // compactHistory 在完整摘要校验通过后落盘（中途失败 / 中止不会写半份）。
+      onContextCompactionStart: (info) =>
+        emit(run, {
+          type: 'event',
+          requestId,
+          event: { type: 'context-compaction-start', ...info }
+        }),
+      onContextCompactionDelta: (info) =>
+        emit(run, {
+          type: 'event',
+          requestId,
+          event: { type: 'context-compaction-delta', ...info }
+        }),
       // 只有一种压缩（摘要），没有「清旧工具结果」那层 —— 那一层会改动请求前缀。
       onContextCompressed: (info) =>
         emit(run, {

@@ -48,11 +48,15 @@ export function fileToolsPlugin(root: string, options: AgentToolOptions): Plugin
  * 全局只读的联网工具插件：web_fetch + screenshot。不依赖工作区，任何会话都可用
  * （无工作区时 `root` 传空串 = 超长正文只截断不落盘，见 spillToWorkspace）。
  */
-export function webToolsPlugin(root: string): PluginObject {
+export function webToolsPlugin(
+  root: string,
+  /** 单条抓取的停止钩子（与 execute_command 同一张表，见 agent.ts 的 commandStops） */
+  stopHooks: Parameters<typeof buildWebFetchTool>[1] = {}
+): PluginObject {
   return {
     name: 'builtin:web-tools',
     apply(ctx) {
-      ctx.tools.registerAll(buildWebFetchTool(root), {
+      ctx.tools.registerAll(buildWebFetchTool(root, stopHooks), {
         priority: 0,
         origin: BUILTIN_ORIGIN,
         source: 'builtin:web_fetch'
@@ -93,7 +97,7 @@ export function rawToolsPlugin(
  * 给工具集套上钩子：`tool:call` 可改写入参、`tool:result` 可改写返回
  * （钩子名与范式见 `@fizz/plugin` 的 hooks.ts）。
  *
- * 只包「有 `execute` 的工具」——AI SDK / Mastra 的工具约定；没有 `execute` 的对象
+ * 只包「有 `execute` 的工具」——AI SDK 的工具约定；没有 `execute` 的对象
  * **原样返回**，保持引用不变（测试里的假工具就是这种）。
  *
  * 钩子里抛的错**不吞**：照常冒出去变成一次 tool-error（仓库「不许静默失败」的价值观）。
@@ -219,7 +223,7 @@ async function guardToolCall(
  * 给工具集套上钩子：`tool:call` 可改写入参、`tool:result` 可改写返回
  * （钩子名与范式见 `@fizz/plugin` 的 hooks.ts）。
  *
- * 只包「有 `execute` 的工具」——AI SDK / Mastra 的工具约定；没有 `execute` 的对象
+ * 只包「有 `execute` 的工具」——AI SDK 的工具约定；没有 `execute` 的对象
  * **原样返回**，保持引用不变（测试里的假工具就是这种）。
  *
  * 钩子里抛的错**不吞**：照常冒出去变成一次 tool-error（仓库「不许静默失败」的价值观）。

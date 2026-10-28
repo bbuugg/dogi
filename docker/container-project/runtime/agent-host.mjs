@@ -155,7 +155,11 @@ function makeSetup(body, requestConfirm, ask, commandStops) {
         onCommandStart: (toolCallId, stop) => commandStops.set(toolCallId, stop),
         onCommandEnd: (toolCallId) => commandStops.delete(toolCallId)
       }),
-      ...buildWebFetchTool(WORKSPACE),
+      // web_fetch 同样接这张停止表（抓卡住的站点不该逼用户中止整轮）
+      ...buildWebFetchTool(WORKSPACE, {
+        onStart: (toolCallId, stop) => commandStops.set(toolCallId, stop),
+        onEnd: (toolCallId) => commandStops.delete(toolCallId)
+      }),
       ...buildAskFollowupTool({ ask }, body.runId)
     },
     [...CONTAINER_AGENT_TOOL_KEYS]
@@ -279,6 +283,14 @@ async function handleRuns(req, res) {
     history: Array.isArray(body.history) ? body.history : [],
     // 压缩检查点的复用键（宿主每轮传同一个会话 id）：不传就每轮重摘要一次
     conversationId: typeof body.conversationId === 'string' ? body.conversationId : undefined,
+    /**
+     * 宿主上一轮落盘的检查点。容器**不持久化任何东西**（连密钥都不落盘，更别说摘要），
+     * 所以这里必须由宿主带回来 —— 不带的话容器一重启（换镜像 / docker restart），
+     * 内存里的 `autoSummaryCache` 就没了，这一轮会把整段历史重新摘要一次。
+     */
+    ...(body.autoSummarySeed && typeof body.autoSummarySeed === 'object'
+      ? { autoSummarySeed: body.autoSummarySeed }
+      : {}),
     model,
     // setup 提供时 skills / permissionMode / projectDoc 等一律不参与装配（提示词已由宿主给全）
     skills: [],
@@ -287,7 +299,22 @@ async function handleRuns(req, res) {
     contextWindow,
     signal: controller.signal,
     onEvent: (event) => writeFrame(run, { type: 'event', event }),
-    onContextCompressed: (info) => writeFrame(run, { type: 'event', event: { type: 'context-compressed', ...info } })
+    /**
+     * 交接文档的三帧都靠**显式回调**转发（`runAgent` 不会把压缩事件走 `onEvent`）：
+     * 少了 start / delta 这两条，容器型项目就看不到「正在压缩」的流式文档，
+     * 只剩一条结束通知。宿主收到后原样进 `ChatStreamFrame` 通道，前端一条链路都不用改。
+     */
+    onContextCompactionStart: (info) =>
+      writeFrame(run, { type: 'event', event: { type: 'context-compaction-start', ...info } }),
+    onContextCompactionDelta: (info) =>
+      writeFrame(run, { type: 'event', event: { type: 'context-compaction-delta', ...info } }),
+    onContextCompressed: (info) => writeFrame(run, { type: 'event', event: { type: 'context-compressed', ...info } }),
+    /**
+     * 刚落下检查点：交给宿主持久化（容器不写盘）。宿主落盘后下一轮当 seed 送回来，
+     * 所以这条帧丢了只会让下一轮多一次摘要调用，不会影响正确性 —— 但仍要发：
+     * 「容器重启一次就整段重摘要」正是缺了它。
+     */
+    onAutoSummary: (entry) => writeFrame(run, { type: 'auto-summary', entry })
   }).catch((err) => ({ finishReason: 'error', error: describeError(err) }))
 
   const aborted = new Promise((resolve) => {

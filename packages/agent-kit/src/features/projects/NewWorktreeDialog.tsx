@@ -182,7 +182,7 @@ export function NewWorktreeDialog({
         </div>
 
         <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+          <Button data-dialog-dismiss="" variant="ghost" onClick={() => onOpenChange(false)}>
             {tr('取消')}
           </Button>
           <Button disabled={!workspace || busy || !identifierValid} onClick={() => void submit()}>

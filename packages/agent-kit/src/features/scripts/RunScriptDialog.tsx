@@ -213,7 +213,7 @@ export function RunScriptDialog({
         </div>
 
         <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+          <Button data-dialog-dismiss="" variant="ghost" onClick={() => onOpenChange(false)}>
             取消
           </Button>
           <Button disabled={!canRun} onClick={handleRun}>

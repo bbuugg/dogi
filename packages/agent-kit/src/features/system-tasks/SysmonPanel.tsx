@@ -955,7 +955,7 @@ function KillDialog({
         </label>
 
         <DialogFooter>
-          <Button variant="ghost" size="sm" onClick={onCancel}>
+          <Button data-dialog-dismiss="" variant="ghost" size="sm" onClick={onCancel}>
             取消
           </Button>
           <Button

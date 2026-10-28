@@ -1866,7 +1866,7 @@ export function TerminalPanel({
           （见 lib/keyboard-inset.ts 文件头）。 */}
       {showKeyBar && (
         <div
-          className="grid shrink-0 grid-cols-7 gap-1 border-t border-border bg-background p-1.5"
+          className="grid shrink-0 grid-cols-7 bg-background"
           // pointerdown 时就记下「终端里本来有没有焦点」—— 等 click 已经晚了，浏览器在
           // touch 处理里就把 textarea blur 了。记下来是为了点完快捷键把用户的键盘状态
           // 原样还给他（开着就补 focus，关着就别招回来），见 hadFocusRef 与 handleAction。
@@ -1894,16 +1894,16 @@ export function TerminalPanel({
           <MobileKey active={mods.ctrl} label="Ctrl" onClick={() => toggleMod('ctrl')} />
           <MobileKey active={mods.alt} label="Alt" onClick={() => toggleMod('alt')} />
           <MobileKey label="Home" onClick={() => handleAction('Home')} />
-          <MobileKey label="↑" ariaLabel="上方向键" onClick={() => handleAction('ArrowUp')} />
+          <MobileKey label="↑" ariaLabel="上方向键" onClick={() => handleAction('ArrowUp')} repeat />
           <MobileKey label="End" onClick={() => handleAction('End')} />
-          <MobileKey label="PgUp" ariaLabel="上一页" onClick={() => handleAction('PageUp')} />
+          <MobileKey label="PgUp" ariaLabel="上一页" onClick={() => handleAction('PageUp')} repeat />
           <MobileKey label="Tab" onClick={() => handleAction('Tab')} />
           <MobileKey label="Del" ariaLabel="删除键" onClick={() => handleAction('Delete')} />
           <MobileKey active={mods.shift} label="Shift" onClick={() => toggleMod('shift')} />
-          <MobileKey label="←" ariaLabel="左方向键" onClick={() => handleAction('ArrowLeft')} />
-          <MobileKey label="↓" ariaLabel="下方向键" onClick={() => handleAction('ArrowDown')} />
-          <MobileKey label="→" ariaLabel="右方向键" onClick={() => handleAction('ArrowRight')} />
-          <MobileKey label="PgDn" ariaLabel="下一页" onClick={() => handleAction('PageDown')} />
+          <MobileKey label="←" ariaLabel="左方向键" onClick={() => handleAction('ArrowLeft')} repeat />
+          <MobileKey label="↓" ariaLabel="下方向键" onClick={() => handleAction('ArrowDown')} repeat />
+          <MobileKey label="→" ariaLabel="右方向键" onClick={() => handleAction('ArrowRight')} repeat />
+          <MobileKey label="PgDn" ariaLabel="下一页" onClick={() => handleAction('PageDown')} repeat />
         </div>
       )}
     </div>

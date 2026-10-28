@@ -348,7 +348,7 @@ export function AssistantPanel({
             // 模型 pill 挤掉。
             leading: <PermissionPill value={permissionMode} onChange={handlePermissionChange} />,
             // 模型 pill：与主会话（ChatPanel 的 ModelSelect）同一颗皮（`CHAT_PILL`）——
-            // 无边框胶囊 + 前置 Sparkles + 不画右侧箭头。助手只有内置 mastra 的
+            // 无边框胶囊 + 前置 Sparkles + 不画右侧箭头。助手只有内置 Agent 的
             // 「配置 × 模型」，没有 ACP 那层，所以一个下拉按配置分组铺开即可。
             trailing: (
               <DropdownMenu>

@@ -10,7 +10,7 @@
  *   `chat-turn` 那套 `emit`，进还是那条 `ChatStreamFrame` 通道 —— 前端一条链路都不用改；
  * - 宿主 → 容器：审批 / 追问的答复走 `POST /runs/:id/answer`，中止走 `POST /runs/:id/abort`。
  *
- * 因此这一条链路里**刻意没有**：ACP（容器里就是我们的 Mastra 运行时）、浏览器工具、MCP、
+ * 因此这一条链路里**刻意没有**：ACP（容器里就是我们的 引擎 运行时）、浏览器工具、MCP、
  * 项目工具、客户端工具、子任务、运行中插话的**注入**（收件箱里的插话走收尾兜底起新一轮，
  * 见收尾链 —— 那与本地一轮的行为一致，不是特例）。
  *
@@ -73,6 +73,17 @@ interface ContainerRunBody {
   /** 容器视角的技能清单（`path` 已是容器内路径，容器据此建 `read_skill`） */
   skills: ContainerSkill[]
   permissionMode: AiPermissionMode
+  /**
+   * 上一轮在容器里落下的**压缩检查点**（宿主持久化过的那份），本轮带回去复用。
+   *
+   * 不传的代价：容器进程一重启（换镜像 / `docker restart`），容器内存里的
+   * `autoSummaryCache` 就没了，这一轮会把**整段历史重新摘要一次** —— 多一次模型调用，
+   * 摘要文本还会变（请求前缀跟着变，上游缓存全废）。
+   *
+   * `keepFromMessageId` 指向的 id 来自宿主上一轮发过去的 `history`（宿主原样带 id，
+   * 不会重编），所以跨轮、跨进程都认得出是哪条消息。
+   */
+  autoSummarySeed?: { keepFromMessageId: string; text: string }
 }
 
 /** 容器内的一帧（容器 → 宿主，SSE 的 `data:` 行） */
@@ -80,6 +91,13 @@ type ContainerFrame =
   | { type: 'event'; event: AgentStreamEvent }
   | { type: 'confirm-request'; confirm: AgentConfirmInput & { id: string } }
   | { type: 'followup-request'; id: string; request: Omit<AskFollowupRequest, 'id'> }
+  /**
+   * 容器里刚落下了一份压缩检查点（`compactHistory` 的 `onAutoSummary`）。
+   *
+   * 容器碰不到宿主的存储，所以只能把它交回来 —— 宿主落盘后，下一轮再当
+   * `autoSummarySeed` 送回去。没有这条，容器重启一次检查点就丢，整段历史重新摘要。
+   */
+  | { type: 'auto-summary'; entry: { keepFromMessageId: string; text: string } }
   | { type: 'done'; result: RunAgentResult }
 
 /** 宿主回给容器的答复（`POST /runs/:id/answer`） */
@@ -216,12 +234,15 @@ async function pumpContainerRun(ctx: ContainerPumpContext): Promise<RunAgentResu
   const dispatch = (frame: ContainerFrame): void => {
     if (frame.type === 'event') {
       /**
-       * 命令的「停止」入口：容器里的 `execute_command` 在容器内跑，宿主杀不到它的进程 ——
-       * 收到 `tool-call` 就在 `run.commandStops` 挂一个**转发器**，让
+       * 单条工具的「停止」入口：容器里的 `execute_command` / `web_fetch` 在容器内跑，
+       * 宿主够不到它的进程 / 连接 —— 收到 `tool-call` 就在 `run.commandStops` 挂一个**转发器**，让
        * `POST /api/chat/command/stop` 与本地一轮走同一张表、同一个路由（不必新增契约）。
        * `tool-result` 到了就摘掉（命令已经结束，再点停止没有意义）。
        */
-      if (frame.event.type === 'tool-call' && frame.event.toolName === 'execute_command') {
+      if (
+        frame.event.type === 'tool-call' &&
+        (frame.event.toolName === 'execute_command' || frame.event.toolName === 'web_fetch')
+      ) {
         const toolCallId = frame.event.toolCallId
         run.commandStops.set(toolCallId, () => {
           run.commandStops.delete(toolCallId)
@@ -237,15 +258,39 @@ async function pumpContainerRun(ctx: ContainerPumpContext): Promise<RunAgentResu
       finished = frame.result
       return
     }
+    if (frame.type === 'auto-summary') {
+      /**
+       * 容器里刚落了检查点：立刻持久化到宿主（与本地一轮的 `onAutoSummary` 同一口径）。
+       *
+       * 顺带撤掉「下一轮强制补压」：固化点已经推进到模型实际看到的位置了。
+       * 这里**不 await、不阻塞读流** —— 它只是记账，落盘失败也不该把这一轮带崩
+       * （`setAutoSummary` 内部会 commit，异常往上抛的话流就读不下去了）。
+       */
+      try {
+        domain.setAutoSummary(ctx.body.conversationId, { ...frame.entry, createdAt: Date.now() })
+      } catch (err) {
+        console.warn('[server] 容器里的压缩检查点落盘失败：', err)
+      }
+      return
+    }
     if (frame.type === 'confirm-request') {
       void ctx
         .confirm(frame.confirm)
         .then((approved) => postAnswer(port, runId, { kind: 'confirm', id: frame.confirm.id, approved }))
       return
     }
-    void ctx
-      .followup(frame.request)
-      .then((answer) => postAnswer(port, runId, { kind: 'followup', id: frame.id, answer }))
+    if (frame.type === 'followup-request') {
+      void ctx
+        .followup(frame.request)
+        .then((answer) => postAnswer(port, runId, { kind: 'followup', id: frame.id, answer }))
+      return
+    }
+    /**
+     * 认不出来的帧：**必须显式落到这里**，不能靠「最后一条 else 就是追问」。
+     * 新镜像 + 旧宿主时，新帧会落进下面这个分支；按追问处理会把
+     * `frame.request` 当参数传进 followup 闸（undefined），轻则一条脏日志，重则把这一轮卡住。
+     */
+    console.warn('[server] 容器发来不认识的帧（已忽略）：', (frame as { type?: string }).type)
   }
 
   const reader = response.body.getReader()
@@ -337,11 +382,11 @@ export async function startContainerTurn(
   if (!workspace.container) return rejectTurn(404, '这个会话的工作区不是容器型项目')
 
   /**
-   * 容器里跑的是我们的 Mastra 运行时，**没有 ACP 客户端** —— 会话却可能是在普通项目里
+   * 容器里跑的是我们的 引擎 运行时，**没有 ACP 客户端** —— 会话却可能是在普通项目里
    * 建好、绑了 ACP agent 再切过来的。这种组合说清楚比默默按容器链路跑强。
    */
   const backend = input.backend ?? conversation.backend
-  if (backend !== 'mastra') {
+  if (backend !== 'builtin') {
     return rejectTurn(
       400,
       backend === 'acp'
@@ -635,7 +680,19 @@ export async function startContainerTurn(
           ),
           systemPrompt,
           skills,
-          permissionMode
+          permissionMode,
+          /**
+           * 上一轮容器落下的检查点：带回去复用，容器重启后不必整段重摘要
+           * （`compactHistory` 的 `seed`，与本地一轮的 `autoSummarySeed` 同一个东西）。
+           */
+          ...(conversation.autoSummary
+            ? {
+                autoSummarySeed: {
+                  keepFromMessageId: conversation.autoSummary.keepFromMessageId,
+                  text: conversation.autoSummary.text
+                }
+              }
+            : {})
         },
         onEvent,
         confirm: confirmFromContainer,

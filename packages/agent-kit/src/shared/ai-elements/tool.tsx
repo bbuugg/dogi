@@ -50,6 +50,12 @@ export type ToolHeaderProps = {
   /** 头部明细（命令 / 主入参等）：紧跟工具名截断显示，悬停 Tooltip 立即看全文 */
   detail?: string;
   /**
+   * 工具名右侧的**运行态**（子任务的「运行中 · 正在读文件 · 已调用 N 个工具」等）。
+   *
+   * 与 `detail` 并列、排在明细之前：运行态要一眼可见，不该被挤到卡片内容区里当正文。
+   */
+  status?: ReactNode;
+  /**
    * 停掉这次工具调用（工具在飞的时候给的回调）：传了就渲染一颗停止钮，排在触发行右侧。
    *
    * ⚠️ 按钮**必须与 CollapsibleTrigger 平级**、不能塞进触发器里 ——
@@ -172,6 +178,7 @@ export const ToolHeader = ({
   type,
   state,
   detail,
+  status,
   onStop,
   stopLabel,
   ...props
@@ -227,6 +234,7 @@ export const ToolHeader = ({
         <span className="shrink-0 text-sm">
           {title ?? type.split("-").slice(1).join("-")}
         </span>
+        {status ? <span className="min-w-0 shrink truncate">{status}</span> : null}
         {detail &&
           (touch ? (
             // 触屏没有 hover：明细仍在工具名后面，点它开全文弹窗。

@@ -40,7 +40,7 @@ export async function POST(request: Request) {
   if (!body.name?.trim()) return jsonError(400, '请填写名称')
   // 目标必须明确选过：触发时没人值守，缺了只会在调度器里报错（不存在「第一份可用配置」兜底）。
   // 两种后端的必填项不同：
-  // - 内置模型（mastra / 缺省）：配置 + 模型都要有；
+  // - 内置模型（内置 / 缺省）：配置 + 模型都要有；
   // - 外部 Agent（acp）：只要 agent（configId），模型可省 = 跟随 agent 自己的默认
   const template = body.template
   if (!template?.configId) {

@@ -18,7 +18,7 @@ const BUNDLED_DEPS = ['cron-parser', 'luxon']
  * 其余 bare import（electron / node 内置 / 第三方）保持 external。
  * `@fizz/agent-host` 的子路径必须逐条列在 `@fizz/agent-host` 之前（前缀匹配）。
  *
- * ⚠️ external 的 bare 依赖（hono / ai / @mastra/core / @modelcontextprotocol/sdk /
+ * ⚠️ external 的 bare 依赖（hono / ai / @modelcontextprotocol/sdk /
  * @ai-sdk/* / zod / @agentclientprotocol/sdk / @hono/node-server /
  * simple-git / ws …）**必须在 apps/desktop/package.json 的
  * dependencies 里声明**：electron-builder 只把生产依赖放进 asar，devDependencies 不带。

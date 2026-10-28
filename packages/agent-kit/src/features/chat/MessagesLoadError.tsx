@@ -5,7 +5,7 @@ import { Button } from "@fizz/ui/button";
 import { useT } from "@fizz/agent-kit/shared/lib/language";
 
 /**
- * 会话历史加载失败（mastra 拉存档 / acp session/load 回放）：消息列表处展示错误 + 重试。
+ * 会话历史加载失败（内置 拉存档 / acp session/load 回放）：消息列表处展示错误 + 重试。
  * 不再像以前那样静默吞掉变成「历史丢了」—— 把 agent 侧（OpenCode 等）报的错亮出来，
  * 让用户一键重试。重试只是重跑同一段装载逻辑，不再走 openConversation 的 id 去重早退。
  */

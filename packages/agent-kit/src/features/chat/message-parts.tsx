@@ -22,6 +22,8 @@ import {
   isUnansweredFollowup
 } from '@fizz/agent-kit/shared/lib/ask-followup'
 import { autoCollapsesReasoning, autoCollapsesTools, useAutoCollapse } from '@fizz/agent-kit/shared/lib/auto-collapse'
+import { ContextCompactionCard } from '@fizz/agent-kit/features/chat/ContextCompactionCard'
+import type { ContextCompactionState } from '@fizz/agent-kit/shared/lib/stores/slices/conversation'
 import { cn } from '@fizz/agent-kit/shared/lib/utils'
 import { useT } from '@fizz/agent-kit/shared/lib/language'
 import type { AgentMessagePart, AskFollowupAnswer } from '@fizz/contracts/types'
@@ -117,6 +119,8 @@ export interface MessagePartsProps {
   conversationId?: string
   /** 不传 = 提问卡只读（容器侧） */
   followup?: MessageFollowupBridge
+  /** 当前会话的交接文档；只有 `messageId` 匹配的那条消息会把它插进 parts 流。 */
+  compaction?: ContextCompactionState | null
 }
 
 function MessagePartsInner({
@@ -125,7 +129,8 @@ function MessagePartsInner({
   total,
   streaming,
   conversationId,
-  followup
+  followup,
+  compaction
 }: MessagePartsProps) {
   // 订阅语言：折叠条摘要（思考 ×N / 工具调用 ×N）在渲染期用 `t()` 算，切语言要跟着变
   useT()
@@ -139,6 +144,16 @@ function MessagePartsInner({
   const turnDone = message.role === 'assistant' && !isStreamingLast
   // 「自动折叠」偏好（设置 → 通用）：决定哪些 part 归到折叠条里、哪些原样铺开
   const autoCollapse = useAutoCollapse()
+
+  const ownCompaction =
+    compaction && compaction.messageId === message.id ? compaction : null
+  const compactionIndex = Math.max(
+    0,
+    Math.min(ownCompaction?.afterPartIndex ?? message.parts.length, message.parts.length)
+  )
+  const compactionNode = ownCompaction ? (
+    <ContextCompactionCard key={`${message.id}-compaction`} compaction={ownCompaction} />
+  ) : null
 
   const renderPart = (part: AgentMessagePart, partIndex: number): ReactNode => {
     const tcid = part.type === 'tool-call' ? part.toolCallId : undefined
@@ -190,7 +205,13 @@ function MessagePartsInner({
 
   // 流式中的轮次 / 用户消息：原样渲染全部 parts（思考条 / 工具卡实时展开，不折叠）
   if (!turnDone) {
-    return <>{message.parts.map((part, partIndex) => renderPart(part, partIndex))}</>
+    const nodes: ReactNode[] = []
+    message.parts.forEach((part, partIndex) => {
+      if (compactionNode && partIndex === compactionIndex) nodes.push(compactionNode)
+      nodes.push(renderPart(part, partIndex))
+    })
+    if (compactionNode && compactionIndex >= message.parts.length) nodes.push(compactionNode)
+    return <>{nodes}</>
   }
 
   // 空白文本（纯换行 / 空格）没有任何可见内容 —— 见函数头注释
@@ -242,6 +263,10 @@ function MessagePartsInner({
     )
   }
   message.parts.forEach((part, partIndex) => {
+    if (compactionNode && partIndex === compactionIndex) {
+      flushRun()
+      nodes.push(compactionNode)
+    }
     if (isBlankText(part)) return
     if (foldable(part)) {
       run.push({ part, partIndex })
@@ -251,6 +276,7 @@ function MessagePartsInner({
     nodes.push(renderPart(part, partIndex))
   })
   flushRun()
+  if (compactionNode && compactionIndex >= message.parts.length) nodes.push(compactionNode)
 
   return <>{nodes}</>
 }
@@ -284,6 +310,7 @@ export const MessageParts = memo(
     prev.index === next.index &&
     prev.total === next.total &&
     prev.streaming === next.streaming &&
+    prev.compaction === next.compaction &&
     prev.followup?.requests === next.followup?.requests &&
     !!prev.followup?.onResume === !!next.followup?.onResume
 )
@@ -332,7 +359,7 @@ export function MessageActionRow({
    * 不传 = 不渲染「从此转为内置 Agent 会话」。
    *
    * 只对 **ACP 会话**给：ACP 的历史在外部 agent 进程里、本进程改不了，但可以把它
-   * **复制**成一条内置（mastra）会话 —— 以这条消息为终点，历史到这条为止（见
+   * **复制**成一条内置（内置）会话 —— 以这条消息为终点，历史到这条为止（见
    * `convertAcpConversation`）。它比「从此签出」更彻底：签出仍是同一种后端，转换是换后端。
    */
   onConvertFromHere?: () => void

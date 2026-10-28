@@ -35,6 +35,7 @@ import { Message, MessageContent } from '@fizz/agent-kit/shared/ai-elements/mess
 import { Skeleton } from '@fizz/ui/skeleton'
 import { MessageOutline } from '@fizz/agent-kit/features/chat/MessageOutline'
 import { ChatFind } from '@fizz/agent-kit/features/chat/chat-find'
+import { ContextCompactionCard } from '@fizz/agent-kit/features/chat/ContextCompactionCard'
 import { useT } from '@fizz/agent-kit/shared/lib/language'
 import { Composer } from '@fizz/agent-kit/features/chat/composer'
 import {
@@ -45,6 +46,7 @@ import {
   type MessageFollowupBridge
 } from '@fizz/agent-kit/features/chat/message-parts'
 import type { AgentChatMessage } from '@fizz/contracts/agent-api'
+import type { ContextCompactionState } from '@fizz/agent-kit/shared/lib/stores/slices/conversation'
 import { cn } from '@fizz/agent-kit/shared/lib/utils'
 
 // ---------------------------------------------------------------------------
@@ -149,6 +151,12 @@ export interface MessageListProps {
    */
   reconnectNotice?: { attempt: number } | null
   /**
+   * 当前会话的上下文交接文档。带着 `messageId`（触发压缩的那条助手消息）时作为该消息
+   * 里的一个折叠块渲染；手动压缩没有绑定消息（`messageId` 缺省），渲染在消息列表末尾。
+   * 两者与思考 part 同一形态，不再放在列表顶部。
+   */
+  compaction?: ContextCompactionState | null
+  /**
    * 正在编辑重发的那条消息（null = 不在编辑）。该条消息加描边压暗，输入框上方同时显示
    * 「编辑消息」条 —— 两处一起才是完整标识：条上写着原文，消息上是它在哪。
    */
@@ -188,7 +196,8 @@ export function MessageList({
   outline = false,
   editingMessageId = null,
   retryNotice = null,
-  reconnectNotice = null
+  reconnectNotice = null,
+  compaction = null
 }: MessageListProps) {
   const tr = useT()
   /**
@@ -278,108 +287,121 @@ export function MessageList({
           ) : total === 0 ? (
             <ConversationEmptyState>{emptyState ?? <DefaultEmptyState />}</ConversationEmptyState>
           ) : (
-            messages.map((message, index) => {
-              const isStreamingLast = streaming && index === total - 1
-              /** 正在编辑重发的那条：描边 + 压暗，和输入框上方的「编辑消息」条是一对标识 */
-              const isEditing = !!editingMessageId && message.id === editingMessageId
-              const actions = renderActions?.({ message, index, total }) ?? null
-              /*
-               * 流式末条**不渲染操作行**（连占位也不）—— 用户明确要求「不要占位」。
-               *
-               * 代价（已知并接受）：操作行是「结束那一帧」才出现的，而滚动是贴底的 ——
-               * 正文的位置只由它下面的内容决定，所以结束那一帧这一行凭空多出的高度
-               * （~28px，加上 `Message` 的 `gap-2` 约 36px）会把正文顶上去一小截。
-               * 这就是最早那个「会话结束后消息列表会跳一下」的成因；用户在看到
-               * 「占位导致底部空白太大」之后，明确选择用「跳一下」换「不留空白」。
-               * ⚠️ 若哪天要把它改回去，做法是：流式末条把**真行**渲染进
-               * `invisible` + `pointer-events-none` 的壳里（`visibility: hidden`，
-               * 不能只用 `opacity-0` —— 挡不住行自己的 `md:group-hover:opacity-100`）。
-               */
-              const showActions = !isStreamingLast
-              return (
-                <Message
-                  key={message.id}
-                  from={message.role}
-                  // data-message-id + scroll-mt-6：给右侧「消息目录」定位 / 留上边距用。
-                  data-message-id={message.id}
-                  // 引用片要标「你的消息 / 助手消息」（见 MessageQuoteLayer）：role 只体现在
-                  // `is-user` / `is-assistant` class 上，靠 class 判太脆，这里显式给一个属性
-                  data-role={message.role}
-                  // 有目录时消息的宽度上限，**按面板宽窄分两档**（判据是容器查询，与上面 `pr` 同一口径）：
-                  // - **窄面板（≤820px）→ `max-w-full`**：那儿已经由 `--rail-channel` 整段让出了
-                  //   竖线通道，再叠一个百分比就是**双重让位** —— 助手的长内容（代码块 / 表格）右缘
-                  //   会平白多空出一段（手机上「92% 的剩余宽度 + 44px 通道」合起来能到 ~71px，正是
-                  //   用户报的「右侧一大片空白」）。让位只留一处，通道说了算。
-                  //   ⚠️ 必须**显式**写 `max-w-full`：ai-elements 的 `Message` 自带 `max-w-[95%]`，
-                  //   不覆盖它就还是双重让位（用户消息右对齐不受影响，助手内容是左对齐的，会少一截）。
-                  // - **宽面板（>820px）→ 95%**：竖线挪到消息列右侧的空白带里，但面板刚过 820px 时
-                  //   那条带还很窄（26px 上下），收一档才留得住余量。
-                  // ⚠️ 早先这里写的是 `max-w-[92%] md:max-w-[95%]` —— `md:` 是**视口**断点，于是
-                  // 桌面窄分栏会被判成「宽」（95% 叠上通道）、手机反而被多让一次，两头都不对。
-                  className={cn(
-                    'mb-6 scroll-mt-6',
-                    outline && '@max-[820px]:max-w-full @min-[820px]:max-w-[95%]'
-                  )}
-                >
-                  {/* 正文 15px：ai-elements 默认是 text-base(16px)，用户反馈偏大，收一档。
-                      层级仍高于思考 / 工具 / 代码（都是 text-sm 14px）。
-                      正在编辑的那条加 `ring` 描边并压暗 —— 圆角沿用用户气泡自身的
-                      （`group-[.is-user]:rounded-lg`，改不了 ai-elements 内部，只能靠 ring 描一圈）。 */}
-                  <MessageContent
+            <>
+              {messages.map((message, index) => {
+                const isStreamingLast = streaming && index === total - 1
+                /** 正在编辑重发的那条：描边 + 压暗，和输入框上方的「编辑消息」条是一对标识 */
+                const isEditing = !!editingMessageId && message.id === editingMessageId
+                const messageCompaction =
+                  compaction && compaction.messageId === message.id ? compaction : null
+                const actions = renderActions?.({ message, index, total }) ?? null
+                /*
+                 * 流式末条**不渲染操作行**（连占位也不）—— 用户明确要求「不要占位」。
+                 *
+                 * 代价（已知并接受）：操作行是「结束那一帧」才出现的，而滚动是贴底的 ——
+                 * 正文的位置只由它下面的内容决定，所以结束那一帧这一行凭空多出的高度
+                 * （~28px，加上 `Message` 的 `gap-2` 约 36px）会把正文顶上去一小截。
+                 * 这就是最早那个「会话结束后消息列表会跳一下」的成因；用户在看到
+                 * 「占位导致底部空白太大」之后，明确选择用「跳一下」换「不留空白」。
+                 * ⚠️ 若哪天要把它改回去，做法是：流式末条把**真行**渲染进
+                 * `invisible` + `pointer-events-none` 的壳里（`visibility: hidden`，
+                 * 不能只用 `opacity-0` —— 挡不住行自己的 `md:group-hover:opacity-100`）。
+                 */
+                const showActions = !isStreamingLast
+                return (
+                  <Message
+                    key={message.id}
+                    from={message.role}
+                    // data-message-id + scroll-mt-6：给右侧「消息目录」定位 / 留上边距用。
+                    data-message-id={message.id}
+                    // 引用片要标「你的消息 / 助手消息」（见 MessageQuoteLayer）：role 只体现在
+                    // `is-user` / `is-assistant` class 上，靠 class 判太脆，这里显式给一个属性
+                    data-role={message.role}
+                    // 有目录时消息的宽度上限，**按面板宽窄分两档**（判据是容器查询，与上面 `pr` 同一口径）：
+                    // - **窄面板（≤820px）→ `max-w-full`**：那儿已经由 `--rail-channel` 整段让出了
+                    //   竖线通道，再叠一个百分比就是**双重让位** —— 助手的长内容（代码块 / 表格）右缘
+                    //   会平白多空出一段（手机上「92% 的剩余宽度 + 44px 通道」合起来能到 ~71px，正是
+                    //   用户报的「右侧一大片空白」）。让位只留一处，通道说了算。
+                    //   ⚠️ 必须**显式**写 `max-w-full`：ai-elements 的 `Message` 自带 `max-w-[95%]`，
+                    //   不覆盖它就还是双重让位（用户消息右对齐不受影响，助手内容是左对齐的，会少一截）。
+                    // - **宽面板（>820px）→ 95%**：竖线挪到消息列右侧的空白带里，但面板刚过 820px 时
+                    //   那条带还很窄（26px 上下），收一档才留得住余量。
+                    // ⚠️ 早先这里写的是 `max-w-[92%] md:max-w-[95%]` —— `md:` 是**视口**断点，于是
+                    // 桌面窄分栏会被判成「宽」（95% 叠上通道）、手机反而被多让一次，两头都不对。
                     className={cn(
-                      'text-[0.9375rem]',
-                      isEditing && 'opacity-60 ring-2 ring-ring/70 ring-offset-2 ring-offset-background'
+                      'mb-6 scroll-mt-6',
+                      outline && '@max-[820px]:max-w-full @min-[820px]:max-w-[95%]'
                     )}
                   >
-                    {/*
-                      零 part 的助手消息有两种，必须分开：
-                      - **正在跑**：还没吐第一个 part，显示「正在思考…」；
-                      - **已经跑完却什么都没吐**（外部 ACP agent 直接 end_turn、模型返回空流…）：
-                        绝不能还转圈。原来这里无条件渲染 ThinkingRow，实测「pi-acp 复用会话的
-                        第二轮」整轮只有一条 finish 事件 → parts 永远为空 → 界面永久停在
-                        「正在思考…」，且一条报错都没有。
-                    */}
-                    {message.parts.length === 0 ? (
-                      streaming && isStreamingLast ? (
-                        <StreamingStatusNotice retryNotice={retryNotice} reconnectNotice={reconnectNotice} />
-                      ) : (
-                        <div className="text-sm text-muted-foreground">{tr('（本轮没有返回内容）')}</div>
-                      )
-                    ) : (
-                      <MessageParts
-                        message={message}
-                        index={index}
-                        total={total}
-                        streaming={streaming}
-                        conversationId={conversationId}
-                        followup={followup}
-                      />
-                    )}
-                    {/* 思考 / 工具都落地了、整轮还在跑：把「正在思考…」补在消息底部，
-                        直到下一个 part 开始（正文 / 思考一开流它就不满足条件了）或整轮停止。
-                        与上面 0 part 时的那个是同一个组件，观感一致。 */}
-                    {streaming &&
-                      message.role === 'assistant' &&
-                      isStreamingLast &&
-                      isWaitingNextStep(message.parts) && (
-                        <StreamingStatusNotice retryNotice={retryNotice} reconnectNotice={reconnectNotice} />
+                    {/* 正文 15px：ai-elements 默认是 text-base(16px)，用户反馈偏大，收一档。
+                        层级仍高于思考 / 工具 / 代码（都是 text-sm 14px）。
+                        正在编辑的那条加 `ring` 描边并压暗 —— 圆角沿用用户气泡自身的
+                        （`group-[.is-user]:rounded-lg`，改不了 ai-elements 内部，只能靠 ring 描一圈）。 */}
+                    <MessageContent
+                      className={cn(
+                        'text-[0.9375rem]',
+                        isEditing && 'opacity-60 ring-2 ring-ring/70 ring-offset-2 ring-offset-background'
                       )}
+                    >
+                      {/*
+                        零 part 的助手消息有两种，必须分开：
+                        - **正在跑**：还没吐第一个 part，显示「正在思考…」；
+                        - **已经跑完却什么都没吐**（外部 ACP agent 直接 end_turn、模型返回空流…）：
+                          绝不能还转圈。原来这里无条件渲染 ThinkingRow，实测「pi-acp 复用会话的
+                          第二轮」整轮只有一条 finish 事件 → parts 永远为空 → 界面永久停在
+                          「正在思考…」，且一条报错都没有。
+                      */}
+                      {message.parts.length === 0 && !messageCompaction ? (
+                        streaming && isStreamingLast ? (
+                          <StreamingStatusNotice retryNotice={retryNotice} reconnectNotice={reconnectNotice} />
+                        ) : (
+                          <div className="text-sm text-muted-foreground">{tr('（本轮没有返回内容）')}</div>
+                        )
+                      ) : (
+                        <MessageParts
+                          message={message}
+                          index={index}
+                          total={total}
+                          streaming={streaming}
+                          conversationId={conversationId}
+                          followup={followup}
+                          compaction={messageCompaction}
+                        />
+                      )}
+                      {/* 思考 / 工具都落地了、整轮还在跑：把「正在思考…」补在消息底部，
+                          直到下一个 part 开始（正文 / 思考一开流它就不满足条件了）或整轮停止。
+                          与上面 0 part 时的那个是同一个组件，观感一致。 */}
+                      {streaming &&
+                        message.role === 'assistant' &&
+                        isStreamingLast &&
+                        messageCompaction?.status !== 'streaming' &&
+                        isWaitingNextStep(message.parts) && (
+                          <StreamingStatusNotice retryNotice={retryNotice} reconnectNotice={reconnectNotice} />
+                        )}
+                    </MessageContent>
+
+                    {/* 文档入口：紧贴正文之下（交付物）。「本轮用量」不在这里 —— 它是操作行
+                        最前面那颗图标（见 `renderActions` / `MessageActionRow`）。
+
+                        ⚠️ **本轮没结束时一律不渲染**：`write_file` 一返回 `presentedDocsOf`
+                        就能认出文档，但流式期间把 chip 挂出来会让「交付物」在模型还没说完时
+                        提前出现（还会把下面的内容高度顶一下）。等这一轮真正落定（`isStreamingLast`
+                        为假）再显示 —— 与操作行 / 用量的出现时机一致。 */}
+                    {!isStreamingLast && renderArtifacts?.(message)}
+
+                    {/* 流式末条整行不渲染（含占位）—— 理由与代价见上面 `showActions` */}
+                    {actions && showActions ? actions : null}
+                  </Message>
+                )
+              })}
+              {compaction && !compaction.messageId && (
+                <Message from="assistant" className="mb-6">
+                  <MessageContent className="text-[0.9375rem]">
+                    <ContextCompactionCard compaction={compaction} />
                   </MessageContent>
-
-                  {/* 文档入口：紧贴正文之下（交付物）。「本轮用量」不在这里 —— 它是操作行
-                      最前面那颗图标（见 `renderActions` / `MessageActionRow`）。
-
-                      ⚠️ **本轮没结束时一律不渲染**：`write_file` 一返回 `presentedDocsOf`
-                      就能认出文档，但流式期间把 chip 挂出来会让「交付物」在模型还没说完时
-                      提前出现（还会把下面的内容高度顶一下）。等这一轮真正落定（`isStreamingLast`
-                      为假）再显示 —— 与操作行 / 用量的出现时机一致。 */}
-                  {!isStreamingLast && renderArtifacts?.(message)}
-
-                  {/* 流式末条整行不渲染（含占位）—— 理由与代价见上面 `showActions` */}
-                  {actions && showActions ? actions : null}
                 </Message>
-              )
-            })
+              )}
+            </>
           )}
         </ConversationContent>
         {/* 「回到底部」指示器（不贴底时才出现） */}

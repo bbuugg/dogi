@@ -77,7 +77,7 @@ RUN npm run build:server && npm run build:web
 
 # 只留运行时依赖：vite / typescript / electron / electron-builder / monaco 全部去掉。
 # 产物里真正会 import 的第三方包（hono、@hono/node-server、ws、node-pty、ai、
-# @mastra/core、@ai-sdk/*、@agentclientprotocol/sdk、@modelcontextprotocol/sdk、zod）
+# @ai-sdk/*、@agentclientprotocol/sdk、@modelcontextprotocol/sdk、zod）
 # 都在各包的 dependencies 里，不会被剪掉。
 RUN npm prune --omit=dev
 

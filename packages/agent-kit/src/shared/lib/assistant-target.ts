@@ -2,7 +2,7 @@
  * AI 助手的模型偏好(客户端偏好,直接落 localStorage —— 与主题 / 权限档同一条约定)。
  *
  * 助手是跨项目的轻量对话,模型选择做成**全局偏好**而不是按会话记:切换助手会话
- * 不换模型,要换就全局换。只覆盖内置 mastra agent(助手不接 ACP)。
+ * 不换模型,要换就全局换。只覆盖内置 Agent agent(助手不接 ACP)。
  */
 
 export interface AssistantTarget {

@@ -23,7 +23,7 @@
  *
  * 会话类型在创建时就锁定，**被锁的整组不显示**（不是置灰）：
  * - acp 会话：只显示绑定的那个 agent 的模型（AI 模型组、其它 agent 一概不出）；
- * - mastra 会话 / 定时任务：ACP 组由 `showAcp` 决定；
+ * - 内置会话 / 定时任务：ACP 组由 `showAcp` 决定；
  * - 没有会话（空态）：两组全量可选。
  */
 import { Check, Settings, Sparkles } from 'lucide-react'
@@ -102,7 +102,7 @@ export interface ModelPickerProps {
    * 不传 = 没锁定，走正常的「AI 模型 + 外部 Agent」两组。
    */
   lockedAgent?: AcpAgentView
-  /** 是否显示「外部 Agent（ACP）」分组：已有 mastra 会话时为 false（换类型 = 新建会话） */
+  /** 是否显示「外部 Agent（ACP）」分组：已有 内置会话时为 false（换类型 = 新建会话） */
   showAcp?: boolean
   /** 触发器上是否带「配置名 · 」前缀（默认不带，只有模型名 —— 位置窄） */
   showProvider?: boolean
@@ -274,7 +274,7 @@ export function ModelPicker({
                 if (!catalog.length) return null
                 const items = catalog.map((modelId) => {
                   const active =
-                    value?.backend === 'mastra' &&
+                    value?.backend === 'builtin' &&
                     value.configId === config.id &&
                     value.modelId === modelId
                   return (
@@ -282,7 +282,7 @@ export function ModelPicker({
                       key={modelId}
                       title={modelId}
                       onSelect={() =>
-                        onChange({ backend: 'mastra', configId: config.id, modelId })
+                        onChange({ backend: 'builtin', configId: config.id, modelId })
                       }
                     >
                       <span className="truncate">{modelId}</span>
@@ -301,7 +301,7 @@ export function ModelPicker({
             )}
             {/*
                           ---- 外部 Agent（ACP）：由 `showAcp` 决定出不出 ----
-                          有会话时换不了类型（换类型 = 新建会话），所以 mastra 会话里这组不出。
+                          有会话时换不了类型（换类型 = 新建会话），所以 内置会话里这组不出。
                           选中即改目标，会话详情那边 `setChatTarget` 会顺手探一次这个 agent 的档位
                           （`probeDraftAcp`）—— 模式 / 思考档 pill 没有会话可读，只能先问 agent。
                         */}

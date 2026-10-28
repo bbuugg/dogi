@@ -249,7 +249,7 @@ function TriggerForm({
    * 形状与会话详情那颗 `ModelPicker` 的 `value` 完全一致（`chatTarget` 也是它），
    * 所以同一颗控件两边都能用，不需要编码成字符串再解回来。
    *
-   * - `{ backend: 'mastra', configId, modelId }`：内置模型（模型必选）；
+   * - `{ backend: 'builtin', configId, modelId }`：内置模型（模型必选）；
    * - `{ backend: 'acp', configId }`：外部 Agent，用它自己的默认模型；
    * - `{ backend: 'acp', configId, modelId }`：外部 Agent + 它广告的某个模型
    *   （值来自 `agent.models[].value`，与手动会话里选的是同一份）。
@@ -278,7 +278,7 @@ function TriggerForm({
     if (!modelId) return null
     const config = models.find((m) => m.id === configId)
     const catalog = (config?.models ?? []).map((model) => model.id)
-    return catalog.includes(modelId) ? { backend: 'mastra', configId, modelId } : null
+    return catalog.includes(modelId) ? { backend: 'builtin', configId, modelId } : null
   })
   /** 触发时会话要挂的 MCP server id；空 = 一个都不挂（触发会话可以没有 MCP） */
   const [mcpServerIds, setMcpServerIds] = useState<string[]>(
@@ -311,7 +311,7 @@ function TriggerForm({
     }
     const { backend, configId, modelId } = modelTarget
     // 内置模型必须挑到具体模型；外部 Agent 允许「跟随 agent 默认」（modelId 为空）
-    if (backend === 'mastra' && !modelId) {
+    if (backend === 'builtin' && !modelId) {
       toast.error('先选一个模型：定时任务触发时没人值守，不会替你挑一份配置')
       return
     }

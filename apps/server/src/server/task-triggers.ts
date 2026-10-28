@@ -193,9 +193,9 @@ export async function createTaskTriggerFromTool(
       ...(input.at !== undefined ? { at: input.at } : {}),
       template: {
         prompt,
-        // 工具这条入口只出现在项目管理助手里（内置 mastra），所以后端写死 mastra；
+        // 工具这条入口只出现在项目管理助手里（内置 Agent），所以后端写死 内置；
         // 外部 Agent（ACP）只能在「定时任务」表单里选（见 TriggerEditDialog）
-        backend: 'mastra',
+        backend: 'builtin',
         configId: target.configId,
         modelId: target.modelId
       },

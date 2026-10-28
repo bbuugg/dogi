@@ -235,8 +235,15 @@ function mergeConversation(configRaw: unknown, dataRaw: unknown): AgentConversat
   const data = dataRaw as Partial<ConversationDataFile>
   if (typeof data.id !== 'string' || !data.id) return null
   const config = (configRaw && typeof configRaw === 'object' ? configRaw : {}) as Partial<ConversationConfigFile>
-  const backend: AgentBackend | undefined =
-    config.backend === 'mastra' || config.backend === 'acp' ? config.backend : undefined
+  /**
+   * 后端：只认 `'acp'`，其余非空取值一律按内置后端读。
+   * 这样老会话文件里存着的历史字符串也能正常打开（不会被读成「未指定」）。
+   */
+  const backend: AgentBackend | undefined = config.backend
+    ? config.backend === 'acp'
+      ? 'acp'
+      : 'builtin'
+    : undefined
   const autoSummary = normalizeAutoSummary(data.autoSummary)
   const kind: 'chat' | 'collab' = config.kind === 'collab' ? 'collab' : 'chat'
   return {

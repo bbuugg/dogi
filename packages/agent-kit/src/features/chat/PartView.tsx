@@ -38,6 +38,8 @@ import { FileDiffView, type DiffHunk } from '@fizz/agent-kit/features/git/FileDi
 import {
   ASK_FOLLOWUP_TOOL,
   isCommandRunning,
+  isStoppableToolRunning,
+  STOPPABLE_TOOLS,
   isErrorText,
   partialJsonString,
   toolCardTitle,
@@ -141,6 +143,7 @@ function ToolCallCard({
   type,
   state,
   detail,
+  status,
   defaultOpen,
   onStop,
   children
@@ -150,6 +153,8 @@ function ToolCallCard({
   state: ToolUIPart['state']
   /** 头部明细（命令 / 主入参）：截断显示在工具名后面，悬停出 Tooltip 看全文 */
   detail?: string
+  /** 工具名右侧的运行态（子任务「运行中 · 正在读文件 · 已调用 N 个工具」） */
+  status?: ReactNode
   /** 显式指定展开态（目前只有流式期的入参预览用）；不传 = 跟随「自动折叠」偏好 */
   defaultOpen?: boolean
   /** 工具在飞（pending / 执行中）时给的停止回调，透传给头部那颗停止钮 */
@@ -202,7 +207,14 @@ function ToolCallCard({
       }}
       defaultOpen={false}
     >
-      <ToolHeader title={title} type={type} state={state} detail={detail} onStop={onStop} />
+      <ToolHeader
+        title={title}
+        type={type}
+        state={state}
+        detail={detail}
+        status={status}
+        onStop={onStop}
+      />
       <ToolContent>{body}</ToolContent>
     </Tool>
   )
@@ -257,15 +269,17 @@ function DelegationRunning({ toolName, toolCount }: { toolName?: string; toolCou
     }, 1000)
     return () => clearInterval(timer)
   }, [])
+  // 一行内联（挂在工具名右侧，见 `ToolHeader` 的 `status`）：不再自成一行，
+  // 所以这里不能 `flex-wrap` —— 窄屏靠外层 truncate 收口。
   return (
-    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-      <span className="inline-flex items-center gap-1.5">
-        <Loader2 className="size-3.5 animate-spin" />
-        {tr('子任务运行中… {seconds}s', { seconds })}
-      </span>
-      {toolName ? <span>{tr('· 正在 {tool}', { tool: toolLabel(toolName) })}</span> : null}
-      {toolCount ? <span>{tr('· 已调用 {count} 个工具', { count: toolCount })}</span> : null}
-    </div>
+    <span className="inline-flex min-w-0 items-center gap-1.5 text-xs">
+      <Loader2 className="size-3.5 shrink-0 animate-spin" />
+      <span className="shrink-0">{tr('子任务运行中… {seconds}s', { seconds })}</span>
+      {toolName ? (
+        <span className="min-w-0 truncate">{tr('· 正在 {tool}', { tool: toolLabel(toolName) })}</span>
+      ) : null}
+      {toolCount ? <span className="shrink-0">{tr('· 已调用 {count} 个工具', { count: toolCount })}</span> : null}
+    </span>
   )
 }
 
@@ -273,7 +287,7 @@ function DelegationRunning({ toolName, toolCount }: { toolName?: string; toolCou
  * 派活的 prompt（`agent-<id>` 的入参结构就是 `{ prompt }`）—— 放到头部明细位，
  * 紧跟工具名截断显示，悬停看全文（ToolHeader 的 detail 本来就是干这个的）。
  *
- * 故意只认 `prompt` 一个字段：派活的入参 Mastra 随时可能加东西（`skills` 之类），
+ * 故意只认 `prompt` 一个字段：派活的入参以后可能加字段（`skills` 之类），
  * 逐个摊开会把明细位变成第二张说明书。
  */
 function delegationPromptOf(input: unknown): string | undefined {
@@ -645,7 +659,7 @@ function isToolResultEmpty(output: unknown): boolean {
  *
  * 一轮失败时（断线、模型配置不对、ACP 建连失败……）客户端 / 服务端都把错误写成一条
  * 文本 part 落进历史。以前用户唯一的出路是**刷新整个页面**（手机版只能重启 App）——
- * 而「刷新页面 → 点开这个会话」做的事其实就是 `reloadConversation`：mastra 拉服务端
+ * 而「刷新页面 → 点开这个会话」做的事其实就是 `reloadConversation`：内置 拉服务端
  * 权威历史（断线期间那一轮往往已经跑完落盘了，真回复会顶掉这条错误）、acp 走
  * `session/load` 回放。所以这里直接给这条错误挂上同一个动作。
  *
@@ -816,16 +830,17 @@ function PartViewInner({
   // 且**当前这条消息还在流式**（`turnLive`）——历史里因异常中断残留的未结算 part
   // 不该出现停止钮。
   const toolCallId = part.type === 'tool-call' ? part.toolCallId : undefined
-  const commandInFlight =
+  const stoppableInFlight =
     turnLive &&
-    part.toolName === 'execute_command' &&
+    STOPPABLE_TOOLS.has(part.toolName) &&
     (state === 'input-streaming' || state === 'input-available')
   const onStop =
-    commandInFlight && toolCallId
+    stoppableInFlight && toolCallId
       ? () => {
-          // 命令已在执行 → 只停**那一条**（杀进程树、工具结果收尾成「（已中止）」，整轮继续）；
-          // 入参还在生成（还没真正跑起来）→ 没有可停的命令，退回中止这一轮。
-          if (isCommandRunning(part)) void stopCommand(toolCallId)
+          // 已经在执行 → 只停**那一条**（命令杀进程树 / 抓取 abort，工具结果收尾成
+          // 「（已中止）」，整轮继续）；入参还在生成（还没真正跑起来）→ 没有可停的，
+          // 退回中止这一轮。
+          if (isStoppableToolRunning(part)) void stopCommand(toolCallId)
           else void stopTurn()
         }
       : undefined
@@ -882,13 +897,17 @@ function PartViewInner({
         type={`tool-${part.toolName}` as ToolUIPart['type']}
         state={state}
         detail={delegationPromptOf(part.input)}
-        defaultOpen={delegationRunning || delegationStreaming}
+        // 运行态挂在**头部**（工具名右边），内容区只放子任务产出，不再为它单开一行
+        status={
+          delegationRunning ? (
+            <DelegationRunning toolName={part.subagentTool} toolCount={part.subagentToolCount} />
+          ) : undefined
+        }
+        // 只在真有流式正文时才自动展开：运行态已经上头部了，空内容区不该被撑开
+        defaultOpen={delegationStreaming}
         onStop={onStop}
       >
         {isError && <AcpTextBlock text={toolErrorText(output)} />}
-        {delegationRunning ? (
-          <DelegationRunning toolName={part.subagentTool} toolCount={part.subagentToolCount} />
-        ) : null}
         {delegationStreaming ? (
           <StreamingInputBlock text={subText} label={t('子任务输出中...')} mono={false} />
         ) : null}

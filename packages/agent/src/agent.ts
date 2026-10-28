@@ -1,25 +1,26 @@
 /**
- * 对话编排（基于 Mastra 的 Agent）。
+ * 对话编排（直接基于 AI SDK 的 `streamText`，多步循环在 `./engine`）。
  *
- * 为什么用 Mastra 而不是像桌面端那样直接调 `streamText`：
- * - 它的 `Agent` 直接吃 AI SDK 的工具集与模型实例（`ToolsInput` 含 `VercelTool`，
- *   `MastraModelConfig` 含 `LanguageModelV4`），所以**现有工具集与模型解析一行不用改**；
- * - 换来 memory / workflow / 工具审批 / 观测这些后面要用的能力，服务器端尤其需要。
+ * 全链路只有**一个消息形状**（`ModelMessage`）：历史转换、压缩切点、token 估算、
+ * 插话注入都作用在它上面；对外仍产出 `AgentStreamEvent`，三端渲染逻辑不变。
  *
  * 与桌面端保持一致的关键点：
  * - 系统提示词与工具集是同一份（./prompt 与 ./tools），技能也是同一套渐进式披露；
  * - 历史消息用同一份 `toModelMessages` 转（原生 tool-call/tool-result，不压成文本）；
  * - 事件仍产出桌面端同款的 `AgentStreamEvent`，所以三个端的消息渲染逻辑可以一致。
  */
-import { Agent } from '@mastra/core/agent'
 import {
   calculateContextTokens,
   compactHistory,
+  compactModelMessages,
   estimateBaseTokens,
   estimateMessagesTokens,
-  estimateMastraMessagesTokens,
+  contextUsed,
+  rememberBaseTokens,
   defaultContextWindowFromEnv,
-  isContextOverflowError
+  isContextOverflowError,
+  type CompactionSummaryDelta,
+  type CompactionSummaryStart
 } from './context'
 import { ASK_FOLLOWUP_HINT, ASK_FOLLOWUP_TOOL } from '@fizz/tools'
 import {
@@ -45,14 +46,8 @@ import {
   wrapToolsWithHooks,
   type MountedPlugin
 } from './plugins'
-import {
-  buildDelegation,
-  buildSubagents,
-  isNestedSubagentChunk,
-  makeDelegationStats,
-  slimDelegationOutput,
-  type SubagentId
-} from './subagents'
+import { buildDelegationTools, makeDelegationStats, type SubagentId } from './subagents'
+import { runEngine } from './engine'
 import { resolveModel } from './resolve-model'
 import { isEmptyStreamOutputError, isRetryableNetworkError, retryDelayMs, sleepWithSignal } from './retry'
 import { resolveMaxRetries, resolveToolCallConcurrency } from '@fizz/contracts/agent-api'
@@ -97,11 +92,11 @@ export interface RunAgentOptions {
    */
   getPermissionMode?: () => AiPermissionMode
   /**
-   * 启用哪些子任务（subagent）。缺省 / 空数组 = 不挂 `agents`、不传 `delegation`，
-   * 行为与加这个字段之前**逐字节一致**。
+   * 启用哪些子任务（subagent）。缺省 / 空数组 = 一个派活工具都不挂，与没有这个能力时
+   * 逐字节一致。
    *
-   * 子 agent 恒为只读（白名单见 subagents.ts）；派活时父的 instructions 与用户原话都会
-   * 下发给它（Mastra 既定行为），派活 prompt 上有注入防线。详见
+   * 子 agent 恒为只读（白名单见 subagents.ts）；它只收到派活时那一条任务文本，父的
+   * 系统提示词与完整历史不下发，派活 prompt 上另有一层注入防线。详见
    * docs/superpowers/specs/2026-10-06-subagent-integration-design.md 的 §8。
    */
   subagents?: SubagentId[]
@@ -133,11 +128,9 @@ export interface RunAgentOptions {
    * 运行中插话（steer）的收件箱轮询：每个迭代边界（一次 LLM 调用 + 其工具执行完成）
    * 调一次，返回一条就消费一条（调用方自行 shift）。返回 null = 没有插话。
    *
-   * 消费到的插话会作为 user 消息 push 进模型上下文并强制续跑一轮（Mastra
-   * `onIterationComplete` 的 `{ continue: true }`；spike 实测：isFinal 边界下
-   * `feedback` 参数会被静默丢弃，必须走 push —— 见
-   * docs/superpowers/specs/2026-10-06-steer-slash-fork-design.md 的 §Spike）。
-   * 只有 mastra 路径会传（ACP 是外部 agent，协议给不了插话）。
+   * 消费到的插话会作为一条 user 消息追加进下一步的 messages（`prepareStep` 的返回值），
+   * 模型因此接着干活；广播出去的那条与落盘历史保持用户原话。
+   * 只有内置后端会传（ACP 是外部 agent，协议给不了插话）。
    */
   pollSteer?: () => Promise<AgentChatMessage | null>
   /**
@@ -213,21 +206,24 @@ export interface RunAgentOptions {
    */
   contextWindow?: number
   /**
+   * 交接文档开始生成（旧历史已切好，马上调摘要模型）。
+   * 服务端用它推 `context-compaction-start`，让用户在压缩期间看到进度而不是干等。
+   */
+  onContextCompactionStart?: (info: CompactionSummaryStart) => void
+  /** 交接文档的流式增量（仅展示；完整摘要校验通过后才会落检查点） */
+  onContextCompactionDelta?: (info: CompactionSummaryDelta) => void
+  /**
    * 压缩发生时的回调：把「压了多少轮 / 压前压后 token 数」告诉调用方。
    * 服务端用它推一条 `context-compressed` 帧，让用户知道这一轮上下文被压过了。
+   * `summary` 是完整交接文档（含文件清单），前端用它覆盖流式拼接结果。
    */
   onContextCompressed?: (info: {
     beforeTokens: number
     afterTokens: number
     summarizedTurns: number
     keptTurns: number
+    summary?: string
   }) => void
-  /**
-   * 把认不出来的 chunk 类型收集起来（调试用）。
-   * Mastra 的 chunk 联合类型在不同版本间会加字段/改名，认不出来时**不能静默丢**——
-   * 首次接入时拿它对照真实流，别靠猜。
-   */
-  unknownChunks?: Set<string>
   /**
    * 是否启用浏览器工具（browser_* 工具集 + 系统提示词里的浏览器使用说明）。
    * 由调用方按「本后端能不能跑浏览器」决定（desktop / web 的共享后端都行，直接传 true）。
@@ -242,31 +238,14 @@ export interface RunAgentOptions {
   maxSteps?: number
 }
 
-function str(value: unknown): string {
-  return typeof value === 'string' ? value : ''
-}
-
 function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-/**
- * 从 Mastra 的 chunk 里抠出「原始错误对象」（用于判断能不能重试）。
- * 取值口径与 `adaptMastraChunk` 一致：`payload` 优先、顶层兜底。
- */
-function chunkErrorOf(raw: unknown): unknown {
-  if (!raw || typeof raw !== 'object') return null
-  const part = raw as Record<string, unknown>
-  const body = (part.payload && typeof part.payload === 'object' ? part.payload : part) as Record<
-    string,
-    unknown
-  >
-  return body.error ?? null
-}
 
 /**
  * 一次尝试里「重发同一条请求通常能成功」的错误：网络中断 **或** 上游返回了空响应
- * （Mastra 合成的 `AGENT_STREAM_ERROR`，见 ./retry 的两条判定）。
+ * （`runAgent` 按 `finishReason === 'other'` + 零内容合成，见 ./retry 的两条判定）。
  */
 function isRetryableAttemptError(err: unknown): boolean {
   return isRetryableNetworkError(err) || isEmptyStreamOutputError(err)
@@ -310,43 +289,6 @@ function normalizeUsage(usage: unknown): RawUsage | null {
   }
 }
 
-/** `finish` chunk 里的两份 usage：整轮累计（记账）与单步（算上下文） */
-function finishUsageOf(raw: unknown): { total: RawUsage | null; step: RawUsage | null } | null {
-  if (!raw || typeof raw !== 'object') return null
-  const part = raw as Record<string, unknown>
-  if (str(part.type) !== 'finish') return null
-  const body = (part.payload && typeof part.payload === 'object' ? part.payload : part) as Record<
-    string,
-    unknown
-  >
-  return {
-    total: normalizeUsage(body.totalUsage ?? body.usage),
-    // 单步 usage **不能**回退到 totalUsage：多步循环里 total 是各步累加，
-    // 拿它当「当前上下文」会虚高好几倍。没有就是没有，调用方自己退回估算。
-    step: normalizeUsage(body.usage)
-  }
-}
-
-/**
- * 从 AI SDK / Mastra 的 `finish` chunk 里抠出 usage。
- * 不是 finish chunk、或没带 usage —— 返回 null。
- *
- * 返回的是**整轮累计**（多步工具循环会把每一步都加起来），只用于记账
- * （`inputTokens` / `totalTokens`）。算上下文大小要用 `readChunkStepUsage`。
- */
-export function readChunkUsage(raw: unknown): RawUsage | null {
-  return finishUsageOf(raw)?.total ?? null
-}
-
-/**
- * `finish` chunk 里的**单步** usage —— 也就是「这一步请求实际发出去多少、回来多少」。
- *
- * 上下文圆环要的是这个：pi 的 `calculateContextTokens` 取「最后一条助手消息的 usage」，
- * 在多步循环里就是**最后一次请求**，不是整轮累计（累计会虚高好几倍）。
- */
-export function readChunkStepUsage(raw: unknown): RawUsage | null {
-  return finishUsageOf(raw)?.step ?? null
-}
 
 /**
  * 把原始用量 + 计时折成对外展示的统计（TPS 按「首字 → 结束」的生成窗口算）。
@@ -388,147 +330,6 @@ function buildTurnUsage(
 const INPUT_DELTA_FLUSH_CHARS = 240
 const INPUT_DELTA_FLUSH_MS = 60
 
-/**
- * Mastra 流 chunk → `AgentStreamEvent`。
- *
- * 字段名做**防御式兼容**（`text`/`textDelta`/`delta`、`input`/`args`、`output`/`result`）：
- * Mastra 内部同时兼容 AI SDK v4/v5/v6/v7 的 chunk 形状，不同版本给的字段名不同，
- * 写死一个名字会在升级时静默丢内容（桌面端踩过同样的坑，见 AGENTS 的 adaptPart）。
- */
-export function adaptMastraChunk(
-  raw: unknown,
-  unknownChunks?: Set<string>
-): AgentStreamEvent | null {
-  if (!raw || typeof raw !== 'object') return null
-  const part = raw as Record<string, unknown>
-  const type = str(part.type)
-  if (type === 'tool-output') {
-    const nested = (part.payload as Record<string, unknown> | undefined)?.output
-    // ⚠️ 子 agent 的流：派活时 Mastra 会把**子 run 的每个 chunk** 原样包成父的
-    // `tool-output`（实测：一次派活冒出 15 条，`payload.output` 是子上次的
-    // `{ type:'text-delta', runId:<子runId>, payload:{ text } }`）。
-    // 其中子 text-delta 的 payload 形状与父正文增量**完全一致** —— 不在这里拦掉，
-    // 子 agent 的话会被当成父的正文 append 到用户正在看的那段回复上（最难查的污染）。
-    // `includeSubAgentToolResultsInModelContext:false` 只管「进父模型上下文」，管不了这里。
-    if (isNestedSubagentChunk(nested)) {
-      // 文本增量转成 subagent-delta；子 agent 的**工具调用**转成轻量进度事件
-      // （只带工具名，不带入参 / 结果 —— 铺开会变成二级卡片树，设计文档 §3.6）。
-      const sub = nested as Record<string, unknown>
-      // ⚠️ toolCallId 在**payload 里**，不在 chunk 顶层（实测）：
-      // { type:'tool-output', payload:{ output:{子chunk}, toolCallId:'call_1', toolName:'agent-explorer' } }
-      // 顶层留一条兜底，防御 Mastra 换形状（它跨版本动过）。
-      const toolCallId =
-        str((part.payload as Record<string, unknown> | undefined)?.toolCallId) || str(part.toolCallId)
-      if (!toolCallId) return null
-      // 与父 text-delta 同一套取值口径：payload 优先、顶层兜底
-      const subBody = (sub.payload && typeof sub.payload === 'object' ? sub.payload : sub) as Record<
-        string,
-        unknown
-      >
-      if (str(sub.type) === 'text-delta') {
-        const text = str(subBody.text ?? subBody.textDelta ?? subBody.delta)
-        if (text) return { type: 'subagent-delta', toolCallId, delta: text }
-        return null
-      }
-      // 子侧工具调用：不同 Mastra 版本字段名可能是 toolName / name。
-      // 只认 tool-call（不认 tool-call-delta：参数增量会反复上报同一个调用）。
-      if (str(sub.type) === 'tool-call') {
-        const toolName = str(subBody.toolName ?? subBody.name)
-        const childToolCallId =
-          str(subBody.toolCallId) || str(subBody.id) || str(subBody.callId)
-        return {
-          type: 'subagent-progress',
-          toolCallId,
-          ...(toolName ? { toolName } : {}),
-          ...(childToolCallId ? { childToolCallId } : {})
-        }
-      }
-      return null
-    }
-  }
-  // ⚠️ Mastra v1 的 fullStream 把数据放在 **payload** 里：
-  //   { type: 'text-delta', runId, from: 'AGENT', payload: { id: 'txt-0', text: '这是 ' } }
-  // 直接读顶层字段会拿到一堆空值（表现为「工具名是空的、正文一个字都不显示」）。
-  // 这里 payload 优先、顶层兜底，兼容它内部对不同 AI SDK 版本做的归一化。
-  const body = (part.payload && typeof part.payload === 'object' ? part.payload : part) as Record<
-    string,
-    unknown
-  >
-
-  switch (type) {
-    case 'text-delta':
-      return { type: 'text-delta', delta: str(body.text ?? body.textDelta ?? body.delta) }
-    case 'reasoning-delta':
-      return { type: 'reasoning-delta', delta: str(body.text ?? body.textDelta ?? body.delta) }
-    case 'tool-call':
-      return {
-        type: 'tool-call',
-        toolCallId: str(body.toolCallId ?? body.id),
-        toolName: str(body.toolName ?? body.name),
-        input: body.input ?? body.args ?? body.arguments ?? null
-      }
-    // 「入参开始流式生成」：只有 id + 工具名，还没有内容（Mastra 1.x 的
-    // tool-call-input-streaming-start）。转成一条空增量 —— 卡片据此**先建出来**，
-    // 标题马上是对的（否则要等完整 tool-call，卡片会先显示一会儿「工具调用」）。
-    case 'tool-call-input-streaming-start':
-      return {
-        type: 'tool-call-delta',
-        toolCallId: str(body.toolCallId ?? body.id),
-        ...(body.toolName ?? body.name ? { toolName: str(body.toolName ?? body.name) } : {}),
-        inputTextDelta: ''
-      }
-    // 入参的流式增量（Mastra 1.x：{ type:'tool-call-delta', payload:{ toolCallId, argsTextDelta } }）
-    case 'tool-call-delta':
-      return {
-        type: 'tool-call-delta',
-        toolCallId: str(body.toolCallId ?? body.id),
-        // 增量帧常常不给工具名（只在完整 tool-call 里给）：给了才带，别塞空串
-        ...(body.toolName ?? body.name ? { toolName: str(body.toolName ?? body.name) } : {}),
-        inputTextDelta: str(body.argsTextDelta ?? body.inputTextDelta ?? body.delta)
-      }
-    case 'tool-result':
-      return {
-        type: 'tool-result',
-        toolCallId: str(body.toolCallId ?? body.id),
-        toolName: str(body.toolName ?? body.name),
-        // 派活的 output 收敛成一句人话：Mastra 会把 subAgentThreadId /
-        // subAgentResourceId / **subAgentToolResults**（子 agent 每次工具调用的完整
-        // 返回值，整份文件都在里面）一起塞过来，而它会原样进会话历史。见
-        // subagents.ts 的 slimDelegationOutput。
-        output: slimDelegationOutput(str(body.toolName ?? body.name), body.output ?? body.result ?? null),
-        ...(body.isError ? { isError: true } : {})
-      }
-    case 'tool-error':
-      return {
-        type: 'tool-result',
-        toolCallId: str(body.toolCallId ?? body.id),
-        toolName: str(body.toolName ?? body.name),
-        output: `工具执行失败: ${describeError(body.error)}`,
-        isError: true
-      }
-    case 'error':
-      return { type: 'error', message: describeError(body.error) }
-    case 'abort':
-      return { type: 'finish', finishReason: 'aborted' }
-    // 这些是起止标记，不带内容（内容都在 delta 里）
-    case 'start':
-    case 'step-start':
-    case 'step-finish':
-    case 'finish':
-    case 'text-start':
-    case 'text-end':
-    case 'reasoning-start':
-    case 'reasoning-end':
-    case 'tool-call-start':
-    case 'tool-call-end':
-      return null
-    default:
-      if (type) unknownChunks?.add(type)
-      return null
-  }
-}
-
-/** Agent 的「静态部分」：系统提示词 + 工具集。与具体模型无关，一轮里只建一次 */
 export interface AgentSetup {
   instructions: string
   /** 工具名 → AI SDK 工具对象；估算上下文时也读它（见 `estimateBaseTokens`） */
@@ -563,6 +364,7 @@ export interface AgentSetup {
  * `ctx.hooks.on(...)`；工具集在产出后再套一层钩子壳（`wrapToolsWithHooks`），
  * 提示词正文最后过一遍 `prompt:render`。没插件挂钩子时，这两步都是原样透传。
  */
+
 export function buildAgentSetup(opts: {
   workspace: AgentWorkspace
   skills: SkillInfo[]
@@ -648,7 +450,19 @@ export function buildAgentSetup(opts: {
     }
   }
   // ④ web_fetch / screenshot 是全局只读工具：不依赖工作区，任何会话（含未绑定目录的「任务」会话）都可用
-  ctx.plugin(webToolsPlugin(opts.workspace.path ?? ''))
+  // ② 内置 web 工具。`web_fetch` 也接同一张停止表：抓一个卡住的站点动辄 30s，
+  //    用户应该能只停这一条，而不是中止整轮。
+  ctx.plugin(
+    webToolsPlugin(
+      opts.workspace.path ?? '',
+      opts.commandStops
+        ? {
+            onStart: (id: string, stop: () => void) => opts.commandStops!.set(id, stop),
+            onEnd: (id: string) => opts.commandStops!.delete(id)
+          }
+        : {}
+    )
+  )
 
   // 审批闸门：`mutating: true` 的工具按权限模式走（readonly 拒绝 / confirm 询问 / full 放行）。
   // 内置文件工具**不经这里**（它们自己管自己的 guardWrite），所以行为与加这个能力之前一致。
@@ -682,47 +496,7 @@ export function buildAgentSetup(opts: {
   return { instructions, tools: wrapToolsWithHooks(tools, hooks), hooks, ctx }
 }
 
-/** 用静态部分 + 模型配置建一个 Mastra Agent（每次尝试现建，代价只是一个配置对象） */
-function newAgent(
-  setup: AgentSetup,
-  model: AiModelConfig,
-  /** 子任务（subagent）实例；无 = 不挂 `agents` 字段，与没有这个能力时逐字节一致 */
-  subagents?: Record<string, Agent>
-): Agent {
-  // ⚠️ 下面两处 `as unknown as` 是**版本偏差**导致的必然结果，不是偷懒：
-  // Mastra 自己 vendor 了多份 @ai-sdk/provider（v5/v6/v7，见它的 dependencies），
-  // 它的 `VercelTool` / `MastraModelConfig` 是按 vendored 那几份写的；
-  // 而本仓库用的是 ai@7 + @ai-sdk/*@4（provider spec v2），两份 TS 类型对不上，
-  // 但**运行时是同一套对象**：Mastra 用 TypeDetector 按 specificationVersion 自行适配。
-  // 真正能证明可用的是端到端跑一轮（scripts/verify-agent-server.mjs 用 mock 模型
-  // 连工具调用一起验），而不是这里的类型。
-  type AgentConfigInput = ConstructorParameters<typeof Agent>[0]
-  return new Agent({
-    id: 'fizz-agent',
-    name: 'Fizz',
-    instructions: setup.instructions,
-    model: resolveModel(model) as unknown as AgentConfigInput['model'],
-    tools: setup.tools as unknown as AgentConfigInput['tools'],
-    // 子任务（subagent）：不启用时**不挂这个字段**——Mastra 的 `listAgentTools` 是
-    // `Object.keys(agents).length > 0` 才生成派活工具，挂个空对象虽然也不会生成，
-    // 但不传更直白（请求体里也不会多一个空 tools 字段）。
-    ...(subagents ? { agents: subagents as unknown as AgentConfigInput['agents'] } : {})
-  })
-}
-
-/** 按工作区 / 模型构造一次性的 Mastra Agent（对外的既有入口，内部复用 buildAgentSetup） */
-export function createFizzAgent(opts: {
-  workspace: AgentWorkspace
-  model: AiModelConfig
-  skills: SkillInfo[]
-  projectDoc?: ProjectDoc | null
-  permissionMode?: AiPermissionMode
-  requestConfirm?: (req: AgentConfirmInput) => Promise<boolean>
-  extraTools?: Record<string, unknown>
-}): Agent {
-  const { model, ...rest } = opts
-  return newAgent(buildAgentSetup(rest), model)
-}
+/** 用静态部分 + 模型配置建一个 内置 Agent（每次尝试现建，代价只是一个配置对象） */
 
 /** 这一轮的序号（与时间戳拼成 turnId）：轮次之间可能重叠，得有个能区分的东西 */
 let turnSeq = 0
@@ -731,7 +505,7 @@ let turnSeq = 0
  * 子任务空闲看门狗：父 agent 派活后，多久没有**任何子任务事件**就判定卡死。
  *
  * 60~120 秒是「模型在正常工作但还没吐字」的常见上限；慢模型 / 大仓库可调到更大，
- * 0 = 关闭。看门狗触发后中止**整轮**（Mastra 的 delegation 没有单独的取消句柄），
+ * 0 = 关闭。看门狗触发后中止**整轮**（子 run 没有单独的取消句柄），
  * 用户会看到一条明确的 `子任务超时` 错误，而不是无限等待。
  */
 function resolveSubagentIdleTimeoutMs(): number {
@@ -802,7 +576,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         `子任务「${label}」超过 ${seconds} 秒没有任何进展，已中止本轮。` +
         '可以重试；如果经常发生，请在设置 →「子任务」里给它换一个更快的模型。'
       console.error('[subagent] ' + watchdogFired)
-      // Mastra 的 delegation 没有单独取消句柄，只能中止整轮；这是有意取舍：
+      // 子 run 没有单独的取消句柄，只能中止整轮；这是有意取舍：
       // 宁可给一句明确错误，也不让父 agent 无限等一个已经卡死的子任务。
       runAbort.abort(new Error(watchdogFired))
       return watchdogFired
@@ -884,9 +658,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
 
   /**
    * 整轮的**唯一返回出口**（四个 return 点都走它：收尾 / 中止 / 异常 / 打日志）。除了
-   * 拼返回值，还负责把 delegation 钩子里记下的错误与派活用量打出来 ——
-   * `hookErrorStrategy:'warn'` 下钩子错误会被 Mastra 吃掉，不捞出来就是
-   * 「派活行为莫名不对但日志一片干净」（对齐仓库「不许静默失败」的价值观）。
+   * 拼返回值，还负责把派活过程里记下的错误与用量打出来 —— 那些错误只记录、不冒泡，
+   * 不打出来就是「派活行为莫名不对但日志一片干净」（对齐仓库「不许静默失败」的价值观）。
    *
    * 它同时是**唯一的收尾动作**：广播 `turn:finish` 并卸载本轮自建的 turn context
    * （所以它是异步的）。调用点一律 `return finish(...)` 直接交出去，由 async 函数 flatten。
@@ -1014,6 +787,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         tools: toolsForModel
       }
   const baseTokens = await estimateBaseTokens(setupForModel.instructions, toolsForModel)
+  // 记下来给手动压缩那条路兜底（它不建 agent，算不出 base —— 不补就差一整个 base）
+  if (opts.conversationId) rememberBaseTokens(opts.conversationId, baseTokens)
 
   // `turn:start`：静态部分（提示词 / 工具集）已定稿、即将发第一次请求。
   // 放在这里而不是更早，是为了让插件看到的本轮提示词就是最终那一份。
@@ -1050,6 +825,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
      * 累计值会把每一步都加一遍。
      */
     let lastStepUsage: RawUsage | null = null
+    /**
+     * 上一次**轮中压缩**之后的大小（`afterTokens`）。只用于冷却：见
+     * `onIterationComplete` 里那段注释。每次「尝试」各一份 —— 重试是从全量历史
+     * 重新起跑，上一份压缩结果已经不在了。
+     */
+    let midTurnCompactAfter: number | null = null
     /** 收到几个带 usage 的 finish chunk：只有一个时才敢把「整轮累计」当单步用 */
     let finishChunks = 0
     /** 本轮**最后一次请求**的上下文大小（见 `TurnUsage.contextTokens`） */
@@ -1060,21 +841,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
       // 子任务（subagent）：每次尝试都现建，和父 agent 同一节奏；不启用时 undefined，
       // 不挂 `agents` 也不传 `delegation`。
       // 工具调用关掉的模型也不挂子任务 —— 派活本身就是一个工具，下发了也用不了。
-      const subagents = opts.subagents?.length && modelSettings.toolCall
-        ? buildSubagents(opts.subagents, {
-            workspacePath: opts.workspace.path,
-            workspaceName: opts.workspace.name,
-            model: effectiveModel,
-            ...(opts.subagentModel ? { subagentModel: withModelApiStyle(opts.subagentModel) } : {}),
-            skills: [],
-            permissionMode: 'readonly'
-          })
-        : undefined
-      const agent = newAgent(
-        setupForModel,
-        effectiveModel,
-        subagents ?? undefined
-      )
+      const contextWindow = opts.contextWindow ?? defaultContextWindowFromEnv()
       /**
        * 上下文压缩只有一层（pi 的 compaction）：`compactHistory` 在 history 层做
        * 「摘要 + 保留近期原文」。它必须作用在 `toModelMessages` 之前 —— 保留起点要锚
@@ -1083,184 +850,250 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
        * ⚠️ 别再往这里加「清旧工具结果」「按缓存冷热决定清不清」那一类层：它们会改动
        * 请求前缀，而上游前缀缓存一断就按全价重读整段历史。前缀保持一致就够了。
        */
-      const contextWindow = opts.contextWindow ?? defaultContextWindowFromEnv()
       const compacted = await compactHistory(opts.history, {
         ...(opts.conversationId ? { conversationId: opts.conversationId } : {}),
         ...(opts.autoSummarySeed ? { seed: opts.autoSummarySeed } : {}),
         ...(opts.onAutoSummary ? { onAutoSummary: opts.onAutoSummary } : {}),
+        ...(opts.onContextCompactionStart
+          ? { onSummaryStart: opts.onContextCompactionStart }
+          : {}),
+        ...(opts.onContextCompactionDelta
+          ? { onSummaryDelta: opts.onContextCompactionDelta }
+          : {}),
         contextWindow,
         baseTokens,
         ...(forceCompact ? { force: true } : {}),
         model: effectiveModel,
         signal: runSignal
       })
-      if (compacted.compressed) opts.onContextCompressed?.(compacted.compressed)
+      if (compacted.compressed) {
+        opts.onContextCompressed?.({
+          ...compacted.compressed,
+          ...(compacted.summary ? { summary: compacted.summary } : {})
+        })
+        // 首轮 / 轮前压缩：把圆环从上一轮的峰值直接拉到压缩后的真实占用。
+        emitEvent({
+          type: 'context-usage',
+          used: compacted.compressed.afterTokens,
+          size: contextWindow,
+          base: baseTokens
+        })
+      }
       const messages = await toModelMessages(compacted.history, {
         resolveFileUrl: opts.resolveFileUrl,
         allowImages: modelSettings.imageInput
       })
       /**
-       * 兜底值（估算）：一轮里**连一个 finish chunk 都没收到**（立刻中止 / 上游直接失败）时，
-       * 圆环至少还有个数。真正显示的值在下面用上游 usage 覆盖 —— 见 `lastStepUsage`。
+       * 兜底值（估算）：一轮里**连一个 usage 都没收到**（立刻中止 / 上游直接失败）时，
+       * 圆环至少还有个数。真正显示的值在收尾时用上游 usage 覆盖。
        */
       contextTokens = baseTokens + estimateMessagesTokens(messages)
-      const result = await agent.stream(
-        // ⚠️ Mastra vendor 了旧版 @ai-sdk/provider 的消息类型，而我们 ai@7 的
-        // ModelMessage 多了 ToolApprovalRequest / CustomPart 等 → 两套类型对不上。
-        // 运行时是同一套对象（TypeDetector 按 specificationVersion 适配），见上面的 as unknown as 注释
-        messages as unknown as Parameters<typeof agent.stream>[0],
-        {
-          maxSteps: opts.maxSteps ?? MAX_STEPS,
-          // 模型一步可能返回一大批 tool-call；限住同时执行的数量，避免同一时间
-          // 起太多命令 / 工具把彼此的输出拖到超时。`called` 策略只在**实际调用**
-          // 了审批类工具时才退化成串行，普通工具仍按上面这个上限并发。
-          toolCallConcurrency: {
-            limit: resolveToolCallConcurrency(opts.toolCallConcurrency),
-            strategy: 'called'
-          },
-          /**
-           * 每次模型调用的参数（Mastra 的 `modelSettings` 直接透传给 AI SDK 的 CallSettings）：
-           * - `maxOutputTokens` = 模型设置里的输出上限（OpenAI 的 max_output_tokens /
-           *   max_completion_tokens；**含**思考 token）；
-           * - `temperature` 沿用配置上的旧字段（无 UI，手改数据文件才用得上）。
-           */
-          ...(maxOutputTokens !== undefined || temperature !== undefined
-            ? {
-                modelSettings: {
-                  ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
-                  ...(temperature !== undefined ? { temperature } : {})
-                }
-              }
-            : {}),
-          abortSignal: runSignal,
-          // 子任务的派活策略（历史截断 / 步数封顶 / 失败文案 / 连败停止）。
-          // 不启用 subagent 时也传：这份 delegation 是纯钩子，没有 agents 就没人触发它，
-          // 零行为差异（且省掉一处条件分支）。
-          delegation: buildDelegation(stats, {
-            ...(opts.workspace.id ? { conversationId: opts.workspace.id } : {})
-          }),
-          onIterationComplete: async (ctx) => {
-            /**
-             * 工具步骤边界：先把「当前上下文占多少」推一帧出去，让前端的上下文圆环
-             * **一轮之内**也跟着走（而不是只在 finish 时跳一下）。
-             *
-             * 这一步用的是 pi 的**兜底分支**（`estimateContextTokens` 找不到「带 usage 的
-             * 助手消息」时）：把消息逐条估出来求和。这里拿不到「这一步的 usage」——
-             * Mastra 的 `onIterationComplete` 不传它，而 finish chunk 与这个回调的先后
-             * 顺序没有保证，猜错就会推一个旧值。真正的权威值在 finish 时用上游 usage 覆盖
-             * （见下面的 `calculateContextTokens`），所以这里估算即可。
-             *
-             * `baseTokens` 是 messages 之外的那块（系统提示词 + 工具 schema），pi 的消息里
-             * 不含它，得补上；拿不到窗口就用环境变量兜底，与压缩判断同源。
-             */
-            emitEvent({
-              type: 'context-usage',
-              used: baseTokens + estimateMastraMessagesTokens(ctx.messages),
-              size: opts.contextWindow ?? defaultContextWindowFromEnv()
-            })
-            const steer = (await opts.pollSteer?.()) ?? null
-            if (!steer) return
-            steered = true
-            // 先广播再注入：服务端据此记下「parts 到此为止」的切片边界。
-            opts.onEvent?.({ type: 'user-injected', message: steer })
-            // ⚠️ 不用返回值的 feedback 字段：spike 实测它在 isFinal 边界被静默丢弃、
-            // 在非 final 边界以 assistant 角色追加 —— 都不是「用户插话」的语义。
-            // 正路是把 user 消息直接 push 进 ctx.messages（下一次请求原样带上），
-            // 再用 continue 强制续跑（模型已给出最终回答时也照样再来一轮）。
-            const steerText = steer.parts
-              .filter((p) => p.type === 'text')
-              .map((p) => p.text)
-              .join('\n')
-              .trim()
-            /**
-             * 插话带的附件（图片 / PDF）：注入的这条消息是 **Mastra format-2**，
-             * 它的 part 形状是 **AI SDK v4 UIMessage** 那一套 —— file part 是
-             * `{ type: 'file', mimeType, data }`，**不是**初始历史那条路上的
-             * `{ type: 'image', image: URL }`（那套由 `toModelMessages` 产出，喂给
-             * `agent.stream` 的入参）。两者别混：形状写错**不会报错**，附件会被静默丢掉
-             * （与 AGENTS.md 记的 `reasoning-delta` 同类坑）。断言见 scripts/verify-steer.mjs。
-             *
-             * `data` 要填**绝对地址**：Mastra 拿到 URL 后会自己去取（下载失败会替换成
-             * 占位文本，不会炸整轮）。绝对化策略由调用方注入（server 传的是
-             * UploadAdapter.resolveModelUrl），这里零存储知识 —— 与 toModelMessages
-             * 的 `resolveFileUrl` 同一条约定。
-             */
-            const allSteerFiles = steer.parts.flatMap((p) =>
-              p.type === 'file' ? [{ mediaType: p.mediaType, url: p.url }] : []
-            )
-            // 模型不收图片：插话里的图片同样摘掉，并在框题里明说（与 toModelMessages 同口径）
-            const steerFiles = modelSettings.imageInput
-              ? allSteerFiles
-              : allSteerFiles.filter((f) => !f.mediaType.startsWith('image/'))
-            const omittedSteerImages = allSteerFiles.length - steerFiles.length
-            // 只带附件、没写文字的插话：框题里补一句，免得模型看到一条空的「插话」正文
-            const steerBody =
-              [
-                steerText,
-                omittedSteerImages > 0
-                  ? `（有 ${omittedSteerImages} 张图片因当前模型未开启图片输入被省略）`
-                  : ''
-              ]
-                .filter(Boolean)
-                .join('\n') ||
-              (steerFiles.length
-                ? '（本条插话只带了附件，没有文字说明）'
-                : '（本条插话没有可发送的内容）')
-            ctx.messages.push({
-              id: steer.id,
-              role: 'user',
-              createdAt: new Date(steer.createdAt),
-              content: {
-                format: 2,
-                parts: [
-                  ...steerFiles.map((f) => ({
-                    type: 'file' as const,
-                    mimeType: f.mediaType,
-                    data: opts.resolveFileUrl ? opts.resolveFileUrl(f.url) : f.url
-                  })),
-                  {
-                    type: 'text',
-                    /*
-                     * ⚠️ 注入给模型的文本必须**带框**，不能把用户原话直接发出去。
-                     *
-                     * 插话就是一条普通 user 消息，而模型天然把「最后一条 user 消息」当成
-                     * 当前任务 —— 原样发的话，用户一句问话（如「可以用 edge 吗？」）就会
-                     * 把整轮任务接管过去，后面的思考与步骤全绕着它转（实测反馈）。
-                     *
-                     * 框里点明「这是运行中插话、不是新任务」，并给出两种意图的出口：
-                     * 补充/纠偏就一并处理，彻底转向也可以 —— 但都别把原任务丢掉。
-                     *
-                     * 末尾再补一条「不要复述」的约束（用户反馈过：不写这句时模型每轮
-                     * 续跑都会先在正文里客套 + 照抄插话原文/框题，用户看着像复读）：
-                     * 插话是上下文里最后一条 user 消息，模型天然要先应一声，而原话就
-                     * 嵌在框里，照抄概率更高。这句放在**末尾**（近因），显式禁掉。
-                     *
-                     * 只改**模型上下文**：`user-injected` 广播出去的那条与落盘历史都保持
-                     * 用户原话（客户端按它拆段显示，用户看到的仍是自己写的那一句）。
-                     */
-                    text:
-                      `【用户在任务运行中的插话】${steerBody}\n` +
-                      '（这是运行中插话，不是新任务：把它纳入当前任务一并处理 —— 需要回答就回答、' +
-                      '要改方向就改方向，但继续完成你原本在做的事，不要把它当成新任务从头开始，也不要丢掉原任务。' +
-                      '回复时不要在开头复述或引用这段插话的原文与上面这个框题 —— 用户已经看到自己写了什么；' +
-                      '直接接着干活，至多一句话带过。）'
-                  }
-                ]
-              }
-            })
-            return { continue: true }
-          }
-        }
-      )
+
       /**
-       * ⚠️ 不能直接 `for await`：看门狗需要在「一个 chunk 都不来」时打断等待，
-       * 而 for-await 会一直挂在 `next()` 上（abortSignal 在部分 Mastra 版本里也
-       * 不会让流立刻结束）。手动拿迭代器，每次 `next()` 与「子任务剩余空闲时间」
-       * 赛跑。
+       * 子任务：每个 id 一个 `agent-<id>` 工具，`execute` 里跑一条独立的子 run
+       * （见 `subagents.ts`）。不启用时是空对象 —— 与没有这个能力时逐字节一致。
        */
-      const streamIterator = (result.fullStream as unknown as AsyncIterable<unknown>)[
-        Symbol.asyncIterator
-      ]()
+      const delegationTools =
+        opts.subagents?.length && modelSettings.toolCall
+          ? buildDelegationTools(opts.subagents, {
+              workspacePath: opts.workspace.path,
+              workspaceName: opts.workspace.name,
+              model: effectiveModel,
+              ...(opts.subagentModel
+                ? { subagentModel: withModelApiStyle(opts.subagentModel) }
+                : {}),
+              /**
+               * 子 run 的事件**不经过父流**（它是工具里自己起的流），所以看门狗的心跳
+               * 必须在这里刷新 —— 否则一个跑了 3 分钟但一直在吐字的子任务会被当成卡死。
+               */
+              emit: (event: AgentStreamEvent) => {
+                if (
+                  (event.type === 'subagent-delta' || event.type === 'subagent-progress') &&
+                  event.toolCallId
+                ) {
+                  const info = activeDelegations.get(event.toolCallId)
+                  if (info) info.lastAt = Date.now()
+                }
+                emitEvent(event)
+              },
+              signal: runSignal,
+              stats
+            })
+          : {}
+
+      type EngineInput = Parameters<typeof runEngine>[0]
+      const engineTools = { ...toolsForModel, ...delegationTools } as EngineInput['tools']
+      /** 上一次边界时 messages 的长度：只用来估「这一步新增的那部分」 */
+      let boundaryCount = messages.length
+
+      const engine = runEngine({
+        model: resolveModel(effectiveModel) as unknown as EngineInput['model'],
+        system: setupForModel.instructions,
+        messages,
+        tools: engineTools,
+        maxSteps: opts.maxSteps ?? MAX_STEPS,
+        abortSignal: runSignal,
+        toolCallConcurrency: resolveToolCallConcurrency(opts.toolCallConcurrency),
+        ...(maxOutputTokens !== undefined || temperature !== undefined
+          ? {
+              modelSettings: {
+                ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+                ...(temperature !== undefined ? { temperature } : {})
+              }
+            }
+          : {}),
+        /**
+         * 工具步骤边界（下一次请求之前）。这里是唯一能安全介入的位置：
+         * 1. 推一帧 `context-usage`，让圆环在一轮之内也走；
+         * 2. 轮中压缩：压完返回新数组，下一步请求立刻变小（不落检查点）；
+         * 3. 消费一条运行中插话，追加成 user 消息。
+         *
+         * ⚠️ 不再需要 `isFinal` 判断 —— `prepareStep` 只在「还有下一步」时被调用，
+         * 天然不会出现「最后一步之后再压一次」。
+         */
+        onStepBoundary: async ({ messages: current }) => {
+          let next = current
+          /**
+           * 显示与判据用**同一个数**：`真值 + 本步新增的估算`，没有真值才全量估算。
+           * 两条腿互相兜底 —— 估算漏了某种 part 形状时真实值兜住，真实值过期时
+           * （刚压缩完 / 第一步）估算兜住。
+           */
+          const tailTokens = estimateMessagesTokens(next.slice(boundaryCount))
+          const estimatedAll = baseTokens + estimateMessagesTokens(next)
+          const realWithTail = lastStepUsage
+            ? calculateContextTokens(lastStepUsage) + tailTokens
+            : 0
+          const observedContextTokens = contextUsed(realWithTail, estimatedAll)
+          emitEvent({
+            type: 'context-usage',
+            used: observedContextTokens,
+            size: contextWindow,
+            base: baseTokens
+          })
+          /**
+           * 冷却：上一次轮中压缩没把上下文压下来时，再压一遍只会把刚写好的摘要再摘要
+           * 一次。要求自那以后真的增长 50% 才允许再压；上限卡在窗口上，别等到溢出。
+           */
+          const cooldownCeiling =
+            midTurnCompactAfter === null
+              ? 0
+              : Math.min(midTurnCompactAfter * 1.5, contextWindow)
+          const cooled = midTurnCompactAfter !== null && observedContextTokens < cooldownCeiling
+          if (!cooled) {
+            try {
+              const compactedMid = cooled
+                ? null
+                : await compactModelMessages(next, {
+                    contextWindow,
+                    baseTokens,
+                    triggerTokens: observedContextTokens,
+                    model: effectiveModel,
+                    signal: runSignal,
+                    ...(opts.onContextCompactionStart
+                      ? { onSummaryStart: opts.onContextCompactionStart }
+                      : {}),
+                    ...(opts.onContextCompactionDelta
+                      ? { onSummaryDelta: opts.onContextCompactionDelta }
+                      : {})
+                  })
+              if (compactedMid?.compressed) {
+                next = compactedMid.messages
+                midTurnCompactAfter = compactedMid.compressed.afterTokens
+                /**
+                 * `lastStepUsage` 是**压缩前**那一步的真实 usage，压缩后已经不代表当前
+                 * 上下文了。作废它，让下一个边界退回逐条估算，直到拿到新的真实值。
+                 */
+                lastStepUsage = null
+                opts.onContextCompressed?.({
+                  ...compactedMid.compressed,
+                  ...(compactedMid.summary ? { summary: compactedMid.summary } : {})
+                })
+                emitEvent({
+                  type: 'context-usage',
+                  used: compactedMid.compressed.afterTokens,
+                  size: contextWindow,
+                  base: baseTokens
+                })
+              }
+            } catch (err) {
+              // 摘要模型挂了不该把已经跑完的工具步骤整轮作废；下一步若真超窗会走 overflow 恢复
+              console.error('[compaction] 轮中压缩失败：' + describeError(err))
+            }
+          }
+          boundaryCount = next.length
+
+          const steer = (await opts.pollSteer?.()) ?? null
+          if (!steer) return next === current ? undefined : next
+          steered = true
+          // 先广播再注入：服务端据此记下「parts 到此为止」的切片边界。
+          opts.onEvent?.({ type: 'user-injected', message: steer })
+          const steerText = steer.parts
+            .filter((p) => p.type === 'text')
+            .map((p) => p.text)
+            .join('\n')
+            .trim()
+          /**
+           * 插话带的附件：这里是 **ModelMessage** 的 part 形状（与 `toModelMessages`
+           * 产出的那条路一致）。写错形状**不会报错**，附件会被静默丢掉。
+           */
+          const allSteerFiles = steer.parts.flatMap((p) =>
+            p.type === 'file' ? [{ mediaType: p.mediaType, url: p.url, name: p.name }] : []
+          )
+          // 模型不收图片：插话里的图片同样摘掉，并在框题里明说（与 toModelMessages 同口径）
+          const steerFiles = modelSettings.imageInput
+            ? allSteerFiles
+            : allSteerFiles.filter((f) => !f.mediaType.startsWith('image/'))
+          const omittedSteerImages = allSteerFiles.length - steerFiles.length
+          // 只带附件、没写文字的插话：框题里补一句，免得模型看到一条空的「插话」正文
+          const steerBody =
+            [
+              steerText,
+              omittedSteerImages > 0
+                ? `（有 ${omittedSteerImages} 张图片因当前模型未开启图片输入被省略）`
+                : ''
+            ]
+              .filter(Boolean)
+              .join('\n') ||
+            (steerFiles.length
+              ? '（本条插话只带了附件，没有文字说明）'
+              : '（本条插话没有可发送的内容）')
+          const steerContent: Array<Record<string, unknown>> = steerFiles.map((f) => {
+            const url = opts.resolveFileUrl ? opts.resolveFileUrl(f.url) : f.url
+            return f.mediaType.startsWith('image/')
+              ? { type: 'image', image: url, mediaType: f.mediaType }
+              : { type: 'file', data: url, mediaType: f.mediaType, filename: f.name }
+          })
+          /**
+           * ⚠️ 注入给模型的文本必须**带框**：插话是一条普通 user 消息，而模型天然把
+           * 「最后一条 user 消息」当成当前任务 —— 原样发的话，用户一句问话就会把整轮
+           * 任务接管过去。框里点明「这是运行中插话、不是新任务」，末尾再禁掉复述
+           * （不写这句时模型每轮续跑都会先客套 + 照抄插话原文）。
+           *
+           * 只改**模型上下文**：`user-injected` 广播出去的那条与落盘历史都保持用户原话。
+           */
+          steerContent.push({
+            type: 'text',
+            text:
+              `【用户在任务运行中的插话】${steerBody}\n` +
+              '（这是运行中插话，不是新任务：把它纳入当前任务一并处理 —— 需要回答就回答、' +
+              '要改方向就改方向，但继续完成你原本在做的事，不要把它当成新任务从头开始，也不要丢掉原任务。' +
+              '回复时不要在开头复述或引用这段插话的原文与上面这个框题 —— 用户已经看到自己写了什么；' +
+              '直接接着干活，至多一句话带过。）'
+          })
+          next = [
+            ...next,
+            { role: 'user', content: steerContent } as unknown as EngineInput['messages'][number]
+          ]
+          boundaryCount = next.length
+          return next
+        }
+      })
+      /**
+       * ⚠️ 不能直接 `for await`：看门狗需要在「一个事件都不来」时打断等待，
+       * 而 for-await 会一直挂在 `next()` 上。手动拿迭代器，每次 `next()` 与
+       * 「子任务剩余空闲时间」赛跑。
+       */
+      const streamIterator = engine.events[Symbol.asyncIterator]()
       let pendingChunk = streamIterator.next()
       for (;;) {
         if (runSignal.aborted) {
@@ -1270,7 +1103,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         const idleRemaining = subagentIdleRemaining()
         let idleTimer: ReturnType<typeof setTimeout> | null = null
         let idleTimedOut = false
-        let chunkResult: IteratorResult<unknown> | null = null
+        let chunkResult: IteratorResult<AgentStreamEvent> | null = null
         try {
           chunkResult =
             idleRemaining === null
@@ -1286,8 +1119,6 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
                   })
                 ])
         } finally {
-          // 上游报错 / 用户中止时这个 await 会直接抛出去：定时器必须在 finally 里清，
-          // 否则每中断一次就留一个最长 120s 的悬空 timer。
           if (idleTimer) clearTimeout(idleTimer)
         }
         // 中止优先于看门狗：两个 race 同时落地时按「用户主动停止」收场，别报成超时。
@@ -1296,101 +1127,82 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
           break
         }
         if (idleTimedOut) {
-          fireSubagentWatchdog()
-          // 流本身可能已经卡死：不再等它自然结束，也不阻塞收尾。
+          /**
+           * 定时器到点只是「父流这段时间没事件」，不等于子任务卡死 —— 子 run 的事件不走
+           * 父流，它可能正在正常吐字。真正的判定在 `fireSubagentWatchdog` 里（按每个
+           * 子任务各自的 `lastAt` 算），没判超时就继续等。
+           */
+          if (!fireSubagentWatchdog()) continue
           void pendingChunk.catch(() => undefined)
           void Promise.resolve(streamIterator.return?.()).catch(() => undefined)
           break
         }
         if (!chunkResult || chunkResult.done) break
-        const chunk = chunkResult.value
+        const event = chunkResult.value
         pendingChunk = streamIterator.next()
-        // ⚠️ 实测（Mastra 1.71）：传进去的 abortSignal 在流式中途 abort 根本不停，
-        // 整轮会跑到自然结束（62k tokens 白烧）。这里每个 chunk 自己看一眼 signal，
-        // 用户点「停止」/ 刷新后停轮才能立刻中断。工具执行 / 等审批期间没有 chunk，
-        // 中断会等到下一个 chunk —— 审批等不等得到由路由侧解开（resolve 成拒绝）。
-        if (runSignal.aborted) {
-          void pendingChunk.catch(() => undefined)
-          break
-        }
-        // 排障开关：Mastra 的 chunk 形状跨版本变过（字段名/嵌套），认不出来时
-        // 打开它把原始 chunk 打出来，比猜快得多（`FIZZ_DEBUG_CHUNKS=1`）
-        if (process.env.FIZZ_DEBUG_CHUNKS === '1') {
-          console.log('[chunk]', JSON.stringify(chunk).slice(0, 500))
-        }
-        // finish chunk 带 usage（多步时最后一条才是累计值，所以后写覆盖先写）
-        const chunkUsage = readChunkUsage(chunk)
-        if (chunkUsage) {
-          rawUsage = chunkUsage
-          finishChunks++
-        }
-        // 单步 usage 后写覆盖先写：最后一次请求的那个才是「当前上下文」
-        const stepUsage = readChunkStepUsage(chunk)
-        if (stepUsage) lastStepUsage = stepUsage
-        /**
-         * 子任务活动续命：不只看被转发出去的 text-delta / tool-call，**任何**子 run
-         * 的 chunk（尤其 reasoning）都算「它还活着」。看门狗判的是「子任务完全没动静」，
-         * 不是「没给用户看的内容」。
-         */
-        const chunkRecord = chunk as Record<string, unknown>
-        if (str(chunkRecord.type) === 'tool-output') {
-          const nestedPayload = chunkRecord.payload as Record<string, unknown> | undefined
-          if (isNestedSubagentChunk(nestedPayload?.output)) {
-            const nestedId = str(nestedPayload?.toolCallId) || str(chunkRecord.toolCallId)
-            const info = nestedId ? activeDelegations.get(nestedId) : undefined
-            if (info) info.lastAt = Date.now()
+        // 流内 error 事件：可重试的请求错误抛出去走重试，其余照旧下发
+        if (event.type === 'error') {
+          const rawError = (event as { raw?: unknown }).raw
+          if (isRetryableAttemptError(rawError)) {
+            throw rawError instanceof Error ? rawError : new Error(event.message)
           }
         }
-        const event = adaptMastraChunk(chunk, opts.unknownChunks)
-        if (event) {
-          // 流内 error chunk（不抛、只发事件）：若底层是「可重试的这一次请求」的错误
-          // （网络中断 / 上游空响应）就抛出去，交给下面的 catch 走重试；
-          // 认不出来的照旧当普通错误事件下发（保持原行为）。
-          if (event.type === 'error') {
-            const rawError = chunkErrorOf(chunk)
-            if (isRetryableAttemptError(rawError)) {
-              throw rawError instanceof Error ? rawError : new Error(event.message)
-            }
+        if (event.type === 'tool-call') {
+          toolExecuted = true
+          // 派活工具：从这一刻开始盯它，直到对应的 tool-result 回来
+          if (event.toolName.startsWith('agent-')) {
+            activeDelegations.set(event.toolCallId, {
+              toolName: event.toolName,
+              lastAt: Date.now()
+            })
           }
-          if (event.type === 'tool-call') {
-            toolExecuted = true
-            // 派活工具：从这一刻开始盯它，直到对应的 tool-result 回来
-            if (event.toolName.startsWith('agent-')) {
-              activeDelegations.set(event.toolCallId, {
-                toolName: event.toolName,
-                lastAt: Date.now()
-              })
-            }
-          }
-          if (event.type === 'tool-result' && activeDelegations.has(event.toolCallId)) {
-            activeDelegations.delete(event.toolCallId)
-          }
-          // 首字（正文 / 思考 / 工具参数都算）到达即开始计生成窗口
-          if (firstOutputAt === null && event.type !== 'finish' && event.type !== 'error') {
-            firstOutputAt = Date.now()
-          }
-          emitEvent(event)
         }
+        if (event.type === 'tool-result' && activeDelegations.has(event.toolCallId)) {
+          activeDelegations.delete(event.toolCallId)
+        }
+        // 子任务的任何动静都算「它还活着」（看门狗判的是「完全没动静」）
+        if (event.type === 'subagent-delta' || event.type === 'subagent-progress') {
+          const info = activeDelegations.get(event.toolCallId)
+          if (info) info.lastAt = Date.now()
+        }
+        // 首字（正文 / 思考 / 工具参数都算）到达即开始计生成窗口
+        if (firstOutputAt === null && event.type !== 'error') {
+          firstOutputAt = Date.now()
+        }
+        emitEvent(event)
       }
-      // 兜底：个别版本 finish chunk 不带 usage，但结果对象上有（Mastra 的 usage 是个 Promise）。
-      // 放在 abort 判断之前：手动 break（用户点停止）时也要试着从 result 上拿，
-      // 否则已经产出的 token 会随着 aborted 一起丢掉。
+      /**
+       * ⚠️ 手动迭代 + `break` **不会**自动关掉生成器（只有 `for await` 会）。
+       * 不显式 `return()` 的话，引擎的 `finally` 不跑、`engine.done` 永远不 resolve ——
+       * 用户点停止后整轮就挂在这里。生成器已经跑完时 return() 是空操作。
+       */
+      await Promise.resolve(streamIterator.return?.()).catch(() => undefined)
+      // 收尾：流跑完 / 被中止都会 resolve（引擎在 finally 里收尾，不会悬挂）
+      const finished = await engine.done
+      /**
+       * 上游「空响应」：finishReason 归到 `other` 且整轮一个内容事件都没产出。
+       * 同一条请求重发通常就有内容，所以抛出去交给重试路径（`isEmptyStreamOutputError`
+       * 按这条文案识别）。中止不算 —— 那是用户主动停。
+       */
+      if (!runSignal.aborted && finished.finishReason === 'other' && firstOutputAt === null) {
+        throw new Error('上游返回空响应（finishReason "other"，整轮没有任何内容）')
+      }
       if (!rawUsage) {
-        const holder = result as unknown as { totalUsage?: unknown; usage?: unknown }
-        const maybe = holder.totalUsage ?? holder.usage
-        const resolved =
-          maybe && typeof (maybe as { then?: unknown }).then === 'function'
-            ? await Promise.resolve(maybe as Promise<unknown>).catch(() => undefined)
-            : maybe
-        rawUsage = normalizeUsage(resolved)
+        rawUsage = normalizeUsage(finished.totalUsage)
+        if (rawUsage) finishChunks = Math.max(finishChunks, 1)
+      }
+      if (!lastStepUsage) {
+        const stepUsage = normalizeUsage(finished.lastStepUsage)
+        if (stepUsage) lastStepUsage = stepUsage
       }
       /**
        * 上下文大小 = **最后一次请求上游真实上报的 input + output**（pi 的
        * `calculateContextTokens`，见 `context.ts`）。一轮结束时最后一条消息就是助手回复，
        * 「其后消息」为空，所以不需要再估 tail。
        *
-       * 不再用 `baseTokens + estimateMessagesTokens` 当显示值：那是按字符估的（±20%），
-       * 而上游上报的 input 已经把系统提示词、工具 schema、缓存命中的部分全算在内了。
+       * 不再用 `baseTokens + estimateMessagesTokens` 当显示值：那是本地估的（CJK 加权后
+       * 已经贴近真实，但仍拿不到「上游到底发了多少」），而上游上报的 input 已经把
+       * 系统提示词、工具 schema、缓存命中的部分全算在内了。
        * 只在拿不到 usage 时才退回估算（上面那个兜底值）。
        */
       if (lastStepUsage) {

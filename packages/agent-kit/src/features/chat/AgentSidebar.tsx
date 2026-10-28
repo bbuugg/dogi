@@ -703,7 +703,7 @@ export function AgentSidebar({
     const running =
       !waiting &&
       (activity.running || !!app.runningConversations[conversation.id]);
-    /** 外部 ACP agent 驱动的会话：行首图标与内置 mastra 会话区分开 */
+    /** 外部 ACP agent 驱动的会话：行首图标与内置 内置会话区分开 */
     const isAcp = conversation.backend === "acp";
     /** 多智能体协作会话（主智能体 + 子 Agent 班子）：行首图标与普通对话区分开 */
     const isCollab = conversation.kind === "collab";
@@ -778,8 +778,8 @@ export function AgentSidebar({
           // 会话在跑：打字气泡（不是转圈 —— 一屏十几行转圈太晃，也读不出「在输出」）
           <TypingBubble />
         ) : isAcp ? (
-          // ACP 会话（外部 agent）用机器人图标与内置 mastra 会话区分；
-          // 判定一律 `=== 'acp'`，旧值 `'ai-sdk'` 落进 else 分支即 mastra
+          // ACP 会话（外部 agent）用机器人图标与内置 内置会话区分；
+          // 判定一律 `=== 'acp'`，旧值 `'ai-sdk'` 落进 else 分支即内置 Agent
           <Bot
             className="size-4 shrink-0 text-muted-foreground"
             aria-label={t("ACP 会话")}
@@ -894,7 +894,7 @@ export function AgentSidebar({
               行尾「更多」：删除 +（仅 acp）重启 / 重新加载会话都收进下拉，与项目行的「更多」同一套。
               删除走弹窗（不再是「点两次就地确认」）：acp 会话要多一个「同时删除 agent 侧会话」
               的复选框，就地按钮塞不下这些信息，所以它本来也该有个「收起来」的地方。
-              后两项**只有 acp 会话有**（内置 mastra 会话没有 agent 进程这个概念）：
+              后两项**只有 acp 会话有**（内置 内置会话没有 agent 进程这个概念）：
               重启 = 杀 agent 进程、保留 sessionId，下一轮 session/load 接回原上下文（是重连不是新建）；
               重新加载 = 当场再 load 一次、拿 agent 侧回放把消息列表整体重建（视图与 agent 侧对齐）。
             */}

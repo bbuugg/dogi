@@ -279,6 +279,21 @@
   max-width: none;
 }
 
+/*
+ * 底部动作行**恰好两个按钮**时让它们等宽。
+ *
+ * footer 上的 `grow` 只按内容分剩余空间，「取消」和「保存」长短不同就会一宽一窄，
+ * 摆在一起很显眼。带路径 / 错误提示的行（≥ 3 个子元素）保持原样，别把提示挤没。
+ */
+[data-mobile-dialog]
+  [data-slot='dialog-footer']:has(
+    > :is([data-slot='button'], [data-slot='spinner-button']) +
+      :is([data-slot='button'], [data-slot='spinner-button'])
+  ):not(:has(> :nth-child(3)))
+  > :is([data-slot='button'], [data-slot='spinner-button']) {
+  flex: 1 1 0%;
+}
+
 ::selection {
   color: var(--background);
   background-color: var(--primary);
