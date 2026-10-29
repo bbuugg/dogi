@@ -21,7 +21,11 @@
 import { loadPlugins } from '@fizz/plugin/loader'
 import { assistantSliceId, buildUserParts, resolveToolCallConcurrency, type ChatRequest, type UploadFileRef } from '@fizz/contracts/agent-api'
 import { CollabRuntime, defaultContextWindowFromEnv, rawToolsPlugin, readProjectDoc, runAgent, type AgentConfirmInput, type MountedPlugin, type RunAgentResult } from '@fizz/agent'
-import { resolveContextWindow, resolveModelSettings } from '@fizz/contracts/types'
+import {
+  normalizeReasoningEffort,
+  resolveContextWindow,
+  resolveModelSettings
+} from '@fizz/contracts/types'
 import { buildMcpToolset } from '@fizz/mcp'
 import { buildAskFollowupTool, buildBrowserToolSet, resolveBrowserChannel } from '@fizz/tools'
 import { runAcpAgent } from '@fizz/acp'
@@ -316,6 +320,14 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
   let acpAgent: AcpAgentConfig | undefined
   const requestedConfigId = input.configId ?? conversation.configId
   const requestedModelId = input.modelId ?? conversation.modelId
+  /**
+   * 思考强度：请求里带了的优先（避免刚点完 pill 立刻发送、PATCH 还没回来的竞态），
+   * 否则用会话记住的那份。ACP 外部 agent 不读它（那边走 acpThoughtLevel）。
+   */
+  const reasoningEffort =
+    input.reasoningEffort !== undefined
+      ? normalizeReasoningEffort(input.reasoningEffort)
+      : conversation.reasoningEffort
   if (!requestedConfigId) {
     return rejectTurn(
       400,
@@ -743,6 +755,7 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
       skills,
       projectDoc,
       permissionMode,
+      ...(backend === 'builtin' && reasoningEffort ? { reasoningEffort } : {}),
       // 运行中活取权限档：用户在整轮中途切档时闸门立刻按新档裁决（改档端点改的就是 run 上这个字段）
       getPermissionMode: () => run.permissionMode,
       requestConfirm,

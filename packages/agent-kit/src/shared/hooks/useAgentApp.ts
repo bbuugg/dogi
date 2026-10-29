@@ -111,6 +111,10 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
     notesRoots: s.notesRoots,
     /** 本轮后端（null = 跟随默认） */
     chatTarget: s.chatTarget,
+    /** 当前会话的思考强度（内置 Agent；null = 跟随模型默认） */
+    reasoningEffort: s.reasoningEffort,
+    /** 改当前会话的思考强度（新任务页 = 待定选择） */
+    setReasoningEffort: s.setReasoningEffort,
     /**
      * 新任务页选中的 ACP agent 的档位快照（模式 / 思考档）—— 那时还没有会话，
      * 这排 pill 的数据只能来自探测（见 `probeDraftAcp`）。`null` = 没选 ACP。
@@ -192,8 +196,8 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
     replaying: activeSlice?.replaying ?? false,
     busy: s.busy,
     /**
-     * 最近一次上下文压缩的通知（带自动消失）。ChatPanel 据此在消息区顶部挂一条
-     * 提示；为 null 时不渲染。
+     * 最近一次上下文压缩的通知（带自动消失）。上下文圆环的详情里展示；
+     * 为 null 时显示「最近没有发生过上下文压缩」。
      */
     contextNotice: s.contextNotice,
     /** 兜底上下文窗口（模型没单独配窗口时的圆环分母）；null = 还没拉到 */
@@ -206,8 +210,6 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
     creatingConversation: s.creatingConversation,
     /** 手动压缩当前会话（落摘要检查点；返回给调用方决定 toast） */
     compressContextNow: s.compressContextNow,
-    /** 清除摘要检查点，回到全文历史 */
-    clearContextSummary: s.clearContextSummary,
     error: s.error,
     /** 全局错误条：未知斜线命令这类「一次性的提示」也走这里（与 store 其他错误同路） */
     setError: s.setError,

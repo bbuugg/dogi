@@ -9,7 +9,8 @@
  * ⚠️ 数据仍来自会话级 `compaction` 展示态，不写进消息 parts：摘要不是对话内容，
  * 刷新后的真源是会话上的 `autoSummary` / `contextSummary`。
  */
-import { ChevronRight, Loader2, Minimize2 } from 'lucide-react'
+import { CheckCircleIcon, ChevronRight, ClockIcon, Minimize2 } from 'lucide-react'
+import { Badge } from '@fizz/ui/badge'
 import { useEffect, useState } from 'react'
 import {
   Reasoning,
@@ -50,48 +51,33 @@ export function ContextCompactionCard({
         setOpen(next)
       }}
     >
-      <ReasoningTrigger>
-        <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="inline-flex items-center gap-1 font-medium text-foreground">
+      <ReasoningTrigger className="w-full">
+        <span className="flex w-full min-w-0 items-center gap-2">
+          <span className="inline-flex shrink-0 items-center gap-1 font-medium text-foreground">
             {/* 「向内收拢」的图标 = 压缩本身，不再用仪表盘（那是「用量」的语义） */}
             <Minimize2 className="size-3.5" />
             {t('压缩上下文')}
           </span>
-          {streaming ? (
-            // 进行中不重复文案（工具名已经说了在压缩），只把转圈放到行尾
-            <Loader2 className="size-3.5 shrink-0 animate-spin" />
-          ) : (
-            <>
-              {compaction.beforeTokens !== undefined && (
-                <span>
-                  {t('压缩前 {tokens} token', {
-                    tokens: compaction.beforeTokens.toLocaleString()
-                  })}
-                </span>
-              )}
-              {compaction.afterTokens !== undefined && (
-                <span>
-                  {t('→ 压缩后 {tokens} token', {
-                    tokens: compaction.afterTokens.toLocaleString()
-                  })}
-                </span>
-              )}
-              {compaction.summarizedTurns !== undefined &&
-                compaction.keptTurns !== undefined && (
-                  <span>
-                    {/*
-                      ⚠️ 这两个数数的是**消息条数**，不是「轮」。原来写「摘要了 N 轮」，
-                      轮中反复压缩时切点前面常常只剩上一条摘要消息 → 永远显示「摘要了 1 轮」，
-                      看起来像「前面那么多消息都没处理」。其实它们早就在摘要里了。
-                    */}
-                    {t('摘要了 {summarized} 条消息，保留 {kept} 条', {
-                      summarized: compaction.summarizedTurns,
-                      kept: compaction.keptTurns
-                    })}
-                  </span>
-                )}
-            </>
-          )}
+          {/*
+           * 与工具卡同一套状态指示（`ToolHeader` 的 Badge）：进行中 = 脉冲时钟，
+           * 完成 = 绿勾。压缩前 / 后 token、摘要条数不再铺在头部（详情看上下文圆环）。
+           */}
+          <Badge
+            variant="secondary"
+            className="ml-auto shrink-0 gap-1.5 rounded-full text-xs"
+          >
+            {streaming ? (
+              <>
+                <ClockIcon className="size-4 animate-pulse" />
+                {t('压缩中…')}
+              </>
+            ) : (
+              <>
+                <CheckCircleIcon className="size-4 text-green-600 dark:text-green-500" />
+                {t('完成')}
+              </>
+            )}
+          </Badge>
           <ChevronRight
             className={cn(
               'size-4 shrink-0 transition-transform',

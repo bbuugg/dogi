@@ -12,6 +12,7 @@ import type {
   AgentConversation,
   AgentStreamEvent,
   AiPermissionMode,
+  AiReasoningEffort,
   AskFollowupRequest,
   ChatRunSummary,
   ChatStreamFrame,
@@ -594,6 +595,13 @@ export interface ConversationSlice {
     modelId?: string;
   } | null;
   /**
+   * 当前会话的**思考强度**（内置 Agent 专用；持久化在会话上，刷新还在）。
+   *
+   * `null` = 跟随模型默认。与 MCP 一样，没有活动会话时是一份**待定选择**，
+   * 随会话创建一起落库。ACP 会话不读它（那边用 `acpThoughtLevel`）。
+   */
+  reasoningEffort: AiReasoningEffort | null;
+  /**
    * 当前会话**允许使用的 MCP server id 清单**（持久化在会话上，刷新还在）。
    *
    * 刻意**不挂在 `chatTarget` 下**：那东西语义是「用哪个模型 / agent」，MCP 是正交的
@@ -669,6 +677,8 @@ export interface ConversationSlice {
       modelId?: string;
     } | null,
   ) => void;
+  /** 改这个会话的思考强度（`null` = 跟随模型默认）；新任务页 = 待定选择 */
+  setReasoningEffort: (effort: AiReasoningEffort | null) => void;
   /**
    * 新任务页选中 ACP agent 时探一次它的档位（模式 / 思考档）。
    *
@@ -1270,6 +1280,32 @@ export const createConversationSlice: StateCreator<
       .catch(() => undefined);
   };
 
+  /** 把会话的思考强度持久化（fire-and-forget，同 persistTarget 的约定） */
+  const persistReasoningEffort = (
+    conversationId: string,
+    effort: AiReasoningEffort | null,
+  ): void => {
+    const api = get().getApi();
+    if (!api) return;
+    void api
+      .setConversationTarget(conversationId, { reasoningEffort: effort })
+      .then(() => {
+        set((state) => ({
+          conversations: state.conversations.map((c) =>
+            c.id === conversationId
+              ? {
+                  ...c,
+                  ...(effort
+                    ? { reasoningEffort: effort }
+                    : { reasoningEffort: undefined }),
+                }
+              : c,
+          ),
+        }));
+      })
+      .catch(() => undefined);
+  };
+
   /**
    * 把「这个会话允许用哪些 MCP」持久化（fire-and-forget，与 persistTarget 同一套约定：
    * 失败不打扰，刷新时以服务端为准）。同时同步本地列表项 —— 会话摘要里带着 mcpServerIds，
@@ -1612,7 +1648,7 @@ export const createConversationSlice: StateCreator<
       return;
     }
     // 上下文压缩是「通知」不是内容增量：不往消息列表里塞东西，
-    // 只是告诉用户这一轮上下文被压过了（展示走 contextNotice，见 ChatPanel）。
+    // 只是告诉用户这一轮上下文被压过了（展示走 ContextRing 的 contextNotice 详情）。
     if (event.type === "context-compressed") {
       writeSlice(conversationId, (s) => ({
         ...s,
@@ -2325,6 +2361,8 @@ export const createConversationSlice: StateCreator<
         mcpServerIds: stored?.mcpServerIds ?? [],
         // 浏览器偏好同理：以服务端那份为准（别的端可能改过；没存过 = null）
         browserSettings: stored?.browserSettings ?? null,
+        // 思考强度同理
+        reasoningEffort: stored?.reasoningEffort ?? null,
       });
     }
     // 本地没人订着这条会话、但服务端还挂着 run（刷新 / 断线重连 / 换端回来）：
@@ -2513,6 +2551,7 @@ export const createConversationSlice: StateCreator<
     const controller = new AbortController();
     const {
       chatTarget,
+      reasoningEffort,
       permissionMode,
       confirmTimeoutMin,
       maxRetries,
@@ -2631,6 +2670,10 @@ export const createConversationSlice: StateCreator<
           maxRetries,
           // 同一批 tool-call 的并发上限：模型一次返回一大批工具调用时，服务端按这个数排队
           toolCallConcurrency,
+          // 思考强度：随请求带一份，避免刚切完档、PATCH 还没落盘时这一轮按旧档跑
+          ...(chatTarget?.backend !== "acp" && reasoningEffort
+            ? { reasoningEffort }
+            : {}),
           // 选了 ACP agent 就走外部进程（configId 此时是 ACP agent id）
           ...(chatTarget
             ? {
@@ -2813,6 +2856,7 @@ export const createConversationSlice: StateCreator<
     chatTarget: null,
     mcpServerIds: [],
     browserSettings: null,
+    reasoningEffort: null,
     draftAcp: null,
     runningConversations: {},
     blankIntent: false,
@@ -2834,6 +2878,11 @@ export const createConversationSlice: StateCreator<
     // ---------- 会话 ----------
     markRunning,
     persistTarget,
+    setReasoningEffort: (effort) => {
+      set({ reasoningEffort: effort });
+      const conversationId = get().activeConversationId;
+      if (conversationId) persistReasoningEffort(conversationId, effort);
+    },
     setChatTarget: (target) => {
       set({ chatTarget: target });
       const conversationId = get().activeConversationId;
@@ -2999,6 +3048,7 @@ export const createConversationSlice: StateCreator<
           chatTarget: preferredTarget(),
           mcpServerIds: [],
           browserSettings: null,
+          reasoningEffort: null,
           draftAcp: null,
         });
         return;
@@ -3013,6 +3063,8 @@ export const createConversationSlice: StateCreator<
         mcpServerIds: stored?.mcpServerIds ?? [],
         // 浏览器偏好也按会话各自记（没存过 = null → 界面按全局默认显示）
         browserSettings: stored?.browserSettings ?? null,
+        // 思考强度同理（没存过 = null → 跟随模型默认）
+        reasoningEffort: stored?.reasoningEffort ?? null,
       });
       /**
        * 定时任务跑出来的会话（`unseen`）：**点开即算看过**。
@@ -3294,6 +3346,8 @@ export const createConversationSlice: StateCreator<
         const mcpServerIds = target?.mcpServerIds ?? get().mcpServerIds;
         // 新任务页上设好的浏览器偏好也是**待定选择**：跟着会话一起落库
         const browserSettings = get().browserSettings;
+        // 思考强度同理（内置会话才有意义；ACP 服务端会忽略）
+        const reasoningEffort = get().reasoningEffort;
         const created = await api.createConversation({
           // 缺省 = 服务端建临时工作区（见 api.createConversation 的注释）
           ...(wid ? { workspaceId: wid } : {}),
@@ -3301,6 +3355,7 @@ export const createConversationSlice: StateCreator<
           ...(target ?? {}),
           ...(mcpServerIds.length ? { mcpServerIds } : {}),
           ...(browserSettings ? { browserSettings } : {}),
+          ...(reasoningEffort ? { reasoningEffort } : {}),
         });
         set((state) => ({ conversations: [created, ...state.conversations] }));
         // 没选项目：服务端刚建了个临时工作区 —— 清单不刷新的话顶栏 / 侧栏认不出它

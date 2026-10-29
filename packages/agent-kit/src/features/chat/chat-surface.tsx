@@ -93,7 +93,7 @@ export interface MessageListProps {
    * 只写 `sm:px-6` 的话手机上消息会**左右贴边**（用户报过「左边没有边距」）。
    */
   contentClassName?: string
-  /** 消息流**之前**的内容（上下文压缩 / 连接中断等 sticky 条） */
+  /** 消息流**之前**的内容（如连接中断 sticky 条） */
   header?: ReactNode
   /**
    * 历史装载失败：给了就整块替换消息流（调用方传自己的「错误 + 重试」组件）。

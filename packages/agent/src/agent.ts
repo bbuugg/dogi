@@ -61,6 +61,7 @@ import type {
   AgentWorkspace,
   AiModelConfig,
   AiPermissionMode,
+  AiReasoningEffort,
   RunAgentResult,
   SubagentTurnUsage,
   TurnUsage
@@ -82,6 +83,11 @@ export interface RunAgentOptions {
    */
   projectDoc?: ProjectDoc | null
   permissionMode?: AiPermissionMode
+  /**
+   * 内置 Agent 的思考强度（AI SDK 顶层 `reasoning`）。缺省 = 不传，跟随模型默认；
+   * 只有服务端按会话解析到非空档位时才传。
+   */
+  reasoningEffort?: AiReasoningEffort
   /**
    * 运行中实时读取权限档（优先于 `permissionMode`）。
    *
@@ -934,11 +940,16 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         maxSteps: opts.maxSteps ?? MAX_STEPS,
         abortSignal: runSignal,
         toolCallConcurrency: resolveToolCallConcurrency(opts.toolCallConcurrency),
-        ...(maxOutputTokens !== undefined || temperature !== undefined
+        ...(maxOutputTokens !== undefined ||
+          temperature !== undefined ||
+          opts.reasoningEffort !== undefined
           ? {
               modelSettings: {
                 ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
-                ...(temperature !== undefined ? { temperature } : {})
+                ...(temperature !== undefined ? { temperature } : {}),
+                ...(opts.reasoningEffort !== undefined
+                  ? { reasoningEffort: opts.reasoningEffort }
+                  : {})
               }
             }
           : {}),

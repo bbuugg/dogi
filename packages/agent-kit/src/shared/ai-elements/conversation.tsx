@@ -12,10 +12,9 @@
  *    会被同一帧的 ResizeObserver spring 抢跑，详见那段注释）。
  * 2. 用户手动开合折叠块（`holdScroll`）：转调库的 `stopScroll()` 退出跟随，
  *    刚展开的内容向下长出来、视图不动，点的那张卡不会被拽到底部。
- * 3. **容器宽度变化时退出跟随**（见下面 `attachScroll`）：宽度变化是**布局**变化
- *    （右侧面板开合、窗口缩放），不是「新内容到达」—— 但宽度一变正文就重排、内容高度
- *    跟着变，库的 ResizeObserver 会把它当成 positive resize 而去贴底。用户正翻着历史时
- *    这就会把视图**突然拽到底部**（实测反馈）。所以宽度一变且用户不在底部时主动 stopScroll。
+ * 3. **用户离开底部后，任何内容尺寸变化都不能把跟随重新打开**（见下面 contentRef 的
+ *    observer）：库在内容变矮且「离底 ≤ 阈值」时会无视用户已上滚、把 isAtBottom 设回
+ *    true；一轮结束时的自动折叠正好触发它，随后操作行出现就会贴底。
  * 4. 对外提供 isAtBottom / scrollToBottom / holdScroll，给「回到底部」按钮与折叠块用。
  * 5. **用户自己往上滚时立刻退出跟随**（见 `attachScroll` 里的 wheel / touch 监听）——
  *    库自带的「上滚即停」在我们这套样式 + 流式场景下两条判定同时失效，只靠它会一直
@@ -40,6 +39,15 @@ import {
  * 两处口径不一致会出现「库认为贴底、我们认为没贴」的错位。
  */
 const AT_BOTTOM_THRESHOLD_PX = 70;
+
+/**
+ * 「真正贴底」的距离（像素）：只有到这里才恢复跟随。
+ *
+ * 不能用上面那个 70px —— 那是**自动贴底锁定**的容差（键盘开合时重新锁住跟随），
+ * 用户手动往下滚时他还没到底、只是进了 70px 范围，一旦据此恢复跟随，
+ * 下一帧任何内容尺寸变化都会**瞬时**把他吸到底部（用户实测的「还没到底就跳」）。
+ */
+const AT_BOTTOM_EPSILON_PX = 2;
 
 type ConversationContextValue = {
   isAtBottom: boolean;
@@ -106,45 +114,42 @@ export const Conversation = ({
       resize: smoothResize ? undefined : "instant",
     });
 
+  /**
+   * 用户主动离开底部后置 true：**只有**滚回底部或 resetKey 才复位。
+   *
+   * 不能只依赖库的 `isAtBottom`：流式期间内容每帧长高会写非 0 的
+   * `resizeDifference`，库的 scroll 判定被整段跳过；键盘 / 触屏 / 拖拽滚动条
+   * 这些不经过 wheel 的上滚因此在库里不算数，下一帧长高就被贴回底部。
+   */
+  const userPausedRef = useRef(false);
+
   /** 用户手动开合折叠块：退出跟随，让内容向下长、视图留在原地（见文件头注释）。 */
   const holdScroll = useCallback(() => {
+    userPausedRef.current = true;
     stopScroll();
   }, [stopScroll]);
 
   /**
-   * 盯**滚动容器自己的宽度**（不是内容高度）的观察器。
+   * 盯**滚动容器自身高度**的观察器（不是内容高度）。
    *
-   * 为什么需要它：库只在内容**变高**时贴底，且它无从区分「新内容到了」与「同一批内容
-   * 因容器变窄而重排变高」。右侧面板开合走的是 `transition-[width] duration-200`
-   * （见 SidePanel），这 200ms 里会话列每帧都在变窄 / 变宽 —— 正文跟着重排，内容高度
-   * 每帧都在变。库的 ResizeObserver 于是每帧发一次 positive resize 并调 `scrollToBottom`；
-   * 它唯一的闸门是内部 `state.isAtBottom`，而那个状态在一次 resize 风暴里并不可靠
-   * （`handleScroll` 在 `resizeDifference !== 0` 时会直接 return，用户的上滚可能没被记账）。
-   * 结果就是用户翻着历史、一开合面板，视图被拽到底部。
+   * 手机键盘收起 / 输入框高度变化会让滚动容器的高度跟着变，浏览器把 `scrollTop`
+   * 夹到新的最大值会触发一次**看起来像上滚**的 scroll 事件，库据此把 `isAtBottom`
+   * 置 false；之后流式内容再长高就不再跟随，用户必须手动滑到底部才恢复（实测反馈）。
+   * 容器高度一变、而当前仍离底 ≤ 阈值时，直接同步落底并
+   * `scrollToBottom({ animation: 'instant' })` 把库的状态机复位 —— 这与「用户真的
+   * 翻到历史里」不同，那种情况离底 > 阈值，不动。
    *
-   * 修法：宽度一变就自己退出跟随。`stopScroll()` 会同步把内部 `isAtBottom` 置 false，
-   * 库随后那些 `scrollToBottom` 在 rAF 里一查 `!isAtBottom` 就直接 bail（库源码
-   * `next()` 的第一个分支），而浏览器天然会在内容变高时保住 `scrollTop` ——
-   * 视图于是留在原地。
-   *
-   * **贴底时反过来：重新锁上跟随**。手机键盘收起 / 输入框高度变化会让滚动容器的
-   * 高度跟着变，浏览器把 `scrollTop` 夹到新的最大值会触发一次**看起来像上滚**的
-   * scroll 事件，库据此把 `isAtBottom` 置 false；之后流式内容再长高就不再跟随，
-   * 用户必须手动滑到底部才恢复（实测反馈）。容器尺寸一变、而当前仍离底 ≤ 阈值时，
-   * 直接同步落底并 `scrollToBottom({ animation: 'instant' })` 把库的状态机复位 ——
-   * 这与「用户真的翻到历史里」不同，那种情况离底 > 阈值，不动。
-   *
-   * 顺带把「窗口缩放」也覆盖了：那是同一类布局变化，同样不该把视图甩到底部。
+   * 内容折叠 / 操作行出现这类**内容**高度变化不走这里，见下面 contentRef 的 observer。
    */
-  const widthObserverRef = useRef<ResizeObserver | null>(null);
+  const containerObserverRef = useRef<ResizeObserver | null>(null);
   /** 用户上滚监听的卸载函数（与 widthObserver 同生命周期，节点换了要摘掉） */
   const userScrollCleanupRef = useRef<(() => void) | null>(null);
   const attachScroll = useCallback(
     (el: HTMLDivElement | null) => {
       // 先把节点交给库（它要挂 scroll / wheel 监听、并从 ref 读 scrollTop）
       scrollRef(el);
-      widthObserverRef.current?.disconnect();
-      widthObserverRef.current = null;
+      containerObserverRef.current?.disconnect();
+      containerObserverRef.current = null;
       userScrollCleanupRef.current?.();
       userScrollCleanupRef.current = null;
       if (!el) return;
@@ -167,15 +172,28 @@ export const Conversation = ({
        * 所以这里自己判「用户想往上」，直接 `stopScroll()` 把库的 isAtBottom 置 false ——
        * 它后续那些 resize 贴底在 rAF 里一查 `!isAtBottom` 就 bail。
        */
+      /**
+       * 手动滚到**真正贴底**后恢复跟随。
+       *
+       * 不能只把 `userPausedRef` 置 false：`stopScroll()` 同时把库的
+       * `escapedFromLock` / `isAtBottom` 置成了退出状态；流式期间 resizeDifference
+       * 非 0，库自己的 scroll 判定被跳过，不在这里复位的话「滚回底部」也不会再跟随。
+       * 此时已经在底部，instant 只是把库的状态机复位，不会产生可见跳变。
+       */
+      const resumeFollowAtBottom = (): void => {
+        if (!userPausedRef.current) return;
+        userPausedRef.current = false;
+        scrollToBottom({ animation: "instant" });
+      };
       const onWheel = (e: WheelEvent): void => {
         if (e.deltaY < 0) {
+          userPausedRef.current = true;
           stopScroll();
           return;
         }
-        // 往下滚且已经贴底：把跟随锁回来。流式期间库的 handleScroll 会被 resize 挡掉，
-        // 不主动锁的话「滚回底部」之后要等这一轮结束才恢复跟随
-        if (el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_THRESHOLD_PX) {
-          scrollToBottom({ animation: "instant" });
+        // 只有**真正到了底部**才恢复跟随；还在 70px 阈值里时不能 instant 吸底。
+        if (el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_EPSILON_PX) {
+          resumeFollowAtBottom();
         }
       };
       /** 触摸（手机 / 触屏本）：手指往下移 = 内容往上翻 = 用户在往回看 */
@@ -186,30 +204,61 @@ export const Conversation = ({
       const onTouchMove = (e: TouchEvent): void => {
         const y = e.touches[0]?.clientY ?? null;
         // 2px 死区：手指按住时的轻微抖动不该算「上滚」
-        if (y !== null && touchY !== null && y - touchY > 2) stopScroll();
+        if (y !== null && touchY !== null && y - touchY > 2) {
+          userPausedRef.current = true;
+          stopScroll();
+        }
         touchY = y;
+      };
+      /**
+       * 兜底：键盘 / PageUp / 拖拽滚动条等不经过 wheel 的上滚。
+       *
+       * 只在「内容没有变矮」时把 scrollTop 变小算作用户上滚 —— 折叠块收起 / 删除消息
+       * 会让浏览器夹小 scrollTop，那不是用户意图。回到最底部才重新打开跟随。
+       */
+      let lastTop = el.scrollTop;
+      let lastHeight = el.scrollHeight;
+      const onScroll = (): void => {
+        const top = el.scrollTop;
+        const height = el.scrollHeight;
+        if (top < lastTop - 2 && height >= lastHeight) {
+          userPausedRef.current = true;
+          stopScroll();
+        }
+        /*
+         * 用户自己往下滚时：
+         * - 只有**真正到底**才恢复跟随；
+         * - 还没到底（哪怕已在库的 70px 容差里）就继续压住库 —— 库的 handleScroll
+         *   会把「near bottom」当成「at bottom」并解开锁定，不压的话下一帧内容一
+         *   变尺寸就瞬时贴底。这里同步再 stopScroll() 一次，盖住它。
+         */
+        if (el.scrollHeight - top - el.clientHeight <= AT_BOTTOM_EPSILON_PX) {
+          resumeFollowAtBottom();
+        } else if (userPausedRef.current) {
+          stopScroll();
+        }
+        lastTop = top;
+        lastHeight = height;
       };
       el.addEventListener("wheel", onWheel, { passive: true });
       el.addEventListener("touchstart", onTouchStart, { passive: true });
       el.addEventListener("touchmove", onTouchMove, { passive: true });
+      el.addEventListener("scroll", onScroll, { passive: true });
       userScrollCleanupRef.current = () => {
         el.removeEventListener("wheel", onWheel);
         el.removeEventListener("touchstart", onTouchStart);
         el.removeEventListener("touchmove", onTouchMove);
+        el.removeEventListener("scroll", onScroll);
       };
-      /** 上一帧的尺寸；`null` = 首次回调（只记录，不当成一次变化） */
-      let prevWidth: number | null = null;
+      /** 上一帧的容器高度；`null` = 首次回调（只记录，不当成一次变化） */
       let prevHeight: number | null = null;
       const ro = new ResizeObserver(([entry]) => {
-        const width = entry.contentRect.width;
         const height = entry.contentRect.height;
-        const first = prevWidth === null || prevHeight === null;
-        const widthChanged = !first && prevWidth !== width;
+        const first = prevHeight === null;
         const heightChanged = !first && prevHeight !== height;
-        prevWidth = width;
         prevHeight = height;
         // 首帧只记录：挂载时不该被当成「刚刚变过尺寸」
-        if (!widthChanged && !heightChanged) return;
+        if (!heightChanged) return;
         // 直接量 DOM 而不是读 React state：这个判断必须与本次布局同步，
         // 走 state 会晚一帧（而这一帧正是库要贴底的那一帧）。
         const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
@@ -221,7 +270,7 @@ export const Conversation = ({
          * 不重新锁的话，这一轮流式输出就永远不跟了（用户得手动滑到底）。
          * 只在「离底 ≤ 阈值」时做 —— 用户真的翻到历史里时不动他的视图。
          */
-        if (distanceFromBottom <= AT_BOTTOM_THRESHOLD_PX) {
+        if (!userPausedRef.current && distanceFromBottom <= AT_BOTTOM_THRESHOLD_PX) {
           const relock = (): void => {
             // 再量一次：rAF 里用户可能已经上滚了，别把他拽回来
             if (el.scrollHeight - el.scrollTop - el.clientHeight > AT_BOTTOM_THRESHOLD_PX) return;
@@ -232,13 +281,10 @@ export const Conversation = ({
           // 尺寸变化后浏览器还可能补发一次 scroll（`scrollTop` 被夹到新上限），
           // 库会把它当成用户上滚。下一帧再锁一次，盖住这条迟到的 scroll。
           requestAnimationFrame(relock);
-          return;
         }
-        // 宽度变化 = 布局变化（面板开合 / 窗口缩放），不是新内容到达：退出跟随
-        if (widthChanged) stopScroll();
       });
       ro.observe(el);
-      widthObserverRef.current = ro;
+      containerObserverRef.current = ro;
     },
     [scrollRef, stopScroll, scrollToBottom]
   );
@@ -246,11 +292,33 @@ export const Conversation = ({
   // 组件卸载时摘掉观察器与用户上滚监听（节点被换掉时由 attachScroll 自己清）
   useEffect(
     () => () => {
-      widthObserverRef.current?.disconnect();
+      containerObserverRef.current?.disconnect();
       userScrollCleanupRef.current?.();
     },
     []
   );
+
+  /**
+   * **内容**尺寸变化时，用户已主动离开底部就重新压住库的跟随状态。
+   *
+   * 库自己的 ResizeObserver 在内容变矮时只要「离底 ≤ 阈值」就会把 isAtBottom 设回 true，
+   * 完全不看 escapedFromLock —— 一轮结束时思考 / 工具卡自动折叠正好会让内容大幅变矮，
+   * 用户明明在上面读，库却在这里把自己重新锁回底部；紧接着操作行 / 成果 chip 出现，
+   * 内容回涨，库就贴底了（用户报的「会话结束后自己跳到底部」）。
+   *
+   * 外面那个容器 observer 盯的是**滚动容器**的尺寸，内容折叠时它根本不会触发，所以
+   * 必须在 contentRef 上单独盯一次。顺序上库先注册、这里后注册，这里同步调 stopScroll()
+   * 会把库刚置上的 isAtBottom 再压回 false，库随后的 rAF 贴底就会 bail。
+   */
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content) return;
+    const ro = new ResizeObserver(() => {
+      if (userPausedRef.current) stopScroll();
+    });
+    ro.observe(content);
+    return () => ro.disconnect();
+  }, [contentRef, stopScroll]);
 
   // 切换会话 / 消息装载完成：本帧 paint 之前瞬时落底（不要平滑动画）
   useLayoutEffect(() => {
@@ -270,14 +338,20 @@ export const Conversation = ({
      * 顺序不能反：先 scrollToBottom 的话，它内部要等一个 rAF 才真正动 scrollTop，
      * 又会被 RO 的 spring 抢先。
      */
+    userPausedRef.current = false;
     const scrollEl = scrollRef.current;
     if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
     scrollToBottom({ animation: "instant" });
   }, [resetKey, scrollRef, scrollToBottom]);
 
+  const resumeAndScrollToBottom = useCallback(() => {
+    userPausedRef.current = false;
+    scrollToBottom();
+  }, [scrollToBottom]);
+
   return (
     <ConversationContext.Provider
-      value={{ isAtBottom, scrollToBottom, holdScroll }}
+      value={{ isAtBottom, scrollToBottom: resumeAndScrollToBottom, holdScroll }}
     >
       <div
         ref={attachScroll}

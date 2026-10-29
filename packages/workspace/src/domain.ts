@@ -59,7 +59,11 @@ import type {
   TransferPayload,
   TurnUsage
 } from '@fizz/contracts/types'
-import { normalizeCollabSettings, normalizeCollabState } from '@fizz/contracts/types'
+import {
+  normalizeCollabSettings,
+  normalizeCollabState,
+  normalizeReasoningEffort
+} from '@fizz/contracts/types'
 import type { AcpAgentConfig } from '@fizz/acp'
 import { normalizeMcpTransport, type McpServerConfig, type McpServerInput } from '@fizz/mcp'
 import type { SkillSettings } from '@fizz/skills'
@@ -1043,6 +1047,11 @@ export class AgentDomain {
       }
     }
     const kind: 'chat' | 'collab' = input.kind ?? prev?.kind ?? 'chat'
+    // 思考强度按会话存：不传 = 沿用已有（改选请走 setConversationTarget）
+    const nextReasoningEffort =
+      input.reasoningEffort !== undefined
+        ? normalizeReasoningEffort(input.reasoningEffort)
+        : prev?.reasoningEffort
     const conversation: AgentConversation = {
       id: input.id ?? prev?.id ?? newId(),
       workspaceId: input.workspaceId,
@@ -1058,6 +1067,7 @@ export class AgentDomain {
       backend: input.backend ?? prev?.backend,
       configId: input.configId ?? prev?.configId,
       modelId: input.modelId ?? prev?.modelId,
+      ...(nextReasoningEffort ? { reasoningEffort: nextReasoningEffort } : {}),
       createdAt: prev?.createdAt ?? now,
       updatedAt: now,
       // MCP 选择按会话存：不传 = 沿用已有（改选请走 setConversationTarget）
@@ -1220,6 +1230,8 @@ export class AgentDomain {
       configId: existing.configId,
       modelId: existing.modelId,
       messages: existing.messages.slice(0, cut + 1),
+      // 思考强度跟着分叉走：分支是「接着这个方向干」，不是一个全新的会话
+      reasoningEffort: existing.reasoningEffort,
       mcpServerIds: existing.mcpServerIds,
       // 浏览器偏好跟着分叉走：分支多半是「换个方向接着干」，浏览器配置照旧
       browserSettings: existing.browserSettings
@@ -1269,22 +1281,20 @@ export class AgentDomain {
   }
 
   /**
-   * 设置 / 清除上下文摘要检查点（**手动压缩**的落库口，见 `ConversationContextSummary`）。
+   * 设置上下文摘要检查点（**手动压缩**的落库口，见 `ConversationContextSummary`）。
    * 只改这一个字段，消息原封不动 —— 压缩只发生在「组装发往模型的历史」那一步。
-   * `null` = 清除（回到全文）。
    *
    * 手动压缩生效时顺手清掉 `autoSummary`：历史已经被检查点切过一遍，再叠一层自动摘要
    * 既是冗余，两套锚点也会打架（自动摘要的起点可能落在被切掉的那段里）。
    */
-  setContextSummary(id: string, summary: ConversationContextSummary | null): AgentConversation {
+  setContextSummary(id: string, summary: ConversationContextSummary): AgentConversation {
     const existing = this.getConversation(id)
     if (!existing) throw new Error('会话不存在')
     const next: AgentConversation = {
       ...existing,
-      // `null` 显式赋 undefined（JSON 落盘时字段被丢弃）= 清除，回到全文
-      contextSummary: summary ?? undefined,
+      contextSummary: summary,
       // 手动压缩已经把持久化历史切好，旧的自动固化点作废（避免两层摘要叠加）
-      ...(summary ? { autoSummary: undefined } : {}),
+      autoSummary: undefined,
       updatedAt: Date.now()
     }
     return this.commitConversation(next)
@@ -1330,6 +1340,7 @@ export class AgentDomain {
       backend?: AgentConversation['backend'] | null
       configId?: string | null
       modelId?: string | null
+      reasoningEffort?: AgentConversation['reasoningEffort'] | null
       mcpServerIds?: string[] | null
       acpPermissionMode?: AcpPermissionMode | null
       /** 浏览器偏好（整体对象语义）：`undefined` = 不动；`null` = 清除（回落全局默认） */
@@ -1362,6 +1373,10 @@ export class AgentDomain {
       backend: target.backend === undefined ? existing.backend : (target.backend ?? undefined),
       configId: target.configId === undefined ? existing.configId : (target.configId ?? undefined),
       modelId: target.modelId === undefined ? existing.modelId : (target.modelId ?? undefined),
+      // 思考强度：`undefined` = 不动；`null` = 清除（跟随模型默认）。非法值一律当清除。
+      ...(target.reasoningEffort !== undefined
+        ? { reasoningEffort: normalizeReasoningEffort(target.reasoningEffort) }
+        : {}),
       ...(nextMcpServerIds ? { mcpServerIds: nextMcpServerIds } : {}),
       // ACP 权限答复策略：`undefined` = 不动；`null` = 回到缺省（confirm，就不写字段）。
       // 只在 `allow` 时落库，免得每条会话配置都多一行没意义的 "confirm"。

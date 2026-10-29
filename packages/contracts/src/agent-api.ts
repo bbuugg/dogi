@@ -32,6 +32,7 @@ import type {
   AiModelSettings,
   AiPermissionMode,
   AiProviderKind,
+  AiReasoningEffort,
   AskFollowupRequest,
   ConversationContextSummary,
   FollowupAnswerItem,
@@ -1237,6 +1238,8 @@ export interface ConversationInput {
   configId?: string;
   /** `builtin` 后端下选中的上游模型（`AiModelConfig.models` 的一项） */
   modelId?: string;
+  /** 内置 Agent 的思考强度（缺省 = 跟随模型）；ACP 会话忽略 */
+  reasoningEffort?: AiReasoningEffort;
   /**
    * ACP 会话绑定：导入 agent 侧既有会话（`session/list` 里的一项）时带上它的
    * sessionId。创建后由服务端在 `session/new` 时回填，客户端不用管。
@@ -1684,6 +1687,11 @@ export interface ChatRequest {
    * 缺失或不在清单里 → 400（不存在「配置默认模型」）。`acp` 下可省（省 = agent 自己的默认）。
    */
   modelId?: string;
+  /**
+   * 本轮思考强度覆盖（仅 `builtin`）。缺省 = 用会话记住的 `reasoningEffort`。
+   * 请求里带一份是为了避免「刚点完 pill 立刻发送」时 PATCH 还没落盘、这一轮按旧档跑。
+   */
+  reasoningEffort?: AiReasoningEffort;
   /** 命令执行权限；服务端默认 confirm（网页端不该默认裸跑命令） */
   permissionMode?: AiPermissionMode;
   /**
@@ -2138,6 +2146,11 @@ export interface ConversationTargetInput {
   /** `ai-sdk` 下：这份配置里选中的上游模型（`AiModelConfig.models` 的一项） */
   modelId?: string | null;
   /**
+   * 内置 Agent 的思考强度。`undefined` = 不动；`null` = 清除（跟随模型默认）。
+   * ACP 会话忽略本字段。
+   */
+  reasoningEffort?: AiReasoningEffort | null;
+  /**
    * ACP 会话的权限答复策略（`confirm` = 逐次问用户 / `allow` = 应用层自动放行）。
    * 传 `null` = 回到缺省 `confirm`。
    */
@@ -2394,6 +2407,7 @@ export type {
   AiModelSettings,
   AiPermissionMode,
   AiProviderKind,
+  AiReasoningEffort,
   AgentChatMessage,
   AgentConfirmRequest,
   AgentConversation,

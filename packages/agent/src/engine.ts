@@ -15,7 +15,7 @@ import {
   type ModelMessage,
   type ToolSet
 } from 'ai'
-import type { AgentStreamEvent } from '@fizz/contracts/types'
+import type { AgentStreamEvent, AiReasoningEffort } from '@fizz/contracts/types'
 
 /** 一个工具步结束、下一步请求之前：可以改写下一步的 messages（插话注入 / 轮中压缩） */
 export interface EngineStepBoundary {
@@ -33,7 +33,12 @@ export interface AgentEngineOptions {
   /** 最大步数（一次请求 + 一轮工具执行 = 1 步） */
   maxSteps: number
   abortSignal?: AbortSignal
-  modelSettings?: { maxOutputTokens?: number; temperature?: number }
+  modelSettings?: {
+    maxOutputTokens?: number
+    temperature?: number
+    /** AI SDK 顶层 `reasoning` 档位；缺省 = 不传（跟随模型） */
+    reasoningEffort?: AiReasoningEffort
+  }
   /**
    * 同时执行的工具调用上限。模型一批并行下发 tool-call 时，全放开会把彼此的
    * 命令 / 输出拖到超时（`execute_command` 尤其明显）。
@@ -200,6 +205,9 @@ export function runEngine(opts: AgentEngineOptions): AgentEngine {
             : {}),
           ...(opts.modelSettings.temperature !== undefined
             ? { temperature: opts.modelSettings.temperature }
+            : {}),
+          ...(opts.modelSettings.reasoningEffort !== undefined
+            ? { reasoning: opts.modelSettings.reasoningEffort }
             : {})
         }
       : {}),

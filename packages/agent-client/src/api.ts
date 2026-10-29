@@ -113,6 +113,7 @@ import type {
 } from "@fizz/contracts/agent-api";
 import type {
   AiPermissionMode,
+  AiReasoningEffort,
   ApiArrangeInput,
   ApiGroup,
   ApiGroupInput,
@@ -1175,6 +1176,8 @@ export function createApi(
       backend?: AgentBackend;
       configId?: string;
       modelId?: string;
+      /** 内置 Agent 的思考强度（缺省 = 跟随模型） */
+      reasoningEffort?: AiReasoningEffort;
       /** 导入 agent 侧既有会话时带上它的 sessionId */
       acpSessionId?: string;
       /** 创建时就定下这个会话允许用哪些 MCP server（缺省 = 全不选） */
@@ -2291,13 +2294,6 @@ export function createApi(
       if (failure) throw new ApiError(failure);
       return result ?? { ok: false, reason: "压缩未返回结果" };
     },
-
-    /** 清除摘要检查点（回到全文历史；下次轮次不再携带摘要消息） */
-    clearContextSummary: (conversationId: string) =>
-      request<ChatCompressResult>(API_ROUTES.chatCompress, {
-        method: "DELETE",
-        body: JSON.stringify({ conversationId }),
-      }),
 
     /**
      * 答复一次命令执行审批（confirm 模式）。
