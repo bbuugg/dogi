@@ -9,7 +9,13 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { streamText } from 'ai'
-import { calculateContextTokens, clearAutoSummaryCache, compactHistory } from './context'
+import {
+  calculateContextTokens,
+  clearAutoSummaryCache,
+  compactHistory,
+  resolveCompactionSettings
+} from './context'
+import { compactionKeepRecentTokens } from '@fizz/contracts/types'
 import type { AgentChatMessage, AiModelConfig } from '@fizz/contracts/types'
 
 vi.mock('./resolve-model', () => ({ resolveModel: () => ({}) }))
@@ -375,5 +381,31 @@ describe('保留区按预算收缩（base 吃掉窗口时）', () => {
     expect(r.compressed).toBeNull()
     expect(r.skipped).toBe('no-budget')
     expect(gen).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * 保留区公式必须**只有一份**：界面判断「手动压缩按钮能不能点」用的是
+ * `compactionKeepRecentTokens`（contracts），服务端切点用的是
+ * `resolveCompactionSettings`（本包）。两边各算一套就会重演「按钮在 92% 以下永远灰着」
+ * ——那条闸当时拿的是**自动**压缩的触发线，和切点根本不是一回事。
+ */
+describe('保留区公式（界面 / 服务端同源）', () => {
+  it('resolveCompactionSettings 的 keepRecentTokens 与 contracts 的 helper 逐值一致', () => {
+    for (const contextWindow of [8000, 32000, 128000, 200000, 1000000]) {
+      for (const fixedTokens of [0, 5000, 60000]) {
+        expect(resolveCompactionSettings(contextWindow, undefined, fixedTokens).keepRecentTokens).toBe(
+          compactionKeepRecentTokens(contextWindow, fixedTokens)
+        )
+      }
+    }
+  })
+
+  it('默认窗口下保留区远小于触发线（手动压缩不该等到 92%）', () => {
+    const contextWindow = 200_000
+    const keep = compactionKeepRecentTokens(contextWindow, 20_000)
+    expect(keep).toBe(20000)
+    // 触发线 ≈ 窗口 − 预留（≈92%），拿它当手动压缩的闸就是这个 bug 的成因
+    expect(keep).toBeLessThan(contextWindow * 0.5)
   })
 })

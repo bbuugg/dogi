@@ -508,8 +508,8 @@ function AnswerSummary({
   const note = typeof obj.note === 'string' ? obj.note : ''
   const byId = new Map(answers.map((a) => [a.id, a]))
 
-  // 状态徽章：与 `getStatusBadge` 同一口径（图标 + 文案 + secondary 底色），
-  // 只是配色按「已回答 / 已跳过 / 失败」三种语义给。
+  // 状态徽章：图标 + 文案 + secondary 底色（工具卡那边已改成**只留图标**，这里没跟着改 ——
+  // 提问卡的三种结局「已回答 / 已跳过 / 失败」光看图标分不清，文案是必要信息）。
   const StatusIcon = isError ? XCircle : answered ? CircleCheck : CircleSlash
   const statusLabel = isError ? tr('失败') : answered ? tr('已回答') : tr('已跳过')
 

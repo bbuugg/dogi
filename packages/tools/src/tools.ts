@@ -79,6 +79,20 @@ export interface AgentToolOptions {
   onCommandEnd?: (toolCallId: string) => void
   /** 命令执行期间的 stdout / stderr 实时增量（纯转发，不缓存） */
   onCommandOutput?: (toolCallId: string, stream: 'stdout' | 'stderr', chunk: string) => void
+  /**
+   * `execute_command` 带 `runInBackground: true` 时调用：把它登记成一条**后台任务**，
+   * 立刻返回任务 id（进程归调用方持有，不占本轮的取消表、不设超时）。
+   *
+   * 由服务端注入 —— 只有它知道任务登记表在哪、这条命令属于哪个会话。**不传 = 不提供
+   * 后台执行**：工具会如实回绝并让模型别等输出，而不是假装命令起来了。
+   */
+  onBackgroundCommand?: (req: {
+    command: string
+    /** 已解析好的绝对路径（调用方不用再算一次 cwd） */
+    cwd: string
+    /** 一行标题：就是命令原文，任务列表里显示这一行 */
+    title: string
+  }) => Promise<{ id: string }>
   /** 可用技能（见 skills.ts）；有值时额外暴露 read_skill 工具，空值不暴露 */
   skills?: AgentSkill[]
   /**
@@ -386,6 +400,52 @@ function killChild(child: ReturnType<typeof spawn>, isWin: boolean): void {
 }
 
 /**
+ * 把一条命令翻译成「起哪个 shell、带什么参数、什么环境」。
+ *
+ * 前台（`runCommand`）与后台（`spawnBackgroundShell`）**必须用同一份判定**：两条路要是
+ * 各挑一次 shell，同一条命令「直接跑」和「丢后台跑」的行为就会不一样 —— 最典型的是
+ * Windows 上前台走 Git Bash、后台掉进 PowerShell，管道 / `&&` / 单引号整个不认。
+ *
+ * shell 选择：POSIX 恒为 `/bin/bash -lc`；Windows **优先 Git Bash** —— 模型拿到的是
+ * POSIX 工具链（ls / grep / sed / find / cat / 管道…），与主流编码代理一致。Git Bash 的
+ * coreutils 在 `<Git>\usr\bin`，登录 profile 之外再显式置前，保证 ls / grep 一定找得到
+ * （继承的 Windows PATH 里通常没有它）。没有 Git Bash 时回退 PowerShell 7（`pwsh`，启动
+ * 更快、UTF-8 默认行为更少坑），再没装就退到系统自带的 5.1（强制 UTF-8 输出，cmd 的 GBK
+ * 会乱码）。判定在 `@fizz/shells` 的 `commandShellPath()` 与 `gitBashPath()`，
+ * 与终端选择器共用同一份探测。
+ */
+function resolveShellSpawn(command: string): {
+  shellCmd: string
+  shellArgs: string[]
+  env: NodeJS.ProcessEnv
+  isWin: boolean
+} {
+  const isWin = process.platform === 'win32'
+  const bashPath = isWin ? gitBashPath() : null
+  const useBash = !isWin || Boolean(bashPath)
+  const shellCmd = isWin ? (bashPath ?? commandShellPath()) : '/bin/bash'
+  const shellArgs = isWin
+    ? useBash
+      ? ['-lc', command]
+      : [
+          '-NoLogo',
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `[Console]::OutputEncoding=[Text.Encoding]::UTF8;$OutputEncoding=[Text.Encoding]::UTF8;${command}`
+        ]
+    : ['-lc', command]
+  const env =
+    isWin && useBash
+      ? {
+          ...process.env,
+          PATH: `${join(dirname(bashPath!), '..', 'usr', 'bin')};${process.env.PATH ?? ''}`
+        }
+      : process.env
+  return { shellCmd, shellArgs, env, isWin }
+}
+
+/**
  * 在工作区目录下执行 shell 命令：输出 stdout + stderr（超预算时把全文落进工作区的
  * `.fizz/tool-output/`，回行号坐标），超时 / abortSignal 触发时终止整个进程树
  * （POSIX 用进程组，Windows 用 taskkill /T）。
@@ -404,40 +464,10 @@ async function runCommand(
     onEnd?: () => void
   }
 ): Promise<string> {
-  const isWin = process.platform === 'win32'
-  /**
-   * shell 选择：POSIX 恒为 `/bin/bash -lc`；Windows **优先 Git Bash** —— 模型拿到的是
-   * POSIX 工具链（ls / grep / sed / find / cat / 管道…），与主流编码代理一致。Git Bash 的
-   * coreutils 在 `<Git>\usr\bin`，登录 profile 之外再显式置前，保证 ls / grep 一定找得到
-   * （继承的 Windows PATH 里通常没有它）。没有 Git Bash 时回退 PowerShell 7（`pwsh`，启动
-   * 更快、UTF-8 默认行为更少坑），再没装就退到系统自带的 5.1（强制 UTF-8 输出，cmd 的 GBK
-   * 会乱码）。判定在 `@fizz/shells` 的 `commandShellPath()` 与 `gitBashPath()`，
-   * 与终端选择器共用同一份探测。
-   */
-  const bashPath = isWin ? gitBashPath() : null
-  const useBash = !isWin || Boolean(bashPath)
-  const shellCmd = isWin ? (bashPath ?? commandShellPath()) : '/bin/bash'
-  const shellArgs = isWin
-    ? useBash
-      ? ['-lc', command]
-      : [
-          '-NoLogo',
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
-          `[Console]::OutputEncoding=[Text.Encoding]::UTF8;$OutputEncoding=[Text.Encoding]::UTF8;${command}`
-        ]
-    : ['-lc', command]
+  const { shellCmd, shellArgs, env, isWin } = resolveShellSpawn(command)
   const child = spawn(shellCmd, shellArgs, {
     cwd,
-    // Git Bash 的 coreutils 在 <Git>\usr\bin：登录 profile 之外再显式置前，保证 ls / grep 找得到
-    env:
-      isWin && useBash
-        ? {
-            ...process.env,
-            PATH: `${join(dirname(bashPath!), '..', 'usr', 'bin')};${process.env.PATH ?? ''}`
-          }
-        : process.env,
+    env,
     windowsHide: true,
     ...(isWin ? {} : { detached: true })
   })
@@ -528,7 +558,105 @@ async function runCommand(
   })
 }
 
+/** 后台命令的收场结果 */
+export interface BackgroundShellExit {
+  /** 退出码；`null` = 没拿到（被信号杀掉 / 启动就失败，看 `error`） */
+  code: number | null
+  /** 启动失败的原因（`spawn` 的 error 事件）；正常收场不带 */
+  error?: string
+  /** 是不是被 `kill()` / `signal` 停掉的（任务登记表据此判「已取消」而不是「失败」） */
+  killed: boolean
+}
+
+export interface BackgroundShellHandle {
+  /** 杀掉整棵进程树（幂等；已经退出的进程会被忽略） */
+  kill: () => void
+  /** 等它自己收场。**不会 reject** —— 启动失败也走 resolve，`error` 里带原因 */
+  done: Promise<BackgroundShellExit>
+}
+
+/**
+ * 起一条**脱离当前回合**的 shell 命令：不设超时、不挂 per-tool-call 取消，
+ * 生命周期由调用方（后台任务登记表）持有。
+ *
+ * 与 `runCommand` 的差别只有三点：不缓存输出（调用方自己按环形缓冲留）、不设超时、
+ * 不返回拼好的字符串。**shell 判定共用 `resolveShellSpawn`**，所以「直接跑」与
+ * 「丢后台跑」对同一条命令的解释完全一致。
+ *
+ * 为什么这个函数在 tools 里而不是在服务端：shell 探测（Git Bash / pwsh / bash）是这一层
+ * 的知识，服务端不该再抄一份 —— 抄出来的第二份迟早在 Windows 上和这一份对不上。
+ */
+export function spawnBackgroundShell(
+  command: string,
+  cwd: string,
+  opts: {
+    /** 逐块增量（不缓存、不截断 —— 缓存与上限归调用方） */
+    onOutput?: (stream: 'stdout' | 'stderr', chunk: string) => void
+    /** 外部停止信号（任务被取消 / 应用退出） */
+    signal?: AbortSignal
+  } = {}
+): BackgroundShellHandle {
+  const { shellCmd, shellArgs, env, isWin } = resolveShellSpawn(command)
+  let killed = false
+  const child = spawn(shellCmd, shellArgs, {
+    cwd,
+    env,
+    windowsHide: true,
+    // POSIX 自成进程组：kill(-pid) 才能一次带走 `npm run` 派生出来的整棵树
+    ...(isWin ? {} : { detached: true })
+  })
+
+  /**
+   * 收树两次：立刻一记整树 kill，600ms 后再补一记。
+   *
+   * 补刀的理由与 `runCommand` 完全相同（Git Bash 的 `-lc`、`npm run` 的包装进程会在第一刀
+   * 之后才 fork 出真正的命令），dev server 就是典型的孙子辈 —— 只打一记会漏掉它，
+   * 用户看到「停不下来、端口还占着」。
+   */
+  const kill = (): void => {
+    killed = true
+    killChild(child, isWin)
+    const straggler = setTimeout(() => killChild(child, isWin), 600)
+    straggler.unref?.()
+  }
+
+  const onAbort = (): void => kill()
+  if (opts.signal) {
+    if (opts.signal.aborted) onAbort()
+    else opts.signal.addEventListener('abort', onAbort, { once: true })
+  }
+
+  child.stdout?.on('data', (d: Buffer) => opts.onOutput?.('stdout', d.toString('utf8')))
+  child.stderr?.on('data', (d: Buffer) => opts.onOutput?.('stderr', d.toString('utf8')))
+
+  const done = new Promise<BackgroundShellExit>((resolve) => {
+    let settled = false
+    const settle = (result: BackgroundShellExit): void => {
+      if (settled) return
+      settled = true
+      opts.signal?.removeEventListener('abort', onAbort)
+      resolve(result)
+    }
+    child.on('error', (err) => settle({ code: null, error: err.message, killed }))
+    child.on('exit', (code) => settle({ code: code ?? null, killed }))
+  })
+
+  return { kill, done }
+}
+
 // ---------- 工具集 ----------
+
+/**
+ * 引擎注入的「这一步的意图」（见 `@fizz/agent` 的 `withToolIntent`）。
+ *
+ * 它不在任何工具自己的 `inputSchema` 里（运行期统一注入），所以只能从入参对象上直接读，
+ * 读不到就是空串。目前只有审批文案用得上：确认弹窗上写「修复类型错误（编辑文件）」
+ * 比只写「编辑文件」有用得多。
+ */
+function intentOf(input: unknown): string {
+  const value = (input as { intent?: unknown } | null | undefined)?.intent
+  return typeof value === 'string' ? value.trim() : ''
+}
 
 /** 构建工作区 Agent 工具集（绑定 root 目录；改动类工具按权限模式拦一道） */
 export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
@@ -559,7 +687,7 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
    */
   const guardWrite = async (
     denied: string,
-    req: { toolCallId: string; toolName: string; command: string }
+    req: { toolCallId: string; toolName: string; command: string; intent?: string }
   ): Promise<string | null> => {
     // 每次调用现取：用户在一轮中途切了权限档时这里立刻按新档裁决
     const mode = currentMode()
@@ -674,11 +802,13 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
         path: z.string().describe(tr('相对工作区的文件路径', 'File path relative to the workspace')),
         content: z.string().describe(tr('完整文件内容', 'Full file contents'))
       }),
-      execute: async ({ path, content }, options) => {
+      execute: async (input, options) => {
+        const { path, content } = input
         const refused = await guardWrite('文件未写入', {
           toolCallId: options.toolCallId,
           toolName: 'write_file',
-          command: `写入文件 ${path}（${content.length} 字符）`
+          command: `写入文件 ${path}（${content.length} 字符）`,
+          intent: intentOf(input)
         })
         if (refused) return refused
         const abs = resolveInside(root, path)
@@ -709,7 +839,8 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
           )
           .describe(tr('按顺序应用的替换列表', 'List of replacements applied in order'))
       }),
-      execute: async ({ path, edits }, options) => {
+      execute: async (input, options) => {
+        const { path, edits } = input
         if (edits.length === 0) throw new Error('edits 是空的：至少给一处 oldText/newText')
         const abs = resolveInside(root, path)
         let text: string
@@ -745,7 +876,8 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
         const refused = await guardWrite('文件未被编辑', {
           toolCallId: options.toolCallId,
           toolName: 'edit_file',
-          command: `编辑文件 ${path}（${edits.length} 处替换）`
+          command: `编辑文件 ${path}（${edits.length} 处替换）`,
+          intent: intentOf(input)
         })
         if (refused) return refused
 
@@ -879,29 +1011,69 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
             '输出超过一个工具结果的预算时会被完整落盘到工作区的 .fizz/tool-output/ 下，结果里给出相对路径、全文行数与本次返回了哪几行；' +
             '其余部分用 read_file 传那个 path 加 offset / limit 按行接着读，也可以用 search_files 检索（常见于构建 / 测试的完整日志）。' +
             '注意这是真实执行环境，删除、覆盖、危险命令（rm -rf、git push --force 等）前先说明影响。' +
+            '需要在**本轮结束后继续跑**的进程（dev server / watch / 长构建）把 runInBackground 设为 true：' +
+            '调用会立刻返回一个后台任务 id，它不受本轮超时与停止影响，输出显示在输入框上方的任务面板里；' +
+            '当前这一轮就要用它的输出时**不要**开这个开关。' +
             shellNote,
           'Run a shell command in the workspace and return stdout + stderr. Use it for builds, tests, git, installing dependencies, starting services, etc. Default timeout is 120 seconds. ' +
             'If output exceeds one tool result, the full text is saved under .fizz/tool-output/ and the result includes the relative path, total lines, and which lines were returned; ' +
             'read the rest with read_file offset/limit on that path, or search it with search_files (common for full build/test logs). ' +
             'This is a real execution environment: explain the impact before deleting, overwriting, or running dangerous commands (rm -rf, git push --force, etc.). ' +
+            'Set runInBackground: true for processes that must keep running after this turn (dev servers, watchers, long builds): the call returns a background task id immediately, ' +
+            'it is not affected by this turn\'s timeout or stop, and its output shows in the task panel above the input box; do NOT set it when the current turn needs the output.' +
             shellNoteEn
         ),
       inputSchema: z.object({
         command: z.string().describe(tr('要执行的命令', 'Command to run')),
         timeoutMs: z.number().optional().describe(tr('超时毫秒数，默认 120000，最大 300000', 'Timeout in milliseconds; default 120000, max 300000')),
-        cwd: z.string().optional().describe(tr('执行目录（相对工作区），缺省为工作区根目录', 'Working directory (relative to the workspace); defaults to the workspace root'))
+        cwd: z.string().optional().describe(tr('执行目录（相对工作区），缺省为工作区根目录', 'Working directory (relative to the workspace); defaults to the workspace root')),
+        runInBackground: z
+          .boolean()
+          .optional()
+          .describe(
+            tr(
+              '设为 true 时把命令丢到后台：立刻返回任务 id，进程在本轮结束后继续跑（dev server / watch / 长构建）。本轮需要它的输出时不要开',
+              'Set true to run the command in the background: returns a task id immediately and the process keeps running after this turn (dev servers, watchers, long builds). Do not set it when this turn needs the output'
+            )
+          )
       }),
-      execute: async ({ command, timeoutMs, cwd = '' }, options) => {
+      execute: async (input, options) => {
+        const { command, timeoutMs, cwd = '', runInBackground } = input
         const refused = await guardWrite('命令未运行', {
           toolCallId: options.toolCallId,
           toolName: 'execute_command',
-          command
+          command,
+          intent: intentOf(input)
         })
         if (refused) return refused
         const execDir = resolveInside(root, cwd)
         const stat = await fs.stat(execDir)
         if (!stat.isDirectory())
           throw new Error(`执行目录不是目录：${cwd || '.'}（cwd 必须是目录；要操作某个文件请把路径写进命令里）`)
+
+        /**
+         * 后台执行：**先过权限闸、再登记**，与前台同一条口径（后台不等于免审批）。
+         *
+         * 这里刻意不建 per-command controller、不设超时 —— 这条命令的生命周期归任务登记表，
+         * 本轮的 abort / 超时都打不到它（那正是「dev server 活过这一轮」的实现方式）。
+         */
+        if (runInBackground) {
+          if (!opts.onBackgroundCommand) {
+            return '当前环境不支持后台执行（没有任务登记通道），命令**没有**启动。请改为普通执行，或让用户自己开一个终端。'
+          }
+          const started = await opts.onBackgroundCommand({
+            command,
+            cwd: execDir,
+            title: command
+          })
+          return [
+            `已在后台启动：${command}`,
+            `任务 id：${started.id}`,
+            '它不占本轮的超时与停止；输出显示在输入框上方的任务面板里（用户可随时停止）。',
+            '本轮不要再等它的输出 —— 需要结果时用普通执行，或先做别的、稍后再看面板。'
+          ].join('\n')
+        }
+
         const t = clampInt(timeoutMs, 1000, 300_000, 120_000)
         /**
          * per-command 停止器：单条停止（调用方持有的 `stop()`）与整轮停止
@@ -1005,7 +1177,8 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
           .optional()
           .describe(tr('path 是目录时必须显式传 true 才允许删除，默认 false（此时传目录会报错）', 'When path is a directory, explicitly pass true to allow deletion; default false (passing a directory then errors)'))
       }),
-      execute: async ({ path, recursive = false }, options) => {
+      execute: async (input, options) => {
+        const { path, recursive = false } = input
         const abs = resolveInside(root, path)
         // 先确认存在：删一个不存在的路径直接报错，避免「静默成功」让模型误以为已删除
         let stat: Awaited<ReturnType<typeof fs.stat>>
@@ -1024,7 +1197,8 @@ export function buildAgentTools(root: string, opts: AgentToolOptions): ToolSet {
         const refused = await guardWrite('内容未被删除', {
           toolCallId: options.toolCallId,
           toolName: 'delete_file',
-          command: isDir ? `删除目录（含全部内容）：${path}` : `删除文件：${path}`
+          command: isDir ? `删除目录（含全部内容）：${path}` : `删除文件：${path}`,
+          intent: intentOf(input)
         })
         if (refused) return refused
         if (isDir) await fs.rm(abs, { recursive: true })

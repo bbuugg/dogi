@@ -78,8 +78,8 @@ export function useNotifyWatcher(): void {
     initConversationActivity()
     return subscribeServerEvent((event) => {
       // 容器型项目的「文件变了」不属于会话活动（没有 conversationId / title），
-      // 由预览面板自己订阅，这里直接跳过
-      if (event.type === 'container:files-changed') return
+      // 由预览面板自己订阅，这里直接跳过；后台任务清单变化同理（会话内的面板自己收）
+      if (event.type === 'container:files-changed' || event.type === 'backgroundTasks:changed') return
       const id = event.conversationId
       const title = truncateText(event.title, 40)
 

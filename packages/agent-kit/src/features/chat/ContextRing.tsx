@@ -8,7 +8,7 @@ import { CHAT_ICON_PILL } from "@fizz/agent-kit/features/chat/composer";
 import type { AgentApp } from "@fizz/agent-kit/shared/hooks/useAgentApp";
 import { useT } from "@fizz/agent-kit/shared/lib/language";
 import {
-  compactionTriggerTokens,
+  compactionKeepRecentTokens,
   DEFAULT_CONTEXT_WINDOW,
   findModelEntry,
   resolveContextWindow,
@@ -182,7 +182,6 @@ export function ContextRing({ app }: { app: AgentApp }) {
       null);
   /** ACP 的窗口取 agent 上报的 size（本地模型配置对 ACP 不适用） */
   const contextWindow = isAcp && acpUsage ? acpUsage.size : localContextWindow;
-  const triggerTokens = compactionTriggerTokens(contextWindow);
   /** 顶上来的那个值是**压缩后**的估算，卡片里要标明，别让人以为又多占了（仅内置 agent） */
   const usedIsCheckpoint = !isAcp && compressedUsed !== null;
 
@@ -203,24 +202,38 @@ export function ContextRing({ app }: { app: AgentApp }) {
 
   const compressing = app.contextCompressing;
   /**
-   * 手动压缩能不能**真的压出东西** —— 判据与服务端同一条线：`即将发出去的那份 >
-   * 窗口 − 预留` 才切得动。
+   * 手动压缩能不能**真的压出东西** —— 判据与服务端的切点同一条线：
+   * **保留区之外还有原文**，切得出要摘要的那一段，才点得动。
    *
-   * 推导：切点按保留区 `keep = 0.8 × (窗口 − 预留 − base − 摘要)` 往前找，
-   * 只有「保留区之外还有原文」才切得出要摘要的那段；而
-   * `base + 摘要 + tail > 窗口 − 预留` 恰好蕴含 `tail > keep`。
-   * 反过来（没到触发线）切点前面只剩一个保留区，服务端只会回「没什么可压缩的」。
+   * ⚠️ 这里曾经拿 `compactionTriggerTokens`（窗口 − 预留，默认窗口下 ≈92%）当闸，
+   * 那是**自动**压缩的触发线；手动压缩走 `compactHistory({ force: true })`，
+   * 服务端**根本不看它**。结果就是「上下文不到 92% 时按钮永远灰着」—— 明明还有
+   * 几十万 token 的历史可以摘要，按钮却像坏了一样（用户报的就是这个）。
    *
-   * 所以按钮直接置灰，别让用户点一次再吃一个错误提示。顺带的好处：没到触发线就压
-   * 会白白改掉请求前缀（上游缓存全废），本来也不该压。
+   * 现在的算法（两边同源，公式在 `compactionKeepRecentTokens`）：
+   * - 保留区 `keep` = min(20000, max(1024, 0.8 × (窗口 − 预留 − base)))；
+   * - 没检查点：消息占用的部分（`used − base`）超过 `keep` 就压得动；
+   * - 有检查点：只有**检查点之后新增**的量（`used − afterTokens`）超过 `keep`
+   *   才切得动 —— 刚压完时这个值≈0，按钮自然灰着（那时也确实没东西可压）。
+   *
+   * `used` 还没拿到（上游不报 usage / 刚开新会话）时**放行**：判不了就别拦，
+   * 让服务端回答（它会在没东西可压时回一句人话）。
    */
-  // `triggerTokens` 就是「窗口 − 预留」，与圆环上那条线、服务端的触发线同源
-  const canCompact = !isAcp && used !== null && used > triggerTokens;
+  const baseTokens = contextUsageMessage?.contextUsage?.base ?? 0;
+  const keepTokens = compactionKeepRecentTokens(contextWindow, baseTokens);
+  const compressibleTokens =
+    used === null
+      ? null
+      : checkpoint
+        ? used - checkpoint.stats.afterTokens
+        : used - baseTokens;
+  const canCompact =
+    !isAcp && (compressibleTokens === null || compressibleTokens >= keepTokens);
   /** 置灰的原因：直接写在 title 上，省得用户猜 */
   const compactBlockedReason = isAcp
     ? t("外部 Agent 自己管理上下文，本地无法压缩")
     : !canCompact
-      ? t("当前上下文还没到压缩线，压缩不会减少占用")
+      ? t("检查点之后还没有超出保留区的历史，压缩不会减少占用")
       : undefined;
 
   const compress = async (): Promise<void> => {

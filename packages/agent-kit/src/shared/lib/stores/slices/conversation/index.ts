@@ -28,7 +28,9 @@ import {
   loadActiveWorkspaceId,
   loadConfirmTimeout,
   loadMaxRetries,
+  loadMaxSteps,
   loadToolCallConcurrency,
+  loadToolIntent,
 } from "./storage";
 import { loadPermissionMode } from "@fizz/agent-kit/shared/lib/permission";
 
@@ -78,6 +80,8 @@ export const createConversationSlice: StateCreator<
     confirmTimeoutMin: loadConfirmTimeout(),
     maxRetries: loadMaxRetries(),
     toolCallConcurrency: loadToolCallConcurrency(),
+    maxSteps: loadMaxSteps(),
+    toolIntent: loadToolIntent(),
 
     readSlice: ctx.readSlice,
     writeSlice: ctx.writeSlice,

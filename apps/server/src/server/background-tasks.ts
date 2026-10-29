@@ -35,6 +35,7 @@ import type {
   BackgroundTaskStatus,
   BackgroundTaskView
 } from '@fizz/contracts/agent-api'
+import { emitServerEvent } from './state'
 
 /** 已结束的任务最多留这么多条（运行中的不占名额、也不会被挤掉） */
 const MAX_FINISHED = 20
@@ -71,6 +72,13 @@ export interface StartBackgroundTaskInput {
    * 缺省随机生成。
    */
   id?: string
+  /**
+   * 发起它的会话 id。有值 = 这条任务属于那个会话（会话里那块面板只看自己的、
+   * 删会话连带停掉）；缺省 = 全局任务（项目页的克隆这类，只出现在状态栏清单里）。
+   *
+   * ⚠️ 登记后**不可改**：切换 / 改名 / 归档会话都不重新归属，否则任务会在会话之间跳来跳去。
+   */
+  sessionId?: string
   /** 任务种类，如 `git-clone` */
   kind: string
   /** 一行标题 */
@@ -116,6 +124,7 @@ export interface BackgroundTaskHandle {
 
 interface Entry {
   id: string
+  sessionId?: string
   kind: string
   title: string
   detail?: string
@@ -137,6 +146,23 @@ interface Entry {
 }
 
 const tasks = new Map<string, Entry>()
+
+/**
+ * 广播「清单变了」（`backgroundTasks:changed`）。
+ *
+ * 只是**失效信号**：不带任务本体，各端收到就重拉一次清单 —— 任务输出是高频的，
+ * 把内容塞进事件等于把全局状态 WS 变成日志通道。
+ *
+ * 包一层 try/catch：这里是任务起跑前最后一道，广播失败不该让任务起不来
+ * （单测 / 启动早期没有事件总线时同理）。
+ */
+function notifyChanged(): void {
+  try {
+    emitServerEvent({ type: 'backgroundTasks:changed' })
+  } catch {
+    // 事件总线不可用：清单轮询会兜住
+  }
+}
 
 /** 到点就 resolve 的 promise：`signal` 不 abort 则永不 settle */
 function aborted(signal: AbortSignal): Promise<void> {
@@ -164,6 +190,7 @@ function toView(entry: Entry): BackgroundTaskView {
   const last = entry.logs[entry.logs.length - 1]
   return {
     id: entry.id,
+    ...(entry.sessionId ? { sessionId: entry.sessionId } : {}),
     kind: entry.kind,
     title: entry.title,
     ...(entry.detail ? { detail: entry.detail } : {}),
@@ -224,6 +251,7 @@ export function startBackgroundTask(input: StartBackgroundTaskInput): Background
   const id = input.id?.trim() || randomUUID()
   const entry: Entry = {
     id,
+    ...(input.sessionId ? { sessionId: input.sessionId } : {}),
     kind: input.kind,
     title: input.title,
     ...(input.detail ? { detail: input.detail } : {}),
@@ -234,8 +262,25 @@ export function startBackgroundTask(input: StartBackgroundTaskInput): Background
     detachCtrl: new AbortController(),
     done: Promise.resolve()
   }
-  // 同一个 id 重复登记（旧任务还没收场就又发了一次）：以新任务为准
+  /*
+   * 同一个 id 重复登记（旧任务还没收场就又发了一次）：以新任务为准。
+   *
+   * ⚠️ **覆盖前必须先把旧任务停掉**。`tasks` 是「谁还在跑」的**唯一**登记处，一旦被
+   * 新 entry 顶掉，旧 entry 的 controller 就没有任何引用者了 —— 它的进程还活着，但
+   * 列表里查不到、界面上点不到、`stopAllRunning()` 也遍历不到，等于凭空多一个
+   * 谁也杀不掉的孤儿。随机 UUID 的调用方打不到这条，但 git-clone 这类由渲染端指定
+   * id 的路径重复提交一次就会撞上。
+   *
+   * 只 abort 不 await：这里是同步登记函数，旧任务体的收场（杀进程树 + 清半成品）
+   * 由它自己的 `done` 链走，新任务不该被它拖住。
+   */
+  const previous = tasks.get(id)
+  if (previous && previous.status === 'running' && !previous.controller.signal.aborted) {
+    previous.controller.abort()
+  }
   tasks.set(id, entry)
+  // 先广播再起跑：会话里的面板要能立刻看到这一行（不必等它产出第一行日志）
+  notifyChanged()
 
   /**
    * 写一行日志：裁剪单行长度 → 进度行原地替换 → 追加 → 裁掉超量的老行。
@@ -290,6 +335,8 @@ export function startBackgroundTask(input: StartBackgroundTaskInput): Background
       if (entry.status === 'canceled') log('已取消', 'warn')
       entry.finishedAt = Date.now()
       prune()
+      // 收场（成功 / 失败 / 取消）都要广播：会话里那一行要变成终态、并开始算优雅窗口
+      notifyChanged()
     }
   })()
 
@@ -330,6 +377,48 @@ export async function cancelBackgroundTask(id: string): Promise<BackgroundTaskVi
   const handle = getBackgroundTask(id)
   if (!handle) return null
   return await handle.cancel()
+}
+
+/**
+ * 停掉某个会话名下**所有**还在跑的任务，返回停了几条（删会话时调）。
+ *
+ * **只发信号、不等收场**：删除路径不能因为某条任务杀不掉而失败，也不能等它慢慢收尾
+ * （那条会话马上就要从侧栏消失，用户不该盯着一个转圈等）。任务体自己负责尽快收场。
+ *
+ * ⚠️ **归档不调这个**：归档是可逆标记，杀进程是不可逆的副作用。只有真删除才停。
+ */
+export function stopSessionRunning(sessionId: string): number {
+  let stopped = 0
+  for (const entry of tasks.values()) {
+    if (entry.sessionId !== sessionId) continue
+    if (entry.status !== 'running') continue
+    if (entry.controller.signal.aborted) continue
+    entry.controller.abort()
+    stopped += 1
+  }
+  return stopped
+}
+
+/**
+ * 停掉**所有**还在跑的后台任务（进程退出前调），返回停了几条。
+ *
+ * 为什么必须有这一步：后台命令是 `detached` 起的（自成进程组，`kill(-pid)` 才能一次
+ * 带走 `npm run` 派生出来的整棵树），代价是**父进程退出它们不会跟着退**。不停的话，
+ * 用户下次开机就会看到一堆占着端口的孤儿 dev server —— 而且再也关不掉了：登记表已经
+ * 随进程消失，没有任何界面能停它们。
+ *
+ * 与 `stopSessionRunning` 同一口径：只发信号、不等收场（退出流程不该被一条杀不掉的
+ * 进程拖住，宽限由 `shutdown` 的超时兜底）。
+ */
+export function stopAllRunning(): number {
+  let stopped = 0
+  for (const entry of tasks.values()) {
+    if (entry.status !== 'running') continue
+    if (entry.controller.signal.aborted) continue
+    entry.controller.abort()
+    stopped += 1
+  }
+  return stopped
 }
 
 /** 转到后台；任务不存在返回 null */

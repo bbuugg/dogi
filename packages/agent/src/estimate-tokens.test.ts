@@ -95,6 +95,31 @@ describe('compactModelMessages（轮中压缩）', () => {
   const history = (n: number): ModelMessage[] =>
     Array.from({ length: n }, (_, i) => turn(i + 1)).flat()
 
+  /**
+   * provider 的消息校验规则：每条 `tool` 消息都必须**紧跟在**带同名 `tool-call` 的
+   * assistant 后面。不满足时上游直接拒掉整轮（OpenAI / DeepSeek 口径）：
+   * `Messages with role 'tool' must be a response to a preceding message with 'tool_calls'`。
+   *
+   * 压缩最容易踩这一条：`toModelMessages` 把结果收成独立的 `tool` 消息，切点落在它上面
+   * 就只剩结果、丢掉调用，摘要置顶后序列第一条直接是 `tool`。
+   */
+  function expectToolPairing(messages: ModelMessage[]): void {
+    messages.forEach((m, i) => {
+      if (m.role !== 'tool') return
+      const prev = messages[i - 1]
+      expect(prev?.role).toBe('assistant')
+      const calls = Array.isArray(prev?.content)
+        ? (prev!.content as Array<{ type: string; toolCallId?: string }>)
+            .filter((p) => p.type === 'tool-call')
+            .map((p) => p.toolCallId)
+        : []
+      const results = (m.content as Array<{ type: string; toolCallId?: string }>).filter(
+        (p) => p.type === 'tool-result'
+      )
+      for (const r of results) expect(calls).toContain(r.toolCallId)
+    })
+  }
+
   it('未越过阈值时不调摘要模型', async () => {
     const input = history(2)
     const r = await compactModelMessages(input, { contextWindow: 4000, model: MODEL })
@@ -113,6 +138,19 @@ describe('compactModelMessages（轮中压缩）', () => {
     expect(gen).toHaveBeenCalledTimes(1)
     expect(r.messages.length).toBeLessThan(24)
     expect(r.summary).toContain('<read-files>')
+  })
+
+  it('切点落在 tool 结果上时退回到它的 tool-call，不留孤儿 tool 消息', async () => {
+    // 这组参数下按 token 累加算出的切点正好是一条 `tool` 消息（每轮 ≈ 511 token，
+    // 保留区 1024 → 退到「user / assistant / tool」中间那一格）
+    const r = await compactModelMessages(history(8), {
+      contextWindow: 4000,
+      model: MODEL,
+      settings: { keepRecentTokens: 1024 }
+    })
+    expect(r.compressed).not.toBeNull()
+    expect(r.messages[0]?.role).toBe('user')
+    expectToolPairing(r.messages)
   })
 
   it('切点前面只剩上一份摘要 → 不压、不调模型', async () => {

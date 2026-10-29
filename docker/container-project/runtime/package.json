@@ -8,6 +8,7 @@
     "@ai-sdk/deepseek": "^3.0.44",
     "@ai-sdk/google": "^4.0.69",
     "@ai-sdk/openai": "^4.0.66",
+    "@ai-sdk/openai-compatible": "3.0.80",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "ai": "^7.0.99",
     "dotenv": "^16.6.1",

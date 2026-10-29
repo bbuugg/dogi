@@ -44,6 +44,18 @@ import { Crepe, CrepeFeature } from '@milkdown/crepe'
 // ⚠️ 别换成 `preset/commonmark` 里同名的那个 —— 那个是「直接给标记套 attrs」，
 // **空选区时会抛错**。
 import { toggleLinkCommand } from '@milkdown/kit/component/link-tooltip'
+/*
+ * ⚠️ 这一行取到的 `KeymapReady` / `keymapCtx` / `editorViewCtx` 必须与 `@milkdown/crepe`
+ * **内部用的是同一份** `@milkdown/ctx`。它们的 id 是 `Symbol()`（`ctx/lib` 的 `TimerType` /
+ * `SliceType`），**跨副本永远不相等** —— 一旦 node_modules 里出现第二份（crepe 锁死了
+ * `@milkdown/kit` 的精确版本，我们的 kit 版本落后一档就会各自装一套），
+ * `ctx.wait(KeymapReady)` 会直接抛 `Timer "KeymapReady" not found, do you forget to record it?`，
+ * 而 `create()` 因此整条 reject → 编辑器根本出不来。
+ *
+ * 所以 `packages/agent-kit/package.json` 里 crepe 与 kit **都写死同一个精确版本**，
+ * 别把其中一个改回 `^`。升级时两个一起改，装完确认
+ * `node_modules/@milkdown/crepe/node_modules` 不存在。
+ */
 import { commandsCtx, editorViewCtx, KeymapReady, keymapCtx, type CmdKey } from '@milkdown/kit/core'
 import type { Ctx, MilkdownPlugin } from '@milkdown/kit/ctx'
 import {
@@ -176,10 +188,20 @@ const TYPORA_KEYMAP: Array<{ key: string; onRun: (ctx: Ctx) => Command }> = [
  * 走 ProseMirror 的 keymap 意味着**天然只在正文聚焦时生效**，不需要额外加「编辑器聚焦吗」的闸。
  */
 const typoraKeymapPlugin: MilkdownPlugin = (ctx) => async () => {
-  await ctx.wait(KeymapReady)
-  const keymap = ctx.get(keymapCtx)
-  const disposers = TYPORA_KEYMAP.map(({ key, onRun }) => keymap.add({ key, priority: 100, onRun }))
-  return () => disposers.forEach((dispose) => dispose())
+  /*
+   * 这一整段必须兜住：`ctx.wait` 在计时器没登记时是**同步抛**的（`Timer "xxx" not found`），
+   * 超时（3s）则是 reject —— 两种都会让 `crepe.create()` 整条失败，表现是**编辑器一片空白**
+   * 而不是「少了几个快捷键」。键位是锦上添花，绝不能成为整个编辑器的单点故障。
+   */
+  try {
+    await ctx.wait(KeymapReady)
+    const keymap = ctx.get(keymapCtx)
+    const disposers = TYPORA_KEYMAP.map(({ key, onRun }) => keymap.add({ key, priority: 100, onRun }))
+    return () => disposers.forEach((dispose) => dispose())
+  } catch (err) {
+    console.warn('[markdown] 自定义键位未注册（编辑器其余功能不受影响）', err)
+    return () => {}
+  }
 }
 
 /**

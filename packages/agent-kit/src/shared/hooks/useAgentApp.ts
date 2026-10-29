@@ -352,6 +352,12 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
     /** 同一批工具调用的并发上限（1 = 串行）与设置动作 */
     toolCallConcurrency: s.toolCallConcurrency,
     setToolCallConcurrency: s.setToolCallConcurrency,
+    /** 一轮最多跑多少步（工具轮）与设置动作 */
+    maxSteps: s.maxSteps,
+    setMaxSteps: s.setMaxSteps,
+    /** 工具卡是否显示「意图」（模型每次调工具填的一句话）与设置动作 */
+    toolIntent: s.toolIntent,
+    setToolIntent: s.setToolIntent,
     /** 选本轮后端：`{backend:'acp', configId:<agent id>}` 或 `{backend:'builtin', configId:<model id>}` */
     setChatTarget: s.setChatTarget,
     /**

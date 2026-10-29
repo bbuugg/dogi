@@ -138,8 +138,9 @@ function waitingOf(
 }
 
 function applyEvent(event: ServerEvent): void {
-  // 容器型项目的「文件变了」与会话运行态无关（没有 conversationId），不进活动表
-  if (event.type === 'container:files-changed') return
+  // 容器型项目的「文件变了」与会话运行态无关（没有 conversationId），不进活动表；
+  // 后台任务清单变化同理（它由会话内的任务面板自己订阅，不影响侧栏转圈）
+  if (event.type === 'container:files-changed' || event.type === 'backgroundTasks:changed') return
   const id = event.conversationId
   const entry = activities.get(id)
   /** 只在真动了的时候才通知订阅者：过期 / 无关的事件不该引起一整轮重渲染 */

@@ -82,6 +82,17 @@ Fizz 是自托管的 AI Agent 工作台：**所有能力跑在一个 Node 进程
 - 主题必须在首帧前定好（preload + `index.html` 内联脚本），**回落规则在 6 处，改一处必须六处同步**。
 - 文案**中文为源**，英文缺失自动回落，新增文案两边都补。
 
+### 测试
+
+- **只用 vitest**（根 `devDependencies` 里的 `vitest`），不要引入 jest / mocha。命令：`npx vitest run`（**没有** npm script）；单文件 `npx vitest run packages/agent/src/estimate-tokens.test.ts`；watch 直接 `npx vitest`。若某次 `npx` 试图拉别的版本（会改 `package.json` / lock），改用 `./node_modules/.bin/vitest run`。
+- **位置与命名**：与被测模块**同目录**的 `xxx.test.ts`（`src/foo.ts` → `src/foo.test.ts`）。不建 `__tests__/`，也不在根上另起 `tests/`。
+- **显式导入**：`import { describe, expect, it, vi } from 'vitest'` —— 仓库**没开 globals**，不导入直接写 `describe(...)` 会 `ReferenceError`。断言用 `it`，不用 `test`。
+- **只有 node 环境**：没有 `vitest.config`、没有 jsdom / @testing-library。要测的 UI 逻辑**先抽成纯函数再测**（`useColorTheme.test.ts` 测的是 `clampThemeNumber` / `buildStyle`，不渲染 hook）。真要 DOM 环境得先加依赖与 setup 并说清代价，**别偷偷塞 `@vitest-environment jsdom`**。
+- **测试文件进 typecheck**：各包 tsconfig 的 `include` 是 `src/**/*`，测试里的类型错误会让 `npm run typecheck` 直接红。
+- **mock 口径**：`vi.mock('./x', () => ({...}))`；只替一部分时 `vi.mock('ai', async (importOriginal) => ({ ...(await importOriginal<typeof import('ai')>()), streamText: vi.fn() }))`；有状态的假实现（假 SSE 流 / 假 fetch）在 `beforeEach` 里重建，别跨用例复用。
+- **边界**：不起服务器、不连真实网关、不 spawn 真实进程、不写用户目录 —— 一律 mock。
+- **修 bug 先写用例**：先落一条能复现的（红），再修到绿，最后 `npx vitest run` 全量跑一遍。文件头注释写清「这条测试在防什么回归」，与本仓其它文档同一风格。
+
 ### 打包与发版
 
 - **版本号只有 `apps/desktop/package.json` 那一份算数**（`app.getVersion()`、`latest.yml`、产物名同源于它）；根 `package.json` 的 version 不参与打包。升版本用 `npm run version:set -- v0.1.3` 一次改齐，**别手改一处漏一处**（`apps/server/src/app.ts` 的 `VERSION` 是第三处硬编码）。
@@ -100,7 +111,7 @@ npm run build:server   # 只构建服务端
 npm run build:web      # 只构建网页（改完前端要重跑，server 同源托管 dist）
 npm run typecheck      # 全量类型检查（提交前必跑）
 npm run check:boundaries  # 包边界检查，必须 0 违规
-npx vitest run         # 单测（无独立 npm script）
+npx vitest run         # 单测全量（无独立 npm script；单文件在后面接路径）
 ```
 
 ## 环境速查

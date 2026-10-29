@@ -42,7 +42,8 @@ import {
   STOPPABLE_TOOLS,
   isErrorText,
   partialJsonString,
-  toolCardTitle,
+  toolCardHead,
+  type ToolCallPart,
   toolErrorText,
   toolLabel,
   toolOutputText,
@@ -755,6 +756,11 @@ function PartViewInner({
   useT()
   const stopCommand = useAgentStore((s) => s.stopCommand)
   const stopTurn = useAgentStore((s) => s.stop)
+  /** 工具卡是否显示「意图」（设置 → AI → 通用 → 工具意图） */
+  const showToolIntent = useAgentStore((s) => s.toolIntent)
+  /** 头部标题 / 明细：开关关掉时 title 回到工具名（见 toolCardHead） */
+  const cardHead = (target: ToolCallPart, detail?: string) =>
+    toolCardHead(target, detail, showToolIntent)
 
   if (part.type === 'text') {
     /*
@@ -856,10 +862,12 @@ function PartViewInner({
     const done = items.filter((t) => t.status === 'completed').length
     return (
       <ToolCallCard
-        title={toolCardTitle(part.toolName, part.acpKind)}
         type={`tool-${part.toolName}` as ToolUIPart['type']}
         state={state}
-        {...(items.length ? { detail: t('{done}/{total} 已完成', { done, total: items.length }) } : {})}
+        {...cardHead(
+          part,
+          items.length ? t('{done}/{total} 已完成', { done, total: items.length }) : undefined
+        )}
         // 清单是给人看的进度，有内容就默认展开（与命令实时输出同一取舍）
         defaultOpen={items.length > 0}
       >
@@ -893,10 +901,9 @@ function PartViewInner({
     const resultText = isError || !hasOutput ? null : toolOutputText(output)
     return (
       <ToolCallCard
-        title={toolCardTitle(part.toolName, part.acpKind)}
         type={`tool-${part.toolName}` as ToolUIPart['type']}
         state={state}
-        detail={delegationPromptOf(part.input)}
+        {...cardHead(part, delegationPromptOf(part.input))}
         // 运行态挂在**头部**（工具名右边），内容区只放子任务产出，不再为它单开一行
         status={
           delegationRunning ? (
@@ -933,10 +940,9 @@ function PartViewInner({
       (part as { liveOutput?: { stdout: string; stderr: string } }).liveOutput ?? { stdout: '', stderr: '' }
     return (
       <ToolCallCard
-        title={toolCardTitle(part.toolName, part.acpKind)}
         type={`tool-${part.toolName}` as ToolUIPart['type']}
         state={state}
-        detail={`$ ${cmd}`}
+        {...cardHead(part, `$ ${cmd}`)}
         // 运行中**强制展开**：实时输出是这块卡存在的意义，折叠起来等于白流
         defaultOpen
         onStop={onStop}
@@ -952,10 +958,9 @@ function PartViewInner({
     const preview = renderStreamingPreview(part)
     return (
       <ToolCallCard
-        title={toolCardTitle(part.toolName, part.acpKind)}
         type={`tool-${part.toolName}` as ToolUIPart['type']}
         state={state}
-        {...(preview?.detail ? { detail: preview.detail } : {})}
+        {...cardHead(part, preview?.detail)}
         // 有内容可看才自动展开：命令类只有头部明细，展开是一片空白
         defaultOpen={Boolean(preview?.text)}
         onStop={onStop}
@@ -982,10 +987,9 @@ function PartViewInner({
     const hasBody = Boolean(isError || fileDiff || acpDirect?.content || builtinDirect?.content)
     return (
       <ToolCallCard
-        title={toolCardTitle(part.toolName, part.acpKind)}
         type={`tool-${part.toolName}` as ToolUIPart['type']}
         state={state}
-        detail={detail}
+        {...cardHead(part, detail)}
         onStop={onStop}
       >
         {hasBody && (
@@ -1005,9 +1009,9 @@ function PartViewInner({
     // 保留「中文工具名 + 状态徽章」的折叠卡，展开是原始参数与结果
     <ToolCallCard
       // ai-elements 的头部按 `tool-xxx` 前缀推断图标/文案，我们补一个中文标题覆盖它
-      title={toolCardTitle(part.toolName, part.acpKind)}
       type={`tool-${part.toolName}` as ToolUIPart['type']}
       state={state}
+      {...cardHead(part)}
       onStop={onStop}
     >
       {part.input !== undefined && part.input !== null && <ToolInput input={part.input} />}

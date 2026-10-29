@@ -14,7 +14,7 @@ import { Loader } from '@fizz/agent-kit/shared/ai-elements/loader'
 import { Button } from '@fizz/ui/button'
 import { PartView } from '@fizz/agent-kit/features/chat/PartView'
 import { TurnStepGroup, turnStepSummary } from '@fizz/agent-kit/features/chat/TurnStepGroup'
-import { textOf, toolState } from '@fizz/agent-kit/shared/lib/parts'
+import { isErrorText, textOf, toolState } from '@fizz/agent-kit/shared/lib/parts'
 import {
   normalizeFollowup,
   formatFollowupAnswer,
@@ -89,18 +89,28 @@ export interface MessageFollowupBridge {
 /**
  * 渲染一条消息的全部 parts（`MessageList` 消息循环里的 parts.map 就委托到这里）。
  *
- * 一轮已完成（助手消息且不是正在流式的末条 —— 完成判据见下面 `turnDone` 的注释）时，
- * **文本 part 逐条照常显示**，其余（思考、工具调用、提问卡……）按原始顺序分段收进
- * `TurnStepGroup` 折叠条 —— 每段**连续**的同类 part 一组，文本穿插在各组之间，
- * 时间线保持原样；流式中的轮次与用户消息不受影响。
+ * 助手消息**两个阶段各有一套折叠口径**，靠同一段分组代码实现（差别只在「正文要不要收」）：
+ *
+ * 1. **流式中**：正文一段都不收。于是折叠条只出现在**两段正文之间** —— 读起来是
+ *    `正文 → [过程] → 正文 → [过程] → 正在写的那段`。最后一段正文之后的那几步是**正在跑**
+ *    的那一步（工具还在转），不收，原样铺开（见 `flushRun` 里对尾巴的处理）。
+ * 2. **一轮结束**（助手消息且不是正在流式的末条 —— 完成判据见 `turnDone` 的注释）：
+ *    **只保留最后一段正文**，其余一切（前面各段正文、思考、工具调用、提问卡……）连成
+ *    **一个**折叠条。典型结果是 `[思考 ×1 · 工具调用 ×3] → 最后那段结论` ——
+ *    中间那些「一段一折」全部合并掉了（摘要只报过程，不报「文本 ×N」，见 `turnStepSummary`）。
+ *
+ * 「最后一段正文」由 `lastTextIndex` 认定（最后一个有内容的 text part）。错误块（`⚠️ ` 前缀）
+ * **永不折叠** —— 它带着「重新加载」按钮。用户消息整条原样铺开，不参与折叠。
  *
  * **哪些类型归组由「自动折叠」偏好评出**（设置 → 通用，见 `lib/auto-collapse.ts`）：
- * 不折叠 = 一个都不归组、全部铺在消息里；折叠思考 / 折叠工具 = 只收那一类；全部折叠
- * （缺省）= 都收。判定在下面 `foldable` 里，折叠条只吃连续的同类 part。
+ * 不折叠 = 一个都不归组、全部铺在消息里（连文本也不收）；折叠思考 / 折叠工具 = 只收那一类，
+ * 但过程性的正文段照收（否则「只留最后一段」这条就失效了）；全部折叠（缺省）= 都收。
+ * 判定在下面 `foldable` 里，折叠条只吃连续的同类 part。
  * 单卡（思考条 / 工具卡）**自身的默认展开态用同一套判定**，见 `PartView` —— 两处不会各说各话。
  *
- * 整轮没有任何非文本 part 时（纯文本回复）没有折叠条；只调了工具就收尾时，
- * 折叠条就是这条消息的全部内容。
+ * 整轮只有一段正文、没有任何思考 / 工具时没有折叠条（就是一条普通回复）；只调了工具
+ * 就收尾时，折叠条就是这条消息的全部内容；分了好几段说但只有一段被留下的情况也一样
+ * 只剩「折叠条 + 那一段」。
  *
  * ⚠️ 空白文本不算「文本」：模型会在思考 / 工具之间偶发输出纯换行的 text part
  * （实测存量数据里大量「\n\n\n」），它没有可见内容，若不打断会被当成正文渲染成
@@ -203,27 +213,61 @@ function MessagePartsInner({
     )
   }
 
-  // 流式中的轮次 / 用户消息：原样渲染全部 parts（思考条 / 工具卡实时展开，不折叠）
-  if (!turnDone) {
-    const nodes: ReactNode[] = []
+  /** 原样铺开全部 parts（用户消息走这条；折叠相关的一切都不参与） */
+  const renderFlat = (): ReactNode => {
+    const flat: ReactNode[] = []
     message.parts.forEach((part, partIndex) => {
-      if (compactionNode && partIndex === compactionIndex) nodes.push(compactionNode)
-      nodes.push(renderPart(part, partIndex))
+      if (compactionNode && partIndex === compactionIndex) flat.push(compactionNode)
+      flat.push(renderPart(part, partIndex))
     })
-    if (compactionNode && compactionIndex >= message.parts.length) nodes.push(compactionNode)
-    return <>{nodes}</>
+    if (compactionNode && compactionIndex >= message.parts.length) flat.push(compactionNode)
+    return <>{flat}</>
   }
+
+  // 用户消息：原样铺开 —— 它只有正文，没有任何可折叠的过程
+  if (message.role !== 'assistant') return renderFlat()
 
   // 空白文本（纯换行 / 空格）没有任何可见内容 —— 见函数头注释
   const isBlankText = (part: AgentMessagePart): boolean =>
     part.type === 'text' && !part.text.trim()
 
   /**
-   * 这个 part 要不要收进折叠条 —— 由「自动折叠」偏好评出（设置 → 通用）。
-   * 只有被选中的那一类（思考 / 工具调用）才归组；没被选中的非文本 part 照常铺在
-   * 消息里，而且**会打断折叠条**（折叠条只吃连续的同类 part，时间线不会被重排）。
+   * 最后一段有内容的正文的下标。两种状态下含义不同、但取值是同一个：
+   *
+   * - **流式中**：它是「已经落地的最新一段」。在它**之后**的那些 part 就是正在跑的那一步
+   *   （工具还在转 / 思考还在出），不能收（见 `flushRun` 里对尾巴的处理）。
+   * - **一轮结束后**：它是**唯一留在明面上**的那一段，前面各段跟着过程一起收进折叠条。
+   *
+   * 一轮里模型常常分几段说话（段与段之间夹着思考 / 工具调用），全铺出来会把结论淹在过程
+   * 里。错误块（`⚠️ ` 前缀）不参与竞争：它带着「重新加载」按钮，收进折叠条等于让人找不到
+   * 恢复入口 —— 它永远单独铺在明面上（见下面 `foldable` 里的那条早退）。
    */
-  const foldable = (part: AgentMessagePart): boolean => {
+  let lastTextIndex = -1
+  message.parts.forEach((part, i) => {
+    if (part.type === 'text' && part.text.trim() && !isErrorText(part.text)) lastTextIndex = i
+  })
+
+  /**
+   * 这个 part 要不要收进折叠条。
+   *
+   * - `text`：**流式中一段都不收**（正在写的正文必须看得见）；**一轮结束后只留最后一段**
+   *   （见 `lastTextIndex`）。后者不细分「自动折叠」偏好里选了哪一类 —— 只要不是「不折叠」，
+   *   过程性的正文就该跟过程一起收起来。「不折叠」是用户明确要求全部铺开，那时连文本也不收
+   *   （否则等于偷偷违背他的设置）。
+   * - `reasoning` / `tool-call` / `tool-result`：由「自动折叠」偏好评出（设置 → 通用）。
+   *
+   * 没被选中的 part 照常铺在消息里，而且**会打断折叠条**（折叠条只吃连续的同类 part，
+   * 时间线不会被重排）。
+   */
+  const foldable = (part: AgentMessagePart, partIndex: number): boolean => {
+    if (part.type === 'text') {
+      // 错误块永远明面显示（它身上有「重新加载」）
+      if (isErrorText(part.text)) return false
+      // 流式中每段正文都看得见；一轮结束后只留最后一段
+      if (!turnDone) return false
+      if (partIndex === lastTextIndex) return false
+      return autoCollapse !== 'none'
+    }
     if (part.type === 'reasoning') return autoCollapsesReasoning(autoCollapse)
     if (part.type === 'tool-call' || part.type === 'tool-result') {
       /**
@@ -245,12 +289,30 @@ function MessagePartsInner({
 
   // 按原始顺序走一遍：连续的「要折叠的」part 各自成组，其余穿插在各组之间
   // （时间线保持原样）。part 保留原始下标 —— key 与 PartView 的接线都靠它保持稳定。
+  //
+  // 于是同一段代码天然给出两种观感：
+  // - **流式中**：正文一段不收，所以组只出现在「两段正文之间」—— 一段过程一个折叠条，
+  //   聊天读起来是 正文 → [过程] → 正文 → [过程] → 正在写的那段；
+  // - **一轮结束**：只有最后一段正文不收，前面所有过程（连同前面各段正文）连成**一个**
+  //   折叠条，紧跟着就是那段结论。它之后若还有 part（少见：正文之后又调了工具），那些
+  //   会重新起一组，仍排在正文下方，不会被提到上面去。
   const nodes: ReactNode[] = []
   let run: { part: AgentMessagePart; partIndex: number }[] = []
   const flushRun = (): void => {
     if (!run.length) return
     const current = run
     run = []
+    /**
+     * 流式中的「尾巴」= 最后一段正文**之后**的那几步 —— 那是正在跑的那一步（工具还在转、
+     * 思考还在出）。收进折叠条等于把实时输出藏起来，所以原样铺开；等下一段正文落地、它变成
+     * 「两段正文之间」的过程时再收（那一趟会走下面的分支）。
+     *
+     * 一轮结束后没有「正在跑」这回事，尾巴也照收 —— 于是整轮只剩「一个折叠条 + 最后一段」。
+     */
+    if (!turnDone && current[0].partIndex > lastTextIndex) {
+      for (const { part, partIndex } of current) nodes.push(renderPart(part, partIndex))
+      return
+    }
     nodes.push(
       <TurnStepGroup
         key={`${message.id}-steps-${current[0].partIndex}`}
@@ -268,7 +330,7 @@ function MessagePartsInner({
       nodes.push(compactionNode)
     }
     if (isBlankText(part)) return
-    if (foldable(part)) {
+    if (foldable(part, partIndex)) {
       run.push({ part, partIndex })
       return
     }

@@ -209,6 +209,29 @@ function sanitizeQueue(items: unknown): QueuedMessage[] {
 }
 
 /**
+ * 摘要检查点还成立吗：**锚点消息必须仍在 `messages` 里**，否则返回 `undefined`（= 丢掉）。
+ *
+ * `ConversationContextSummary.upToMessageId` 记的是「已摘要的最后一条」，它同时是下一轮
+ * 组装历史时的切点（`historyForTurn` 从它之后取原文）。锚点一旦被删掉，那份摘要描述的就是
+ * **已经不存在的历史**，而 `historyForTurn` 会退化成按 `createdAt` 过滤、照样把摘要置顶 ——
+ * 用户刚删掉的内容又通过摘要被喂回模型（模型会「记得」用户以为删干净了的事）。
+ *
+ * 所以「动 messages 的删除类路径」都要过这一道：锚点不在了就把检查点一起丢，让下一轮
+ * 重新按需压缩。宁可多压一次，也别把删掉的东西带回来。
+ *
+ * 与 `forkConversation` 同一判据（那里是「锚点没落在截取范围内就不复制摘要」）。
+ * ⚠️ 与 `saveConversation` 刻意不同：那条路是「改标题 / 换模型 / 桌面端覆盖消息」，
+ * 消息通常没被裁剪，摘要该原样带走（见那里 1085 行起的注释）。
+ */
+function liveContextSummary(
+  summary: ConversationContextSummary | undefined,
+  messages: AgentChatMessage[]
+): ConversationContextSummary | undefined {
+  if (!summary) return undefined
+  return messages.some((m) => m.id === summary.upToMessageId) ? summary : undefined
+}
+
+/**
  * 两份用量相加（任一为 undefined 视为 0）。
  *
  * 单轮 TurnUsage 是模型返回的本轮 token 数；ConversationUsage 是整个会话的累计。
@@ -1486,12 +1509,28 @@ export class AgentDomain {
       ...existing,
       messages: [],
       totalUsage: undefined,
+      // 清空 = 从零开始：两个摘要锚点指向的正是刚被删掉的那批消息，留着会让下一轮
+      // 把旧摘要（甚至整段被删的上下文）当成「这个会话的前情」喂给模型
+      contextSummary: undefined,
+      autoSummary: undefined,
       updatedAt: Date.now()
     }
     return this.commitConversation(next)
   }
 
-  /** 删除会话里的单条消息（web / 桌面端 MessageDeleteButton 的后台实现） */
+  /**
+   * 删除会话里的单条消息（web / 桌面端 MessageDeleteButton 的后台实现）。
+   *
+   * ⚠️ **硬删除，没有回收站**：`messages` 裁掉之后 `commitConversation` 整份重写
+   * `conversation.json`（`writeJsonAtomic` = 写 `.tmp` 再 rename），旧内容当场没了 ——
+   * 没有 `deletedAt` / tombstone / `.bak`，撤销不了。三条删除路径（本条、`deleteMessagesFrom`
+   * 的截断、`clearConversation` 的清空）都是这个口径。
+   *
+   * 要加「可撤销」得先选形态：破坏性操作前落整份快照（读路径零改动，回滚 = 回到操作前）、
+   * 还是给消息加 `deletedAt` 标记（真·逐条软删，但渲染 / 搜索 / 导出 / token 估算 / 压缩 /
+   * fork / collab 所有读 `messages` 的地方都要认这个字段，漏一处就是已删消息回流进上下文）。
+   * 别在没定形态前零散加半个标记。
+   */
   deleteMessage(id: string, messageId: string): AgentConversation {
     const existing = this.getConversation(id)
     if (!existing) throw new Error('会话不存在')
@@ -1500,9 +1539,12 @@ export class AgentDomain {
       throw new Error('ACP 会话的消息保存在 agent 侧，本地不支持删除单条消息')
     }
     if (!existing.messages.some((m) => m.id === messageId)) throw new Error('消息不存在')
+    const kept = existing.messages.filter((m) => m.id !== messageId)
     const next: AgentConversation = {
       ...existing,
-      messages: existing.messages.filter((m) => m.id !== messageId),
+      messages: kept,
+      // 删掉的正好是摘要锚点：那份摘要描述的是已不存在的历史，一并丢掉（见 liveContextSummary）
+      contextSummary: liveContextSummary(existing.contextSummary, kept),
       updatedAt: Date.now()
     }
     return this.commitConversation(next)
@@ -1523,9 +1565,12 @@ export class AgentDomain {
     }
     const index = existing.messages.findIndex((m) => m.id === messageId)
     if (index < 0) throw new Error('消息不存在')
+    // 编辑重发 / 「从这里重新开始」：锚点很可能就落在被截掉的那一段里
+    const kept = existing.messages.slice(0, index)
     const next: AgentConversation = {
       ...existing,
-      messages: existing.messages.slice(0, index),
+      messages: kept,
+      contextSummary: liveContextSummary(existing.contextSummary, kept),
       updatedAt: Date.now()
     }
     return this.commitConversation(next)

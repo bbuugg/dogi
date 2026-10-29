@@ -7,6 +7,7 @@ import {
   CollapsibleTrigger,
 } from "@fizz/ui/collapsible";
 import { cn } from "@fizz/agent-kit/shared/lib/utils";
+import { REVEAL_ON_HOVER_ARROW } from "@fizz/agent-kit/shared/lib/hover-reveal-arrow";
 import { BrainIcon, ChevronRightIcon } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import {
@@ -216,7 +217,9 @@ export const ReasoningTrigger = memo(
        */
       <CollapsibleTrigger
         className={cn(
-          "flex w-fit max-w-full items-center gap-2 text-left text-muted-foreground text-sm transition-colors hover:text-foreground",
+          // `group/row`：箭头 hover 显示按「这一行」算（消息气泡自带裸 group，用裸 group-hover
+          // 会变成整条消息一起亮，见 REVEAL_ON_HOVER_ARROW）
+          "group/row flex w-fit max-w-full items-center gap-2 text-left text-muted-foreground text-sm transition-colors hover:text-foreground",
           className
         )}
         {...props}
@@ -247,7 +250,8 @@ export const ReasoningTrigger = memo(
             ) : null}
             <ChevronRightIcon
               className={cn(
-                "size-4 shrink-0 transition-transform",
+                REVEAL_ON_HOVER_ARROW,
+                "size-4 shrink-0",
                 isOpen ? "rotate-90" : "rotate-0"
               )}
             />

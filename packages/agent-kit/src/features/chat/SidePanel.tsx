@@ -191,6 +191,36 @@ export function SidePanel({
     setPanelWidth(scope, next)
   }
 
+  /** 标签条（横向滚动容器）与每个标签元素的 ref：用来把激活的标签滚进视口 */
+  const tabStripRef = useRef<HTMLDivElement | null>(null)
+  const tabElRefs = useRef(new Map<string, HTMLDivElement>())
+
+  /**
+   * 激活的标签若被横向滚出视口，把它滚回可见。
+   *
+   * 最典型的触发：标签开了一长排，从左侧会话栏 / 对话里的入口点回一个**早就开着、但标签
+   * 没露出来**的标签 —— 只有标签条自己滚过去，界面才不会看起来像「点了没反应」。
+   *
+   * 手法与 `FilesPanel` 同一份：只改标签条自己的 `scrollLeft`，**不用 `scrollIntoView`**
+   * （它会把外层纵向滚动容器一起带走 —— 这里外面还套着可拖宽的 `ResizablePanel`）。
+   *
+   * `open` / `parked` 也在依赖里：面板收起（宽度裁到 0）或停放（`display:none`）期间挂出
+   * 一个标签，等它重新可见后同样要滚进来 —— 那两种状态下量到的宽度都是 0，滚了也没意义。
+   */
+  useEffect(() => {
+    if (!activeKey) return
+    const strip = tabStripRef.current
+    const el = tabElRefs.current.get(activeKey)
+    if (!strip || !el || strip.clientWidth === 0) return
+    const stripRect = strip.getBoundingClientRect()
+    const elRect = el.getBoundingClientRect()
+    if (elRect.left < stripRect.left) {
+      strip.scrollTo({ left: strip.scrollLeft + (elRect.left - stripRect.left), behavior: 'smooth' })
+    } else if (elRect.right > stripRect.right) {
+      strip.scrollTo({ left: strip.scrollLeft + (elRect.right - stripRect.right), behavior: 'smooth' })
+    }
+  }, [activeKey, open, parked])
+
   return (
     // 停放中的面板整体 `hidden`（display:none）：不占位、不渲染，但组件不卸载
     <div hidden={parked} className={cn('flex min-h-0 shrink-0', parked && 'pointer-events-none')}>
@@ -242,10 +272,17 @@ export function SidePanel({
               这一层（与主区域 `PanelView` 的标签条同一口径）。右侧收起按钮在滚动区之外，
               始终固定在行尾。
             */}
-            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto no-scrollbar">
+            <div
+              ref={tabStripRef}
+              className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto no-scrollbar"
+            >
               {tabs.map((tab) => (
                 <PanelTab
                   key={tab.key}
+                  ref={(el: HTMLDivElement | null) => {
+                    if (el) tabElRefs.current.set(tab.key, el)
+                    else tabElRefs.current.delete(tab.key)
+                  }}
                   active={tab.key === activeKey}
                   label={tab.label}
                   title={tab.title}

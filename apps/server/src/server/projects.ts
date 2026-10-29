@@ -21,6 +21,7 @@ import { WORKTREE_IDENTIFIER_RE } from '@fizz/contracts/agent-api'
 import { addWorktree, cloneRepo, ensureWorktreesIgnored, hasCommits, isCloneCanceled, refExists, removeWorktree, repoNameFromUrl, resolveRepoRoot, type GitLogLevel } from '@fizz/git'
 import { resolveDataDir } from '@fizz/workspace'
 import { domain } from './state'
+import { stopSessionRunning } from './background-tasks'
 import { projectDirOf } from './container-projects/root'
 import { purgeProjectContainers } from './container-projects/purge'
 import { describeError } from './lib/http'
@@ -316,6 +317,13 @@ export async function removeProject(id: string, input?: RemoveProjectInput): Pro
     await purgeProjectContainers(ws.container.slug)
   }
 
+  // 删项目会**级联**删掉它下面的会话。会话没了，它名下那些后台命令就再没有能显示它的
+  // 容器了（面板按会话过滤），所以先发停止信号。与会话删除同一条口径：只发信号、
+  // 不等收场，杀不掉的进程由任务体自己收尾。
+  const doomedWorkspaces = new Set(subtree.map((ws) => ws.id))
+  for (const conversation of domain.listConversations()) {
+    if (doomedWorkspaces.has(conversation.workspaceId)) stopSessionRunning(conversation.id)
+  }
   domain.deleteWorkspace(id)
   return domain.listWorkspaces()
 }

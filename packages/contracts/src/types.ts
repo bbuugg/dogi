@@ -271,6 +271,40 @@ export function compactionTriggerTokens(contextWindow: number): number {
   return Math.max(1, contextWindow - compactionReserveTokens(contextWindow))
 }
 
+/**
+ * 保留区的下限：再怎么给「压缩动不了的那部分」让位，也要留这么多原文
+ * —— 否则模型连「刚才在干什么」都不知道。与服务端 `MIN_KEEP_TOKENS` 同一个数。
+ */
+export const COMPACTION_MIN_KEEP_TOKENS = 1024
+
+/**
+ * 压缩后要保留多少 token 的原文（保留区大小）—— 与服务端 `resolveCompactionSettings`
+ * **同一公式**，供界面判断「手动压缩现在压不压得动」。
+ *
+ * ⚠️ 它和 `compactionTriggerTokens` 是**两条不同的线**，别混用：
+ * - `compactionTriggerTokens` = 窗口 − 预留（≈92%），是**自动**压缩的触发线；
+ * - 这一条是「切点之外还剩多少原文」，**手动**压缩（`force: true`）只看它 ——
+ *   历史上用触发线当手动压缩按钮的闸，结果上下文不到 92% 时按钮永远灰着。
+ *
+ * @param fixedTokens 消息之外、压缩动不了的那部分（系统提示词 + 工具 schema + 已有摘要）
+ * @param overrides   服务端 `CompactionSettings` 的覆盖（测试 / 特殊场景用；缺省即 pi 默认值）
+ */
+export function compactionKeepRecentTokens(
+  contextWindow: number,
+  fixedTokens = 0,
+  overrides?: { reserveTokens?: number; keepRecentTokens?: number }
+): number {
+  const reserve = Math.min(
+    overrides?.reserveTokens ?? COMPACTION_RESERVE_TOKENS,
+    compactionReserveTokens(contextWindow)
+  )
+  const budget = contextWindow - reserve - Math.max(0, fixedTokens)
+  return Math.min(
+    overrides?.keepRecentTokens ?? COMPACTION_KEEP_RECENT_TOKENS,
+    Math.max(COMPACTION_MIN_KEEP_TOKENS, Math.floor(budget * 0.8))
+  )
+}
+
 /*
  * 压缩参数（`reserveTokens = 16384` / `keepRecentTokens = 20000`）在
  * `packages/agent/src/context.ts` 的 `DEFAULT_COMPACTION_SETTINGS` 里，与 pi 一致。
@@ -2097,6 +2131,11 @@ export interface AgentConfirmRequest {
   toolName: string
   /** 待执行的命令 */
   command: string
+  /**
+   * 模型对这一步的意图（一句话）。有值时审批卡把它放在标题位，
+   * 用户点「允许」前先知道**为什么**要跑这条命令。
+   */
+  intent?: string
   workspaceId?: string
   workspaceName?: string
   /** 多智能体协作：发起这次审批的子 Agent（主智能体 / 普通会话不填） */
@@ -2118,6 +2157,8 @@ export interface AgentConfirmInput {
   toolName: string
   /** 待执行的命令 / 删除动作的描述 */
   command: string
+  /** 模型对这一步的意图（一句话，引擎注入的 `intent` 字段）；没有就不传 */
+  intent?: string
   /** 多智能体协作：发起这次审批的子 Agent（主智能体 / 普通会话不填） */
   agentId?: string
   agentName?: string
@@ -2223,6 +2264,20 @@ export interface ContainerFilesChangedEvent {
   workspaceId: string
 }
 
+/**
+ * 后台任务清单变了（起了 / 收场了 / 被取消了）。
+ *
+ * 只是一个**失效信号**：不带任务本体，收到就重新 `GET /api/background-tasks`。
+ * 为什么不带：任务输出是高频的（一条 dev server 每秒几十行），把内容塞进事件等于把
+ * 全局状态 WS 变成日志传输通道；而清单本身小，重拉一次比维护增量便宜得多。
+ *
+ * 生产方是登记表本身（`startBackgroundTask` 的启动与收场两处），所以不管是哪条路
+ * 起的任务（会话里的 agent 命令、项目页的克隆），各端都能第一时间看到。
+ */
+export interface BackgroundTasksChangedEvent {
+  type: 'backgroundTasks:changed'
+}
+
 /** 全局状态 WS 上广播的瞬时事件（生产方：`lib/server/state.ts` 的 `emitServerEvent`） */
 export type ServerEvent =
   | ConversationStartedEvent
@@ -2232,6 +2287,7 @@ export type ServerEvent =
   | ConversationFollowupEvent
   | ConversationFollowupResolvedEvent
   | ContainerFilesChangedEvent
+  | BackgroundTasksChangedEvent
 
 // ============================================================================
 // 定时任务

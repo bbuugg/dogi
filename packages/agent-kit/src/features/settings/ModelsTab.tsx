@@ -889,25 +889,31 @@ export function ModelsTab({ app }: { app: AgentApp }) {
       {/*
         「从上游拉取」的候选清单：**独立弹窗**。
         勾选只改本地草稿 `picked`，「确认添加」才并进配置 —— 取消不留痕迹。
+
+        ⚠️ 滚动只在**列表**里发生，弹窗本身不滚（`overflow-hidden` + flex 列）：
+        上游清单动辄几百个模型，让 DialogContent 自己滚的话标题、筛选框、底部按钮会
+        跟着一起滚出视口，而且列表的 `max-h` 与弹窗的 `max-h` 会叠成两条滚动条。
+        高度上限由 DialogContent 的 `max-h-[85dvh]` 提供，列表 `min-h-0 flex-1` 吃掉
+        剩余空间并在内部滚 —— 与「编辑模型」弹窗同一套排法。
       */}
       <Dialog open={pickingId !== null} onOpenChange={(open) => !open && closePicker()}>
-        <DialogContent className="max-h-[85dvh] overflow-x-hidden overflow-y-auto">
-          <DialogHeader>
+        <DialogContent className="flex max-h-[85dvh] flex-col overflow-hidden">
+          <DialogHeader className="shrink-0">
             <DialogTitle>{tr('从上游拉取模型')}</DialogTitle>
           </DialogHeader>
 
           {fetching && (
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <div className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
               <Loader2 className="size-3.5 animate-spin" />
               {tr('正在向上游要模型清单…')}
             </div>
           )}
           {/* 拉取失败的原文可能是很长的 URL / JSON 片段：break-all 让它在弹窗内换行 */}
-          {fetchError && <p className="text-xs break-all text-destructive">{fetchError}</p>}
+          {fetchError && <p className="shrink-0 text-xs break-all text-destructive">{fetchError}</p>}
 
           {fetched && (
-            <>
-              <div className="flex items-center gap-2">
+            <div className="flex min-h-0 flex-1 flex-col gap-3">
+              <div className="flex shrink-0 items-center gap-2">
                 <Input
                   placeholder={tr('筛选模型…')}
                   value={filter}
@@ -919,7 +925,8 @@ export function ModelsTab({ app }: { app: AgentApp }) {
                 </span>
               </div>
 
-              <div className="max-h-72 space-y-0.5 overflow-x-hidden overflow-y-auto pr-1">
+              {/* 唯一允许滚动的容器：`min-h-0` 让它能缩到比内容更小，滚动条才会落在列表上 */}
+              <div className="min-h-0 flex-1 space-y-0.5 overflow-x-hidden overflow-y-auto pr-1">
                 {visible.map((id) => {
                   const already = (pickingConfig?.models ?? []).some((model) => model.id === id)
                   const checked = already || picked.includes(id)
@@ -991,7 +998,7 @@ export function ModelsTab({ app }: { app: AgentApp }) {
                 )}
               </div>
 
-              <div className="flex flex-wrap gap-2">
+              <div className="flex shrink-0 flex-wrap gap-2">
                 <Button
                   type="button"
                   size="sm"
@@ -1029,10 +1036,10 @@ export function ModelsTab({ app }: { app: AgentApp }) {
                   {tr('重新拉取')}
                 </Button>
               </div>
-            </>
+            </div>
           )}
 
-          <DialogFooter className="pt-1">
+          <DialogFooter className="shrink-0 pt-1">
             <Button type="button" size="sm" variant="ghost" onClick={closePicker}>
               {tr('取消')}
             </Button>

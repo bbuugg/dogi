@@ -1082,7 +1082,17 @@ export interface BackgroundTaskLogLine {
  */
 export interface BackgroundTaskView {
   id: string;
-  /** 任务种类（决定图标与文案）：目前只有 `git-clone` */
+  /**
+   * 发起它的**会话** id（`Conversation.id`）。
+   *
+   * 有值时这条任务属于那个会话：会话里那块后台任务面板只显示自己的，删会话会连带停掉
+   * 它们。没有值的任务（如 `git-clone`）不属于任何会话 —— 它由用户在项目页直接发起，
+   * 只出现在状态栏那张全局清单里。
+   *
+   * 会话归属在登记那一刻**固定死**，之后切会话 / 改名 / 归档都不改。
+   */
+  sessionId?: string;
+  /** 任务种类（决定图标与文案）：`git-clone` / `agent-command` */
   kind: string;
   /** 一行标题，如 `克隆 owner/repo` */
   title: string;
@@ -1663,6 +1673,40 @@ export function resolveToolCallConcurrency(override?: number): number {
   );
 }
 
+// ---------------------------------------------------------------------------
+// 工具步数上限（客户端偏好 + 服务端执行，常量放契约里让两端共用一份）
+// ---------------------------------------------------------------------------
+
+/**
+ * 一轮对话里最多跑多少步的缺省值（1 步 = 一次模型请求 + 一轮工具执行）。
+ *
+ * 取 80：正常任务（读几个文件 → 改 → 验证）十几步就够，80 留了充足余量；
+ * 而 500 是「几乎不设限」—— 一旦模型陷入反复重试，能在触发压缩之前就烧掉整个窗口
+ * （每步都要重发全量上下文，第 N 步的成本是第 1 步的 N 倍）。
+ *
+ * 它是**缺省值**、不是硬上限：设置 → AI → 偏好里可以按自己的任务调（见 `resolveMaxSteps`）。
+ * 常量放在契约里，是因为设置页（浏览器）与 agent 运行时（服务端）要读同一个数 ——
+ * 客户端不能 import `@fizz/agent`（会把整个运行时拖进包里）。
+ */
+export const DEFAULT_MAX_STEPS = 80;
+/** 下限：至少 1 步（0 步 = 这一轮什么都不做） */
+export const MIN_MAX_STEPS = 1;
+/** 上限：再高与「不设限」无异，只是把烧窗口的时间拖长 */
+export const MAX_MAX_STEPS = 1000;
+
+/**
+ * 收敛「工具步数上限」：非数字 / 越界一律夹到 [1, 1000]，缺省 = `DEFAULT_MAX_STEPS`。
+ *
+ * ⚠️ 这是**一轮**的上限，不是整个会话：用户追问一句就是新的一轮、预算重新开始。
+ */
+export function resolveMaxSteps(override?: number): number {
+  const n =
+    typeof override === "number" && Number.isFinite(override)
+      ? Math.round(override)
+      : DEFAULT_MAX_STEPS;
+  return Math.min(MAX_MAX_STEPS, Math.max(MIN_MAX_STEPS, n));
+}
+
 /** 追加一条用户消息并跑一轮（服务端负责落盘助手回复） */
 export interface ChatRequest {
   conversationId: string;
@@ -1710,6 +1754,21 @@ export interface ChatRequest {
    * 每一轮请求都带上（这个偏好存在客户端）；只影响内置 Agent 的工具执行。
    */
   toolCallConcurrency?: number;
+  /**
+   * 一轮对话里最多跑多少步（1 步 = 一次模型请求 + 一轮工具执行）。
+   * 缺省 = `DEFAULT_MAX_STEPS`；每一轮请求都带上（这个偏好存在客户端）。
+   * 只影响内置 Agent —— ACP 后端跑多久由外部 agent 自己决定。
+   */
+  maxSteps?: number;
+  /**
+   * 是否让模型为每次工具调用写一句「意图」（一句话说明这一步要干什么），
+   * 渲染层拿它当工具卡标题。缺省 `true`；每一轮请求都带上（这个偏好存在客户端）。
+   *
+   * 关掉 = **不再往工具 schema 注入 `intent` 字段**（每个工具省一个字段的 tokens，
+   * 提示词里那条约定也一起撤掉），工具卡标题退回工具名。
+   * 只影响内置 Agent —— ACP 后端的工具卡标题由外部 agent 自己给。
+   */
+  toolIntent?: boolean;
   /**
    * 这一轮 user 消息的落盘 id（缺省 `u-<ts>` 自生成）。
    *

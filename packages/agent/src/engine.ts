@@ -9,13 +9,19 @@
  * 本文件只负责「跑一轮、吐事件」，不碰领域逻辑（压缩、插话、用量记账都在 `agent.ts`）。
  */
 import {
+  asSchema,
+  jsonSchema,
   stepCountIs,
   streamText,
+  type FlexibleSchema,
+  type JSONSchema7,
   type LanguageModel,
   type ModelMessage,
+  type Schema,
   type ToolSet
 } from 'ai'
 import type { AgentStreamEvent, AiReasoningEffort } from '@fizz/contracts/types'
+import { tr } from '@fizz/i18n'
 
 /** 一个工具步结束、下一步请求之前：可以改写下一步的 messages（插话注入 / 轮中压缩） */
 export interface EngineStepBoundary {
@@ -107,6 +113,114 @@ function limitToolConcurrency(tools: ToolSet, limit: number): ToolSet {
     } as ToolSet[string]
   }
   return out
+}
+
+/**
+ * 工具入参里「这一步想干什么」的字段名。
+ *
+ * 由 `withToolIntent()` 统一注入到**每一个**工具 schema 里，模型每次调用都要填一句，
+ * 渲染层拿它当工具卡的标题（否则卡片上只有「执行命令」「编辑文件」这种工具名，
+ * 用户看不出这一步的目的）。字段名同时被 `@fizz/agent-kit` 的 `toolIntentOf()` 读，
+ * 两边必须是同一个字符串。
+ */
+export const TOOL_INTENT_FIELD = 'intent'
+
+/**
+ * 注入给模型的 intent 字段说明。
+ *
+ * ⚠️ **这段话会在每一个工具的 schema 里各出现一次**，所以刻意写得极短：它是
+ * 「每个工具 +N tokens」的固定成本（实测一段长说明是 73 tokens/工具，压短后约 30）。
+ * 「怎么填、不要复述工具名」这类完整约定放在系统提示词里（见 `toolIntentHint`），
+ * 只出现一次 —— schema 里只需要让模型知道这个字段是什么。
+ *
+ * 留一句「显示为卡片标题」是给**没有系统提示词那条约定**的路径兜底
+ * （调用方自造 `setup` 的项目管理助手就走那条路）。
+ */
+function intentProperty(): JSONSchema7 {
+  return {
+    type: 'string',
+    description: tr(
+      '这一步的意图：一句话（≤20 字，用用户的语言）说明要达成什么，会显示为工具卡标题',
+      'Intent of this step: one short sentence (≤20 chars, in the user’s language); shown as the card title'
+    )
+  }
+}
+
+/**
+ * 把 `intent` 塞进工具 schema 的**第一位**，并保证校验后仍然留在入参里。
+ *
+ * 为什么在引擎这一层做、而不是改 40 个工具定义：内置工具是 zod、MCP / 插件工具是
+ * JSON Schema、子任务工具是手写对象，三条来源各不相同，只有「送进 `streamText` 之前」
+ * 是共同收口点（`runEngine` 全项目只有一个调用方）。
+ *
+ * 三个必须注意的点：
+ * 1. **必须排第一位**。入参是流式生成的（`tool-input-delta` 一帧帧追加），排后面的话
+ *    标题要等整段 JSON 收完才变，前面几秒还是「执行命令」；
+ * 2. **原 `validate` 会把 intent 吃掉**：zod 默认 strip 未知字段，直接复用会让
+ *    `tool-call` 的 `input` 里没有 intent（界面拿不到、工具也拿不到）。所以包一层：
+ *    先摘掉 intent 再交给原校验（原 schema 可能是 `.strict()`，带着它会被判失败），
+ *    校验通过后再把 intent 并回去；
+ * 3. 只处理对象入参。非对象 schema 塞 `intent` 会让上游直接 400，遇到就原样放行。
+ */
+export async function withToolIntent(tools: ToolSet): Promise<ToolSet> {
+  const out: ToolSet = {}
+  for (const [name, entry] of Object.entries(tools)) {
+    out[name] = await injectIntent(entry as ToolSet[string])
+  }
+  return out
+}
+
+async function injectIntent(entry: ToolSet[string]): Promise<ToolSet[string]> {
+  const raw = (entry as { inputSchema?: FlexibleSchema<unknown> }).inputSchema
+  let json: JSONSchema7
+  try {
+    // `jsonSchema` 可能是 PromiseLike（standard schema 那一路），统一 await 掉
+    json = await asSchema(raw).jsonSchema
+  } catch {
+    return entry
+  }
+  if (!json || (json.type !== undefined && json.type !== 'object')) return entry
+  // 根上是 `$ref` 的（个别 MCP server 这么写）：draft-07 里 `$ref` 的兄弟字段会被忽略，
+  // 塞进去也到不了模型，还可能与严格校验器打架 —— 原样放行
+  if (typeof json.$ref === 'string') return entry
+  const properties = (json.properties ?? {}) as Record<string, JSONSchema7>
+  // 已经有同名字段（工具自己就声明了 `intent`，比如某个 MCP server 的业务参数）就不重复注入
+  if (TOOL_INTENT_FIELD in properties) return entry
+
+  const injected = jsonSchema(
+    {
+      ...json,
+      properties: { [TOOL_INTENT_FIELD]: intentProperty(), ...properties },
+      // 放进 required 只是给模型的强提示：运行期校验只认 `validate`（下面那层），
+      // 模型漏填不会让整轮报错，界面退回工具名当标题。
+      required: [
+        TOOL_INTENT_FIELD,
+        ...((json.required ?? []) as string[]).filter((k: string) => k !== TOOL_INTENT_FIELD)
+      ]
+    },
+    { validate: keepIntent(asSchema(raw)) }
+  ) as FlexibleSchema<unknown>
+
+  return { ...entry, inputSchema: injected } as ToolSet[string]
+}
+
+/** 原校验 + 「把 intent 原样带回解析结果」（见 `withToolIntent` 第 2 点） */
+function keepIntent(base: Schema<unknown>) {
+  return async (value: unknown) => {
+    const raw =
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : {}
+    const rawIntent = raw[TOOL_INTENT_FIELD]
+    const intent = typeof rawIntent === 'string' ? rawIntent.trim() : ''
+    const { [TOOL_INTENT_FIELD]: _intent, ...rest } = raw
+    const parsed = base.validate ? await base.validate(rest) : { success: true as const, value: rest }
+    if (!parsed.success) return parsed
+    return {
+      success: true as const,
+      value: intent ? { [TOOL_INTENT_FIELD]: intent, ...(parsed.value as object) } : parsed.value
+    }
+  }
 }
 
 /** 把 AI SDK 的一个 fullStream part 折成 fizz 的事件；不是内容就返回 null */

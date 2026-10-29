@@ -272,6 +272,15 @@ export interface ConversationSlice {
   maxRetries: number;
   /** 同一批工具调用的并发上限（1 = 串行）。随每轮请求带给服务端 */
   toolCallConcurrency: number;
+  /** 一轮最多跑多少步（工具轮）。随每轮请求带给服务端 */
+  maxSteps: number;
+  /**
+   * 工具卡是否显示「意图」：模型每次调工具填一句「这一步要干什么」，卡片拿它当标题。
+   *
+   * 同时管两件事 —— 注入（随每轮请求带给服务端，决定要不要往工具 schema 塞 `intent`）
+   * 与渲染（关掉后历史里的卡片也回到工具名）。随每轮请求带给服务端。
+   */
+  toolIntent: boolean;
 
   // ---------- slice 读写 ----------
   readSlice: (conversationId: string | null) => ConvSlice;
@@ -337,6 +346,9 @@ export interface ConversationSlice {
   setConfirmTimeoutMin: (minutes: number) => void;
   setMaxRetries: (value: number) => void;
   setToolCallConcurrency: (value: number) => void;
+  setMaxSteps: (value: number) => void;
+  /** 工具卡是否显示「意图」（同时决定要不要让模型填） */
+  setToolIntent: (value: boolean) => void;
   loadMessages: (
     conversationId: string,
     opts?: { loadError?: boolean },

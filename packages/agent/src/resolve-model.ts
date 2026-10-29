@@ -7,6 +7,7 @@
  */
 import { type LanguageModel } from 'ai'
 import { createOpenAI } from '@ai-sdk/openai'
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import { createAnthropic } from '@ai-sdk/anthropic'
 import { createDeepSeek } from '@ai-sdk/deepseek'
 import { createGoogleGenerativeAI } from '@ai-sdk/google'
@@ -168,12 +169,15 @@ export function debugHttpFetch(
  * - GLM / airouter / StepFun：`delta.reasoning_content`（字符串）
  * - OpenRouter：`delta.reasoning`（字符串）+ `delta.reasoning_details`（数组）
  *
- * 实测（`scripts/probe-reasoning.mjs`，4 个配置全跑）：
- * - `@ai-sdk/openai` 的 chat-completions 分支对上述字段**一个都不解析**，reasoning 恒为 0 字；
- * - `@ai-sdk/deepseek` 只认 `reasoning_content`（GLM / airouter / StepFun 命中，OpenRouter 落空）。
+ * 服务两条路：
+ * 1. **`openai` kind 的 chat-completions 分支**（`createOpenAI().chat()`）—— 这里两件事都需要：
+ *    官方实现对思考字段一个都不解析（reasoning 恒 0 字），且它的 chunk schema 是
+ *    `z.literal('function')`，网关把 `tool_calls[].type` 给成空串就整轮 `TypeValidationError`；
+ * 2. **`openai-compatible` kind**（`@ai-sdk/openai-compatible`）—— 它自己就认
+ *    `reasoning_content ?? reasoning`、也完全不看 `tool_calls[].type`，挂这层只为把
+ *    OpenRouter 那种 `reasoning_details` 数组归一成字符串（否则那家会丢思考内容）。
  *
- * 所以这里在 fetch 层做一次字段改名，再交给 deepseek 的 chat 模型解析 ——
- * 既不用自己实现整套 OpenAI 协议，也不依赖具体是哪个网关。
+ * 所以别把这里当成「openai-compatible 的补丁」删掉 —— 删了第 1 条路立刻坏。
  */
 export function normalizeReasoningFetch(
   ...args: Parameters<typeof globalThis.fetch>
@@ -210,9 +214,21 @@ export function normalizeReasoningFetch(
 /**
  * 根据配置创建对应 provider 的模型实例（agent 服务复用）。
  *
- * ⚠️ `openai-compatible` 的 chat-completions 走的是 **deepseek** 的 chat 模型，不是 openai 的 ——
- * 因为只有它会解析 `reasoning_content`，openai 的实现会把思考内容整段丢掉（见 normalizeReasoningFetch）。
- * 两者发的都是标准 OpenAI chat-completions 请求，差异仅在响应解析。
+ * `openai-compatible` 走**专门的** `@ai-sdk/openai-compatible`（以前是拿 deepseek 的实现兼职，
+ * 因为只有它会解析 `reasoning_content`）。换过来的三个理由：
+ * 1. 它原生解析 `reasoning_content ?? reasoning`（流式与非流式都认）；
+ * 2. 它的 chunk schema **根本不看 `tool_calls[].type`** —— 网关给空串也不会 `TypeValidationError`；
+ * 3. 思考强度走 OpenAI 原生的 `reasoning_effort`，不注入 DeepSeek 专属的 `thinking: {…}`。
+ *
+ * 而 deepseek 兼职那套有三个副作用（对非 deepseek 模型 id 全部命中）：`isDeepSeekV4Model()`
+ * 不匹配即返回 true → 每条 assistant 历史都被塞 `reasoning_content: ""`、有思考内容时整段回传；
+ * 同一判定让 `isThinkingEnabled` 恒真 → **`temperature` / `top_p` 被静默丢弃**；设了思考强度时
+ * 还会往请求体里塞 DeepSeek 的 `thinking` 字段。严格网关（OpenAI 官方 / Azure）会因此 400。
+ *
+ * ⚠️ `@ai-sdk/openai-compatible` **没有 Responses API**（只有 chat/completions + 老 `/completions`
+ * + embedding + image），所以 `apiStyle: 'responses'` 那条路仍归 `@ai-sdk/openai`。
+ * ⚠️ 它的 `includeUsage` **没有默认值**：不传就不发 `stream_options.include_usage`，流式响应里
+ * 拿不到 usage（上下文圆环的「已用」会永远是空、压缩只能靠估算）—— 所以这里显式传 true。
  *
  * 每个 provider 都挂了出站日志：`debugHttpFetch`（SSE 归一化那条路是 normalizeReasoningFetch，
  * 它内部也走 debugHttpFetch）。**模型网关的请求只有这里能看到** —— 桌面端渲染进程走 IPC 不出网，
@@ -247,6 +263,7 @@ export function resolveModel(config: AiModelConfig): LanguageModel {
     case 'openai-compatible': {
       const style = config.apiStyle ?? 'chat-completions'
       if (style === 'responses') {
+        // 兼容包里没有 Responses 实现，这条路只能借用官方包（网关得真支持 /v1/responses）
         const provider = createOpenAI({
           apiKey: config.apiKey ?? 'EMPTY',
           baseURL: config.baseURL,
@@ -254,9 +271,21 @@ export function resolveModel(config: AiModelConfig): LanguageModel {
         })
         return provider.responses(config.model)
       }
-      const provider = createDeepSeek({
+      /**
+       * `baseURL` 是**必填**的：这个包没有兜底端点（deepseek / openai 都有默认域名），
+       * 缺了会拼出 `undefined/chat/completions` 这种非法 URL。宁可在这里给人话。
+       */
+      const baseURL = config.baseURL?.trim()
+      if (!baseURL) {
+        throw new Error('「OpenAI 兼容」类型必须填写 baseURL（如 https://openrouter.ai/api/v1）')
+      }
+      const provider = createOpenAICompatible({
+        // provider 名：只用于 `providerOptions['openai-compatible']` 的命名空间，本项目不传 providerOptions
+        name: 'openai-compatible',
         apiKey: config.apiKey ?? 'EMPTY',
-        baseURL: config.baseURL,
+        baseURL,
+        // 不传就不发 stream_options.include_usage → 流式拿不到 usage（见上面的注释）
+        includeUsage: true,
         fetch: normalizeReasoningFetch
       })
       return provider(config.model)

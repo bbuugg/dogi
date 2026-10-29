@@ -1071,6 +1071,8 @@ export function createConversationRunLoop(ctx: ConvCore) {
       confirmTimeoutMin,
       maxRetries,
       toolCallConcurrency,
+      maxSteps,
+      toolIntent,
     } = get();
     // 记下「上次使用的模型」（新会话预选用它），并把这次真正发出去的选择写回会话目录
     // （`config.json`）—— 「用某个模型发消息就更新这个配置的值」。
@@ -1185,6 +1187,10 @@ export function createConversationRunLoop(ctx: ConvCore) {
           maxRetries,
           // 同一批 tool-call 的并发上限：模型一次返回一大批工具调用时，服务端按这个数排队
           toolCallConcurrency,
+          // 一轮最多跑多少步：达到上限后服务端会停下这一轮（即使还有没跑完的工具调用）
+          maxSteps,
+          // 工具卡是否带「意图」：服务端据此决定要不要往工具 schema 注入 intent 字段
+          toolIntent,
           // 思考强度：随请求带一份，避免刚切完档、PATCH 还没落盘时这一轮按旧档跑
           ...(chatTarget?.backend !== "acp" && reasoningEffort
             ? { reasoningEffort }

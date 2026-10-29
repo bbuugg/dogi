@@ -46,9 +46,10 @@ function optionIcon(kind: AgentConfirmOption['kind']) {
   )
 }
 
-/** 审批项的一句话头：「需要你确认：<工具名>（工作区「x」）」 */
+/** 审批项的一句话头：「需要你确认：<意图>（<工具名>）（工作区「x」）」 */
 function ConfirmHeadline({ confirm }: { confirm: AgentConfirmRequest }) {
   const tr = useT()
+  const label = toolLabel(confirm.toolName)
   return (
     <div className="text-sm font-medium">
       {confirm.agentName && (
@@ -56,7 +57,12 @@ function ConfirmHeadline({ confirm }: { confirm: AgentConfirmRequest }) {
           {confirm.agentName}
         </span>
       )}
-      {tr('需要你确认：{tool}', { tool: toolLabel(confirm.toolName) })}
+      {/* 意图在前：用户点「允许」之前最想知道的是**为什么要跑这条命令**，
+          工具名退到括号里（没有意图时与改造前完全一致） */}
+      {tr('需要你确认：{tool}', { tool: confirm.intent || label })}
+      {confirm.intent && (
+        <span className="font-normal text-muted-foreground">{tr('（{tool}）', { tool: label })}</span>
+      )}
       {confirm.workspaceName && (
         <span className="font-normal text-muted-foreground">
           {tr('（工作区「{name}」）', { name: confirm.workspaceName })}

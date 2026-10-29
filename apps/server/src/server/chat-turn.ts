@@ -19,7 +19,7 @@
  * ⚠️ 这里刻意**只放内存**：服务端进程重启后 run 全丢（半截正文不再恢复，用户消息仍在）。
  */
 import { loadPlugins } from '@fizz/plugin/loader'
-import { assistantSliceId, buildUserParts, resolveToolCallConcurrency, type ChatRequest, type UploadFileRef } from '@fizz/contracts/agent-api'
+import { assistantSliceId, buildUserParts, resolveMaxSteps, resolveToolCallConcurrency, type ChatRequest, type UploadFileRef } from '@fizz/contracts/agent-api'
 import { CollabRuntime, defaultContextWindowFromEnv, rawToolsPlugin, readProjectDoc, runAgent, type AgentConfirmInput, type MountedPlugin, type RunAgentResult } from '@fizz/agent'
 import {
   normalizeReasoningEffort,
@@ -27,7 +27,7 @@ import {
   resolveModelSettings
 } from '@fizz/contracts/types'
 import { buildMcpToolset } from '@fizz/mcp'
-import { buildAskFollowupTool, buildBrowserToolSet, resolveBrowserChannel } from '@fizz/tools'
+import { buildAskFollowupTool, buildBrowserToolSet, resolveBrowserChannel, spawnBackgroundShell } from '@fizz/tools'
 import { runAcpAgent } from '@fizz/acp'
 import { discoverServerPlugins, withRuntimeConfig } from './plugin-roots'
 import { refreshPluginModels } from './plugin-models'
@@ -49,6 +49,7 @@ import { startContainerTurn } from './container-projects/turn'
 import { buildClientToolset, createClientToolGate } from './client-tool-gate'
 import { errorPart, excerptOf, foldEventIntoParts } from './agent-parts'
 import { createRun, emit, finishRun, type ChatRun } from './chat-run'
+import { startBackgroundTask } from './background-tasks'
 import { refreshAcpSessionState } from './acp-session-state'
 import { appendAcpTranscript } from './acp-transcripts'
 import { describeError } from './lib/http'
@@ -388,6 +389,13 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
     typeof input.toolCallConcurrency === 'number' && Number.isFinite(input.toolCallConcurrency)
       ? resolveToolCallConcurrency(input.toolCallConcurrency)
       : undefined
+  // 一轮最多跑多少步（设置页里的偏好）；非法值交给 runAgent 用缺省（`DEFAULT_MAX_STEPS`）
+  const maxSteps =
+    typeof input.maxSteps === 'number' && Number.isFinite(input.maxSteps)
+      ? resolveMaxSteps(input.maxSteps)
+      : undefined
+  // 工具卡「意图」开关（设置页里的偏好）；非布尔值交给 runAgent 用缺省（开启）
+  const toolIntent = typeof input.toolIntent === 'boolean' ? input.toolIntent : undefined
 
   const run = createRun({
     conversationId: conversation.id,
@@ -764,6 +772,45 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
       resolveFileUrl: (url) => resolveUploadModelUrl(url, opts?.origin ?? ''),
       // 单条命令停止表（POST /api/chat/command/stop 命中它；run 级，收尾时清空）
       commandStops: run.commandStops,
+      /**
+       * 后台命令（`execute_command` 的 `runInBackground`）：登记成一条**属于本会话**的
+       * 后台任务，进程归登记表持有 —— 本轮的 abort 与超时都打不到它，这正是「dev server
+       * 活过这一轮」的实现方式。
+       *
+       * 进程用 `spawnBackgroundShell` 起（与前台共用同一份 shell 判定，别在服务端抄第二份），
+       * 输出按行写进任务日志：用户在输入框上方那一行展开，看到的就是这条进程的真实输出。
+       */
+      onBackgroundCommand: async ({ command, cwd, title }) => {
+        const handle = startBackgroundTask({
+          sessionId: conversation.id,
+          kind: 'agent-command',
+          title,
+          detail: cwd,
+          run: async (signal, log) => {
+            log(`$ ${command}`)
+            // 块边界不等于行边界：两条流各留一个「半行」缓冲，收场时把剩下的吐出来
+            const pending: Record<'stdout' | 'stderr', string> = { stdout: '', stderr: '' }
+            const write = (stream: 'stdout' | 'stderr', chunk: string): void => {
+              const parts = (pending[stream] + chunk).split('\n')
+              pending[stream] = parts.pop() ?? ''
+              for (const line of parts) log(line)
+            }
+            const shell = spawnBackgroundShell(command, cwd, {
+              signal,
+              onOutput: (stream, chunk) => write(stream, chunk)
+            })
+            const exit = await shell.done
+            for (const stream of ['stdout', 'stderr'] as const) {
+              if (pending[stream].trim()) log(pending[stream])
+            }
+            // 三种收场都要让登记表知道为什么结束（它据此判 done / failed / canceled）
+            if (exit.error) throw new Error(`启动失败：${exit.error}`)
+            if (exit.killed) throw new Error('已停止')
+            if (exit.code !== 0) throw new Error(`退出码 ${exit.code}`)
+          }
+        })
+        return { id: handle.id }
+      },
       plugins,
       ...(isCollab ? { extraTools: collabTools, extraPrompt: collabPrompt } : {}),
       /**
@@ -792,6 +839,8 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
       ),
       ...(maxRetries !== undefined ? { maxRetries } : {}),
       ...(toolCallConcurrency !== undefined ? { toolCallConcurrency } : {}),
+      ...(maxSteps !== undefined ? { maxSteps } : {}),
+      ...(toolIntent !== undefined ? { toolIntent } : {}),
       signal: run.controller.signal,
       onEvent,
       // 运行中插话：每个工具步骤边界从 run 的收件箱消费一条（agent 侧注入并强制续跑）

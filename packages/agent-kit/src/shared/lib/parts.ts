@@ -474,6 +474,72 @@ export function toolCardTitle(name: string, kind?: string): string {
   return toolLabel(name)
 }
 
+/**
+ * 工具入参里「这一步的意图」的字段名。
+ *
+ * 由 `@fizz/agent` 的 `withToolIntent()` 注入到每个工具的 schema 里（模型每次调用必填），
+ * 两边的字符串必须一致 —— 改一处就要改另一处。
+ */
+export const TOOL_INTENT_FIELD = 'intent'
+
+/**
+ * 从**还在流式生成**的入参 JSON 里抠出 intent。
+ *
+ * 入参是一帧帧追加的（`{"intent":"修复类型错误","pa…`），完整 tool-call 到达前
+ * `part.input` 还是空的，只能按文本抠 —— 这样卡片一出现标题就是意图，
+ * 而不是先显示「执行命令」、等整段 JSON 收完再跳一下。
+ */
+function intentFromInputText(text: string): string {
+  const matched = /"intent"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(text)
+  if (!matched) return ''
+  const raw = matched[1]
+  try {
+    return JSON.parse(`"${raw}"`) as string
+  } catch {
+    // 半截（转义序列还没吐完）就先用原文，下一帧会覆盖
+    return raw
+  }
+}
+
+/** 这条工具调用的「意图」（模型填的那句话）；没有就返回空串 */
+export function toolIntentOf(part: AgentMessagePart): string {
+  if (part.type !== 'tool-call') return ''
+  const input = part.input
+  if (input && typeof input === 'object' && !Array.isArray(input)) {
+    const value = (input as Record<string, unknown>)[TOOL_INTENT_FIELD]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return part.inputText ? intentFromInputText(part.inputText).trim() : ''
+}
+
+/** 工具卡只画在 tool-call part 上（tool-result 兜底卡单独渲染） */
+export type ToolCallPart = Extract<AgentMessagePart, { type: 'tool-call' }>
+
+/**
+ * 工具卡头部：**有意图就把意图当标题**，工具名退到明细最前面
+ * （`修复类型错误` / `编辑文件 · src/parts.ts`）。
+ *
+ * 退位而不是丢掉工具名：意图说的是「为什么」，工具名说的是「用什么干的」，
+ * 排查时两样都要看。没有意图（老会话 / 模型没填 / 非内置工具）时与改造前完全一致。
+ */
+export function toolCardHead(
+  part: ToolCallPart,
+  detail?: string,
+  /**
+   * 是否显示意图（设置 → AI → 通用 → 工具意图）。缺省显示。
+   *
+   * 关掉时连**历史里已有 intent 的卡片**也回到工具名 —— 这个开关管的是「显示」，
+   * 不只是「让模型填」，否则关掉开关后老会话还是满屏意图，看起来像没生效。
+   */
+  showIntent = true
+): { title: string; detail?: string } {
+  const label = toolCardTitle(part.toolName, part.acpKind)
+  const intent = showIntent ? toolIntentOf(part) : ''
+  if (!intent) return detail ? { title: label, detail } : { title: label }
+  const extra = detail?.trim()
+  return extra ? { title: intent, detail: `${label} · ${extra}` } : { title: intent, detail: label }
+}
+
 /** ask_followup_question 工具名（与 @fizz/tools 侧的 ASK_FOLLOWUP_TOOL 一致；web 不依赖 Node 侧包） */
 export const ASK_FOLLOWUP_TOOL = 'ask_followup_question'
 

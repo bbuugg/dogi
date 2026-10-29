@@ -133,7 +133,7 @@ export function ReasoningEffortSelect({ app }: { app: AgentApp }) {
             }}
             aria-label={t('思考强度')}
             className="h-7 cursor-pointer"
-            trackClassName="data-horizontal:h-7 rounded-full bg-muted ring-1 ring-foreground/10 ring-inset shadow-[inset_0_2px_5px_rgba(0,0,0,0.16)]"
+            trackClassName="data-horizontal:h-7 rounded-full bg-muted"
             rangeClassName={cn(
               'rounded-full shadow-[inset_0_1px_1px_rgba(255,255,255,0.3)]',
               !dragging && 'transition-[width,background-size] duration-200 ease-out',

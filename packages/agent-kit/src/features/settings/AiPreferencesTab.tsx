@@ -1,20 +1,26 @@
 /**
- * AI 偏好：从「通用」里抽出来的、**只作用于 AI 的那几条** —— 工具权限 + 工具调用并发 +
- * 命令审批超时 + 模型请求重试 + 子任务（subagent）。
+ * AI 通用设置（导航上：设置 → AI → 通用）：从「通用」组里抽出来的、**只作用于 AI 的那几条**
+ * —— 工具权限 + 工具调用并发 + 工具步数上限 + 命令审批超时 + 模型请求重试 + 自动折叠 +
+ * 子任务（subagent）。
  *
  * 为什么单开一页而不是留在通用里：通用里真正「跟 AI 无关」的只剩通知 / 常亮 / 监控 / 更新
  * 那几项，而守在通用里找「它能改什么、能跑多快」的正好是 AI 组里的这些配置。现在
- * 设置 → AI → 偏好 就是「这套 AI 怎么干活」的唯一入口。
+ * 设置 → AI → 通用 就是「这套 AI 怎么干活」的唯一入口。
+ *
+ * ⚠️ 导航上叫「通用」不叫「偏好」：这一页装的是 AI 的**默认行为**（权限档 / 并发 / 步数 /
+ * 折叠），不是个人口味，叫「偏好」会让人以为里面是主题、字号。**tab id 仍是 `ai-prefs`**，
+ * 别跟着改（`SettingsContent` / `types.ts` 都按它分发）。
  *
  * ⚠️ 这里只搬了 UI：所有偏好仍然读写同一份 store（`useAgentStore` / `app.*`），
  * 落盘字段、`DATA_VERSION` 迁移、服务端上送路径一律没动 —— 搬家不改数据。
  *
- * 留在「通用」里的：结束通知 / 屏幕常亮 / 语音输入静音超时 / 系统监控 / 远程访问 / 软件更新
+ * 留在「通用」组里的：结束通知 / 屏幕常亮 / 语音输入静音超时 / 系统监控 / 远程访问 / 软件更新
  * （它们是宿主环境与提醒的事，不是 AI 的行为）。
  */
 import { toast } from 'sonner'
 import { Check, ChevronsDownUp, ShieldCheck } from 'lucide-react'
 import { Input } from '@fizz/ui/input'
+import { Switch } from '@fizz/ui/switch'
 import {
   Select,
   SelectContent,
@@ -26,7 +32,14 @@ import { cn } from '@fizz/agent-kit/shared/lib/utils'
 import type { AgentApp } from '@fizz/agent-kit/shared/hooks/useAgentApp'
 import { permissionOption, permissionOptions } from '@fizz/agent-kit/shared/lib/permission'
 import { SUBAGENT_IDS, SUBAGENT_META } from '@fizz/contracts/types'
-import { DEFAULT_TOOL_CALL_CONCURRENCY, resolveToolCallConcurrency } from '@fizz/contracts'
+import {
+  DEFAULT_MAX_STEPS,
+  DEFAULT_TOOL_CALL_CONCURRENCY,
+  MAX_MAX_STEPS,
+  MIN_MAX_STEPS,
+  resolveMaxSteps,
+  resolveToolCallConcurrency
+} from '@fizz/contracts'
 import { useAgentStore } from '@fizz/agent-kit/shared/lib/stores/agent-store'
 import { AUTO_COLLAPSE_OPTIONS, setAutoCollapse, useAutoCollapse } from '@fizz/agent-kit/shared/lib/auto-collapse'
 import { ChoiceChips } from '@fizz/agent-kit/features/settings/ChoiceChips'
@@ -124,6 +137,55 @@ export function AiPreferencesTab({ app }: { app: AgentApp }) {
             className="w-28 font-mono"
           />
           <span className="text-xs text-muted-foreground">{tr('个')}</span>
+        </div>
+      </section>
+
+      <section className="space-y-2">
+        <div className="text-sm font-medium">{tr('工具调用最大步数')}</div>
+        <p className="text-xs leading-4 text-muted-foreground">
+          {tr('一轮对话里最多连续调用工具多少次（1 步 = 一次模型请求 + 一轮工具执行）。达到上限后即使还有没跑完的工具调用也会停下这一轮。默认')}{' '}
+          {DEFAULT_MAX_STEPS}{tr('，上限')} {MAX_MAX_STEPS}
+          {tr('；调大能跑更长的任务，代价是每步都要重发全量上下文，成本随步数累加。')}
+        </p>
+        <div className="flex items-center gap-2">
+          <Input
+            type="number"
+            min={MIN_MAX_STEPS}
+            max={MAX_MAX_STEPS}
+            step={1}
+            value={app.maxSteps}
+            onChange={(e) => {
+              const raw = e.target.value === '' ? DEFAULT_MAX_STEPS : Number(e.target.value)
+              if (!Number.isNaN(raw)) app.setMaxSteps(raw)
+            }}
+            onBlur={(e) => {
+              // 失焦时把胡乱输入（越界 / 小数 / 空）夹回合法区间
+              const raw = e.target.value === '' ? DEFAULT_MAX_STEPS : Number(e.target.value)
+              app.setMaxSteps(resolveMaxSteps(Number.isNaN(raw) ? DEFAULT_MAX_STEPS : raw))
+            }}
+            className="w-28 font-mono"
+          />
+          <span className="text-xs text-muted-foreground">{tr('步')}</span>
+        </div>
+      </section>
+
+      <section className="space-y-2">
+        <div className="text-sm font-medium">{tr('工具意图')}</div>
+        <p className="text-xs leading-4 text-muted-foreground">
+          {tr(
+            '让模型为每次工具调用写一句「这一步要干什么」，显示成工具卡的标题（「修复类型错误」而不是「编辑文件」）。' +
+              '关掉后工具卡立刻回到工具名，模型也不再被要求填这句（下一轮生效）。'
+          )}
+        </p>
+        <div className="flex items-center gap-2">
+          <Switch
+            id="tool-intent-enabled"
+            checked={app.toolIntent}
+            onCheckedChange={app.setToolIntent}
+          />
+          <label htmlFor="tool-intent-enabled" className="text-xs text-muted-foreground">
+            {app.toolIntent ? tr('已开启') : tr('已关闭（工具卡只显示工具名）')}
+          </label>
         </div>
       </section>
 

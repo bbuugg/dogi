@@ -36,7 +36,8 @@ import {
 import {
   MAX_STEPS,
   buildAgentSystemPrompt,
-  toModelMessages
+  toModelMessages,
+  toolIntentHint
 } from './prompt'
 import {
   fileToolsPlugin,
@@ -47,7 +48,7 @@ import {
   type MountedPlugin
 } from './plugins'
 import { buildDelegationTools, makeDelegationStats, type SubagentId } from './subagents'
-import { runEngine } from './engine'
+import { runEngine, withToolIntent } from './engine'
 import { resolveModel } from './resolve-model'
 import { isEmptyStreamOutputError, isRetryableNetworkError, retryDelayMs, sleepWithSignal } from './retry'
 import { resolveMaxRetries, resolveToolCallConcurrency } from '@fizz/contracts/agent-api'
@@ -129,6 +130,17 @@ export interface RunAgentOptions {
    * 单条停止能力（与从前逐字节一致）。
    */
   commandStops?: Map<string, () => void>
+  /**
+   * 后台命令登记：`execute_command` 带 `runInBackground` 时调它，拿到任务 id。
+   *
+   * 由 server 注入（它持有任务登记表，也知道这条命令属于哪个会话）；不传 = 不提供
+   * 后台执行（工具会如实回绝）。进程归登记表持有，本轮的 signal / 超时都打不到它。
+   */
+  onBackgroundCommand?: (req: {
+    command: string
+    cwd: string
+    title: string
+  }) => Promise<{ id: string }>
   signal?: AbortSignal
   /**
    * 运行中插话（steer）的收件箱轮询：每个迭代边界（一次 LLM 调用 + 其工具执行完成）
@@ -181,6 +193,13 @@ export interface RunAgentOptions {
    * 缺省 = `DEFAULT_TOOL_CALL_CONCURRENCY`；服务端把设置页里的偏好按轮传进来。
    */
   toolCallConcurrency?: number
+  /**
+   * 是否让模型为每次工具调用写一句「意图」（见 `withToolIntent`）。缺省 = 开启。
+   *
+   * 服务端把设置页里的偏好按轮传进来；关掉时既不注入 `intent` 字段，提示词里那条
+   * 约定也一起撤掉（否则模型会被告知填一个 schema 里没有的字段）。
+   */
+  toolIntent?: boolean
   /** 每条流事件（已经转成桌面端同款的 AgentStreamEvent） */
   onEvent?: (event: AgentStreamEvent) => void
   /**
@@ -387,6 +406,12 @@ export function buildAgentSetup(opts: {
   onEvent?: (event: AgentStreamEvent) => void
   /** 命令停止表（见 RunAgentOptions.commandStops） */
   commandStops?: Map<string, () => void>
+  /** 后台命令登记（见 RunAgentOptions.onBackgroundCommand） */
+  onBackgroundCommand?: (req: {
+    command: string
+    cwd: string
+    title: string
+  }) => Promise<{ id: string }>
   extraTools?: Record<string, unknown>
   /** 调用方额外挂的插件（server 的项目工具 / 浏览器 / MCP 桥接等），按数组顺序挂载 */
   plugins?: MountedPlugin[]
@@ -399,6 +424,11 @@ export function buildAgentSetup(opts: {
    * `readNestedProjectDocs` + 历史里的 marker 建好传进来；不传 = 不加载。
    */
   nestedDocs?: (absPath: string, isDirectory: boolean) => Promise<string | null>
+  /**
+   * 是否让模型为每次工具调用写一句「意图」。缺省开启；关掉时提示词里那条约定不追加
+   * （否则模型会被告知填一个 schema 里没有的字段，见 `toolIntentHint`）。
+   */
+  toolIntent?: boolean
 }): AgentSetup {
   const ctx = createAppContext('agent-setup')
   ctx.set('tools', new ToolsService(ctx))
@@ -437,6 +467,9 @@ export function buildAgentSetup(opts: {
               opts.onEvent?.({ type: 'tool-output-delta', toolCallId: id, stream, delta })
           }
         : {}),
+      // 后台执行通道：不传就没有 runInBackground（工具会如实回绝），
+      // 与「这个环境不支持后台命令」是同一件事
+      ...(opts.onBackgroundCommand ? { onBackgroundCommand: opts.onBackgroundCommand } : {}),
       skills: opts.skills,
       ...(opts.nestedDocs ? { nestedDocs: opts.nestedDocs } : {})
     })
@@ -493,7 +526,9 @@ export function buildAgentSetup(opts: {
       )
     : '你是 Fizz 的对话助手。本会话没有绑定工作区，因此不能读写文件或执行命令，但可以使用 web_fetch 工具打开网页抓取资料；只能基于对话内容或抓取到的网页内容回答问题、整理思路。'
   // 提示词也走注册表：内置提示词是唯一一段，插件可再追加（priority 更大的排在后面）
-  ctx.prompt.section('builtin', base + askHint, { priority: 0 })
+  // 「工具意图」的约定：只有真的往 schema 注入 `intent` 时才追加（见 toolIntentHint）
+  const intentHint = opts.toolIntent === false ? '' : toolIntentHint()
+  ctx.prompt.section('builtin', base + askHint + intentHint, { priority: 0 })
   if (opts.extraPrompt?.trim()) {
     ctx.prompt.section('caller', opts.extraPrompt.trim(), { priority: 1 })
   }
@@ -767,12 +802,14 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
       ...(opts.getPermissionMode ? { getPermissionMode: opts.getPermissionMode } : {}),
       ...(opts.requestConfirm ? { requestConfirm: opts.requestConfirm } : {}),
       ...(opts.commandStops ? { commandStops: opts.commandStops } : {}),
+      ...(opts.onBackgroundCommand ? { onBackgroundCommand: opts.onBackgroundCommand } : {}),
       onEvent: (event) => emitEvent(event),
       ...(opts.extraTools ? { extraTools: opts.extraTools } : {}),
       ...(opts.plugins ? { plugins: opts.plugins } : {}),
       ...(opts.browser ? { browser: true } : {}),
       ...(opts.extraPrompt ? { extraPrompt: opts.extraPrompt } : {}),
-      ...(nestedDocs ? { nestedDocs } : {})
+      ...(nestedDocs ? { nestedDocs } : {}),
+      ...(opts.toolIntent === false ? { toolIntent: false } : {})
     })
   /**
    * 工具调用开关关掉时**一个工具都不下发**（`AiModelSettings.toolCall`）。
@@ -780,8 +817,15 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
    * 闸放在这里而不是 `buildAgentSetup` 里：`opts.setup` 可能是调用方自造的
    * （项目管理助手那套），只有这里能把所有入口一网打尽。提示词里补一句能力限制 ——
    * 否则系统提示词还在教模型怎么用工具，它只能输出假的工具调用文本。
+   *
+   * 开着的这一支要**先注入 `intent`**（见 `withToolIntent`）：注入放在 `estimateBaseTokens`
+   * 之前，工具 schema 的 token 估算才把这一字段算进去，圆环不会越跑越偏。
    */
-  const toolsForModel = modelSettings.toolCall ? agentSetup.tools : {}
+  const toolsForModel = modelSettings.toolCall
+    ? opts.toolIntent === false
+      ? agentSetup.tools
+      : await withToolIntent(agentSetup.tools as Parameters<typeof withToolIntent>[0])
+    : {}
   const setupForModel: AgentSetup = modelSettings.toolCall
     ? agentSetup
     : {

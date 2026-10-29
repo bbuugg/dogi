@@ -6,6 +6,7 @@ import {
 } from "@fizz/agent-kit/features/chat/attachments";
 import { type ChatComposerProps } from "@fizz/agent-kit/features/chat/chat-surface";
 import { ConfirmQueue } from "@fizz/agent-kit/features/chat/ConfirmCard";
+import { BackgroundTaskDock } from "@fizz/agent-kit/features/chat/BackgroundTaskDock";
 import { ModelSelect } from "@fizz/agent-kit/features/chat/ModelSelect";
 import { ReasoningEffortSelect } from "@fizz/agent-kit/features/chat/ReasoningEffortSelect";
 import { QuotePreviewRow } from "@fizz/agent-kit/features/chat/quotes";
@@ -322,6 +323,15 @@ export function useMainComposerProps(
             {/* MCP 从 `trailing` 搬上来：它与浏览器同属「给这一轮装能力」 */}
             <McpSelect app={app} />
           </ComposerToolbar>
+        )}
+        {/*
+          会话自己的后台进程（agent 用 runInBackground 起的 dev server / watch）：
+          排在审批卡**之上** —— 审批是「现在必须答」的，任务只是「顺便看一眼」，
+          抢不到位置时就该它让位（面板自己在 min(200px,24vh) 内滚）。
+          没有会话、或这个会话没有后台任务时它自己返回 null，不占位。
+        */}
+        {app.activeConversationId && !isAcp && (
+          <BackgroundTaskDock app={app} conversationId={app.activeConversationId} />
         )}
         {app.pendingConfirms.length > 0 && (
           <ConfirmQueue

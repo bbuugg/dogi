@@ -27,7 +27,12 @@
  * - 桌面端不走 `runAgent`（它自己调 streamText），所以这里不会误伤桌面端。
  */
 import { asSchema, streamText } from 'ai'
-import { DEFAULT_CONTEXT_WINDOW, compactionReserveTokens } from '@fizz/contracts/types'
+import {
+  COMPACTION_MIN_KEEP_TOKENS,
+  DEFAULT_CONTEXT_WINDOW,
+  compactionKeepRecentTokens,
+  compactionReserveTokens
+} from '@fizz/contracts/types'
 import { resolveModel } from './resolve-model'
 import { toModelMessages } from './model-messages'
 import type { AgentChatMessage, AiModelConfig } from '@fizz/contracts/types'
@@ -55,7 +60,7 @@ export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
  * 于是按窗口封顶到 25%（**唯一的机械适配，不改机制**）。
  */
 /** 保留区的下限：再怎么让位也要留这么多原文，否则模型连「刚才在干什么」都不知道 */
-export const MIN_KEEP_TOKENS = 1024
+export const MIN_KEEP_TOKENS = COMPACTION_MIN_KEEP_TOKENS
 
 export function resolveCompactionSettings(
   contextWindow: number,
@@ -71,16 +76,14 @@ export function resolveCompactionSettings(
 ): CompactionSettings {
   const merged = { ...DEFAULT_COMPACTION_SETTINGS, ...overrides }
   const reserveTokens = Math.min(merged.reserveTokens, compactionReserveTokens(contextWindow))
-  /** 留给「消息」的预算：窗口 − 预留 − 压缩动不了的那块 */
-  const budget = contextWindow - reserveTokens - Math.max(0, fixedTokens)
   // 保留区不能把整个窗口吃掉，否则永远切不出「要压缩的那段」；
   // 还要和触发线留 20% 余量 —— keep == 触发线时，压完立刻又满足触发条件，每轮重压一次。
   // 上限取 `max(MIN_KEEP, budget × 0.8)`：预算被吃光时退到下限（能压多少算多少），
   // 但仍然允许调用方显式给一个更小的 override（测试 / 特殊场景）。
-  const keepRecentTokens = Math.min(
-    merged.keepRecentTokens,
-    Math.max(MIN_KEEP_TOKENS, Math.floor(budget * 0.8))
-  )
+  //
+  // 公式收在 contracts 的 `compactionKeepRecentTokens` 里：界面判断「手动压缩按钮能不能点」
+  // 用的是同一个数，两边不能各算一套（曾用触发线当闸，按钮在 92% 以下永远灰着）。
+  const keepRecentTokens = compactionKeepRecentTokens(contextWindow, fixedTokens, merged)
   return { ...merged, reserveTokens, keepRecentTokens }
 }
 
@@ -524,6 +527,19 @@ export async function compactModelMessages(
   // 未完成的工具调用必须留在保留区，否则摘要会把 call 和后面的 result 拆开
   const pending = pendingToolCallIndex(messages)
   if (pending >= 0 && pending < cutIndex) cutIndex = pending
+  /**
+   * ⚠️ 切点**绝不能落在 `tool` 消息上**（实测报错：
+   * `Messages with role 'tool' must be a response to a preceding message with 'tool_calls'`）。
+   *
+   * `toModelMessages` 把一批工具结果单独收成一条 `tool` 消息，它的 `tool-call` 在
+   * **前一条** assistant 里。切在 `tool` 上等于「只留结果、丢掉调用」，摘要置顶之后消息
+   * 序列变成 `user(摘要) → tool → …`，provider 校验直接拒掉整轮 —— 而这一轮的工具其实
+   * 都跑完了，用户看到的就是「压完就报协议错」。
+   *
+   * 往回退到那条 assistant 一起保留：少摘要一步换请求合法，而且它们本来就是同一批调用
+   * （`while` 而不是 `if` —— 极端输入里可能连着几条 `tool`，退到第一个非 `tool` 为止）。
+   */
+  while (cutIndex > 0 && messages[cutIndex]?.role === 'tool') cutIndex -= 1
   if (cutIndex <= 0) return unchanged
 
   const summarized = messages.slice(0, cutIndex)

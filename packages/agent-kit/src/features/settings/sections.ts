@@ -129,10 +129,12 @@ function allSettingsGroups(app: AgentApp): SettingsGroup[] {
       // （它是执行环境，不是能力本身，但同属 AI 这条链路）。
       title: t('AI'),
       items: [
-        // 「偏好」= 原来挤在通用里、只作用于 AI 的那几条（工具权限 / 并发 / 审批超时 /
+        // 「通用」= 原来挤在通用里、只作用于 AI 的那几条（工具权限 / 并发 / 审批超时 /
         // 重试 / 自动折叠 / 子任务），见 `AiPreferencesTab`。放第一项：它是「这套 AI 怎么
         // 干活」的总开关，先定行为再看接什么模型。
-        { id: 'ai-prefs', label: t('偏好'), icon: SlidersHorizontal },
+        // 叫「通用」而不是「偏好」：这一页装的是 AI 的**默认行为**（权限档、并发、步数、
+        // 折叠），不是用户口味；「偏好」那种叫法会让人以为里面是主题 / 字号之类的个人口味。
+        { id: 'ai-prefs', label: t('通用'), icon: SlidersHorizontal },
         { id: 'models', label: t('模型 ({count})', { count: app.models.length }), icon: Cpu },
         { id: 'acp', label: t('ACP agent ({count})', { count: app.acpAgents.length }), icon: Bot },
         { id: 'mcp', label: t('MCP ({count})', { count: app.mcpServers.length }), icon: Plug },

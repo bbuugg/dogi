@@ -10,16 +10,16 @@ import { buildAgentTools, type AgentPermissionMode, type AgentToolOptions, BROWS
 import { buildSkillsPromptSection, type AgentSkill } from '@fizz/skills'
 import { buildProjectDocSection, type ProjectDoc } from './project-doc'
 import { getLanguage } from '@fizz/i18n'
+import { DEFAULT_MAX_STEPS } from '@fizz/contracts/agent-api'
 
 /**
- * Agent 单轮对话的最大工具步数。
+ * Agent 单轮对话的最大工具步数（**缺省值**，调用方可用 `RunAgentOptions.maxSteps` 覆盖）。
  *
- * 取 80：正常任务（读几个文件 → 改 → 验证）十几步就够，80 留了充足余量；
- * 而 500 是「几乎不设限」—— 一旦模型陷入反复重试，能在触发压缩之前就烧掉整个窗口
- * （每步都要重发全量上下文，第 N 步的成本是第 1 步的 N 倍）。
- * 真需要更多步的长任务，用户会追问，那时上下文也已经压过一轮，成本可控。
+ * 常量本体在契约里（`DEFAULT_MAX_STEPS`）：设置 → AI → 偏好 那一页要读同一个数，而
+ * 浏览器侧不能 import 本包（会把整个运行时拖进前端产物）。这里保留导出，是为了让
+ * 「不传 `maxSteps` 时走多少」在这一层一眼可见；取值理由（为什么 80 而不是 500）见契约。
  */
-export const MAX_STEPS = 80
+export const MAX_STEPS = DEFAULT_MAX_STEPS
 
 export type { AgentPermissionMode, AgentToolOptions, AgentSkill }
 export { buildAgentTools }
@@ -45,6 +45,26 @@ export type AgentStreamEvent =
     }
   | { type: 'finish'; finishReason: string }
   | { type: 'error'; message: string }
+
+/**
+ * 「每次工具调用都要填 `intent`」这条使用约定。
+ *
+ * **单独成段、由 `buildAgentSetup` 按开关追加**，不写进 `buildAgentSystemPrompt` 的正文：
+ * 这条约定只有在真的往工具 schema 注入了 `intent` 时才成立（见 `engine.ts` 的
+ * `withToolIntent` 与设置里的「工具意图」开关）。schema 里没有这个字段却让模型填，
+ * 模型只会把它塞进别的参数里，或者开始编造字段名。
+ */
+export function toolIntentHint(): string {
+  return getLanguage() === 'en'
+    ? [
+        '',
+        '- Every tool call must fill `intent`: one short sentence (≤20 chars, in the user’s language) saying what this step should achieve — it is shown as the card title, so do not restate the tool name or arguments.'
+      ].join('\n')
+    : [
+        '',
+        '- 每次调用工具都要填 `intent`：一句话（≤20 字，用用户的语言）说明这一步要达成什么 —— 它就是工具卡的标题，不要复述工具名或参数。'
+      ].join('\n')
+}
 
 /**
  * 构建 Agent 系统提示词：说明工作区、工具约定与安全边界。

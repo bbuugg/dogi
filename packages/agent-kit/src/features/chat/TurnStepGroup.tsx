@@ -20,10 +20,18 @@ import {
   CollapsibleTrigger
 } from '@fizz/ui/collapsible'
 import { ASK_FOLLOWUP_TOOL } from '@fizz/agent-kit/shared/lib/parts'
+import { REVEAL_ON_HOVER_ARROW } from '@fizz/agent-kit/shared/lib/hover-reveal-arrow'
+import { cn } from '@fizz/agent-kit/shared/lib/utils'
 import { t } from '@fizz/i18n'
 import type { AgentMessagePart } from '@fizz/contracts/types'
 
-/** 从一批要折叠的 part 里算出折叠条上的摘要文案（如「思考 ×1 · 工具调用 ×3」；英文见 en.ts） */
+/**
+ * 从一批要折叠的 part 里算出折叠条上的摘要文案（如「思考 ×1 · 工具调用 ×3」；英文见 en.ts）。
+ *
+ * ⚠️ `text` **刻意不计数**：一轮结束后折叠条里确实可能压着前面几段正文，但摘要只报「过程」
+ * （思考 / 工具 / 提问）—— 多一项「文本 ×N」既不在用户的关注点上，又会让这行变长。
+ * 一段过程都没有、只压着正文时回落成「执行过程」。
+ */
 export function turnStepSummary(parts: AgentMessagePart[]): string {
   let reasoning = 0
   let tools = 0
@@ -68,9 +76,12 @@ export function TurnStepGroup({
           ⚠️ 必须是 `flex` 而不是 `inline-flex`：行内级盒子会被父级 line-height 撑出
           一个更高的行盒（多出来的留白掉在下方），这条摘要就会比工具条偏上、
           与下一条的间距也偏松 —— 详见 reasoning.tsx 的 ReasoningTrigger。 */}
-      <CollapsibleTrigger className="group flex w-fit max-w-full items-center gap-2 rounded-md text-left text-muted-foreground text-sm transition-colors hover:text-foreground">
+      <CollapsibleTrigger className="group group/row flex w-fit max-w-full items-center gap-2 rounded-md text-left text-muted-foreground text-sm transition-colors hover:text-foreground">
         <span className="min-w-0 truncate">{summary}</span>
-        <ChevronRight className="size-4 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
+        {/* 箭头平时隐形、悬停整行才浮出来（规则见 `REVEAL_ON_HOVER_ARROW`）；触屏常显 */}
+        <ChevronRight
+          className={cn(REVEAL_ON_HOVER_ARROW, 'size-4 shrink-0 group-data-[state=open]:rotate-90')}
+        />
       </CollapsibleTrigger>
       <CollapsibleContent className="pt-2">
         <div className="flex flex-col gap-2">{children}</div>

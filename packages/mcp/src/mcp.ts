@@ -106,10 +106,20 @@ export async function buildMcpToolset(configs: McpServerConfig[]): Promise<McpTo
             description: t.description ?? `MCP 工具 ${t.name}`,
             inputSchema: jsonSchema(t.inputSchema as Parameters<typeof jsonSchema>[0]),
             execute: async (input: unknown) => {
+              /*
+               * `intent` 是引擎给界面注入的字段（`@fizz/agent` 的 `withToolIntent`），
+               * 不属于工具自己的入参：严格的 MCP server 会按 `inputSchema` 校验 arguments，
+               * 多一个字段就回「Invalid arguments」。转发前摘掉。
+               */
+              const rawArgs =
+                input && typeof input === 'object' && !Array.isArray(input)
+                  ? (input as Record<string, unknown>)
+                  : {}
+              const { intent: _intent, ...args } = rawArgs
               try {
                 const res = (await state.client!.callTool({
                   name: t.name,
-                  arguments: (input ?? {}) as Record<string, unknown>
+                  arguments: args
                 })) as CallToolResult
                 const isError = res.isError === true
                 const text = (res.content ?? [])

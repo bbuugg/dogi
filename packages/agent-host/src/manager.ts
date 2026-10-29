@@ -123,10 +123,6 @@ class BackendManager {
       this.wsPortValue = (httpServer.address() as AddressInfo).port
 
       this.error = undefined
-      console.log(
-        '[backend] 共享后端已装配（进程内直连，不占端口；内部 WS 端口 %d）',
-        this.wsPortValue
-      )
     } catch (err) {
       this.error = err instanceof Error ? err.message : String(err)
       console.error('[backend] 共享后端装配失败：', err)
@@ -179,15 +175,32 @@ class BackendManager {
    * `ask_followup_question` 提问、正挂着等用户答复（那一轮看起来「停了」，其实活着），
    * 这时候关掉应用再打开，**那一轮的消息整段消失**（用户消息还在，助手一个字不在）。
    *
-   * 与 `runShutdown` 的第 4 / 6 步同一口径：先 `abortAllRuns()` 等 `run.done`
-   * （`finishRun` 之前 chat-turn 已经把 parts 落盘），再 `store.flush()`。
-   * 两步都有超时兜底 —— 收尾卡住也不能把退出钉死。
+   * 与 `runShutdown` 的第 3.9 / 4 / 6 步同一口径：先停后台命令，再 `abortAllRuns()`
+   * 等 `run.done`（`finishRun` 之前 chat-turn 已经把 parts 落盘），最后 `store.flush()`。
+   * 每一步都有超时兜底 —— 收尾卡住也不能把退出钉死。
    */
   async drain(timeoutMs = 5_000): Promise<void> {
     const delay = (ms: number): Promise<void> =>
       new Promise((resolve) => {
         setTimeout(resolve, ms)
       })
+    /*
+     * 后台命令（`execute_command` 的 `runInBackground` 起的 dev server / watch）。
+     *
+     * 它们**故意活过一轮对话**（那是这个能力的意义），所以既不在 `commandStops` 里、
+     * 也不受 `abortRun` 影响 —— 只有进程退出时这一处能收它们。POSIX 上是 `detached`
+     * 自成进程组，Windows 上 Node 也不会跟着父进程退，**不停就是一堆占着端口的孤儿**；
+     * 更糟的是登记表随进程消失，之后再没有任何界面能停它们。
+     *
+     * 顺序与 `runShutdown` 一致（3.9 在 4 之前）：先发停止信号，再中止对话 ——
+     * 反过来会让「对话收尾时还指望那条命令的输出」的路径读到半截日志。
+     */
+    try {
+      const { stopAllRunning } = await import('@/lib/server/background-tasks')
+      stopAllRunning()
+    } catch (err) {
+      console.error('[backend] 退出前停止后台命令失败：', err)
+    }
     try {
       const { abortAllRuns } = await import('@/lib/server/chat-run')
       const pending = abortAllRuns()

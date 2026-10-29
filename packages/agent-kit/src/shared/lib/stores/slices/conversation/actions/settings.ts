@@ -3,9 +3,15 @@
  * 内部助手一律从 ctx 拿，internals 不会反过来依赖它。
  */
 import type { AcpPermissionMode } from "@fizz/contracts/types";
-import { resolveToolCallConcurrency } from "@fizz/contracts/agent-api";
+import { resolveMaxSteps, resolveToolCallConcurrency } from "@fizz/contracts/agent-api";
 import { savePermissionMode } from "@fizz/agent-kit/shared/lib/permission";
-import { saveConfirmTimeout, saveMaxRetries, saveToolCallConcurrency } from "../storage";
+import {
+  saveConfirmTimeout,
+  saveMaxRetries,
+  saveMaxSteps,
+  saveToolCallConcurrency,
+  saveToolIntent,
+} from "../storage";
 import type { ConvInternals } from "../internals/context";
 import type { ConversationSlice } from "../types";
 
@@ -13,7 +19,13 @@ export function createSettingsActions(
   ctx: ConvInternals,
 ): Pick<
   ConversationSlice,
-  "setPermissionMode" | "setAcpPermissionMode" | "setConfirmTimeoutMin" | "setMaxRetries" | "setToolCallConcurrency"
+  | "setPermissionMode"
+  | "setAcpPermissionMode"
+  | "setConfirmTimeoutMin"
+  | "setMaxRetries"
+  | "setToolCallConcurrency"
+  | "setMaxSteps"
+  | "setToolIntent"
 > {
   const { set, get, api, readSlice } = ctx;
 
@@ -76,6 +88,15 @@ export function createSettingsActions(
       const next = resolveToolCallConcurrency(value);
       saveToolCallConcurrency(next);
       set({ toolCallConcurrency: next });
+    },
+    setMaxSteps: (value) => {
+      const next = resolveMaxSteps(value);
+      saveMaxSteps(next);
+      set({ maxSteps: next });
+    },
+    setToolIntent: (value) => {
+      saveToolIntent(value);
+      set({ toolIntent: value });
     },
   };
 }

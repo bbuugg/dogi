@@ -1,12 +1,12 @@
 "use client";
 
-import { Badge } from "@fizz/ui/badge";
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@fizz/ui/collapsible";
 import { cn } from "@fizz/agent-kit/shared/lib/utils";
+import { REVEAL_ON_HOVER_ARROW } from "@fizz/agent-kit/shared/lib/hover-reveal-arrow";
 import { useT } from "@fizz/agent-kit/shared/lib/language";
 import type { ToolUIPart } from "ai";
 import {
@@ -82,34 +82,42 @@ const isSettled = (state: ToolUIPart["state"]) =>
   state === "output-denied" ||
   state === "input-streaming";
 
-const getStatusBadge = (status: ToolUIPart["state"]) => {
-  const labels: Record<ToolUIPart["state"], string> = {
-    "input-streaming": "Pending",
-    "input-available": "Running",
-    "approval-requested": "Awaiting Approval",
-    "approval-responded": "Responded",
-    "output-available": "Completed",
-    "output-error": "Error",
-    "output-denied": "Denied",
-  };
-
-  const icons: Record<ToolUIPart["state"], ReactNode> = {
-    "input-streaming": <CircleIcon className="size-4" />,
-    "input-available": <ClockIcon className="size-4 animate-pulse" />,
-    "approval-requested": <ClockIcon className="size-4 text-yellow-600" />,
-    "approval-responded": <CheckCircleIcon className="size-4 text-blue-600" />,
-    "output-available": <CheckCircleIcon className="size-4 text-green-600" />,
-    "output-error": <XCircleIcon className="size-4 text-red-600" />,
-    "output-denied": <XCircleIcon className="size-4 text-orange-600" />,
-  };
-
-  return (
-    <Badge className="gap-1.5 rounded-full text-xs" variant="secondary">
-      {icons[status]}
-      {labels[status]}
-    </Badge>
-  );
+/**
+ * 工具行的**运行态图标**：只一颗图标，**不带文案、不带底色**。
+ *
+ * - 去掉文案：这一行已经挤了工具名 + 明细（命令 / 路径），再挂一段 "Running" / "Completed"
+ *   会把明细先挤断，而图标本身已经把状态说清楚了。
+ * - 去掉底色：以前套在 `<Badge variant="secondary">` 里，那块灰底在暗色主题下比工具名还重，
+ *   而状态是**次要信息**，不该抢戏。
+ *
+ * 图标自身的语义色保留（绿=完成 / 红=出错 / 黄=等审批），那是唯一还在传递状态的东西。
+ */
+const STATUS_ICONS: Record<ToolUIPart["state"], ReactNode> = {
+  "input-streaming": <CircleIcon className="size-4 shrink-0" />,
+  "input-available": <ClockIcon className="size-4 shrink-0 animate-pulse" />,
+  "approval-requested": <ClockIcon className="size-4 shrink-0 text-yellow-600" />,
+  "approval-responded": <CheckCircleIcon className="size-4 shrink-0 text-blue-600" />,
+  "output-available": <CheckCircleIcon className="size-4 shrink-0 text-green-600" />,
+  "output-error": <XCircleIcon className="size-4 shrink-0 text-red-600" />,
+  "output-denied": <XCircleIcon className="size-4 shrink-0 text-orange-600" />,
 };
+
+/**
+ * 状态文案（**中文为源**，英文见 `packages/i18n/src/en.ts` 的「工具卡的状态 tooltip」一节）。
+ *
+ * 只出现在图标的 tooltip 里，不再铺在工具行上 —— 那一行要留给工具名与明细。
+ */
+const STATUS_LABELS: Record<ToolUIPart["state"], string> = {
+  "input-streaming": "正在生成参数",
+  "input-available": "执行中",
+  "approval-requested": "等待审批",
+  "approval-responded": "已审批",
+  "output-available": "已完成",
+  "output-error": "出错",
+  "output-denied": "已拒绝",
+};
+
+const statusIcon = (status: ToolUIPart["state"]) => STATUS_ICONS[status];
 
 /**
  * 明细的全文弹窗（触屏 / 窄窗口共用）。
@@ -243,7 +251,10 @@ export const ToolHeader = ({
   const trigger = (
     <CollapsibleTrigger
       className={cn(
-        "group flex min-w-0 max-w-full flex-col items-start gap-1 rounded-md text-left text-muted-foreground transition-colors hover:text-foreground",
+        // `group/row`：箭头 hover 显示要按「这一行」算，不能用裸 `group` —— 消息气泡自带
+        // 一个裸 group，那样会变成「鼠标停在消息任意处、所有箭头一起亮」（见 REVEAL_ON_HOVER_ARROW）。
+        // 裸 `group` 保留给下面的 `group-data-[state=open]:rotate-90`。
+        "group group/row flex min-w-0 max-w-full flex-col items-start gap-1 rounded-md text-left text-muted-foreground transition-colors hover:text-foreground",
         !settled && "cursor-default hover:text-muted-foreground",
         className
       )}
@@ -291,9 +302,33 @@ export const ToolHeader = ({
               <TooltipContent className="max-w-[28rem] break-words">{detail}</TooltipContent>
             </Tooltip>
           ))}
-        {getStatusBadge(state)}
+        {/*
+         * 状态：只有一颗图标，文案挪进 tooltip。
+         * 图标本身已经把状态说清楚了（绿勾 / 红叉 / 脉冲时钟），而这一行还要装工具名和明细，
+         * 文字挂在旁边只会先把明细挤断 —— 想要确切说法的人悬停一下就有。
+         */}
+        <Tooltip delayDuration={100}>
+          <TooltipTrigger asChild>
+            {/* 图标现在是状态唯一的载体：`role="img"` + aria-label 让读屏也能听到状态 */}
+            <span
+              role="img"
+              aria-label={tr(STATUS_LABELS[state])}
+              className="inline-flex shrink-0 items-center"
+            >
+              {statusIcon(state)}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>{tr(STATUS_LABELS[state])}</TooltipContent>
+        </Tooltip>
         {settled && (
-          <ChevronRightIcon className="size-4 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
+          /*
+           * 箭头平时隐形、悬停整行才浮出来（规则与理由见 `REVEAL_ON_HOVER_ARROW`）：
+           * 鼠标停在这条工具行上时它才是有用的提示（能展开 / 能收起），平时只是噪音。
+           * 触屏靠那条 `[@media(hover:none)]` 常显 —— 否则手机上完全看不出卡片能点开。
+           */
+          <ChevronRightIcon
+            className={cn(REVEAL_ON_HOVER_ARROW, "size-4 shrink-0 group-data-[state=open]:rotate-90")}
+          />
         )}
       </span>
     </CollapsibleTrigger>

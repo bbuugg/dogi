@@ -1,5 +1,6 @@
 import { asSchema, stepCountIs, streamText, tool } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
@@ -7,7 +8,7 @@ import { spawn } from "node:child_process";
 import { existsSync, lstatSync, promises, statSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { z } from "zod";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { randomBytes, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import "@modelcontextprotocol/sdk/client/index.js";
@@ -19,7 +20,7 @@ import { EventEmitter } from "node:events";
 import "dotenv";
 import { simpleGit } from "simple-git";
 import { chromium } from "playwright";
-//#region packages/contracts/src/types.ts
+// packages/contracts/src/types.ts
 /** 按模型 id 找清单里的那一条（找不到返回 undefined，不回退到第一个） */
 function findModelEntry(models, modelId) {
 	if (!modelId) return void 0;
@@ -74,6 +75,27 @@ function compactionReserveTokens(contextWindow) {
 	return Math.min(COMPACTION_RESERVE_TOKENS, Math.max(1024, Math.floor(contextWindow * .25)));
 }
 /**
+* 保留区的下限：再怎么给「压缩动不了的那部分」让位，也要留这么多原文
+* —— 否则模型连「刚才在干什么」都不知道。与服务端 `MIN_KEEP_TOKENS` 同一个数。
+*/
+var COMPACTION_MIN_KEEP_TOKENS = 1024;
+/**
+* 压缩后要保留多少 token 的原文（保留区大小）—— 与服务端 `resolveCompactionSettings`
+* **同一公式**，供界面判断「手动压缩现在压不压得动」。
+*
+* ⚠️ 它和 `compactionTriggerTokens` 是**两条不同的线**，别混用：
+* - `compactionTriggerTokens` = 窗口 − 预留（≈92%），是**自动**压缩的触发线；
+* - 这一条是「切点之外还剩多少原文」，**手动**压缩（`force: true`）只看它 ——
+*   历史上用触发线当手动压缩按钮的闸，结果上下文不到 92% 时按钮永远灰着。
+*
+* @param fixedTokens 消息之外、压缩动不了的那部分（系统提示词 + 工具 schema + 已有摘要）
+* @param overrides   服务端 `CompactionSettings` 的覆盖（测试 / 特殊场景用；缺省即 pi 默认值）
+*/
+function compactionKeepRecentTokens(contextWindow, fixedTokens = 0, overrides) {
+	const budget = contextWindow - Math.min(overrides?.reserveTokens ?? 16384, compactionReserveTokens(contextWindow)) - Math.max(0, fixedTokens);
+	return Math.min(overrides?.keepRecentTokens ?? 2e4, Math.max(COMPACTION_MIN_KEEP_TOKENS, Math.floor(budget * .8)));
+}
+/**
 * 解析某个模型的上下文窗口：显式配置 > 兜底值。
 *
 * 非正数 / 非有限数一律当「没配」—— 手改坏的 JSON 不该让阈值变成 0 或 NaN
@@ -113,8 +135,7 @@ var CONTAINER_AGENT_TOOL_KEYS = [
 * 请重建容器」，而不是让帧静默对不上。**改容器内 `/runs` 的请求体或帧形状就把它 +1。**
 */
 var CONTAINER_PROTOCOL_VERSION = 1;
-//#endregion
-//#region packages/agent/src/resolve-model.ts
+// packages/agent/src/resolve-model.ts
 var sseDecoder = new TextDecoder();
 var sseEncoder = new TextEncoder();
 /**
@@ -225,12 +246,15 @@ function debugHttpFetch(...args) {
 * - GLM / airouter / StepFun：`delta.reasoning_content`（字符串）
 * - OpenRouter：`delta.reasoning`（字符串）+ `delta.reasoning_details`（数组）
 *
-* 实测（`scripts/probe-reasoning.mjs`，4 个配置全跑）：
-* - `@ai-sdk/openai` 的 chat-completions 分支对上述字段**一个都不解析**，reasoning 恒为 0 字；
-* - `@ai-sdk/deepseek` 只认 `reasoning_content`（GLM / airouter / StepFun 命中，OpenRouter 落空）。
+* 服务两条路：
+* 1. **`openai` kind 的 chat-completions 分支**（`createOpenAI().chat()`）—— 这里两件事都需要：
+*    官方实现对思考字段一个都不解析（reasoning 恒 0 字），且它的 chunk schema 是
+*    `z.literal('function')`，网关把 `tool_calls[].type` 给成空串就整轮 `TypeValidationError`；
+* 2. **`openai-compatible` kind**（`@ai-sdk/openai-compatible`）—— 它自己就认
+*    `reasoning_content ?? reasoning`、也完全不看 `tool_calls[].type`，挂这层只为把
+*    OpenRouter 那种 `reasoning_details` 数组归一成字符串（否则那家会丢思考内容）。
 *
-* 所以这里在 fetch 层做一次字段改名，再交给 deepseek 的 chat 模型解析 ——
-* 既不用自己实现整套 OpenAI 协议，也不依赖具体是哪个网关。
+* 所以别把这里当成「openai-compatible 的补丁」删掉 —— 删了第 1 条路立刻坏。
 */
 function normalizeReasoningFetch(...args) {
 	return debugHttpFetch(...args).then((res) => {
@@ -262,9 +286,21 @@ function normalizeReasoningFetch(...args) {
 /**
 * 根据配置创建对应 provider 的模型实例（agent 服务复用）。
 *
-* ⚠️ `openai-compatible` 的 chat-completions 走的是 **deepseek** 的 chat 模型，不是 openai 的 ——
-* 因为只有它会解析 `reasoning_content`，openai 的实现会把思考内容整段丢掉（见 normalizeReasoningFetch）。
-* 两者发的都是标准 OpenAI chat-completions 请求，差异仅在响应解析。
+* `openai-compatible` 走**专门的** `@ai-sdk/openai-compatible`（以前是拿 deepseek 的实现兼职，
+* 因为只有它会解析 `reasoning_content`）。换过来的三个理由：
+* 1. 它原生解析 `reasoning_content ?? reasoning`（流式与非流式都认）；
+* 2. 它的 chunk schema **根本不看 `tool_calls[].type`** —— 网关给空串也不会 `TypeValidationError`；
+* 3. 思考强度走 OpenAI 原生的 `reasoning_effort`，不注入 DeepSeek 专属的 `thinking: {…}`。
+*
+* 而 deepseek 兼职那套有三个副作用（对非 deepseek 模型 id 全部命中）：`isDeepSeekV4Model()`
+* 不匹配即返回 true → 每条 assistant 历史都被塞 `reasoning_content: ""`、有思考内容时整段回传；
+* 同一判定让 `isThinkingEnabled` 恒真 → **`temperature` / `top_p` 被静默丢弃**；设了思考强度时
+* 还会往请求体里塞 DeepSeek 的 `thinking` 字段。严格网关（OpenAI 官方 / Azure）会因此 400。
+*
+* ⚠️ `@ai-sdk/openai-compatible` **没有 Responses API**（只有 chat/completions + 老 `/completions`
+* + embedding + image），所以 `apiStyle: 'responses'` 那条路仍归 `@ai-sdk/openai`。
+* ⚠️ 它的 `includeUsage` **没有默认值**：不传就不发 `stream_options.include_usage`，流式响应里
+* 拿不到 usage（上下文圆环的「已用」会永远是空、压缩只能靠估算）—— 所以这里显式传 true。
 *
 * 每个 provider 都挂了出站日志：`debugHttpFetch`（SSE 归一化那条路是 normalizeReasoningFetch，
 * 它内部也走 debugHttpFetch）。**模型网关的请求只有这里能看到** —— 桌面端渲染进程走 IPC 不出网，
@@ -287,17 +323,26 @@ function resolveModel(config) {
 			baseURL: config.baseURL,
 			fetch: debugHttpFetch
 		})(config.model);
-		case "openai-compatible":
+		case "openai-compatible": {
 			if ((config.apiStyle ?? "chat-completions") === "responses") return createOpenAI({
 				apiKey: config.apiKey ?? "EMPTY",
 				baseURL: config.baseURL,
 				fetch: debugHttpFetch
 			}).responses(config.model);
-			return createDeepSeek({
+			/**
+			* `baseURL` 是**必填**的：这个包没有兜底端点（deepseek / openai 都有默认域名），
+			* 缺了会拼出 `undefined/chat/completions` 这种非法 URL。宁可在这里给人话。
+			*/
+			const baseURL = config.baseURL?.trim();
+			if (!baseURL) throw new Error("「OpenAI 兼容」类型必须填写 baseURL（如 https://openrouter.ai/api/v1）");
+			return createOpenAICompatible({
+				name: "openai-compatible",
 				apiKey: config.apiKey ?? "EMPTY",
-				baseURL: config.baseURL,
+				baseURL,
+				includeUsage: true,
 				fetch: normalizeReasoningFetch
 			})(config.model);
+		}
 		default:
 			if ((config.apiStyle ?? "responses") === "chat-completions") return createOpenAI({
 				apiKey: config.apiKey ?? "EMPTY",
@@ -311,8 +356,7 @@ function resolveModel(config) {
 			}).responses(config.model);
 	}
 }
-//#endregion
-//#region packages/agent/src/model-messages.ts
+// packages/agent/src/model-messages.ts
 /**
 * 非字符串工具结果回给模型时的字符上限。
 *
@@ -476,8 +520,7 @@ async function toModelMessages(history, opts) {
 	}
 	return messages;
 }
-//#endregion
-//#region packages/agent/src/context.ts
+// packages/agent/src/context.ts
 /**
 * 上下文压缩（compaction）：对话历史过长时，把「旧的那一段」摘要成一条检查点，
 * 只保留最近约 `keepRecentTokens` 的原文。
@@ -518,16 +561,14 @@ var DEFAULT_COMPACTION_SETTINGS = {
 * 于是按窗口封顶到 25%（**唯一的机械适配，不改机制**）。
 */
 /** 保留区的下限：再怎么让位也要留这么多原文，否则模型连「刚才在干什么」都不知道 */
-var MIN_KEEP_TOKENS = 1024;
+var MIN_KEEP_TOKENS = COMPACTION_MIN_KEEP_TOKENS;
 function resolveCompactionSettings(contextWindow, overrides, fixedTokens = 0) {
 	const merged = {
 		...DEFAULT_COMPACTION_SETTINGS,
 		...overrides
 	};
 	const reserveTokens = Math.min(merged.reserveTokens, compactionReserveTokens(contextWindow));
-	/** 留给「消息」的预算：窗口 − 预留 − 压缩动不了的那块 */
-	const budget = contextWindow - reserveTokens - Math.max(0, fixedTokens);
-	const keepRecentTokens = Math.min(merged.keepRecentTokens, Math.max(MIN_KEEP_TOKENS, Math.floor(budget * .8)));
+	const keepRecentTokens = compactionKeepRecentTokens(contextWindow, fixedTokens, merged);
 	return {
 		...merged,
 		reserveTokens,
@@ -867,7 +908,7 @@ async function compactModelMessages(messages, opts) {
 	* 与 `compactHistory` 同一条闸：`系统提示词 + 工具定义` 已经吃掉预算时，压也压不到
 	* 触发线以下。这里更贵 —— 每个工具步边界都会白调一次摘要模型。
 	*/
-	if (compactionBudget(opts.contextWindow, settings, baseTokens) <= 1024) return unchanged;
+	if (compactionBudget(opts.contextWindow, settings, baseTokens) <= MIN_KEEP_TOKENS) return unchanged;
 	const tokens = messages.map((m) => estimateMessagesTokens([m]));
 	let cutIndex = 0;
 	let accumulated = 0;
@@ -880,6 +921,19 @@ async function compactModelMessages(messages, opts) {
 	}
 	const pending = pendingToolCallIndex(messages);
 	if (pending >= 0 && pending < cutIndex) cutIndex = pending;
+	/**
+	* ⚠️ 切点**绝不能落在 `tool` 消息上**（实测报错：
+	* `Messages with role 'tool' must be a response to a preceding message with 'tool_calls'`）。
+	*
+	* `toModelMessages` 把一批工具结果单独收成一条 `tool` 消息，它的 `tool-call` 在
+	* **前一条** assistant 里。切在 `tool` 上等于「只留结果、丢掉调用」，摘要置顶之后消息
+	* 序列变成 `user(摘要) → tool → …`，provider 校验直接拒掉整轮 —— 而这一轮的工具其实
+	* 都跑完了，用户看到的就是「压完就报协议错」。
+	*
+	* 往回退到那条 assistant 一起保留：少摘要一步换请求合法，而且它们本来就是同一批调用
+	* （`while` 而不是 `if` —— 极端输入里可能连着几条 `tool`，退到第一个非 `tool` 为止）。
+	*/
+	while (cutIndex > 0 && messages[cutIndex]?.role === "tool") cutIndex -= 1;
 	if (cutIndex <= 0) return unchanged;
 	const summarized = messages.slice(0, cutIndex);
 	const kept = messages.slice(cutIndex);
@@ -1270,7 +1324,7 @@ async function compactHistory(history, opts) {
 	* 调用、还会把请求前缀改掉（上游缓存全废），换来的只是「摘要了 1 轮、占用没降」。
 	* 把原因交回调用方，让界面说人话。
 	*/
-	if (compactionBudget(opts.contextWindow, settings, fixedTokens) <= 1024) return hasCheckpoint ? {
+	if (compactionBudget(opts.contextWindow, settings, fixedTokens) <= MIN_KEEP_TOKENS) return hasCheckpoint ? {
 		history: assembled,
 		compressed: null,
 		reused: true,
@@ -1396,8 +1450,7 @@ function isContextOverflowError(err) {
 	const message = err instanceof Error ? err.message : String(err);
 	return /context[ _-]?length|context[ _-]?window|maximum context|prompt is too long|too many tokens|exceeds the maximum/i.test(message);
 }
-//#endregion
-//#region packages/shells/src/shells.ts
+// packages/shells/src/shells.ts
 /**
 * 本地可用 shell 的探测与解析（**Node 专用**，零运行时依赖）。
 *
@@ -1536,8 +1589,7 @@ function commandShellPath() {
 	if (process.platform !== "win32") return "/bin/bash";
 	return gitBashPath() ?? findPwsh() ?? "powershell.exe";
 }
-//#endregion
-//#region packages/contracts/src/workspace.ts
+// packages/contracts/src/workspace.ts
 /**
 * 工作区路径安全与忽略规则。
 *
@@ -1715,8 +1767,7 @@ function resolveMaxRetries(override) {
 function resolveToolCallConcurrency(override) {
 	return Math.min(10, Math.max(1, typeof override === "number" && Number.isFinite(override) ? Math.round(override) : 3));
 }
-//#endregion
-//#region packages/contracts/src/browser.ts
+// packages/contracts/src/browser.ts
 /**
 * ⚠️ 视口**不跟随面板尺寸**。
 *
@@ -1768,8 +1819,7 @@ function browserUserAgent(mode, actualDesktopUa) {
 }
 /** 手机 UA 对应的 `navigator.platform`（桌面不覆盖，保持宿主原样） */
 var MOBILE_PLATFORM = "Linux armv8l";
-//#endregion
-//#region packages/i18n/src/index.ts
+// packages/i18n/src/index.ts
 /**
 * Fizz 国际化内核：语言状态 + 中英文文案。
 *
@@ -1793,8 +1843,7 @@ function getLanguage() {
 function tr(zh, en) {
 	return current === "en" ? en : zh;
 }
-//#endregion
-//#region packages/skills/src/skill-tools.ts
+// packages/skills/src/skill-tools.ts
 /**
 * 技能（Agent Skills 约定：目录 + `SKILL.md`）。
 *
@@ -1898,8 +1947,7 @@ function buildSkillsPromptSection(skills) {
 		"- Do not mention skills unrelated to the current task and do not list them in the reply."
 	].join("\n"));
 }
-//#endregion
-//#region packages/tools/src/edit-match.ts
+// packages/tools/src/edit-match.ts
 /** 策略名 → 给模型看的说明（空 = 精确命中，不用多说） */
 var NOTES = {
 	exact: "",
@@ -2179,8 +2227,7 @@ function applyTolerantEdit(text, oldText, newText) {
 		note: NOTES[match.strategy] ?? ""
 	};
 }
-//#endregion
-//#region packages/tools/src/output-log.ts
+// packages/tools/src/output-log.ts
 /**
 * 超长工具输出的落盘：**execute_command** / **web_fetch** 结果太长时，把全文写进工作区的
 * `.fizz/tool-output/`，只回「头 + 尾」正文，外加一组**行号坐标**让模型自己把剩下的读完。
@@ -2341,8 +2388,7 @@ function clipToBudget(text, max = SUMMARY_BODY_CHARS) {
 	const cut = text.lastIndexOf("\n", max);
 	return `${text.slice(0, cut > max * .6 ? cut : max)}\n…（本段已按预算裁剪）`;
 }
-//#endregion
-//#region packages/tools/src/tools.ts
+// packages/tools/src/tools.ts
 /**
 * 工作区 Agent 工具集：文件读取 / 查找 / 写入 / 编辑 / 删除 / 执行命令。
 *
@@ -2593,6 +2639,41 @@ function killChild(child, isWin) {
 	} catch {}
 }
 /**
+* 把一条命令翻译成「起哪个 shell、带什么参数、什么环境」。
+*
+* 前台（`runCommand`）与后台（`spawnBackgroundShell`）**必须用同一份判定**：两条路要是
+* 各挑一次 shell，同一条命令「直接跑」和「丢后台跑」的行为就会不一样 —— 最典型的是
+* Windows 上前台走 Git Bash、后台掉进 PowerShell，管道 / `&&` / 单引号整个不认。
+*
+* shell 选择：POSIX 恒为 `/bin/bash -lc`；Windows **优先 Git Bash** —— 模型拿到的是
+* POSIX 工具链（ls / grep / sed / find / cat / 管道…），与主流编码代理一致。Git Bash 的
+* coreutils 在 `<Git>\usr\bin`，登录 profile 之外再显式置前，保证 ls / grep 一定找得到
+* （继承的 Windows PATH 里通常没有它）。没有 Git Bash 时回退 PowerShell 7（`pwsh`，启动
+* 更快、UTF-8 默认行为更少坑），再没装就退到系统自带的 5.1（强制 UTF-8 输出，cmd 的 GBK
+* 会乱码）。判定在 `@fizz/shells` 的 `commandShellPath()` 与 `gitBashPath()`，
+* 与终端选择器共用同一份探测。
+*/
+function resolveShellSpawn(command) {
+	const isWin = process.platform === "win32";
+	const bashPath = isWin ? gitBashPath() : null;
+	const useBash = !isWin || Boolean(bashPath);
+	return {
+		shellCmd: isWin ? bashPath ?? commandShellPath() : "/bin/bash",
+		shellArgs: isWin ? useBash ? ["-lc", command] : [
+			"-NoLogo",
+			"-NoProfile",
+			"-NonInteractive",
+			"-Command",
+			`[Console]::OutputEncoding=[Text.Encoding]::UTF8;$OutputEncoding=[Text.Encoding]::UTF8;${command}`
+		] : ["-lc", command],
+		env: isWin && useBash ? {
+			...process.env,
+			PATH: `${join(dirname(bashPath), "..", "usr", "bin")};${process.env.PATH ?? ""}`
+		} : process.env,
+		isWin
+	};
+}
+/**
 * 在工作区目录下执行 shell 命令：输出 stdout + stderr（超预算时把全文落进工作区的
 * `.fizz/tool-output/`，回行号坐标），超时 / abortSignal 触发时终止整个进程树
 * （POSIX 用进程组，Windows 用 taskkill /T）。
@@ -2600,32 +2681,10 @@ function killChild(child, isWin) {
 * `root` 只用于落盘（全文要能被 read_file 读到，就必须在工作区内）。
 */
 async function runCommand(command, cwd, timeoutMs, root, signal, sink) {
-	const isWin = process.platform === "win32";
-	/**
-	* shell 选择：POSIX 恒为 `/bin/bash -lc`；Windows **优先 Git Bash** —— 模型拿到的是
-	* POSIX 工具链（ls / grep / sed / find / cat / 管道…），与主流编码代理一致。Git Bash 的
-	* coreutils 在 `<Git>\usr\bin`，登录 profile 之外再显式置前，保证 ls / grep 一定找得到
-	* （继承的 Windows PATH 里通常没有它）。没有 Git Bash 时回退 PowerShell 7（`pwsh`，启动
-	* 更快、UTF-8 默认行为更少坑），再没装就退到系统自带的 5.1（强制 UTF-8 输出，cmd 的 GBK
-	* 会乱码）。判定在 `@fizz/shells` 的 `commandShellPath()` 与 `gitBashPath()`，
-	* 与终端选择器共用同一份探测。
-	*/
-	const bashPath = isWin ? gitBashPath() : null;
-	const useBash = !isWin || Boolean(bashPath);
-	const shellCmd = isWin ? bashPath ?? commandShellPath() : "/bin/bash";
-	const shellArgs = isWin ? useBash ? ["-lc", command] : [
-		"-NoLogo",
-		"-NoProfile",
-		"-NonInteractive",
-		"-Command",
-		`[Console]::OutputEncoding=[Text.Encoding]::UTF8;$OutputEncoding=[Text.Encoding]::UTF8;${command}`
-	] : ["-lc", command];
+	const { shellCmd, shellArgs, env, isWin } = resolveShellSpawn(command);
 	const child = spawn(shellCmd, shellArgs, {
 		cwd,
-		env: isWin && useBash ? {
-			...process.env,
-			PATH: `${join(dirname(bashPath), "..", "usr", "bin")};${process.env.PATH ?? ""}`
-		} : process.env,
+		env,
 		windowsHide: true,
 		...isWin ? {} : { detached: true }
 	});
@@ -2900,13 +2959,14 @@ function buildAgentTools(root, opts) {
 			}
 		}),
 		execute_command: tool({
-			description: tr("在工作区目录下执行 shell 命令并返回输出（stdout + stderr）。适用于运行构建 / 测试 / git 操作 / 安装依赖 / 启动服务等。命令默认超时 120 秒。输出超过一个工具结果的预算时会被完整落盘到工作区的 .fizz/tool-output/ 下，结果里给出相对路径、全文行数与本次返回了哪几行；其余部分用 read_file 传那个 path 加 offset / limit 按行接着读，也可以用 search_files 检索（常见于构建 / 测试的完整日志）。注意这是真实执行环境，删除、覆盖、危险命令（rm -rf、git push --force 等）前先说明影响。" + shellNote, "Run a shell command in the workspace and return stdout + stderr. Use it for builds, tests, git, installing dependencies, starting services, etc. Default timeout is 120 seconds. If output exceeds one tool result, the full text is saved under .fizz/tool-output/ and the result includes the relative path, total lines, and which lines were returned; read the rest with read_file offset/limit on that path, or search it with search_files (common for full build/test logs). This is a real execution environment: explain the impact before deleting, overwriting, or running dangerous commands (rm -rf, git push --force, etc.). " + shellNoteEn),
+			description: tr("在工作区目录下执行 shell 命令并返回输出（stdout + stderr）。适用于运行构建 / 测试 / git 操作 / 安装依赖 / 启动服务等。命令默认超时 120 秒。输出超过一个工具结果的预算时会被完整落盘到工作区的 .fizz/tool-output/ 下，结果里给出相对路径、全文行数与本次返回了哪几行；其余部分用 read_file 传那个 path 加 offset / limit 按行接着读，也可以用 search_files 检索（常见于构建 / 测试的完整日志）。注意这是真实执行环境，删除、覆盖、危险命令（rm -rf、git push --force 等）前先说明影响。需要在**本轮结束后继续跑**的进程（dev server / watch / 长构建）把 runInBackground 设为 true：调用会立刻返回一个后台任务 id，它不受本轮超时与停止影响，输出显示在输入框上方的任务面板里；当前这一轮就要用它的输出时**不要**开这个开关。" + shellNote, "Run a shell command in the workspace and return stdout + stderr. Use it for builds, tests, git, installing dependencies, starting services, etc. Default timeout is 120 seconds. If output exceeds one tool result, the full text is saved under .fizz/tool-output/ and the result includes the relative path, total lines, and which lines were returned; read the rest with read_file offset/limit on that path, or search it with search_files (common for full build/test logs). This is a real execution environment: explain the impact before deleting, overwriting, or running dangerous commands (rm -rf, git push --force, etc.). Set runInBackground: true for processes that must keep running after this turn (dev servers, watchers, long builds): the call returns a background task id immediately, it is not affected by this turn's timeout or stop, and its output shows in the task panel above the input box; do NOT set it when the current turn needs the output." + shellNoteEn),
 			inputSchema: z.object({
 				command: z.string().describe(tr("要执行的命令", "Command to run")),
 				timeoutMs: z.number().optional().describe(tr("超时毫秒数，默认 120000，最大 300000", "Timeout in milliseconds; default 120000, max 300000")),
-				cwd: z.string().optional().describe(tr("执行目录（相对工作区），缺省为工作区根目录", "Working directory (relative to the workspace); defaults to the workspace root"))
+				cwd: z.string().optional().describe(tr("执行目录（相对工作区），缺省为工作区根目录", "Working directory (relative to the workspace); defaults to the workspace root")),
+				runInBackground: z.boolean().optional().describe(tr("设为 true 时把命令丢到后台：立刻返回任务 id，进程在本轮结束后继续跑（dev server / watch / 长构建）。本轮需要它的输出时不要开", "Set true to run the command in the background: returns a task id immediately and the process keeps running after this turn (dev servers, watchers, long builds). Do not set it when this turn needs the output"))
 			}),
-			execute: async ({ command, timeoutMs, cwd = "" }, options) => {
+			execute: async ({ command, timeoutMs, cwd = "", runInBackground }, options) => {
 				const refused = await guardWrite("命令未运行", {
 					toolCallId: options.toolCallId,
 					toolName: "execute_command",
@@ -2915,6 +2975,26 @@ function buildAgentTools(root, opts) {
 				if (refused) return refused;
 				const execDir = resolveInside(root, cwd);
 				if (!(await promises.stat(execDir)).isDirectory()) throw new Error(`执行目录不是目录：${cwd || "."}（cwd 必须是目录；要操作某个文件请把路径写进命令里）`);
+				/**
+				* 后台执行：**先过权限闸、再登记**，与前台同一条口径（后台不等于免审批）。
+				*
+				* 这里刻意不建 per-command controller、不设超时 —— 这条命令的生命周期归任务登记表，
+				* 本轮的 abort / 超时都打不到它（那正是「dev server 活过这一轮」的实现方式）。
+				*/
+				if (runInBackground) {
+					if (!opts.onBackgroundCommand) return "当前环境不支持后台执行（没有任务登记通道），命令**没有**启动。请改为普通执行，或让用户自己开一个终端。";
+					const started = await opts.onBackgroundCommand({
+						command,
+						cwd: execDir,
+						title: command
+					});
+					return [
+						`已在后台启动：${command}`,
+						`任务 id：${started.id}`,
+						"它不占本轮的超时与停止；输出显示在输入框上方的任务面板里（用户可随时停止）。",
+						"本轮不要再等它的输出 —— 需要结果时用普通执行，或先做别的、稍后再看面板。"
+					].join("\n");
+				}
 				const t = clampInt$1(timeoutMs, 1e3, 3e5, 12e4);
 				/**
 				* per-command 停止器：单条停止（调用方持有的 `stop()`）与整轮停止
@@ -3014,8 +3094,7 @@ function buildAgentTools(root, opts) {
 		...opts.skills?.length ? buildReadSkillTool(opts.skills) : {}
 	}, opts.includeTools);
 }
-//#endregion
-//#region packages/tools/src/ask-followup.ts
+// packages/tools/src/ask-followup.ts
 /**
 * `ask_followup_question` 工具（**传输无关**的共享实现，桌面端 / server 共用）。
 *
@@ -3097,8 +3176,7 @@ function buildAskFollowupTool(sink, requestId) {
 		}
 	}) };
 }
-//#endregion
-//#region packages/tools/src/playwright-browsers.ts
+// packages/tools/src/playwright-browsers.ts
 /**
 * Playwright 浏览器的运行时保障：web_fetch 的 `engine="browser"`、screenshot 工具
 * 与**内置浏览器面板 / `browser_*` 工具**都跑无头 Chromium，而安装包**不再随包分发
@@ -3264,8 +3342,7 @@ function downloadChromiumHeadlessShell(abortSignal) {
 		});
 	});
 }
-//#endregion
-//#region packages/tools/src/headless.ts
+// packages/tools/src/headless.ts
 /** 默认的启动超时：与页面加载超时同一量级（30s） */
 var DEFAULT_LAUNCH_TIMEOUT = 3e4;
 /**
@@ -3326,8 +3403,7 @@ async function launchHeadlessChromium(timeout = DEFAULT_LAUNCH_TIMEOUT) {
 		clearTimeout(timer);
 	}
 }
-//#endregion
-//#region packages/tools/src/web-fetch.ts
+// packages/tools/src/web-fetch.ts
 /**
 * 内置 web_fetch 工具：打开任意网页（含搜索结果页），抓取正文并整理成 AI 容易理解的
 * 结构化 Markdown。
@@ -3612,14 +3688,12 @@ Object.fromEntries(Object.entries({
 	api: "api.json",
 	scripts: "scripts.json"
 }).map(([kind, file]) => [file, kind]));
-//#endregion
-//#region packages/workspace/src/store.ts
+// packages/workspace/src/store.ts
 /** 数据目录：`FIZZ_DATA_DIR` > `~/.fizz-server` */
 function resolveDataDir() {
 	return process.env.FIZZ_DATA_DIR?.trim() || join(homedir(), ".fizz-server");
 }
-//#endregion
-//#region packages/workspace/src/app-log.ts
+// packages/workspace/src/app-log.ts
 /**
 * 应用日志：整个 App 的业务事件记录（SSH / 终端 / 隧道 / SFTP / 插件 / Agent …）。
 *
@@ -3783,8 +3857,7 @@ var AppLogger = class extends EventEmitter {
 	}
 };
 new AppLogger();
-//#endregion
-//#region packages/tools/src/screenshot.ts
+// packages/tools/src/screenshot.ts
 /**
 * 内置 screenshot 工具：用 Playwright 无头浏览器打开网页截图，存到服务端数据目录的
 * `screenshots/`，并返回一个**同源相对 URL**（`/api/screenshots/<uuid>.<ext>`）。
@@ -3882,8 +3955,7 @@ function buildScreenshotTool() {
 		}
 	}) };
 }
-//#endregion
-//#region packages/git/src/git-panel.ts
+// packages/git/src/git-panel.ts
 /**
 * git 路由（status / diff / branches / log / action）共用的 git 访问层，基于 simple-git。
 * 「面板」指这层命令最终服务的源代码管理面板（非交互、无 TTY 的服务端环境）。
@@ -3926,8 +3998,9 @@ var GIT_TIMEOUT_MS = 3e5;
 * outputHandler 里抓 stderr 的闭包是按调用隔离的，共享实例会把不同命令的 stderr 串在一起。
 */
 function gitPanel(cwd, timeoutMs = GIT_TIMEOUT_MS) {
+	const baseDir = existsSync(cwd) ? cwd : tmpdir();
 	return simpleGit({
-		baseDir: cwd,
+		baseDir,
 		config: ["core.quotePath=false"],
 		allowEnvironment: ["GIT_TERMINAL_PROMPT"],
 		timeout: { block: timeoutMs },
@@ -4012,8 +4085,7 @@ function unquotePath(raw) {
 	}
 	return Buffer.from(out).toString("utf8");
 }
-//#endregion
-//#region packages/tools/src/git-read.ts
+// packages/tools/src/git-read.ts
 /**
 * `git_read`：给 agent 的**只读 git 视图**。
 *
@@ -4124,8 +4196,7 @@ function explainEmpty(action) {
 		case "show": return "（这个提交没有可显示的内容 —— 可能是个空提交）";
 	}
 }
-//#endregion
-//#region packages/tools/src/browser/input.ts
+// packages/tools/src/browser/input.ts
 /** CDP 的 buttons 位掩码：左=1 / 右=2 / 中=4 / 后退=8 / 前进=16 */
 function buttonBit(button) {
 	switch (button) {
@@ -4204,8 +4275,7 @@ function toCdpCommand(input, buttonsMask) {
 		default: return null;
 	}
 }
-//#endregion
-//#region packages/tools/src/browser/resolver.ts
+// packages/tools/src/browser/resolver.ts
 /**
 * Playwright **自带 headless shell** 的目录；没下载过则 null。
 *
@@ -4258,8 +4328,7 @@ function launchAttempts(pref) {
 		].filter((a) => a !== null);
 	}
 }
-//#endregion
-//#region packages/tools/src/browser/engine.ts
+// packages/tools/src/browser/engine.ts
 /**
 * 浏览器引擎：一个会话 = 一个 headless Chromium（Playwright 起），画面走 CDP screencast
 * 推给订阅者（后端 WS 处理器，再经 desktop 内部 WS / web server WS 到渲染端面板）。
@@ -4656,8 +4725,7 @@ var BrowserSessionManager = class {
 	}
 };
 new BrowserSessionManager();
-//#endregion
-//#region packages/tools/src/browser/tools.ts
+// packages/tools/src/browser/tools.ts
 /**
 * 系统提示词里的浏览器段落：只在挂了浏览器工具时追加。
 *
@@ -4676,8 +4744,7 @@ var BROWSER_PROMPT_SECTION = tr([
 	"- The browser is real: clicks and typing affect the live page (they may submit forms, place orders, or delete data) — explain before irreversible actions;",
 	"- To see what the page looks like, use browser_snapshot (text snapshot); it is better than a screenshot for understanding structure."
 ].join("\n"));
-//#endregion
-//#region packages/plugin/src/logger.ts
+// packages/plugin/src/logger.ts
 /**
 * 极简 Logger：插件日志统一带 `[plugin:<路径>]` 前缀，路径是 Context 名字链路。
 *
@@ -4711,8 +4778,7 @@ var Logger = class Logger {
 		return new Logger(label, this);
 	}
 };
-//#endregion
-//#region packages/plugin/src/scope.ts
+// packages/plugin/src/scope.ts
 var CURRENT = null;
 /** 在「CURRENT = ctx」的作用域里跑 `fn`，跑完恢复（支持嵌套） */
 function withContext(ctx, fn) {
@@ -4730,8 +4796,7 @@ function withContext(ctx, fn) {
 function bindEffect(owner, disposer) {
 	return (CURRENT ?? owner)._pushEffect(disposer);
 }
-//#endregion
-//#region packages/plugin/src/service.ts
+// packages/plugin/src/service.ts
 var Service = class {
 	ctx;
 	constructor(ctx) {
@@ -4756,8 +4821,7 @@ var Service = class {
 		return bindEffect(this.ctx, disposer);
 	}
 };
-//#endregion
-//#region packages/plugin/src/services/events.ts
+// packages/plugin/src/services/events.ts
 /**
 * 事件总线服务：`ctx.events` 的实体。
 *
@@ -4793,8 +4857,7 @@ var EventsService = class extends Service {
 		return this.ctx.bail(name, ...args);
 	}
 };
-//#endregion
-//#region packages/plugin/src/context.ts
+// packages/plugin/src/context.ts
 /**
 * Context —— 插件框架的心脏（Cordis 风格的精简实现）。
 *
@@ -5150,8 +5213,7 @@ var Context = class Context {
 function createAppContext(name = "app") {
 	return new Context(null, name);
 }
-//#endregion
-//#region packages/plugin/src/services/tools.ts
+// packages/plugin/src/services/tools.ts
 /**
 * 工具注册表：`ctx.tools` 的实体。**这是插件「加 / 覆盖」Agent 工具的唯一入口。**
 *
@@ -5282,8 +5344,7 @@ var ToolsService = class extends Service {
 		return atTop[0];
 	}
 };
-//#endregion
-//#region packages/plugin/src/services/prompt.ts
+// packages/plugin/src/services/prompt.ts
 /**
 * 提示词注册表：`ctx.prompt` 的实体。**这是插件往系统提示词里插话的唯一入口。**
 *
@@ -5338,8 +5399,7 @@ var PromptService = class extends Service {
 		return this.list().map((s) => s.text).join(separator);
 	}
 };
-//#endregion
-//#region packages/plugin/src/services/workspace.ts
+// packages/plugin/src/services/workspace.ts
 /**
 * 工作区服务：把「这一轮绑定的工作区根目录」交给插件。
 *
@@ -5391,8 +5451,7 @@ var WorkspaceService = class extends Service {
 		return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
 	}
 };
-//#endregion
-//#region packages/plugin/src/services/models.ts
+// packages/plugin/src/services/models.ts
 /**
 * 模型配置注册表：`ctx.models` 的实体。**插件往「设置 → 模型」里加配置的唯一入口。**
 *
@@ -5504,8 +5563,7 @@ var ModelsService = class extends Service {
 		return [...this._byId.values()];
 	}
 };
-//#endregion
-//#region packages/plugin/src/hooks.ts
+// packages/plugin/src/hooks.ts
 /**
 * 钩子（hook）：插件**改写** Agent 行为的地方 —— 与 `ctx.events` 的「只通知、不干预」互补。
 *
@@ -5554,8 +5612,7 @@ var HooksService = class extends EventsService {
 		return "hooks";
 	}
 };
-//#endregion
-//#region packages/agent/src/project-doc.ts
+// packages/agent/src/project-doc.ts
 /**
 * 项目约束文档（`AGENTS.md`）与分层规则。
 *
@@ -5790,8 +5847,15 @@ function buildProjectDocSection(doc) {
 	}
 	return lines.join("\n");
 }
-//#endregion
-//#region packages/agent/src/prompt.ts
+// packages/agent/src/prompt.ts
+/**
+* Agent 单轮对话的最大工具步数（**缺省值**，调用方可用 `RunAgentOptions.maxSteps` 覆盖）。
+*
+* 常量本体在契约里（`DEFAULT_MAX_STEPS`）：设置 → AI → 偏好 那一页要读同一个数，而
+* 浏览器侧不能 import 本包（会把整个运行时拖进前端产物）。这里保留导出，是为了让
+* 「不传 `maxSteps` 时走多少」在这一层一眼可见；取值理由（为什么 80 而不是 500）见契约。
+*/
+var MAX_STEPS = 80;
 /**
 * 构建 Agent 系统提示词：说明工作区、工具约定与安全边界。
 *
@@ -5936,8 +6000,7 @@ function buildPlanningSection() {
 		"- 简单任务、单步操作不要用清单；清单是给你自己对进度用的，不必在正文里复述一遍它。"
 	].join("\n");
 }
-//#endregion
-//#region packages/agent/src/plugins.ts
+// packages/agent/src/plugins.ts
 /**
 * 内置能力 → 插件。
 *
@@ -6111,8 +6174,7 @@ function wrapToolsWithHooks(tools, hooks) {
 	}
 	return out;
 }
-//#endregion
-//#region packages/agent/src/subagents.ts
+// packages/agent/src/subagents.ts
 /**
 * 子任务（subagent）：把「只读、产出噪声大、与父上下文无关」的活派给独立的子 run。
 *
@@ -6313,8 +6375,7 @@ function buildDelegationTools(ids, opts) {
 	}
 	return out;
 }
-//#endregion
-//#region packages/agent/src/engine.ts
+// packages/agent/src/engine.ts
 /**
 * 内置 agent 的流式引擎：**AI SDK 的 `streamText` + 多步工具循环**，把它的 part 映射成
 * fizz 自己的 `AgentStreamEvent`。
@@ -6450,7 +6511,8 @@ function runEngine(opts) {
 		...opts.abortSignal ? { abortSignal: opts.abortSignal } : {},
 		...opts.modelSettings ? {
 			...opts.modelSettings.maxOutputTokens !== void 0 ? { maxOutputTokens: opts.modelSettings.maxOutputTokens } : {},
-			...opts.modelSettings.temperature !== void 0 ? { temperature: opts.modelSettings.temperature } : {}
+			...opts.modelSettings.temperature !== void 0 ? { temperature: opts.modelSettings.temperature } : {},
+			...opts.modelSettings.reasoningEffort !== void 0 ? { reasoning: opts.modelSettings.reasoningEffort } : {}
 		} : {},
 		prepareStep: async ({ messages, stepNumber }) => {
 			const next = await opts.onStepBoundary?.({
@@ -6528,8 +6590,7 @@ function runEngine(opts) {
 		done
 	};
 }
-//#endregion
-//#region packages/agent/src/retry.ts
+// packages/agent/src/retry.ts
 /**
 * 模型请求的自动重试：可重试网络错误的判定 + 退避等待。
 *
@@ -6606,8 +6667,7 @@ function sleepWithSignal(ms, signal) {
 		signal?.addEventListener("abort", onAbort, { once: true });
 	});
 }
-//#endregion
-//#region packages/agent/src/agent.ts
+// packages/agent/src/agent.ts
 /**
 * 对话编排（直接基于 AI SDK 的 `streamText`，多步循环在 `./engine`）。
 *
@@ -6724,6 +6784,7 @@ function buildAgentSetup(opts) {
 				delta
 			})
 		} : {},
+		...opts.onBackgroundCommand ? { onBackgroundCommand: opts.onBackgroundCommand } : {},
 		skills: opts.skills,
 		...opts.nestedDocs ? { nestedDocs: opts.nestedDocs } : {}
 	}));
@@ -6970,6 +7031,7 @@ async function runAgent(opts) {
 		...opts.getPermissionMode ? { getPermissionMode: opts.getPermissionMode } : {},
 		...opts.requestConfirm ? { requestConfirm: opts.requestConfirm } : {},
 		...opts.commandStops ? { commandStops: opts.commandStops } : {},
+		...opts.onBackgroundCommand ? { onBackgroundCommand: opts.onBackgroundCommand } : {},
 		onEvent: (event) => emitEvent(event),
 		...opts.extraTools ? { extraTools: opts.extraTools } : {},
 		...opts.plugins ? { plugins: opts.plugins } : {},
@@ -7107,12 +7169,13 @@ async function runAgent(opts) {
 				system: setupForModel.instructions,
 				messages,
 				tools: engineTools,
-				maxSteps: opts.maxSteps ?? 80,
+				maxSteps: opts.maxSteps ?? MAX_STEPS,
 				abortSignal: runSignal,
 				toolCallConcurrency: resolveToolCallConcurrency(opts.toolCallConcurrency),
-				...maxOutputTokens !== void 0 || temperature !== void 0 ? { modelSettings: {
+				...maxOutputTokens !== void 0 || temperature !== void 0 || opts.reasoningEffort !== void 0 ? { modelSettings: {
 					...maxOutputTokens !== void 0 ? { maxOutputTokens } : {},
-					...temperature !== void 0 ? { temperature } : {}
+					...temperature !== void 0 ? { temperature } : {},
+					...opts.reasoningEffort !== void 0 ? { reasoningEffort: opts.reasoningEffort } : {}
 				} } : {},
 				/**
 				* 工具步骤边界（下一次请求之前）。这里是唯一能安全介入的位置：
@@ -7428,5 +7491,4 @@ async function runAgent(opts) {
 		}
 	}
 }
-//#endregion
 export { ASK_FOLLOWUP_TOOL, CONTAINER_AGENT_TOOL_KEYS, CONTAINER_PROTOCOL_VERSION, buildAgentTools, buildAskFollowupTool, buildWebFetchTool, defaultContextWindowFromEnv, filterToolSet, resolveContextWindow, runAgent };

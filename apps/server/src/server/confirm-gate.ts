@@ -99,6 +99,7 @@ export function createConfirmGate(input: {
       toolCallId: req.toolCallId,
       toolName: req.toolName,
       command: req.command,
+      ...(req.intent ? { intent: req.intent } : {}),
       ...(req.agentId ? { agentId: req.agentId } : {}),
       ...(req.agentName ? { agentName: req.agentName } : {}),
       ...(input.workspace ? { workspaceId: input.workspace.id, workspaceName: input.workspace.name } : {}),

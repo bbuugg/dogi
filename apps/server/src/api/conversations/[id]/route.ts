@@ -6,6 +6,7 @@
  */
 import type { ConversationRenameInput } from '@fizz/contracts/agent-api'
 import { domain } from '@/lib/server/state'
+import { stopSessionRunning } from '@/lib/server/background-tasks'
 import { forgetAcpTranscript } from '@/lib/server/acp-transcripts'
 import { describeError, jsonError, parseJsonBody } from '@/app/api/_lib/auth'
 
@@ -24,6 +25,9 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params
+  // 先停掉这个会话名下的后台命令再删：进程属于会话，会话没了就再没有能显示它的容器。
+  // 只发信号不等收场（删除不该被一条杀不掉的进程拖住），任务体自己尽快收尾。
+  stopSessionRunning(id)
   domain.deleteConversation(id)
   forgetAcpTranscript(id)
   return Response.json(domain.listConversations())

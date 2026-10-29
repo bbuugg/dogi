@@ -115,6 +115,14 @@ export async function runShutdown(
     stopPublicGateway()
   })
 
+  // 3.9 停掉后台命令（agent 用 `runInBackground` 起的 dev server / watch）。
+  //     它们自成进程组，**父进程退出不会跟着退** —— 不停就是一堆占着端口的孤儿进程，
+  //     而且登记表随进程消失，之后没有任何界面能停它们。只发信号不等收场。
+  await step('停止后台命令', async () => {
+    const { stopAllRunning } = await import('./background-tasks')
+    stopAllRunning()
+  })
+
   // 4. 中止所有在跑的对话，并**等它们收尾** —— 这一步等的是 chat-turn 把已产生的
   //    部分正文落盘（`run.done` 在 finishRun 之后 resolve），是整个收尾里唯一
   //    「真的在保住用户东西」的一步，所以给它最长的宽限。

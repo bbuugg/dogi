@@ -1,6 +1,6 @@
 /**
- * 对话相关的本地持久化：当前工作区 / 当前会话、审批超时、重试次数、并发度，以及待发送队列的
- * localStorage 缓存。只做读写，不持有 store。
+ * 对话相关的本地持久化：当前工作区 / 当前会话、审批超时、重试次数、并发度、步数上限，以及
+ * 待发送队列的 localStorage 缓存。只做读写，不持有 store。
  *
  * 队列缓存不是「老实现遗留」：打开会话时要先拿它渲染（否则列表先闪一下空），服务端 / 网络
  * 不可用时也照旧能用，只是不跨端。
@@ -8,7 +8,9 @@
 import type { QueuedMessage } from "@fizz/contracts/types";
 import {
   DEFAULT_MAX_RETRIES,
+  DEFAULT_MAX_STEPS,
   DEFAULT_TOOL_CALL_CONCURRENCY,
+  resolveMaxSteps,
   resolveToolCallConcurrency,
 } from "@fizz/contracts/agent-api";
 
@@ -94,6 +96,18 @@ export function saveMaxRetries(value: number): void {
   lsSet(MAX_RETRIES_KEY, String(value));
 }
 
+/** 一轮最多跑多少步（工具轮）：默认 `DEFAULT_MAX_STEPS`；存坏了 / 越界夹回合法区间 */
+const MAX_STEPS_KEY = "fizz.web.maxSteps";
+export function loadMaxSteps(): number {
+  const raw = lsGet(MAX_STEPS_KEY);
+  if (raw === null) return DEFAULT_MAX_STEPS;
+  const n = Number(raw);
+  return Number.isFinite(n) ? resolveMaxSteps(n) : DEFAULT_MAX_STEPS;
+}
+export function saveMaxSteps(value: number): void {
+  lsSet(MAX_STEPS_KEY, String(resolveMaxSteps(value)));
+}
+
 /** 同一批工具调用的并发上限（1 = 串行）：默认 3；存坏了 / 越界夹回合法区间 */
 const TOOL_CONCURRENCY_KEY = "fizz.web.toolCallConcurrency";
 export function loadToolCallConcurrency(): number {
@@ -106,6 +120,20 @@ export function loadToolCallConcurrency(): number {
 }
 export function saveToolCallConcurrency(value: number): void {
   lsSet(TOOL_CONCURRENCY_KEY, String(resolveToolCallConcurrency(value)));
+}
+
+/**
+ * 工具调用是否带「意图」：模型每次调工具填一句「这一步要干什么」，显示为工具卡标题。
+ *
+ * 默认**开启**（只存关掉的标记）：老用户没有这个 key 时也该看到新行为，
+ * 而「关掉」是明确的用户决定，必须记住。
+ */
+const TOOL_INTENT_KEY = "fizz.web.toolIntent";
+export function loadToolIntent(): boolean {
+  return lsGet(TOOL_INTENT_KEY) !== "0";
+}
+export function saveToolIntent(value: boolean): void {
+  lsSet(TOOL_INTENT_KEY, value ? "1" : "0");
 }
 
 /**
