@@ -34,20 +34,13 @@ export function PendingSteers({
   if (items.length === 0) return null;
   // 排序能力判定与队列一致：触屏上 HTML5 拖拽起不动，那些设备由把手自己扛指针事件（见 SortableRow）
   const canTouch = supportsTouch();
-  // 头部文案随「本轮是否在跑」切换，与队列同一套做法：跑着 = 会在边界生效；
-  // 没跑 = 这些插话已经不会再生效（服务端收件箱随 run 消失），只能立刻发出去或移除
   const running = app.streaming;
   return (
     <div className="flex flex-col border-b border-border px-3 py-2">
       <span className="mb-1 flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Zap className="size-3.5" />
-            <span className="min-w-0 flex-1">
-              {running
-                ? t("插入中 · {count} 条（下个步骤边界生效，agent 正在跑的这一轮内）", { count: items.length })
-                : t("未发出 · {count} 条（本轮已结束，可挑一条立刻发出去）", { count: items.length })}
-            </span>
-            <span className="shrink-0">{t("拖动左侧把手可调整顺序")}</span>
-          </span>
+        <Zap className="size-3.5" />
+        <span className="min-w-0 flex-1">{t("排队中")}</span>
+      </span>
       {/* 固定高度 + 内部滚动：与队列列表同一套尺寸，条数再多也不顶高输入框 */}
       <div
         className={cn(

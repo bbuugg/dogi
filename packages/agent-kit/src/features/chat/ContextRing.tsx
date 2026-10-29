@@ -2,7 +2,6 @@
 import { Gauge, Loader2 } from "lucide-react";
 import { useEffect, useMemo } from "react";
 import { toast } from "sonner";
-import { formatDuration } from "@fizz/agent-kit/shared/lib/duration";
 import { Button } from "@fizz/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@fizz/ui/popover";
 import { CHAT_ICON_PILL } from "@fizz/agent-kit/features/chat/composer";
@@ -13,8 +12,6 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   findModelEntry,
   resolveContextWindow,
-  SUBAGENT_META,
-  type SubagentId,
 } from "@fizz/contracts/types";
 import { turnIsAcp } from "@fizz/agent-kit/features/chat/session-backend";
 
@@ -183,34 +180,11 @@ export function ContextRing({ app }: { app: AgentApp }) {
       liveContextUsage?.used ??
       lastUsage?.contextTokens ??
       null);
-  /**
-   * 「压缩动不了的那块」：系统提示词 + 工具 schema（只有内置 agent 的实时帧会带）。
-   *
-   * 这是「圆环红了但手动压缩说没得压」的唯一解释 —— 历史已经被压到保留区，
-   * 剩下的大头是提示词与工具定义，压缩机制管不到。所以它必须显示出来，
-   * 否则用户只会一遍遍点压缩。
-   *
-   * 取**最后一条带 `base` 的消息**而不是只认 `liveContextUsage`：一轮结束后实时那份
-   * 会被 finish 的权威值盖掉（见上面的优先级），但消息上的 `contextUsage` 还在，
-   * 这样「跑完了再点开卡片」也能看到这个数。
-   */
-  let usageBase: number | null = null;
-  if (!isAcp) {
-    for (let i = app.messages.length - 1; i >= 0; i -= 1) {
-      const base = app.messages[i]?.contextUsage?.base;
-      if (base != null) {
-        usageBase = base;
-        break;
-      }
-    }
-  }
   /** ACP 的窗口取 agent 上报的 size（本地模型配置对 ACP 不适用） */
   const contextWindow = isAcp && acpUsage ? acpUsage.size : localContextWindow;
   const triggerTokens = compactionTriggerTokens(contextWindow);
   /** 顶上来的那个值是**压缩后**的估算，卡片里要标明，别让人以为又多占了（仅内置 agent） */
   const usedIsCheckpoint = !isAcp && compressedUsed !== null;
-  /** 顶部那个值是不是「本轮实时估算」（内置 agent 流式中）；卡片文案据此区分 */
-  const usedIsLive = !isAcp && !usedIsCheckpoint && liveContextUsage !== null;
 
   // pi 的 footer 是 `(tokens / contextWindow) * 100` 保留一位小数；**不截断**（会真的显示 105.3%）
   const percent = used !== null ? (used / contextWindow) * 100 : null;
@@ -253,10 +227,6 @@ export function ContextRing({ app }: { app: AgentApp }) {
     const res = await app.compressContextNow();
     // 成功后的摘要块 / 横幅由 store 的 SSE 事件驱动；失败这里直接报
     if (!res.ok) toast.error(t("手动压缩失败：{error}", { error: res.reason ?? t("未知错误") }));
-  };
-  const clear = async (): Promise<void> => {
-    const res = await app.clearContextSummary();
-    if (!res.ok) toast.error(t("清除摘要失败：{error}", { error: res.reason ?? t("未知错误") }));
   };
 
   /** 圆环几何：r=7 在 18×18 视窗里留给 2.5 描边刚好；弧线从 12 点方向起 */
@@ -345,136 +315,21 @@ export function ContextRing({ app }: { app: AgentApp }) {
           {usedIsCheckpoint && (
             <div className="text-muted-foreground">{t("（压缩后估算，下一轮起按上游实测值）")}</div>
           )}
-          {/* 「压缩动不了的那块」：历史压到保留区之后，占用就剩它 —— 圆环红着但压不动
-              的原因只可能在这里（提示词 / 工具定义 / 已有摘要），点压缩是没用的。 */}
-          {usageBase !== null && (
-            <div className="flex items-baseline gap-1.5 text-muted-foreground">
-              <span>{t("其中系统提示词 + 工具")}</span>
-              <span className="font-medium text-foreground tabular-nums">
-                {usageBase.toLocaleString()}
-              </span>
-            </div>
-          )}
-          {/* 上一轮的完整账目：上游上报的**整轮**输入（多步工具循环下是各 step 累加，
-                        所以它不是上面的上下文占用）、输出、思考、速度。缺哪项（上游没报）就不显示 */}
-          {lastUsage && (
-            <div className="grid grid-cols-1 gap-y-0.5 text-muted-foreground">
-              <span>
-                {t("本轮累计输入")}{" "}
-                <span className="font-medium text-foreground tabular-nums">
-                  {lastUsage.inputTokens.toLocaleString()}
-                </span>
-              </span>
-              <span>
-                {t("输出")}{" "}
-                <span className="font-medium text-foreground tabular-nums">
-                  {lastUsage.outputTokens.toLocaleString()}
-                </span>
-              </span>
-              {lastUsage.cachedInputTokens != null && (
-                <span>
-                  {t("其中缓存命中")}{" "}
-                  <span className="font-medium text-foreground tabular-nums">
-                    {lastUsage.cachedInputTokens.toLocaleString()}
-                  </span>
-                </span>
-              )}
-              {lastUsage.reasoningTokens != null && (
-                <span>
-                  {t("其中思考")}{" "}
-                  <span className="font-medium text-foreground tabular-nums">
-                    {lastUsage.reasoningTokens.toLocaleString()}
-                  </span>
-                </span>
-              )}
-              {/* 子任务（subagent）的账：父的字段是父自己上报的，不含这部分 */}
-              {lastUsage.subagents &&
-                Object.entries(lastUsage.subagents).map(([id, s]) => (
-                  <span key={id}>
-                    {t("子任务")} · {SUBAGENT_META[id as SubagentId]?.name ?? id}{" "}
-                    <span className="font-medium text-foreground tabular-nums">
-                      {s.totalTokens.toLocaleString()}
-                    </span>{" "}
-                    <span className="text-muted-foreground">
-                      {t("（{count} 次）", { count: s.calls })}
-                    </span>
-                  </span>
-                ))}
-              <span>
-                {lastUsage.tps > 0 && `${lastUsage.tps.toFixed(1)} tok/s`}
-                {/* 分隔符只在两段都有时才出现 —— 早先 TPS 为 0 时会留下一个
-                                    前导的「 · 」（`false && \` · …\`` 渲染成空串，但前一个
-                                    分支也是 false，看起来干干净净；tps 为 0 时才看出来） */}
-                {lastUsage.tps > 0 && lastUsage.durationMs > 0 && " · "}
-                {lastUsage.durationMs > 0 &&
-                  formatDuration(lastUsage.durationMs)}
-              </span>
-            </div>
-          )}
-
-          {/* 会话累计：与消息区顶部那条 sticky 条同源（conversation.totalUsage） */}
-          {conversation?.totalUsage && (
-            <>
-              <div className="border-t pt-2" />
-              <div className="flex items-center gap-1.5 font-medium text-foreground">
-                <Gauge className="size-3.5" />
-                {t("会话累计")}
-              </div>
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-muted-foreground">
-                <span>
-                  {t("输入")}{" "}
-                  <span className="font-medium text-foreground tabular-nums">
-                    {conversation.totalUsage.inputTokens.toLocaleString()}
-                  </span>
-                </span>
-                <span>
-                  {t("输出")}{" "}
-                  <span className="font-medium text-foreground tabular-nums">
-                    {conversation.totalUsage.outputTokens.toLocaleString()}
-                  </span>
-                </span>
-                <span>
-                  {t("合计")}{" "}
-                  <span className="font-medium text-foreground tabular-nums">
-                    {conversation.totalUsage.totalTokens.toLocaleString()}
-                  </span>
-                </span>
-                {!!conversation.totalUsage.reasoningTokens && (
-                  <span>
-                    {t("思考")}{" "}
-                    <span className="font-medium text-foreground tabular-nums">
-                      {conversation.totalUsage.reasoningTokens.toLocaleString()}
-                    </span>
-                  </span>
-                )}
-                {!!conversation.totalUsage.cachedInputTokens && (
-                  <span>
-                    {t("缓存")}{" "}
-                    <span className="font-medium text-foreground tabular-nums">
-                      {conversation.totalUsage.cachedInputTokens.toLocaleString()}
-                    </span>
-                  </span>
-                )}
-              </div>
-            </>
-          )}
-
           {/* 压缩相关的是内置 agent 专属：ACP 的上下文在 agent 侧，本地既看不见
-                        压缩历史也没有可点的按钮（`compressContextNow` / `clearContextSummary`
-                        都是 内置 那条路的事） */}
+                        压缩历史也没有可点的按钮（`compressContextNow` 只走内置那条路） */}
           {!isAcp && (
             <>
               <div className="border-t pt-2" />
               {app.contextNotice ? (
                 <p className="text-muted-foreground">
-                  {t("最近一次压缩：{before} → {after} token，摘要 {summarized} 轮、保留 {kept} 轮。", {
+                  {t("最近一次压缩：{before} → {after} token，摘要了 {summarized} 条消息、保留 {kept} 条。", {
                     before: app.contextNotice.beforeTokens.toLocaleString(),
                     after: app.contextNotice.afterTokens.toLocaleString(),
                     summarized: app.contextNotice.summarizedTurns ?? 0,
                     kept: app.contextNotice.keptTurns ?? 0,
                   })}
                 </p>
-              ) : (
+              ) : checkpoint ? null : (
                 <p className="text-muted-foreground">
                   {t("最近没有发生过上下文压缩。")}
                 </p>
@@ -513,17 +368,6 @@ export function ContextRing({ app }: { app: AgentApp }) {
                       t("压缩上下文")
                     )}
                   </Button>
-                  {checkpoint && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 px-2.5 text-xs text-muted-foreground"
-                      disabled={compressing}
-                      onClick={() => void clear()}
-                    >
-                      {t("清除摘要")}
-                    </Button>
-                  )}
                 </div>
               )}
             </>

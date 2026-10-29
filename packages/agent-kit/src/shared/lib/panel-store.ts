@@ -204,6 +204,62 @@ export function openTab(key: string): void {
 }
 
 /**
+ * 用一个新 key **就地替换**某个标签（同组、同位置，激活状态跟着走）。
+ *
+ * ## 为什么需要它（它修的 bug）
+ *
+ * 「新对话」草稿标签（`__new__`）里发出第一条消息会建出真实会话，那张草稿应当**变成**
+ * 会话标签。原来只有「面板上**只有**这一张草稿」时才走就地替换（`syncTabs([key])`），
+ * 一旦用户还开着别的会话 / 终端标签（极常见的状态：从某条会话里点「新建对话」），
+ * 就会落到 `openTab(key)` —— 于是**草稿留着 + 又冒出一张会话标签**，用户看到
+ * 「发个消息怎么又开了一个对话标签」。
+ *
+ * ## 为什么不直接用 `syncTabs`
+ *
+ * `syncTabs(keys)` 是「对齐到这批 key」：传 `[newKey]` 会把面板上**其它标签全摘掉**
+ * （用户开着的终端、别的会话一起没）。这里只动 `oldKey` 这一颗，其余原样保留。
+ *
+ * 单标签模式（手机壳）下退化成「只剩新 key」：那里本来就不允许多标签，语义不变。
+ */
+export function replaceTab(oldKey: string, newKey: string): void {
+  if (oldKey === newKey) return
+  update((s) => {
+    if (singleTab) return singleTabOnly(s, newKey)
+    const gid = groupOfTab(s, oldKey)
+    // 旧标签已经不在（被别的路径先摘掉了）：当作普通打开，别把新会话弄丢
+    if (!gid) {
+      const all = allTabKeys(s)
+      const next = all.includes(newKey) ? all : [...all, newKey]
+      return activateTabPure(alignToTabs(s, next), newKey)
+    }
+    const g = s.groups[gid]!
+    const at = g.tabIds.indexOf(oldKey)
+    if (at < 0) return s
+    // 新 key 已经在别处开着（极少见：同一会话被别的入口先开了标签）：摘掉旧的再切过去，
+    // 不能就地替换 —— 否则同一个 key 会出现在两张标签上
+    if (groupOfTab(s, newKey)) {
+      return activateTabPure(closeTabPure(s, oldKey), newKey)
+    }
+    const tabIds = [...g.tabIds]
+    tabIds[at] = newKey
+    const next: PanelState = {
+      ...s,
+      groups: {
+        ...s.groups,
+        [gid]: {
+          ...g,
+          tabIds,
+          activeTabId: g.activeTabId === oldKey ? newKey : g.activeTabId
+        }
+      },
+      // 替换发生在哪一组，焦点就跟到哪一组（用户刚在草稿里发的消息，焦点本就该在那）
+      activeGroupId: gid
+    }
+    return activateTabPure(next, newKey)
+  })
+}
+
+/**
  * 把标签补进来但**不改变焦点**（已经在里面就是空操作）。
  *
  * 与 `openTab` 的差别只有一处：要不要切过去。`PanelView` 首次挂载时用它对齐「当前会话」

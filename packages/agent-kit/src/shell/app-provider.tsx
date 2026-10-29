@@ -19,6 +19,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ShellDetectResult } from '@fizz/shells'
 import type { WorkspaceConfigSnapshot } from '@fizz/contracts/workspace-config'
 import { useAgentApp } from '@fizz/agent-kit/shared/hooks/useAgentApp'
+import { useAgentStore } from '@fizz/agent-kit/shared/lib/stores/agent-store'
 import { useTheme } from '@fizz/agent-kit/shared/hooks/useTheme'
 import { useTriggers } from '@fizz/agent-kit/shared/hooks/useTriggers'
 import { useTerminalShell, getTerminalShell } from '@fizz/agent-kit/shared/lib/terminal-shell'
@@ -91,13 +92,35 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
    */
   const openConversation = useCallback(
     (conversationId: string, workspaceId?: string): void => {
-      // 只在真要跨工作区时才切，且**不让它顺手开「该工作区最新会话」**：
-      // selectWorkspace 的默认行为是自动打开最新会话，紧接着这里又打开目标会话 ——
-      // 两次 loadMessages 竞速，模型选择等状态先 A 后 B 闪一下。
-      // 新建会话时更糟：conversationsRef 还没同步到刚建好的会话，selectWorkspace
-      // 会先打开「上一个会话」再切回来 —— 这就是新建会话后页面闪一下的来源。
-      if (workspaceId && workspaceId !== app.activeWorkspaceId) {
-        app.selectWorkspace(workspaceId, false)
+      /*
+       * 打开会话时把**当前工作区**也切到它所属的工作区。
+       *
+       * 原来只在显式传了 `workspaceId` 时才切，于是通知点击（`use-notify-watcher`
+       * 只有会话 id）会留下「对话标签是 A、`activeWorkspaceId` 还是 B」的错位：
+       * 顶栏按会话显示 A，但快捷操作 / 上传源 / 终端入口 / git 状态都读全局
+       * `activeWorkspaceId`，全落到 B 上（用户实测：从通知跳回旧工作区后快捷操作
+       * 整颗没了）。工作区能从会话清单反查，缺省就自己补上。
+       *
+       * 仍然**不让它顺手开「该工作区最新会话」**：selectWorkspace 的默认行为是自动
+       * 打开最新会话，紧接着这里又打开目标会话 —— 两次 loadMessages 竞速，模型选择
+       * 等状态先 A 后 B 闪一下。新建会话时更糟：conversationsRef 还没同步到刚建好的
+       * 会话，selectWorkspace 会先打开「上一个会话」再切回来。
+       */
+      /*
+       * ⚠️ 必须读**点击时**的 store 快照，不能用闭包里的 `app`：通知的 onClick 会被
+       * 原生通知模块保存到点击为止，期间用户完全可能已经切到别的工作区。用旧快照比
+       * `activeWorkspaceId` 会误判「已经在目标工作区」而跳过切换（用户实测：通知在
+       * 切走前生成，点回来时快捷操作还停在上一个工作区）。
+       */
+      const current = useAgentStore.getState()
+      const targetWorkspaceId =
+        workspaceId ??
+        current.conversations.find((c) => c.id === conversationId)?.workspaceId
+      if (
+        targetWorkspaceId &&
+        targetWorkspaceId !== current.activeWorkspaceId
+      ) {
+        app.selectWorkspace(targetWorkspaceId, false)
       }
       void app.openConversation(conversationId)
       const open = allTabKeys()

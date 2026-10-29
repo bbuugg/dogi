@@ -5,7 +5,7 @@
  * 桌面端引导加载需要全文，用 ?full=1 让服务端返回含完整消息的会话全集。
  */
 import { randomUUID } from 'node:crypto'
-import type { AgentChatMessage, CollabSettings } from '@fizz/contracts/types'
+import type { AgentChatMessage, AiReasoningEffort, CollabSettings } from '@fizz/contracts/types'
 import { abortAcpTurn, createAcpSession } from '@fizz/acp'
 import { domain } from '@/lib/server/state'
 import { ensurePiConfirmExtension } from '@/lib/server/acp-extension'
@@ -33,6 +33,8 @@ export async function POST(request: Request) {
     configId?: string
     /** 创建时确定的具体模型（内置 = 配置下的模型 id；acp = agent 广告的模型值） */
     modelId?: string
+    /** 内置 Agent 的思考强度（缺省 = 跟随模型）；ACP 忽略 */
+    reasoningEffort?: AiReasoningEffort
     /** 导入 / 绑定 agent 侧既有会话：创建时就落 acpSessionId */
     acpSessionId?: string
     messages?: AgentChatMessage[]
@@ -135,6 +137,7 @@ export async function POST(request: Request) {
       backend: input.backend,
       configId: input.configId,
       modelId: input.modelId,
+      ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
       acpSessionId: input.acpSessionId,
       ...(Array.isArray(input.messages) ? { messages: input.messages } : {})
     })

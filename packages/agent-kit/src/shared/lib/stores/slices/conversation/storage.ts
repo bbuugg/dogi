@@ -1,0 +1,160 @@
+/**
+ * 对话相关的本地持久化：当前工作区 / 当前会话、审批超时、重试次数、并发度，以及待发送队列的
+ * localStorage 缓存。只做读写，不持有 store。
+ *
+ * 队列缓存不是「老实现遗留」：打开会话时要先拿它渲染（否则列表先闪一下空），服务端 / 网络
+ * 不可用时也照旧能用，只是不跨端。
+ */
+import type { QueuedMessage } from "@fizz/contracts/types";
+import {
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_TOOL_CALL_CONCURRENCY,
+  resolveToolCallConcurrency,
+} from "@fizz/contracts/agent-api";
+
+// ---------------------------------------------------------------------------
+// 客户端偏好：直接落 localStorage（key 沿用旧 web-host 的，已存的设置不丢）
+// ---------------------------------------------------------------------------
+
+/** 上次打开的工作区 / 会话（启动恢复现场，会话自己记着选的模型） */
+const ACTIVE_WORKSPACE_KEY = "fizz.web.activeWorkspaceId";
+const ACTIVE_CONVERSATION_KEY = "fizz.web.activeConversationId";
+/** confirm 审批超时（分钟）：默认 10，0 = 不超时 */
+const CONFIRM_TIMEOUT_KEY = "fizz.web.confirmTimeout";
+
+/** SSR 上没有 localStorage：各 loader 返回兜底值（客户端行为不变） */ function lsGet(
+  key: string,
+): string | null {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(key);
+}
+export function lsSet(key: string, value: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(key, value);
+}
+
+export function loadActiveWorkspaceId(): string | null {
+  return lsGet(ACTIVE_WORKSPACE_KEY) || null;
+}
+export function saveActiveWorkspaceId(id: string | null): void {
+  lsSet(ACTIVE_WORKSPACE_KEY, id ?? "");
+}
+export function loadActiveConversationId(): string | null {
+  return lsGet(ACTIVE_CONVERSATION_KEY) || null;
+}
+export function saveActiveConversationId(id: string | null): void {
+  lsSet(ACTIVE_CONVERSATION_KEY, id ?? "");
+}
+/**
+ * 抹掉这份记录（**连键一起移除**，不是写空串）。
+ *
+ * 与 `saveActiveConversationId(null)` 的区别正是 `loadBlankIntent()` 判的那条线：
+ * 「从没选过」与「明确要空态」是两种不同的状态，登出清场要的是**前者**（下次登录照旧
+ * 兜底到最新一条会话），所以这里不能只写空串。
+ */
+export function clearActiveConversationId(): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(ACTIVE_CONVERSATION_KEY);
+}
+/**
+ * 「用户明确要空态」是否**已落盘**（键在、但为空串）。
+ *
+ * `saveActiveConversationId(null)` 写的是空串，而 `loadActiveConversationId()` 把空串也读成
+ * `null` —— 于是「关掉了所有会话」与「从没选过」在它眼里一模一样。启动恢复必须分清这两者：
+ * 前者**不能**再把会话拉回来（用户刚亲手把它们关掉），后者才该兜底到该工作区最新一条。
+ * 所以这里直接看**键在不在**：键在且为空 = 明确要空态。
+ *
+ * 为什么不能只靠 store 里的 `blankIntent`：那个是内存态，刷新即丢，而用户关掉所有会话之后
+ * 往往紧接着就是刷新页面 —— 正是它护不住的那一刻。
+ */
+export function loadBlankIntent(): boolean {
+  return lsGet(ACTIVE_CONVERSATION_KEY) === "";
+}
+
+/** 审批超时（分钟）：默认 10，0 = 不超时；存坏了回落默认 */
+export function loadConfirmTimeout(): number {
+  const raw = lsGet(CONFIRM_TIMEOUT_KEY);
+  if (raw === null) return 10;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.round(n) : 10;
+}
+export function saveConfirmTimeout(minutes: number): void {
+  lsSet(CONFIRM_TIMEOUT_KEY, String(minutes));
+}
+
+/** 模型请求自动重试次数（0 = 不限制）：默认 2；存坏了 / 非法回落默认 */
+const MAX_RETRIES_KEY = "fizz.web.maxRetries";
+export function loadMaxRetries(): number {
+  const raw = lsGet(MAX_RETRIES_KEY);
+  if (raw === null) return DEFAULT_MAX_RETRIES;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.round(n) : DEFAULT_MAX_RETRIES;
+}
+export function saveMaxRetries(value: number): void {
+  lsSet(MAX_RETRIES_KEY, String(value));
+}
+
+/** 同一批工具调用的并发上限（1 = 串行）：默认 3；存坏了 / 越界夹回合法区间 */
+const TOOL_CONCURRENCY_KEY = "fizz.web.toolCallConcurrency";
+export function loadToolCallConcurrency(): number {
+  const raw = lsGet(TOOL_CONCURRENCY_KEY);
+  if (raw === null) return DEFAULT_TOOL_CALL_CONCURRENCY;
+  const n = Number(raw);
+  return Number.isFinite(n)
+    ? resolveToolCallConcurrency(n)
+    : DEFAULT_TOOL_CALL_CONCURRENCY;
+}
+export function saveToolCallConcurrency(value: number): void {
+  lsSet(TOOL_CONCURRENCY_KEY, String(resolveToolCallConcurrency(value)));
+}
+
+/**
+ * 待发送队列：**服务端权威** + localStorage 缓存。
+ *
+ * 缓存不是「老实现遗留」，它在两处仍是必需的：
+ * 1. 打开会话时先拿缓存渲染，服务端那份回来后**无感替换**（否则列表先闪一下空）；
+ * 2. 服务端 / 网络不可用（未连接 / 离线 / 写失败）时队列照旧能用，只是不跨端。
+ */
+const QUEUE_KEY_PREFIX = "fizz.web.queue.";
+export function loadQueue(conversationId: string): QueuedMessage[] {
+  try {
+    const raw = lsGet(QUEUE_KEY_PREFIX + conversationId);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter(
+          (m): m is QueuedMessage =>
+            !!m && typeof m.id === "string" && typeof m.text === "string",
+        )
+      : [];
+  } catch {
+    return [];
+  }
+}
+export function saveQueue(
+  conversationId: string | null,
+  items: QueuedMessage[],
+): void {
+  if (!conversationId) return;
+  try {
+    if (items.length === 0) lsRemove(QUEUE_KEY_PREFIX + conversationId);
+    else lsSet(QUEUE_KEY_PREFIX + conversationId, JSON.stringify(items));
+  } catch {
+    // localStorage 不可用（隐私模式 / 超额）：队列退回纯内存，不阻塞发送
+  }
+}
+export function lsRemove(key: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(key);
+}
+/** 清掉所有按会话隔离的待发送队列（登出 / 401 失效时别残留到下次登录） */
+export function clearAllQueues(): void {
+  try {
+    if (typeof window === "undefined") return;
+    for (const key of Object.keys(window.localStorage)) {
+      if (key.startsWith(QUEUE_KEY_PREFIX)) window.localStorage.removeItem(key);
+    }
+  } catch {
+    // localStorage 不可用：队列本来就只是内存态，跳过
+  }
+}

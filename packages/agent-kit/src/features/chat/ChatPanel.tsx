@@ -27,7 +27,7 @@
  * 编辑期间有两处标识：输入框卡片内的「编辑消息」条与消息列表里那条消息的描边压暗
  * （见 `EditMessageBar` 与 `MessageList` 的 `editingMessageId`）。
  */
-import { Gauge, MessageSquare, Unplug } from "lucide-react";
+import { MessageSquare, Unplug } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ChatSurface, CopyOnlyActions } from "@fizz/agent-kit/features/chat/chat-surface";
@@ -113,7 +113,7 @@ export function ChatPanel({
  *
  * 骨架（消息列表 / 输入区 / 落底指示器 / 消息目录）在 `chat/chat-surface.tsx`，与容器
  * 工作台同一份；这里只给主会话特有的东西：
- * - 消息流上方的 sticky 条（上下文已压缩 / 连接中断提示）；会话累计用量已从顶部移除
+ * - 消息流上方的连接中断 sticky 条；会话累计用量已从顶部移除
  * - 一轮结束后的用量统计行（随消息落盘）；
  * - 消息级操作（编辑重发 / 删除）+ 待发送队列 + 工作区 / 模型 / 权限 pill。
  */
@@ -597,26 +597,6 @@ function ChatPanelInner({
                   >
                     {t("立即重连")}
                   </button>
-                </div>
-              )}
-              {app.contextNotice && (
-                <div className="sticky top-0 z-10 mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border bg-background/80 px-3 py-1.5 text-xs text-muted-foreground backdrop-blur">
-                  <span className="inline-flex items-center gap-1 font-medium text-foreground">
-                    <Gauge className="size-3.5" />
-                    {t("上下文已压缩")}
-                  </span>
-                  <span>
-                    {t("压缩前 {tokens} token", { tokens: app.contextNotice.beforeTokens.toLocaleString() })}
-                  </span>
-                  <span>
-                    {t("→ 压缩后 {tokens} token", { tokens: app.contextNotice.afterTokens.toLocaleString() })}
-                  </span>
-                  <span>
-                    {t("摘要了 {summarized} 轮，保留 {kept} 轮", {
-                      summarized: app.contextNotice.summarizedTurns ?? 0,
-                      kept: app.contextNotice.keptTurns ?? 0,
-                    })}
-                  </span>
                 </div>
               )}
             </>

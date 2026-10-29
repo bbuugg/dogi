@@ -740,10 +740,14 @@ export function AcpTab({ app }: { app: AgentApp }) {
           {/*
             列表：已添加（含手动添加的）排前 + 探测到的候选。
             不挂在「探测成功」分支下 —— 探测失败 / 进行中时，已保存与手动添加的模型仍要能看见、能取消。
+
+            ⚠️ 容器**无条件渲染**并常驻 `flex-auto`：只有探测回来那一刻才出现列表的话，
+            加载中 / 无候选时这一块不存在，下面「全选 / 清空」与底部按钮会紧贴上方内容浮在
+            卡片中间（用户报过「按钮跑上面去了」）。常驻之后它永远吃掉剩余高度，列表区高度
+            固定，下方各行始终贴在底部。
           */}
-          {modelRows.length > 0 && (
-            <div className="min-h-0 flex-auto space-y-0.5 overflow-y-auto pr-1">
-              {modelRows.map(({ model, added }) => (
+          <div className="min-h-0 flex-auto space-y-0.5 overflow-y-auto pr-1">
+            {modelRows.map(({ model, added }) => (
                 <div
                   key={model.value}
                   className={cn(
@@ -801,14 +805,12 @@ export function AcpTab({ app }: { app: AgentApp }) {
                   </Tooltip>
                 </div>
               ))}
-            </div>
-          )}
-
-          {modelRows.length === 0 && keyword && (
-            <div className="shrink-0 px-1.5 py-2 text-xs text-muted-foreground">
-              {tr('没有匹配「{keyword}」的模型。', { keyword: search.trim() })}
-            </div>
-          )}
+            {modelRows.length === 0 && keyword && (
+              <div className="px-1.5 py-2 text-xs text-muted-foreground">
+                {tr('没有匹配「{keyword}」的模型。', { keyword: search.trim() })}
+              </div>
+            )}
+          </div>
 
           {/*
             手动添加：agent 没广告清单 / 探测失败时兜底，或直接按 id 指定模型。
@@ -873,12 +875,8 @@ export function AcpTab({ app }: { app: AgentApp }) {
           </div>
 
           {/*
-            `mt-auto` = 按钮行永远贴卡片底边。
-            这张卡是**定高**的（见上面 DialogContent 的注释），可列表整块可能压根不存在：
-            还没探测回来（`probe === 'loading'`）、或这个 agent 一个可选模型都没广告、也没
-            手动加过。那时上面几行全是 `shrink-0`，剩余空间没有任何元素去吃 —— 按钮行就
-            紧贴内容浮在卡片中间，下面留一大片空白（手机上看就像「取消 / 保存跑到上面去了」）。
-            列表在时它自己是 `flex-auto`，空间已被吃满，`mt-auto` 不起作用；列表不在时它接管。
+            列表区常驻 `flex-auto` 已吃满剩余高度，这一行自然落在底部；
+            `mt-auto` 只是兜底，保证即使列表容器将来被改成不占空间，按钮也不会浮上去。
           */}
           <DialogFooter className="mt-auto shrink-0 pt-1">
             <Button type="button" size="sm" variant="ghost" onClick={closeModelDialog}>

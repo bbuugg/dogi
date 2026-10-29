@@ -22,7 +22,7 @@ import {
 } from "lucide-react";
 import { Button } from "@fizz/ui/button";
 import type { ComponentProps, ReactNode } from "react";
-import { isValidElement, useState } from "react";
+import { isValidElement, useEffect, useState } from "react";
 import { CodeBlock } from "@fizz/agent-kit/shared/ai-elements/code-block";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@fizz/ui/tooltip";
 import {
@@ -130,6 +130,16 @@ function DetailDialog({
 }) {
   const tr = useT();
   const [copied, setCopied] = useState(false);
+  // 触屏没有 hover：复制入口默认藏起来，点一下内容区才浮出来（与消息操作行同一做法）
+  const [copyVisible, setCopyVisible] = useState(false);
+
+  // 关掉弹窗时复位，下一次打开仍是干净状态（复制的勾也不该留到下次）
+  useEffect(() => {
+    if (!open) {
+      setCopyVisible(false);
+      setCopied(false);
+    }
+  }, [open]);
 
   const copy = (): void => {
     // 剪贴板可能不可用（非安全上下文 / 无权限）：弹窗里的文字仍可手动选中复制，不额外报错
@@ -148,25 +158,40 @@ function DetailDialog({
         <DialogHeader>
           <DialogTitle>{title ?? tr("完整内容")}</DialogTitle>
           <DialogDescription>
-            {tr("这次调用的完整内容（列表里被截断了），可选中或用下方按钮复制。")}
+            {tr("这次调用的完整内容（列表里被截断了），可选中复制；点击内容会显示复制按钮。")}
           </DialogDescription>
         </DialogHeader>
-        <pre
-          // 全局默认禁选（styles.css 的白名单制）：这块是要拿去复制 / 贴给别人的，显式放开
-          data-selectable
-          className="max-h-[60vh] overflow-auto rounded-md bg-muted/50 px-2 py-1.5 font-mono text-xs leading-5 whitespace-pre-wrap break-all"
+        <div
+          className="relative max-h-[60vh] overflow-hidden rounded-md bg-muted/50"
+          onClick={() => setCopyVisible(true)}
         >
-          {detail}
-        </pre>
-        <Button
-          size="sm"
-          variant="outline"
-          className="w-fit justify-self-end"
-          onClick={copy}
-        >
-          {copied ? <CheckIcon className="size-4" /> : <CopyIcon className="size-4" />}
-          {copied ? tr("已复制") : tr("复制")}
-        </Button>
+          <pre
+            // 全局默认禁选（styles.css 的白名单制）：这块是要拿去复制 / 贴给别人的，显式放开
+            data-selectable
+            className="max-h-[60vh] overflow-auto px-2 py-1.5 font-mono text-xs leading-5 whitespace-pre-wrap break-all"
+          >
+            {detail}
+          </pre>
+          {copyVisible && (
+            <button
+              type="button"
+              title={copied ? tr("已复制") : tr("复制")}
+              aria-label={copied ? tr("已复制") : tr("复制")}
+              onClick={(event) => {
+                event.stopPropagation();
+                copy();
+              }}
+              // 与消息操作行里的复制钮同一形态：无边框 / 无底色，只有图标
+              className="absolute right-1.5 bottom-1.5 rounded p-1 text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground"
+            >
+              {copied ? (
+                <CheckIcon className="size-4 text-emerald-500" />
+              ) : (
+                <CopyIcon className="size-4" />
+              )}
+            </button>
+          )}
+        </div>
       </DialogContent>
     </Dialog>
   );

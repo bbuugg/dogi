@@ -10,7 +10,7 @@
  *
  * 落检查点：摘要写进会话的 `contextSummary`，之后每轮组装历史时都从这里切片
  * （摘要消息 + 检查点之后的原文，见 `chat-turn.ts` 的 `historyForTurn`）。
- * 原始消息一条不动，清除检查点即回到全文。
+ * 原始消息一条不动。
  *
  * 仅内置 agent（内置）会话可用：ACP 会话的历史在 agent 侧，本地摘要没有意义。
  * 摘要请求失败直接报错返回，**不落检查点** —— 落一个没有正文的检查点等于永久丢失旧上下文。
@@ -201,18 +201,4 @@ export async function POST(request: Request) {
       await write({ type: 'error', message: describeError(err).message })
     }
   })
-}
-
-/**
- * 清除摘要检查点：DELETE /api/chat/compress，body `{ conversationId }`。
- * 原始消息一直都在，删掉的只是「替代关系」—— 之后每轮回到全文历史。
- */
-export async function DELETE(request: Request) {
-  const body = await parseJsonBody<{ conversationId?: string }>(request)
-  if (!body?.conversationId) return jsonError(400, '缺少 conversationId')
-  const conversation = domain.getConversation(body.conversationId)
-  if (!conversation) return jsonError(404, '会话不存在')
-  domain.setContextSummary(conversation.id, null)
-  markDirty(['conversations'])
-  return Response.json({ ok: true })
 }

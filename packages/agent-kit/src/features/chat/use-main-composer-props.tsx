@@ -7,6 +7,7 @@ import {
 import { type ChatComposerProps } from "@fizz/agent-kit/features/chat/chat-surface";
 import { ConfirmQueue } from "@fizz/agent-kit/features/chat/ConfirmCard";
 import { ModelSelect } from "@fizz/agent-kit/features/chat/ModelSelect";
+import { ReasoningEffortSelect } from "@fizz/agent-kit/features/chat/ReasoningEffortSelect";
 import { QuotePreviewRow } from "@fizz/agent-kit/features/chat/quotes";
 import { usePromptInputController } from "@fizz/agent-kit/shared/ai-elements/prompt-input";
 import {
@@ -373,6 +374,8 @@ export function useMainComposerProps(
             分子 / 分母；本地压缩那几项对 ACP 不可用，组件里按 isAcp 隐掉 */}
         <ContextRing app={app} />
         <ModelSelect app={app} />
+        {/* 思考强度：内置 Agent 专属；ACP 的思考档由下面的 AcpThoughtLevelSelect 负责 */}
+        {!isAcp && <ReasoningEffortSelect app={app} />}
         {/* 模式：**只有 opencode 风格**才显示（build / plan），摆在模型选择器之后；
             没有模式时返回 null —— 不做中性 pill */}
         <AcpModePill app={app} />

@@ -232,9 +232,9 @@ export const ReasoningTrigger = memo(
               /*
                * 折叠 + 流式时的行内实时预览。`min-w-0 flex-1`：与触发器的 `w-fit max-w-full`
                * 搭配 —— 文字短时整行贴合内容（右侧箭头紧跟），长了就顶满并把旧字从左边推出。
-               * 刚换行、最后一行还是空的时刻留一个闪烁光标，不然那一瞬间预览会整个消失，
-               * 看着像「思考停了」。换行后的「整体上跳」由 reasoningPreviewLine 切最后一行实现，
-               * 与这里行内的横向推出互补：纵向跟最新行、横向跟最新字。
+               * 换行后的「整体上跳」由 reasoningPreviewLine 切最后一行实现，与这里行内的
+               * 横向推出互补：纵向跟最新行、横向跟最新字。最后一行暂时为空时宁可让预览
+               * 消失，也不补闪烁光标（用户明确不要那个光标）。
                */
               <span
                 ref={previewRef}
@@ -242,9 +242,7 @@ export const ReasoningTrigger = memo(
               >
                 {previewText ? (
                   <span className="inline-block w-max">{previewText}</span>
-                ) : (
-                  <span className="animate-pulse">▍</span>
-                )}
+                ) : null}
               </span>
             ) : null}
             <ChevronRightIcon

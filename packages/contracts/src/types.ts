@@ -324,6 +324,44 @@ export type AiPermissionMode = 'full' | 'confirm' | 'readonly'
  */
 export type AgentBackend = 'builtin' | 'acp'
 
+/**
+ * 一轮内置 Agent 的思考强度（AI SDK `CallSettings.reasoning` 的取值）。
+ *
+ * 缺省 / `undefined` = 不传，交给模型自己决定（不是 `provider-default`，语义相同但
+ * 少发一个字段）。AI SDK 没有公开的模型能力查询，不支持的档位由 provider 降级 / 丢弃；
+ * UI 滑块覆盖「默认 / 无 / 最小 / 低 / 中 / 高 / 极高 / 最高」八档。
+ *
+ * ACP 会话不使用这个字段：外部 Agent 的思考档走 `acpThoughtLevel`。
+ */
+export type AiReasoningEffort =
+  | 'provider-default'
+  | 'none'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max'
+
+/** 全部合法档位（配置 / HTTP 入参归一化用；UI 滑块展示默认与 none→max 共八档） */
+export const AI_REASONING_EFFORTS = [
+  'provider-default',
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max'
+] as const satisfies readonly AiReasoningEffort[]
+
+/** 把任意输入归一成合法档位；非法 / 缺省 = `undefined`（跟随模型默认） */
+export function normalizeReasoningEffort(value: unknown): AiReasoningEffort | undefined {
+  return typeof value === 'string' && (AI_REASONING_EFFORTS as readonly string[]).includes(value)
+    ? (value as AiReasoningEffort)
+    : undefined
+}
+
 // ---------- ask_followup_question：AI 向用户提结构化选择题 ----------
 
 /** 一个选项的展示形态：纯文本，或带说明的对象 */
@@ -955,7 +993,7 @@ export interface ConversationContextSummary {
  * 与 `ConversationContextSummary` 一样只影响「发往模型的历史」，原始消息一条不动。
  *
  * 为什么不复用 `contextSummary`：
- * - 那个是用户点「压缩」的检查点，界面会显示「已开启摘要压缩」，还会被「清除摘要」按钮清掉；
+ * - 那个是用户点「压缩」的检查点，界面会显示「已开启摘要压缩」；
  * - 自动压缩是后台行为，不该出现在那个位置，也不该被那个按钮一并清掉
  *   （清了就退回每轮重算摘要）。
  */
@@ -1560,6 +1598,11 @@ export interface AgentConversation {
    *   （那是 agent 侧的缺省，不是 Fizz 的设置）。
    */
   modelId?: string
+  /**
+   * 内置 Agent 这一轮用多强的思考（缺省 = 跟随模型，见 `AiReasoningEffort`）。
+   * 按会话记住，切换模型不丢；ACP 会话不读这个字段（那边用 `acpThoughtLevel`）。
+   */
+  reasoningEffort?: AiReasoningEffort
   createdAt: number
   updatedAt: number
   /**

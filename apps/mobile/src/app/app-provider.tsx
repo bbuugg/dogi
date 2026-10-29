@@ -18,6 +18,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ShellDetectResult } from '@fizz/shells'
 import type { WorkspaceConfigSnapshot } from '@fizz/contracts/workspace-config'
 import { useAgentApp } from '@fizz/agent-kit/shared/hooks/useAgentApp'
+import { useAgentStore } from '@fizz/agent-kit/shared/lib/stores/agent-store'
 import { useTheme } from '@fizz/agent-kit/shared/hooks/useTheme'
 import { useTriggers } from '@fizz/agent-kit/shared/hooks/useTriggers'
 import { useTerminalShell, getTerminalShell } from '@fizz/agent-kit/shared/lib/terminal-shell'
@@ -85,13 +86,26 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
    */
   const openConversation = useCallback(
     (conversationId: string, workspaceId?: string): void => {
-      // 只在真要跨工作区时才切，且**不让它顺手开「该工作区最新会话」**：
-      // selectWorkspace 的默认行为是自动打开最新会话，紧接着这里又打开目标会话 ——
-      // 两次 loadMessages 竞速，模型选择等状态先 A 后 B 闪一下。
-      // 新建会话时更糟：conversationsRef 还没同步到刚建好的会话，selectWorkspace
-      // 会先打开「上一个会话」再切回来 —— 这就是新建会话后页面闪一下的来源。
-      if (workspaceId && workspaceId !== app.activeWorkspaceId) {
-        app.selectWorkspace(workspaceId, false)
+      /*
+       * 打开会话时把当前工作区也切到它所属的工作区。
+       *
+       * 通知点击只带会话 id；原来只在显式传 `workspaceId` 时才切，于是通知从别的
+       * 工作区跳回来后会留下「对话标签是 A、activeWorkspaceId 还是 B」的错位 ——
+       * 快捷操作 / 上传源 / 终端入口 / git 状态都读全局工作区，全落到 B 上。
+       *
+       * ⚠️ 必须读点击时的 store 快照：原生通知的 onClick 会保存到用户点击为止，
+       * 闭包里的 `app` 可能已经过期。选择工作区时传 false，避免顺手打开该工作区
+       * 最新会话和下面这次 openConversation 竞速。
+       */
+      const current = useAgentStore.getState()
+      const targetWorkspaceId =
+        workspaceId ??
+        current.conversations.find((c) => c.id === conversationId)?.workspaceId
+      if (
+        targetWorkspaceId &&
+        targetWorkspaceId !== current.activeWorkspaceId
+      ) {
+        app.selectWorkspace(targetWorkspaceId, false)
       }
       void app.openConversation(conversationId)
       const open = allTabKeys()

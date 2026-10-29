@@ -80,8 +80,6 @@ export interface CoreSlice {
    * 返回给调用方（popover）决定 toast 什么。
    */
   compressContextNow: () => Promise<{ ok: boolean; reason?: string }>
-  /** 清除摘要检查点，回到全文历史 */
-  clearContextSummary: () => Promise<{ ok: boolean; reason?: string }>
 }
 
 /** contextNotice 的自动消失：8 秒后清掉。它是「发生了什么」的提示，不该一直挂着 */
@@ -155,26 +153,6 @@ const createCoreSlice: StateCreator<AgentStore, [], [], CoreSlice> = (set, get) 
       return { ok: false, reason: err instanceof Error ? err.message : String(err) }
     } finally {
       set({ contextCompressing: false })
-    }
-  },
-  clearContextSummary: async () => {
-    const conversationId = get().activeConversationId
-    if (!conversationId) return { ok: false, reason: '没有打开的会话' }
-    const api = get().getApi()
-    if (!api) return { ok: false, reason: '还没有连接到服务端' }
-    try {
-      const res = await api.clearContextSummary(conversationId)
-      if (res.ok) {
-        set((state) => ({
-          conversations: state.conversations.map((c) =>
-            c.id === conversationId ? { ...c, contextSummary: undefined } : c
-          )
-        }))
-        return { ok: true }
-      }
-      return { ok: false, reason: res.reason }
-    } catch (err) {
-      return { ok: false, reason: err instanceof Error ? err.message : String(err) }
     }
   }
 })
