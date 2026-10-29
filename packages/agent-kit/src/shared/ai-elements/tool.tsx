@@ -16,6 +16,7 @@ import {
   CircleIcon,
   ClockIcon,
   CopyIcon,
+  Loader2Icon,
   Square,
   WrenchIcon,
   XCircleIcon,
@@ -64,6 +65,16 @@ export type ToolHeaderProps = {
   onStop?: () => void;
   /** 停止钮文案（缺省「停止」） */
   stopLabel?: string;
+  /**
+   * 这一条是不是**本轮直播里还在跑**（所属消息仍在流式）。
+   *
+   * 只有它为真时，运行态才画成转圈的 loading。历史里因异常中断残留的未结算 part
+   * （用户停止 / 断线 / 进程被杀）也停在 `input-streaming` / `input-available`，
+   * 给它们转圈等于在说「它还在跑」—— 所以那两档在非直播时退回静态图标。
+   *
+   * 缺省 true：自造头部的调用方（插件面板等）不必关心这个区别。
+   */
+  live?: boolean;
   className?: string;
 };
 
@@ -91,16 +102,38 @@ const isSettled = (state: ToolUIPart["state"]) =>
  *   而状态是**次要信息**，不该抢戏。
  *
  * 图标自身的语义色保留（绿=完成 / 红=出错 / 黄=等审批），那是唯一还在传递状态的东西。
+ *
+ * ⚠️ 这张表只放**结算 / 审批**两类的静态图标；「还在跑」那两档由 `statusIcon` 换成转圈的
+ * loading，见那里的说明。
  */
 const STATUS_ICONS: Record<ToolUIPart["state"], ReactNode> = {
   "input-streaming": <CircleIcon className="size-4 shrink-0" />,
-  "input-available": <ClockIcon className="size-4 shrink-0 animate-pulse" />,
+  "input-available": <ClockIcon className="size-4 shrink-0" />,
   "approval-requested": <ClockIcon className="size-4 shrink-0 text-yellow-600" />,
   "approval-responded": <CheckCircleIcon className="size-4 shrink-0 text-blue-600" />,
   "output-available": <CheckCircleIcon className="size-4 shrink-0 text-green-600" />,
   "output-error": <XCircleIcon className="size-4 shrink-0 text-red-600" />,
   "output-denied": <XCircleIcon className="size-4 shrink-0 text-orange-600" />,
 };
+
+/** 「还在跑」的两档：入参正在生成（模型还在写这个调用）、已收到完整入参（工具在执行） */
+const RUNNING_STATES = new Set<ToolUIPart["state"]>(["input-streaming", "input-available"]);
+
+/**
+ * 状态图标：**在跑的转圈**，其余按 `STATUS_ICONS`。
+ *
+ * 转圈是「还没结束」最直白的信号 —— 原来 `input-available` 是一颗 `animate-pulse` 的时钟，
+ * 脉冲幅度太小，扫一眼看不出和静止图标的区别（长命令、`sleep 30` 这种几秒不动的尤其明显）。
+ *
+ * `live` 是必需的门：非直播（历史里残留的未结算 part）时**不能转** —— 那一轮早就没了，
+ * 转圈会让人以为它还在跑。那时退回静态的圆圈 / 时钟。
+ */
+const statusIcon = (state: ToolUIPart["state"], live: boolean) =>
+  live && RUNNING_STATES.has(state) ? (
+    <Loader2Icon className="size-4 shrink-0 animate-spin" />
+  ) : (
+    STATUS_ICONS[state]
+  );
 
 /**
  * 状态文案（**中文为源**，英文见 `packages/i18n/src/en.ts` 的「工具卡的状态 tooltip」一节）。
@@ -116,8 +149,6 @@ const STATUS_LABELS: Record<ToolUIPart["state"], string> = {
   "output-error": "出错",
   "output-denied": "已拒绝",
 };
-
-const statusIcon = (status: ToolUIPart["state"]) => STATUS_ICONS[status];
 
 /**
  * 明细的全文弹窗（触屏 / 窄窗口共用）。
@@ -214,6 +245,7 @@ export const ToolHeader = ({
   status,
   onStop,
   stopLabel,
+  live = true,
   ...props
 }: ToolHeaderProps) => {
   const tr = useT();
@@ -304,8 +336,8 @@ export const ToolHeader = ({
           ))}
         {/*
          * 状态：只有一颗图标，文案挪进 tooltip。
-         * 图标本身已经把状态说清楚了（绿勾 / 红叉 / 脉冲时钟），而这一行还要装工具名和明细，
-         * 文字挂在旁边只会先把明细挤断 —— 想要确切说法的人悬停一下就有。
+         * 图标本身已经把状态说清楚了（转圈 = 还在跑 / 绿勾 / 红叉 / 黄钟），而这一行还要装
+         * 工具名和明细，文字挂在旁边只会先把明细挤断 —— 想要确切说法的人悬停一下就有。
          */}
         <Tooltip delayDuration={100}>
           <TooltipTrigger asChild>
@@ -315,7 +347,7 @@ export const ToolHeader = ({
               aria-label={tr(STATUS_LABELS[state])}
               className="inline-flex shrink-0 items-center"
             >
-              {statusIcon(state)}
+              {statusIcon(state, live)}
             </span>
           </TooltipTrigger>
           <TooltipContent>{tr(STATUS_LABELS[state])}</TooltipContent>

@@ -28,7 +28,7 @@ import {
   Reasoning,
   ReasoningContent,
   ReasoningTrigger,
-  reasoningPreviewLine,
+  reasoningPreview,
 } from '@fizz/agent-kit/shared/ai-elements/reasoning'
 import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput } from '@fizz/agent-kit/shared/ai-elements/tool'
 import { useAgentStore } from '@fizz/agent-kit/shared/lib/stores/agent-store'
@@ -93,8 +93,9 @@ function ReasoningView({ text, streaming }: { text: string; streaming: boolean }
     else if (autoClose) setOpen(false)
   }, [streaming, autoClose])
 
-  // 折叠 + 流式 → 触发行上多跟一行实时预览（最新一行）；不折叠 / 不流式时传 undefined
-  const previewText = !open && streaming && text.trim() ? reasoningPreviewLine(text) : undefined
+  // 折叠 + 流式 → 触发行上多跟一行实时预览（最新一行）；不折叠 / 不流式时传 undefined。
+  // `lineKey` 一起传：预览靠它判「换行」，好把这一行整体上滚一格（见 reasoningPreview）。
+  const preview = !open && streaming && text.trim() ? reasoningPreview(text) : undefined
 
   return (
     <Reasoning
@@ -109,7 +110,7 @@ function ReasoningView({ text, streaming }: { text: string; streaming: boolean }
         setOpen(next)
       }}
     >
-      <ReasoningTrigger previewText={previewText} />
+      <ReasoningTrigger previewText={preview?.line} previewLineKey={preview?.lineKey} />
       <ReasoningContent>{text}</ReasoningContent>
     </Reasoning>
   )
@@ -147,6 +148,7 @@ function ToolCallCard({
   status,
   defaultOpen,
   onStop,
+  live = true,
   children
 }: {
   title: string
@@ -160,6 +162,13 @@ function ToolCallCard({
   defaultOpen?: boolean
   /** 工具在飞（pending / 执行中）时给的停止回调，透传给头部那颗停止钮 */
   onStop?: () => void
+  /**
+   * 这一条是不是**本轮直播里还在跑**：决定运行态图标转不转（见 ToolHeader 的 `live`）。
+   *
+   * 历史里因异常中断残留的未结算 part 也停在运行态，那里必须给静态图标 ——
+   * 一直转圈等于在说「它还在跑」，而那一轮早就结束了。
+   */
+  live?: boolean
   children: ReactNode
 }) {
   /** 「折叠工具 / 全部折叠」= 默认收起；其余两档 = 默认展开（用户改设置时已渲染的卡片也跟着变） */
@@ -215,6 +224,7 @@ function ToolCallCard({
         detail={detail}
         status={status}
         onStop={onStop}
+        live={live}
       />
       <ToolContent>{body}</ToolContent>
     </Tool>
@@ -864,6 +874,7 @@ function PartViewInner({
       <ToolCallCard
         type={`tool-${part.toolName}` as ToolUIPart['type']}
         state={state}
+        live={turnLive}
         {...cardHead(
           part,
           items.length ? t('{done}/{total} 已完成', { done, total: items.length }) : undefined
@@ -903,6 +914,7 @@ function PartViewInner({
       <ToolCallCard
         type={`tool-${part.toolName}` as ToolUIPart['type']}
         state={state}
+        live={turnLive}
         {...cardHead(part, delegationPromptOf(part.input))}
         // 运行态挂在**头部**（工具名右边），内容区只放子任务产出，不再为它单开一行
         status={
@@ -942,6 +954,7 @@ function PartViewInner({
       <ToolCallCard
         type={`tool-${part.toolName}` as ToolUIPart['type']}
         state={state}
+        live={turnLive}
         {...cardHead(part, `$ ${cmd}`)}
         // 运行中**强制展开**：实时输出是这块卡存在的意义，折叠起来等于白流
         defaultOpen
@@ -960,6 +973,7 @@ function PartViewInner({
       <ToolCallCard
         type={`tool-${part.toolName}` as ToolUIPart['type']}
         state={state}
+        live={turnLive}
         {...cardHead(part, preview?.detail)}
         // 有内容可看才自动展开：命令类只有头部明细，展开是一片空白
         defaultOpen={Boolean(preview?.text)}
@@ -989,6 +1003,7 @@ function PartViewInner({
       <ToolCallCard
         type={`tool-${part.toolName}` as ToolUIPart['type']}
         state={state}
+        live={turnLive}
         {...cardHead(part, detail)}
         onStop={onStop}
       >
@@ -1011,6 +1026,7 @@ function PartViewInner({
       // ai-elements 的头部按 `tool-xxx` 前缀推断图标/文案，我们补一个中文标题覆盖它
       type={`tool-${part.toolName}` as ToolUIPart['type']}
       state={state}
+      live={turnLive}
       {...cardHead(part)}
       onStop={onStop}
     >

@@ -128,19 +128,25 @@ export type ReasoningTriggerProps = ComponentProps<typeof CollapsibleTrigger> & 
   getThinkingMessage?: (isStreaming: boolean, duration?: number) => ReactNode;
   /**
    * 折叠 + 流式时，紧跟在「正在思考…」后面那一行**实时预览**（已切好最后一行）。
-   * undefined = 不显示。调用方负责在不该显示时传 undefined，原因见 `reasoningPreviewLine`。
+   * undefined = 不显示。调用方负责在不该显示时传 undefined，原因见 `reasoningPreview`。
    */
   previewText?: string;
+  /**
+   * 上面那一行的行号（`reasoningPreview` 返回的 `lineKey`）——「换行滚一格」的**唯一**判据。
+   * undefined 时只横滚、不滚行（预览内容不是逐行推进的调用方可以不给）。
+   */
+  previewLineKey?: number;
 };
 
 /**
- * 思考正文 → 行内预览的那一行。
+ * 思考正文 → 行内预览：**最后一行**的纯文本 + 这一行的行号。
  *
- * **只取最后一行**（最后一个 `\n` 之后那段）—— 这就是「出现换行就向上滚一下」的全部含义：
- * 一行的高度只放得下一行，与其把整段塞进来再靠 CSS 截断（那样永远只看得见开头几个字），
- * 不如让这一行始终跟着**最新的一行**走：换行发生的那一刻，露出来的内容整体往上跳一格。
- * 还没出现换行时就是同一行内的流式增长，超出宽度时把前面的字从左边顶出去（见
- * ReasoningTrigger 里的预览窗口），永远露出最新的结尾。
+ * **只取最后一行**（最后一个 `\n` 之后那段）—— 一行的高度只放得下一行，与其把整段塞进来
+ * 再靠 CSS 截断（那样永远只看得见开头几个字），不如让这一行始终跟着**最新的一行**走。
+ *
+ * 返回的 `lineKey`（最后一个 `\n` 的下标）是「换行发生了」的判据，交给 `ReasoningPreview`
+ * 决定要不要把预览整体上滚一格。⚠️ **不能靠「新文本不是旧文本的前缀」来判换行**：
+ * 下面剥 markdown 记号时，`**bo` → `bo` 就不是前缀了，会被误判成换行、凭空滚一下。
  *
  * 顺手去掉的 markdown 记号：预览是纯文本一行，`**粗体**` / `` `代码` `` / `- 列表` 这些
  * 记号留在一行里只是噪点（又要省掉重新解析 markdown 的开销）。
@@ -149,9 +155,10 @@ export type ReasoningTriggerProps = ComponentProps<typeof CollapsibleTrigger> & 
  * 把原始 text 传进来的话，展开状态下每来一个 token 都会改 props，`memo` 的
  * ReasoningTrigger 连同里面的 Shimmer 就跟着重渲染（现在它们在展开时是不重渲染的）。
  */
-export function reasoningPreviewLine(text: string): string {
-  return text
-    .slice(text.lastIndexOf("\n") + 1)
+export function reasoningPreview(text: string): { line: string; lineKey: number } {
+  const lineKey = text.lastIndexOf("\n");
+  const line = text
+    .slice(lineKey + 1)
     // 行首的标题 / 引用 / 列表符号（「-5 是负数」里的「-」后面没空格，不会误伤）
     .replace(/^\s*(?:#{1,6}|>|[-*+]|\d+[.)])\s+/, "")
     .replace(/`([^`]*)`/g, "$1") // 行内代码
@@ -160,7 +167,147 @@ export function reasoningPreviewLine(text: string): string {
     .replace(/[*_~]+/g, "") // 其余强调 / 删除线记号
     .replace(/\s+/g, " ")
     .trim();
+  return { line, lineKey };
 }
+
+/**
+ * 换行滚动的两半动画。**必须同长**（200ms），否则一进一出对不上，看着像两行在错位。
+ *
+ * `fill-mode-forwards` 是滚出去那一半的必要条件：`animate-out` 默认
+ * `animation-fill-mode: none`，动画一结束就弹回原位（0），在窗口里重新露出来 ——
+ * 表现就是「滚上去又跳回来」。
+ *
+ * `motion-reduce:hidden`：关掉动画时滚出去那行会一直停在原位盖住新行，索性整行不画
+ * （只留「直接换行」的效果）。
+ */
+const ROLL_IN =
+  "animate-in slide-in-from-bottom duration-200 ease-out";
+const ROLL_OUT =
+  "animate-out slide-out-to-top duration-200 ease-out fill-mode-forwards motion-reduce:hidden";
+
+/**
+ * 预览里的一行文本：超出宽度时**横向跟最新字**。
+ *
+ * 不是 truncate（那样永远只看得见开头，而最新内容在尾部），也不是
+ * `scrollLeft = scrollWidth`（那是**每来一颗 token 硬跳一格**，看起来一格一格地抖 ——
+ * 用户原话「很生硬」）。做法是让文字躺在 `w-max` 轨道上、窗口 `overflow-hidden`，
+ * 把轨道 `translateX(-溢出量)`，溢出量变化由 CSS transition 追着走：token 密集时
+ * 就是一段连续的平滑滚动，稀疏时也只是一次短促的滑动。
+ *
+ * ⚠️ 首帧落位**不能**带过渡：挂载时（新行 / 上一行）从 0 滑到尾部，看起来像整行被
+ * 从开头抽走。所以第一次先关掉 transition 直接落位，下一帧再交还给 class。
+ *
+ * ⚠️ 位置靠 `ResizeObserver` 跟，不是靠 `[text]` 依赖：文字变长会改轨道宽度（观察轨道），
+ * 面板被拖宽会改窗口宽度（观察窗口）—— 后者不跟的话，拖完面板预览会停在一个错的
+ * 位移上，尾部被裁掉。
+ */
+const PreviewTrack = memo(function PreviewTrack({ text }: { text: string }) {
+  const trackRef = useRef<HTMLSpanElement>(null);
+
+  useLayoutEffect(() => {
+    const track = trackRef.current;
+    const win = track?.parentElement;
+    if (!track || !win) return;
+
+    const place = (instant: boolean) => {
+      const overflow = Math.max(0, track.offsetWidth - win.clientWidth);
+      const shift = `translateX(${-overflow}px)`;
+      if (!instant) {
+        track.style.transform = shift;
+        return;
+      }
+      track.style.transition = "none";
+      track.style.transform = shift;
+      // 下一帧交还给 class 上的过渡，否则后面每一次位移也都是硬跳
+      requestAnimationFrame(() => {
+        track.style.transition = "";
+      });
+    };
+
+    place(true);
+    const observer = new ResizeObserver(() => place(false));
+    observer.observe(win);
+    observer.observe(track);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <span
+      ref={trackRef}
+      className="inline-block w-max transition-transform duration-150 ease-out motion-reduce:transition-none"
+    >
+      {text}
+    </span>
+  );
+});
+
+/**
+ * 折叠 + 流式时触发行上那一行实时预览：**横向跟最新字、纵向跟最新行**。
+ *
+ * 纵向是「换行时整行往上滚一格」：同时挂两行 ——
+ *   · 当前行在**流内**（`block`），撑出窗口宽度、并且带 `ROLL_IN` 从下方 100% 升上来；
+ *   · 上一行**绝对定位**叠在同一个窗口里，带 `ROLL_OUT` 从 0 滚到 -100% 停住。
+ * 两行都靠 `key` 换新：当前行 key = 行号，行号一变就重新挂载、动画从头播；
+ * 上一行是换行那一刻从 state 里取到的「上一行的最终文本」。
+ *
+ * ⚠️ 判「换行」只能用 `lineKey`（见 `reasoningPreview`），不能比对文本前缀。
+ * ⚠️ 窗口高度写死 `h-5`（= `text-sm` 的 20px 行高）：绝对定位的上一行需要窗口有确定
+ * 高度才裁得干净。改触发行的字号时这里要跟着改，否则会露半行。
+ */
+const ReasoningPreview = memo(function ReasoningPreview({
+  text,
+  lineKey,
+}: {
+  text: string;
+  lineKey: number;
+}) {
+  /*
+   * 「当前行」镜像成 state 而不是直接用 props：换行那一刻要拿到**上一行的最终文本**
+   * 去渲染滚出去的那行，而 props 里只剩新行了。渲染期 setState 是 React 认可的
+   * 「props 变了就调整 state」写法，会立刻再渲染一次、不会多一帧旧内容。
+   */
+  const [cur, setCur] = useState({ key: lineKey, text });
+  const [prev, setPrev] = useState<{ key: number; text: string } | null>(null);
+
+  /*
+   * ⚠️ 空行不滚。`\n` 常常单独一个 token 先到，下一颗 token 才出字 —— 那一下如果照滚，
+   * 窗口会先滚成一个空白（宽度也塌成 0），等字来了行号又没变、不会再滚第二次，
+   * 结果就是「空白一下，然后文字凭空冒出来」，等于没动画。
+   * 所以新行还没出字时**继续显示上一行**，等出字了再一起滚。
+   */
+  if (text) {
+    if (cur.key !== lineKey) {
+      setPrev(cur);
+      setCur({ key: lineKey, text });
+    } else if (cur.text !== text) {
+      setCur({ key: lineKey, text });
+    }
+  }
+
+  return (
+    <span className="relative h-5 min-w-0 flex-1 overflow-hidden whitespace-nowrap text-muted-foreground">
+      {prev ? (
+        /* 纯视觉的滚出层：同一段字已经在当前行里，别让读屏念两遍 */
+        <span
+          /*
+           * key 带 `prev-` 前缀：换行时「上一行」的 key 恰好等于刚退位那行的 key，
+           * 不带前缀 React 会把那个 DOM 节点挪过来复用 —— `PreviewTrack` 里量好的
+           * `translateX` 是按**旧窗口宽度**算的，而窗口宽度跟着新行变了，滚出去的
+           * 那行尾部就对不上右边缘（会横着错开一截）。带前缀让它重新挂载、重新量。
+           */
+          key={`prev-${prev.key}`}
+          aria-hidden
+          className={cn("absolute inset-0 h-5 overflow-hidden", ROLL_OUT)}
+        >
+          <PreviewTrack text={prev.text} />
+        </span>
+      ) : null}
+      <span key={`cur-${cur.key}`} className={cn("block h-5 overflow-hidden", ROLL_IN)}>
+        <PreviewTrack text={cur.text} />
+      </span>
+    </span>
+  );
+});
 
 /**
  * 思考条的默认触发文案（中英都走 `t()`；英文见 `packages/i18n/src/en.ts`）。
@@ -187,24 +334,12 @@ export const ReasoningTrigger = memo(
     children,
     getThinkingMessage = defaultGetThinkingMessage,
     previewText,
+    previewLineKey,
     ...props
   }: ReasoningTriggerProps) => {
     const { isStreaming, isOpen, duration } = useReasoning();
     // 订阅语言：memo 组件不订阅的话，切语言时这行字不会跟着变（见 defaultGetThinkingMessage）
     useT();
-
-    /*
-     * 预览窗口：超出宽度**不 truncate**（那永远只看得见开头，而最新内容在尾部），
-     * 而是让文字躺在 `w-max` 轨道上、窗口 `overflow-x-hidden`，每次内容更新把
-     * scrollLeft 钉到最右 —— 未超宽时等于 0（无副作用），超宽后每颗 token 都把
-     * 前面的字往左顶一格，露出的始终是最新结尾（与消息贴底、终端跟随同一套逻辑）。
-     * useLayoutEffect 在绘制前同步执行，不会闪出旧内容。
-     */
-    const previewRef = useRef<HTMLSpanElement>(null);
-    useLayoutEffect(() => {
-      const win = previewRef.current;
-      if (win) win.scrollLeft = win.scrollWidth;
-    }, [previewText]);
 
     return (
       /*
@@ -227,26 +362,21 @@ export const ReasoningTrigger = memo(
         {children ?? (
           <>
             <BrainIcon className="size-4 shrink-0" />
-            {/* 预览在时标题不许被压缩（min-w-0 留给预览那一格去 truncate） */}
+            {/* 预览在时标题不许被压缩（min-w-0 留给预览那一格，它自己横向滚动） */}
             <span className={cn("truncate", previewText != null && "shrink-0")}>
               {getThinkingMessage(isStreaming, duration)}
             </span>
             {previewText != null ? (
               /*
-               * 折叠 + 流式时的行内实时预览。`min-w-0 flex-1`：与触发器的 `w-fit max-w-full`
-               * 搭配 —— 文字短时整行贴合内容（右侧箭头紧跟），长了就顶满并把旧字从左边推出。
-               * 换行后的「整体上跳」由 reasoningPreviewLine 切最后一行实现，与这里行内的
-               * 横向推出互补：纵向跟最新行、横向跟最新字。最后一行暂时为空时宁可让预览
-               * 消失，也不补闪烁光标（用户明确不要那个光标）。
+               * 折叠 + 流式时的行内实时预览：横向跟最新字、纵向跟最新行（换行滚一格）。
+               * 窗口的宽度由流内的当前行撑出（`min-w-0 flex-1` 与触发器的 `w-fit max-w-full`
+               * 搭配：文字短时整行贴合内容、右侧箭头紧跟，长了就顶满并把旧字从左边推出）。
+               * 实现与坑见 `ReasoningPreview`。
                */
-              <span
-                ref={previewRef}
-                className="min-w-0 flex-1 overflow-x-hidden whitespace-nowrap text-muted-foreground"
-              >
-                {previewText ? (
-                  <span className="inline-block w-max">{previewText}</span>
-                ) : null}
-              </span>
+              <ReasoningPreview
+                text={previewText}
+                lineKey={previewLineKey ?? -1}
+              />
             ) : null}
             <ChevronRightIcon
               className={cn(
