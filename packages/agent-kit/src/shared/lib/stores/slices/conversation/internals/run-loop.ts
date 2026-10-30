@@ -490,6 +490,7 @@ export function createConversationRunLoop(ctx: ConvCore) {
             updatedAt: Date.now(),
           },
           liveText: {},
+          liveParts: {},
         };
         const collab = applyCollabEvent(base, event);
         return { ...s, collab };
@@ -672,7 +673,7 @@ export function createConversationRunLoop(ctx: ConvCore) {
           if (get().activeConversationId === conversationId) {
             writeSlice(conversationId, (s) => ({
               ...s,
-              collab: { state: collab, liveText: {} },
+              collab: { state: collab, liveText: {}, liveParts: {} },
             }));
           }
         } catch (err) {

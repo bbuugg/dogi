@@ -41,7 +41,8 @@
  * 展开 / 收起时同样要 holdScroll() 暂停自动贴底，否则视图会被拽走。
  */
 import { useState, type ReactNode } from 'react'
-import { Brain, ChevronRight, Wrench } from 'lucide-react'
+import { Brain, ChevronRight, Square, Wrench } from 'lucide-react'
+import { Button } from '@fizz/ui/button'
 import { ShimmerLabel } from '@fizz/agent-kit/shared/ai-elements/shimmer-label'
 import { WorkBars } from '@fizz/agent-kit/shared/ai-elements/work-bars'
 import { ReasoningPreview } from '@fizz/agent-kit/shared/ai-elements/reasoning'
@@ -61,6 +62,7 @@ export function TurnStepGroup({
   active = false,
   live = false,
   kind,
+  onStop,
   children
 }: {
   /** 抬头左格（最后做的那件事 / 已工作多久 / 计数摘要），由 `lib/turn-step.ts` 算好传进来 */
@@ -99,6 +101,25 @@ export function TurnStepGroup({
    * 「执行命令」之间来回闪 —— 用户看到的就是这行字抽风。
    */
   live?: boolean
+  /**
+   * 停掉**这一段里正在跑的那一步**（可选）：传了就渲染一颗停止钮，排在**箭头左侧**
+   * （名字 / 预览的最后、展开箭头的正前面），**且只在组收起时出现** ——
+   * 展开后内容区每张工具卡头部都有自己的停止钮，抬头不重复给第二颗。
+   *
+   * 只在「尾 part 是真在执行的、且支持单条停止」的工具上给（判据在 `message-parts.tsx`
+   * 的 `groupHead`，与工具卡头部那颗钮同一套 `isStoppableToolRunning`）：
+   * `execute_command` / `web_fetch` / 派活工具（`agent-*`）。其它工具没有单条取消通道，
+   * 挂上去要么点了没反应、要么等于偷偷中止整轮。
+   *
+   * 为什么需要它：过程一旦折进组里，工具卡自己的头部（连同那颗停止钮）就被收起来了。
+   * 用户看到「这步在乱跑」时，不该被迫先展开组、再找卡片、再点一次 —— 抬头那行本来就写着
+   * 「现在在干什么」，停止就该在它旁边。
+   *
+   * ⚠️ 按钮**不能塞进 CollapsibleTrigger 里**：触发器本身就是 `<button>`（Radix 渲染的），
+   * 套一层既是非法 HTML，点停止也会先被它当成开合热区吞掉一次（同一个坑见 `ToolHeader`
+   * 的 `onStop`）。所以这一行是「内容触发器 / 停止钮 / 箭头触发器」三段平级结构。
+   */
+  onStop?: () => void
   children: ReactNode
 }) {
   const tr = useT()
@@ -157,21 +178,18 @@ export function TurnStepGroup({
       <Brain className="size-4 shrink-0" />
     ) : null
 
-  return (
-    <Collapsible
-      open={open}
-      onOpenChange={(next) => {
-        conversation?.holdScroll()
-        setOpen(next)
-      }}
-      className="w-full"
-    >
-      {/* 触发行照抄 ReasoningTrigger 的口径（同样是「图标 + 一行摘要」）：`flex w-fit`
-          让箭头贴着摘要文字、不铺满整行；hover 整行提亮。
-          ⚠️ 必须是 `flex` 而不是 `inline-flex`：行内级盒子会被父级 line-height 撑出
-          一个更高的行盒（多出来的留白掉在下方），这条摘要就会比工具条偏上、
-          与下一条的间距也偏松 —— 详见 reasoning.tsx 的 ReasoningTrigger。 */}
-      <CollapsibleTrigger className="group group/row flex w-fit max-w-full items-center gap-2 rounded-md text-left text-muted-foreground text-sm transition-colors hover:text-foreground">
+  /*
+   * 内容触发器（图标 + 名字 + 预览）：抽成变量是因为它**不含箭头**了 —— 停止钮要排在
+   * 「预览」与「箭头」之间，而真正的按钮塞不进触发器（见下面 return 里的说明）。
+   *
+   * 照抄 ReasoningTrigger 的口径（同样是「图标 + 一行摘要」）：`flex w-fit`
+   * 不铺满整行；hover 整行提亮。
+   * ⚠️ 必须是 `flex` 而不是 `inline-flex`：行内级盒子会被父级 line-height 撑出
+   * 一个更高的行盒（多出来的留白掉在下方），这条摘要就会比工具条偏上、
+   * 与下一条的间距也偏松 —— 详见 reasoning.tsx 的 ReasoningTrigger。
+   */
+  const contentTrigger = (
+      <CollapsibleTrigger className="flex w-fit max-w-full min-w-0 items-center gap-2 rounded-md text-left text-muted-foreground text-sm transition-colors hover:text-foreground">
         {/* 左格最多**一个**图形，四档互斥（用条件而不是 hidden，不留空槽把名字推歪）：
             - 进行中 + 收起 → 三根跳动的竖条（位置标记，一眼看出这组在动）；
             - 进行中 + 展开 → 同样是三根竖条（`WorkBars`）：抬头这时是「正在工作…」，
@@ -202,11 +220,63 @@ export function TurnStepGroup({
             <span className="min-w-0 flex-1 truncate">{preview.text}</span>
           )
         ) : null}
-        {/* 箭头平时隐形、悬停整行才浮出来（规则见 `REVEAL_ON_HOVER_ARROW`）；触屏常显 */}
-        <ChevronRight
-          className={cn(REVEAL_ON_HOVER_ARROW, 'size-4 shrink-0 group-data-[state=open]:rotate-90')}
-        />
       </CollapsibleTrigger>
+  )
+
+  return (
+    <Collapsible
+      open={open}
+      onOpenChange={(next) => {
+        conversation?.holdScroll()
+        setOpen(next)
+      }}
+      className="w-full"
+    >
+      {/* 整行三段：内容触发器 → 停止钮 → 箭头触发器。`w-fit` 让三段贴着文字排，
+          不会被推到容器最右端（组抬头是一行摘要，不像工具卡那样需要贴右的按钮）。
+          `group/row` 挂在整行上：箭头「悬停这一行才浮现」要按这一行算 —— 规则与坑见
+          `REVEAL_ON_HOVER_ARROW`（消息气泡自带裸 group，用裸 `group-hover:` 会让整轮
+          所有箭头一起亮）。`min-w-0` 留给内容触发器：窄屏上长标题 / 长预览自己截断。 */}
+      <div className="group/row flex w-fit max-w-full min-w-0 items-center gap-2">
+        {contentTrigger}
+        {/* 停止钮排在**箭头左侧**、且**只在收起时给**（`!open`）。
+            - 收起态：抬头就是这一段的全部信息（一行摘要），要停只能在这儿停；
+            - 展开态：下面每张工具卡自己的头部都带停止钮，抬头再放一颗是重复，
+              而且抬头这时读的是「正在工作…」这类进行时描述，右边不该挤一个动作按钮。
+            它是真正的 <button>，塞不进内容触发器 —— `<button>` 套 `<button>` 是非法 HTML，
+            点停止还会被触发器当成开合热区吞掉一次，所以整行拆成两个平级触发器，按钮夹在中间。 */}
+        {onStop && !open ? (
+          <Button
+            size="icon-xs"
+            variant="outline"
+            aria-label={tr('停止')}
+            title={tr('停止')}
+            className="shrink-0"
+            onClick={onStop}
+          >
+            <Square className="size-3" />
+          </Button>
+        ) : null}
+        {/* 箭头单独成一个 Trigger：收起时贴在停止钮右侧，展开时直接跟到预览后面
+            （停止钮那时不渲染），仍然是开合热区（Radix 一个 Collapsible 可以挂多个
+            Trigger，点哪个都开合）。它自己带 `data-state`，所以旋转照旧用裸
+            `group-data-[state=open]`（自身就是那个 `.group`）。
+            纯图标按钮没有文字，靠 aria-label 报「展开 / 收起」。 */}
+        <CollapsibleTrigger
+          aria-label={open ? tr('收起') : tr('展开')}
+          className="group flex shrink-0 items-center rounded-md text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <ChevronRight
+            className={cn(
+              REVEAL_ON_HOVER_ARROW,
+              // 键盘 Tab 到这颗箭头 Trigger 上时箭头必须现身：`REVEAL_ON_HOVER_ARROW` 里的
+              // `group-focus-visible/row` 要求整行 `group/row` 自身被聚焦，而它是 div、
+              // 不可聚焦 —— 这里用 Trigger 自己的 `group` 补一条。
+              'size-4 shrink-0 group-focus-visible:opacity-100 group-data-[state=open]:rotate-90'
+            )}
+          />
+        </CollapsibleTrigger>
+      </div>
       <CollapsibleContent className="pt-2">
         <div className="flex flex-col gap-2">{children}</div>
       </CollapsibleContent>

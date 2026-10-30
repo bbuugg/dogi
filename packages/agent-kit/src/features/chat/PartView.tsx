@@ -16,10 +16,12 @@
  * ai-elements 期望的形状（`ToolUIPart['type']` / `['state']`）。
  */
 import { memo, useEffect, useRef, useState, type ReactNode } from 'react'
-import { CheckCircle2, Circle, FileText, ImageOff, Loader2, RefreshCw } from 'lucide-react'
+import { CheckCircle2, Circle, FileText, ImageOff, ListTree, Loader2, RefreshCw } from 'lucide-react'
 import { toast } from 'sonner'
+import { Button } from '@fizz/ui/button'
 import { ImageViewer } from '@fizz/ui/image-viewer'
 import { SpinnerButton } from '@fizz/ui/spinner-button'
+import { useOpenSubagent } from '@fizz/agent-kit/features/chat/subagent-view'
 import type { ToolUIPart } from 'ai'
 import { useStickToBottom } from 'use-stick-to-bottom'
 import { saveImageLocally } from '@fizz/agent-kit/shared/lib/image-download'
@@ -40,8 +42,8 @@ import { FileDiffView, type DiffHunk } from '@fizz/agent-kit/features/git/FileDi
 import {
   ASK_FOLLOWUP_TOOL,
   isCommandRunning,
+  isStoppableToolName,
   isStoppableToolRunning,
-  STOPPABLE_TOOLS,
   isErrorText,
   partialJsonString,
   toolCardHead,
@@ -59,7 +61,7 @@ import {
 } from '@fizz/agent-kit/shared/lib/terminal/display'
 import { collapsedBody, shouldRefreshSnapshot } from '@fizz/agent-kit/shared/lib/collapse-swap'
 import { loadMediaObjectUrl } from '@fizz/agent-kit/shared/lib/media-url'
-import type { AgentMessagePart, TodoItem } from '@fizz/contracts/types'
+import type { AgentMessagePart, SubagentDelegation, TodoItem } from '@fizz/contracts/types'
 import type { AskFollowupAnswer } from '@fizz/contracts/types'
 
 /**
@@ -293,8 +295,8 @@ function renderStreamingPreview(part: AgentMessagePart): { detail?: string; text
     partialJsonString(raw, 'filePath')
   const command = partialJsonString(raw, 'command') || partialJsonString(raw, 'cmd')
   const content = partialJsonString(raw, 'content') || partialJsonString(raw, 'newText')
-  // 命令类：明细已经移出头部（见 ToolHeaderProps.detail），命令得铺到内容区才有得看 ——
-  // 只给 detail 的话，卡片上除了标题就一片空白。
+  // 命令类：明细在触发行右侧单行截断显示（见 ToolHeaderProps.detail），这里再往内容区
+  // 铺一份完整命令 —— 头部那截会被省略号切掉，展开后要能看到原文。
   if (command) return { detail: `$ ${command}`, text: `$ ${command}` }
   if (path || content) {
     return {
@@ -482,9 +484,9 @@ function AcpTextBlock({ text, singleLine }: { text: string; singleLine?: boolean
  * 直显内容 + 明细。
  *
  * `content`：展开后的内容区（diff / 输出文本等）；
- * `detail`：命令 / 主入参，**不进头部**（头部只留标题，见 `ToolHeaderProps.detail`），
- * 只作为标题的 Tooltip 补充 / 触屏弹窗全文。命令类工具另有一份回声在 `content` 第一行
- * （`$ 命令`），展开卡片就能看到跑的是什么。
+ * `detail`：命令 / 主入参，排在**触发行右侧**（单行截断，见 `ToolHeaderProps.detail`），
+ * 同时也是标题 Tooltip / 触屏弹窗里的全文。命令类工具另有一份完整回声在 `content` 第一行
+ * （`$ 命令`），展开卡片就能看到没被截断的原文。
  */
 type DirectResult = { content: ReactNode; detail?: string }
 
@@ -525,8 +527,8 @@ function renderAcpDirect(part: AgentMessagePart): DirectResult | null {
     if (command) detail = `$ ${command}`
     // output 是 tool-result 回填进来的（contracts 的 tool-call 形状没声明）：运行时一定在
     const outputText = toolOutputText((part as { output?: unknown }).output)
-    // 明细已移出头部（见 ToolHeaderProps.detail）：命令必须在内容区第一行回声一份，
-    // 否则这张卡折叠/展开都只剩标题，看不到跑的到底是什么。
+    // 命令在触发行右侧已截断显示（见 ToolHeaderProps.detail）：内容区再回声一份完整的，
+    // 长命令在头部只剩半截时，展开就能看到跑的到底是什么。
     const echoed = [command ? `$ ${command}` : '', outputText ?? ''].filter(Boolean).join('\n')
     if (echoed) nodes.push(<AcpTextBlock key="output" text={echoed} singleLine />)
   }
@@ -575,7 +577,7 @@ function renderBuiltinDirect(
       part.isError === true || !hasOutput || part.toolName === 'send_keys'
         ? null
         : terminalOutputForDisplay(toolOutputText(output) ?? '')
-    // 明细已移出头部：命令要铺到内容区第一行，否则卡的标题下面什么都看不到
+    // 命令在触发行右侧已截断显示，内容区第一行再铺一份完整的（这条链路没有 diff 视图）
     const echoed = command ? (body ? `$ ${command}\n${body}` : `$ ${command}`) : body
     return {
       ...(command ? { detail: `$ ${command}` } : keys ? { detail: t('按键 {keys}', { keys }) } : {}),
@@ -752,6 +754,8 @@ function PartViewInner({
   /** 头部标题 / 明细：开关关掉时 title 回到工具名（见 toolCardHead） */
   const cardHead = (target: ToolCallPart, detail?: string) =>
     toolCardHead(target, detail, showToolIntent)
+  /** 「查看过程」的打开通道（由会话宿主 `ChatSurface` 提供；容器侧的片段渲染里是 null） */
+  const openSubagent = useOpenSubagent()
 
   if (part.type === 'text') {
     /*
@@ -819,24 +823,25 @@ function PartViewInner({
 
   const { state, hasOutput, output, isError, streamingInput } = toolState(part)
 
-  // 工具卡头部的停止钮**只给 execute_command**：其它工具没有「单条取消」的通道，
+  // 工具卡头部的停止钮**只给真有「单条取消」通道的工具**（`isStoppableToolName`：
+  // execute_command / web_fetch / 派活工具 `agent-*`）：其它工具没有这条通道，
   // 在它们上面挂停止钮要么是空操作、要么等于偷偷中止整轮，语义不诚实 —— 所以干脆不显示，
   // 要停整轮用输入框那颗停止钮。
   //
-  // 命令「在飞」= pending（入参还在流式生成）或执行中（已收到完整入参、结果还没回），
+  // 工具「在飞」= pending（入参还在流式生成）或执行中（已收到完整入参、结果还没回），
   // 且**当前这条消息还在流式**（`turnLive`）——历史里因异常中断残留的未结算 part
   // 不该出现停止钮。
   const toolCallId = part.type === 'tool-call' ? part.toolCallId : undefined
   const stoppableInFlight =
     turnLive &&
-    STOPPABLE_TOOLS.has(part.toolName) &&
+    isStoppableToolName(part.toolName) &&
     (state === 'input-streaming' || state === 'input-available')
   const onStop =
     stoppableInFlight && toolCallId
       ? () => {
-          // 已经在执行 → 只停**那一条**（命令杀进程树 / 抓取 abort，工具结果收尾成
-          // 「（已中止）」，整轮继续）；入参还在生成（还没真正跑起来）→ 没有可停的，
-          // 退回中止这一轮。
+          // 已经在执行 → 只停**那一条**（命令杀进程树 / 抓取 abort / 子任务 abort 子 run，
+          // 工具结果收尾成「（已中止）」，整轮继续）；入参还在生成（还没真正跑起来）→
+          // 没有可停的，退回中止这一轮。
           if (isStoppableToolRunning(part)) void stopCommand(toolCallId)
           else void stopTurn()
         }
@@ -894,7 +899,7 @@ function PartViewInner({
         state={state}
         live={turnLive}
         {...cardHead(part, delegationPromptOf(part.input))}
-        // 运行态挂在**头部**（工具名右边），内容区只放子任务产出，不再为它单开一行
+        // 运行态挂在**头部**（工具名右边），内容区只放子任务产出与过程入口
         status={
           delegationRunning ? (
             <DelegationRunning toolName={part.subagentTool} toolCount={part.subagentToolCount} />
@@ -902,6 +907,23 @@ function PartViewInner({
         }
         onStop={onStop}
       >
+        {/*
+         * 过程入口：子任务的思考 / 工具调用 / 正文都在 `delegation.parts` 里，
+         * 点开把**主会话整块换成子任务的消息流**（与主任务同一套观感），头部有返回。
+         * 没有这份记录（老消息 / 执行环境不支持）时不画按钮，别给一个点了没反应的入口。
+         *
+         * ⚠️ 必须把 `part.toolCallId` 一起交出去：宿主拿它逐帧重取最新的 delegation，
+         * 否则运行中打开看到的是点开那一刻的快照（见 `subagent-view.ts`）。
+         *
+         * 跑着的时候不用翻卡片：输入框上方那排「运行中的子任务」是常驻的同类入口
+         * （见 `ChatSurface` 的 `RunningSubagents`）。这里是**回看**历史派活的入口。
+         */}
+        {part.delegation && openSubagent ? (
+          <SubagentProcessEntry
+            delegation={part.delegation}
+            onOpen={() => openSubagent(part.toolCallId, part.delegation as SubagentDelegation)}
+          />
+        ) : null}
         {isError && <AcpTextBlock text={toolErrorText(output)} />}
         {delegationStreaming ? (
           <StreamingInputBlock text={subText} label={t('子任务输出中...')} mono={false} />
@@ -936,8 +958,8 @@ function PartViewInner({
         // 折叠状态下也能判断「还在跑」、也能停。
         onStop={onStop}
       >
-        {/* 明细已移出头部（见 ToolHeaderProps.detail）：运行中也要先把「跑的是什么」铺出来，
-            否则这张卡从头到尾都只有一句意图，用户不知道当前在跑哪条命令。 */}
+        {/* 命令在触发行右侧已截断显示（见 ToolHeaderProps.detail）；这里铺一份完整的，
+            运行中也能一眼看到当前跑的是哪条命令，不用去悬停。 */}
         {cmd ? <AcpTextBlock text={`$ ${cmd}`} singleLine /> : null}
         <LiveOutputBlock live={live} />
       </ToolCallCard>
@@ -1018,6 +1040,62 @@ function PartViewInner({
         />
       )}
     </ToolCallCard>
+  )
+}
+
+/**
+ * 派活卡内容区里的「查看子任务过程」入口（**回看**用：跑着的时候有输入框上方那排常驻 chip）。
+ *
+ * 点开把**主会话整块换成子任务的消息流**，头部有返回；流式期那份过程跟着往下走。
+ *
+ * 为什么放在内容区而不是触发行：触发行是「这一步在干什么」的状态位，点开过程是一个
+ * **导航**动作 —— 两种语义混在一个点击区域里，用户想展开卡片时会误开过程（这个按钮
+ * 曾经放在触发行右侧，用户明确否掉了，理由也是「不该跟状态挤在同一行」）。
+ *
+ * 右边那行状态只在**异常终态**时出现：`empty` / `failed` / `aborted` 正是「为什么没结论」
+ * 的答案，从前只体现在父侧的兜底文案里，用户得猜。
+ */
+function SubagentProcessEntry({
+  delegation,
+  onOpen
+}: {
+  delegation: SubagentDelegation
+  onOpen: () => void
+}) {
+  const tr = useT()
+  const statusText =
+    delegation.status === 'empty'
+      ? tr('跑完了，但没有产出结论')
+      : delegation.status === 'failed'
+        ? tr('执行失败')
+        : delegation.status === 'aborted'
+          ? tr('已中止')
+          : null
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className="h-7 gap-1.5 px-2 text-xs"
+        onClick={onOpen}
+      >
+        <ListTree className="size-3.5" />
+        {tr('查看子任务过程')}
+      </Button>
+      {statusText ? (
+        <span
+          className={cn(
+            'text-xs',
+            delegation.status === 'empty' || delegation.status === 'failed'
+              ? 'text-amber-600 dark:text-amber-500'
+              : 'text-muted-foreground'
+          )}
+        >
+          {statusText}
+        </span>
+      ) : null}
+    </div>
   )
 }
 

@@ -122,35 +122,73 @@ export function applyEvent(parts: AgentMessagePart[], event: AgentStreamEvent): 
       next[index] = { ...call, liveOutput: { stdout: nextStdout, stderr: nextStderr } } as AgentMessagePart
       return next
     }
-    case 'subagent-delta': {
-      // 子任务（subagent）的文本增量：折叠到**派活卡**（agent-<id> 那张）的
-      // `subagentText` 上。找不到 id 就忽略 —— 父侧 tool-call 一定会先到
-      //（引擎 先发 tool-call 再开始派），丢了这条只是少一帧增量。
+    case 'subagent-start': {
+      // 派活开跑：在派活卡（`agent-<id>` 那张）上建一份**过程记录**。找不到卡就忽略
+      // —— 父侧 tool-call 一定会先到（引擎先发 tool-call 再开始派）。
       const index = next.findIndex((p) => p.type === 'tool-call' && p.toolCallId === event.toolCallId)
       if (index === -1) return next
       const call = next[index] as Extract<AgentMessagePart, { type: 'tool-call' }>
-      next[index] = { ...call, subagentText: (call.subagentText ?? '') + event.delta } as AgentMessagePart
+      next[index] = {
+        ...call,
+        delegation: {
+          subagentId: event.subagentId,
+          task: event.task,
+          parts: [],
+          status: 'running',
+          startedAt: Date.now()
+        }
+      } as AgentMessagePart
       return next
     }
 
-    case 'subagent-progress': {
-      // 子 agent 的工具进度：只记「最近在调什么 + 一共调了几次」。
-      // 同一个子侧调用可能被 引擎 重复上报，按 childToolCallId 去重。
+    case 'subagent-event': {
       const index = next.findIndex((p) => p.type === 'tool-call' && p.toolCallId === event.toolCallId)
       if (index === -1) return next
       const call = next[index] as Extract<AgentMessagePart, { type: 'tool-call' }>
-      const duplicated = Boolean(
-        event.childToolCallId && event.childToolCallId === call.subagentToolId
-      )
-      next[index] = {
+      const inner = event.event
+      /**
+       * 两件事一起做，互不替代：
+       * 1. 折叠进 `delegation.parts` —— **递归调用本函数**，子任务的消息因此和主任务
+       *    同一套形状（面板里直接交给 `MessageParts` 渲染）；
+       * 2. 维护派活卡上那行轻量进度（`subagentText` / `subagentTool`），没有它时
+       *    收起状态的卡片没有任何动静，看起来像卡死。
+       *
+       * `delegation` 可能还没有（start 帧丢了）：那种情况只做第 2 件，不建空记录 ——
+       * 一条没有 subagentId / task 的记录进了历史反而更难看懂。
+       */
+      const patched: AgentMessagePart = {
         ...call,
-        ...(event.toolName ? { subagentTool: event.toolName } : {}),
-        ...(!duplicated
+        ...(call.delegation
+          ? { delegation: { ...call.delegation, parts: applyEvent(call.delegation.parts, inner) } }
+          : {}),
+        ...(inner.type === 'text-delta'
+          ? { subagentText: (call.subagentText ?? '') + inner.delta }
+          : {}),
+        ...(inner.type === 'tool-call'
           ? {
+              subagentTool: inner.toolName,
               subagentToolCount: (call.subagentToolCount ?? 0) + 1,
-              ...(event.childToolCallId ? { subagentToolId: event.childToolCallId } : {})
+              subagentToolId: inner.toolCallId
             }
           : {})
+      }
+      next[index] = patched
+      return next
+    }
+
+    case 'subagent-end': {
+      const index = next.findIndex((p) => p.type === 'tool-call' && p.toolCallId === event.toolCallId)
+      if (index === -1) return next
+      const call = next[index] as Extract<AgentMessagePart, { type: 'tool-call' }>
+      if (!call.delegation) return next
+      next[index] = {
+        ...call,
+        delegation: {
+          ...call.delegation,
+          status: event.status,
+          // 派活方给的耗时更准（它包住的是子 run 自己的起止），拿不到才用本地时间戳
+          endedAt: call.delegation.startedAt + (event.durationMs ?? Date.now() - call.delegation.startedAt)
+        }
       } as AgentMessagePart
       return next
     }
@@ -350,18 +388,31 @@ export function isCommandRunning(part: AgentMessagePart): boolean {
  * 服务端按 toolCallId 查 run 的停止表），所以新增一个可停工具只要**名字加进来 +
  * 工具自己在执行期登记 stop**，不需要新接口、也不需要新按钮。
  *
- * 目前两类：
+ * 目前三类：
  * - `execute_command`：杀那一棵进程树；
- * - `web_fetch`：abort 这一次抓取（抓境外站点动辄等 30s，不该为它废掉整轮）。
+ * - `web_fetch`：abort 这一次抓取（抓境外站点动辄等 30s，不该为它废掉整轮）；
+ * - 派活工具 `agent-<id>`：abort 这一个子 run（见 `isStoppableToolName` 的说明）。
  */
 export const STOPPABLE_TOOLS: ReadonlySet<string> = new Set(['execute_command', 'web_fetch'])
+
+/**
+ * 派活工具（`agent-<id>`）也支持单条停止 —— 前缀判定，**不要**把 id 一个个塞进
+ * `STOPPABLE_TOOLS`：`SubagentId` 是开放集合（新增见 contracts 的 `SUBAGENT_META`），
+ * 漏写一个就变成「那个子任务没有停止钮」，而且没有任何地方会报错。
+ *
+ * 服务端那边派活工具同样把 stop 登记进 run 的停止表（见 `subagents.ts` 的
+ * `commandStops`），所以这里放行就是「点了真的能停」。
+ */
+export function isStoppableToolName(toolName: string): boolean {
+  return STOPPABLE_TOOLS.has(toolName) || toolName.startsWith('agent-')
+}
 
 /**
  * 「在飞且可单独停止」——判据与 `isCommandRunning` 同源（不看 `liveOutput`，理由见上），
  * 只是工具集合更宽。渲染层用它决定停止钮是「只停这条」还是「中止整轮」。
  */
 export function isStoppableToolRunning(part: AgentMessagePart): boolean {
-  if (part.type !== 'tool-call' || !STOPPABLE_TOOLS.has(part.toolName)) return false
+  if (part.type !== 'tool-call' || !isStoppableToolName(part.toolName)) return false
   const { hasOutput, streamingInput } = toolState(part)
   return !hasOutput && !streamingInput
 }

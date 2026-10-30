@@ -17,8 +17,29 @@ export function createConversationOpenActions(
 
   return {
     openConversation: (conversationId) => {
-      // 已是当前会话：什么都不做（重复打开只会白白重拉，界面闪一下）
-      if (conversationId && conversationId === get().activeConversationId)
+      /**
+       * 已是当前会话**且本地现场还在**：什么都不做（重复打开只会白白重拉，界面闪一下）。
+       *
+       * ⚠️ 「现场还在」这半个判据不能省。`newConversation` 建完会话就把
+       * `activeConversationId` 设成了它（界面要立刻切进去），调用方紧接着那次
+       * `openConversation(id)` 于是命中早退 —— 可那一刻 `slices[id]` 根本不存在，
+       * **没有任何人触发装载**。消息区按 `messagesLoading` 的兜底（「本屏绑了会话、
+       * 本地现场还没建」→ true）就恒显示骨架屏，而且永远等不到头：没有任何请求在飞。
+       *
+       * 必中场景：
+       * - 「多智能体协作」建完即打开、不先发消息（用户报「打开后消息列表始终 loading」）；
+       * - 刷新后由 `PanelView` 把当前会话对齐到焦点标签 —— 那时 `activeConversationId`
+       *   已从 localStorage 还原成同一条，而 `slices` 是空的。
+       *
+       * 反之，现场在内存里时早退仍然是对的：切走期间流式帧一直写在它自己的 slice 上，
+       * 这里重拉只会让界面白闪一次。
+       */
+      const existing = conversationId ? get().slices[conversationId] : undefined;
+      if (
+        conversationId &&
+        conversationId === get().activeConversationId &&
+        existing
+      )
         return;
       // 空态 = 用户的明确意图（「新建会话」/ 删除后落空态）：记下来挡住兜底恢复
       set({
@@ -43,7 +64,6 @@ export function createConversationOpenActions(
         });
         return;
       }
-      const existing = get().slices[conversationId];
       // 恢复这个会话记住的模型（配置 / 模型被删就是 null → 界面显示「选择模型」，
       // 不继承别的会话的选择）。列表可能还没刷到最新，装载收尾会用会话详情再校正一次。
       const stored = get().conversations.find((c) => c.id === conversationId);

@@ -22,14 +22,18 @@ export async function POST(request: Request) {
     enabled?: SubagentId[]
     modelConfigId?: string | null
     modelId?: string | null
+    maxSteps?: Partial<Record<SubagentId, number>>
   }>(request)
-  // 归一化在这里也过一次：HTTP 请求体是不可信输入，非法 id / 空串直接收敛。
+  // 归一化在这里也过一次：HTTP 请求体是不可信输入，非法 id / 空串 / 越界步数直接收敛。
   // ⚠️ 缺字段 = 保留 —— 启停开关只传 enabled，不能顺手把已选的模型清掉。
   const normalized = normalizeSubagentSettings(body ?? {})
   const patch = {
     ...(body?.enabled !== undefined ? { enabled: normalized.enabled } : {}),
     ...('modelConfigId' in (body ?? {}) ? { modelConfigId: normalized.modelConfigId ?? null } : {}),
-    ...('modelId' in (body ?? {}) ? { modelId: normalized.modelId ?? null } : {})
+    ...('modelId' in (body ?? {}) ? { modelId: normalized.modelId ?? null } : {}),
+    // 步数**整体替换**（与 enabled 同口径）：传 `{}` 就是全部回到默认值。
+    // 这里给原值而不是 normalized：`{}` 经归一化会变成 undefined，会被下游当成「保留」。
+    ...(body?.maxSteps !== undefined ? { maxSteps: body.maxSteps } : {})
   }
   const subagents = domain.saveSubagentSettings(patch)
   return Response.json({ subagents })

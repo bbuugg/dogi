@@ -1486,6 +1486,20 @@ export interface CollabTask {
   status: CollabTaskStatus
   output?: string
   error?: string
+  /**
+   * 这一轮的**过程记录**（思考 / 正文 / 工具调用 + 结果），形状与主消息的 `parts` 完全同构。
+   *
+   * 存在的理由：子 Agent 没有会话记录，任务原先只存 `prompt` + 最终 `output`，右侧面板
+   * 里就只有「一问一答两段纯文本」—— 主对话每轮都有的思考折叠条、工具调用行通通没有，
+   * 观感差得很远。有它之后 `CollabAgentChatPanel` 直接把 `parts` 交给同一个 `MessageList`，
+   * 折叠条 / 工具卡 / 代码块都是同一套渲染。与内置子任务的 `SubagentDelegation.parts`
+   * 同一口径。
+   *
+   * 缺省 = 老任务（加这个字段之前跑的）或没跑到任何事件：渲染端退回 `output` 纯文本。
+   * 落盘前会按字符预算裁剪（见 `@fizz/agent` 的 `collab-parts.ts`），所以这里**不是**
+   * 完整过程，只是最近若干步。
+   */
+  parts?: AgentMessagePart[]
   /** 本任务用量（只统计子 Agent 自己） */
   usage?: { inputTokens: number; outputTokens: number; totalTokens: number }
   createdAt: number
@@ -1526,6 +1540,98 @@ export interface CollabState {
   updatedAt: number
 }
 
+/**
+ * 流式增量并入 parts：同类型的**相邻** part 直接追加，不一个字一个 part。
+ *
+ * 前后端共用这一份：服务端收口 `CollabTask.parts`、前端拼运行中的实时预览，
+ * 两处的合并口径必须一致，否则「跑的时候」和「跑完之后」的卡片会跳一下。
+ */
+export function appendPartDelta(
+  parts: AgentMessagePart[],
+  type: 'text' | 'reasoning',
+  delta: string
+): void {
+  if (!delta) return
+  const last = parts[parts.length - 1]
+  if (last && last.type === type) {
+    // 复制最后一条而不是原地改：调用方（前端 store）每帧做的是浅拷贝数组，
+    // 共享的 part 对象被原地改会「追溯」污染上一帧的快照。
+    parts[parts.length - 1] = { ...last, text: last.text + delta }
+    return
+  }
+  parts.push({ type, text: delta })
+}
+
+/** 工具调用开始：先落一条 part，结果回来时用 `foldToolResult` 回填 */
+export function appendToolCallPart(
+  parts: AgentMessagePart[],
+  call: { toolCallId: string; toolName: string; input: unknown }
+): void {
+  parts.push({
+    type: 'tool-call',
+    toolCallId: call.toolCallId,
+    toolName: call.toolName,
+    input: call.input
+  })
+}
+
+/**
+ * 工具结果回填到对应的 `tool-call` 上。
+ *
+ * 不另起一条 `tool-result`：主对话落盘的就是「结果挂在调用上」，渲染端也只认这一种。
+ * 找不到对应调用（事件乱序 / 已被裁剪掉）就静默丢弃 —— 结果单独飘着没有意义。
+ */
+export function foldToolResult(
+  parts: AgentMessagePart[],
+  result: { toolCallId: string; output: unknown; isError?: boolean }
+): void {
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    const part = parts[index]
+    if (!part || part.type !== 'tool-call' || part.toolCallId !== result.toolCallId) continue
+    // 同样用复制替换（理由见 `appendPartDelta`）；`isError` 一旦置上不再摘掉
+    parts[index] = {
+      ...part,
+      output: result.output,
+      ...(result.isError ? { isError: true } : {})
+    }
+    return
+  }
+}
+
+/**
+ * 过程记录的形状收敛。
+ *
+ * `collab.json` 是本地文件，用户可能手改坏；渲染端会按 `type` 直接分支，所以这里
+ * 只留认得的分支，字段不全的整条丢掉。
+ *
+ * `tool-result` 不收：结果在写盘前已经折叠到对应 `tool-call.output` 上（与主对话
+ * 落盘口径一致），单独一条飘着渲染出来也是一张空卡。
+ */
+function normalizeCollabParts(value: unknown): AgentMessagePart[] {
+  const out: AgentMessagePart[] = []
+  for (const raw of Array.isArray(value) ? value : []) {
+    if (!raw || typeof raw !== 'object') continue
+    const part = raw as Record<string, unknown>
+    if (part.type === 'text' || part.type === 'reasoning') {
+      if (typeof part.text !== 'string') continue
+      out.push({ type: part.type, text: part.text })
+      continue
+    }
+    if (part.type === 'tool-call') {
+      if (typeof part.toolCallId !== 'string' || typeof part.toolName !== 'string') continue
+      out.push({
+        type: 'tool-call',
+        toolCallId: part.toolCallId,
+        toolName: part.toolName,
+        input: part.input ?? null,
+        ...(part.output === undefined ? {} : { output: part.output }),
+        ...(part.isError === true ? { isError: true } : {})
+      })
+    }
+  }
+  return out
+}
+
 export function normalizeCollabState(value: unknown): CollabState {
   const input = (value ?? {}) as Partial<CollabState>
   const tasks: CollabTask[] = []
@@ -1550,6 +1656,11 @@ export function normalizeCollabState(value: unknown): CollabState {
           : 'queued',
       ...(typeof t.output === 'string' ? { output: t.output } : {}),
       ...(typeof t.error === 'string' ? { error: t.error } : {}),
+      ...(() => {
+        // 过程记录：空数组不必写进文件（老任务没有这个字段）
+        const parts = normalizeCollabParts(t.parts)
+        return parts.length ? { parts } : {}
+      })(),
       ...(t.usage && typeof t.usage === 'object'
         ? {
             usage: {
@@ -1832,6 +1943,18 @@ export type AgentMessagePart =
        */
       subagentToolId?: string
       /**
+       * 子任务的**完整过程记录**（子 agent 自己的思考 / 工具调用 / 正文）。
+       *
+       * 与上面几个 `subagent*` 字段的本质区别：那些是「派活卡上的一行进度」，只喂渲染；
+       * 这一份**随消息落盘**，让用户能 attach 进去看整段过程（折叠条 / 工具卡与主任务
+       * 完全同一套渲染），也让人能回答「这次派活到底为什么没给结论」。
+       *
+       * 形状刻意与主消息的 `parts` 同构：`SubagentDelegation.parts` 就是
+       * `AgentMessagePart[]`，渲染端直接复用 `MessageParts`（见 `SubagentPanel`）。
+       * 子 agent 没有派活工具，所以这份 parts 里不会再有 `delegation`（不会递归）。
+       */
+      delegation?: SubagentDelegation
+      /**
        * **流式期**的命令实时输出（stdout / stderr 分开累积）。
        *
        * 与 `inputText` / `subagentText` 同性质：只喂渲染、不进落盘历史；
@@ -1881,37 +2004,88 @@ export type AgentMessagePart =
       isError?: boolean
     }
 
+/**
+ * 子任务的运行状态。
+ *
+ * - `running`：还在跑（只有落到 part 上的记录会出现，事件流里没有这个值）；
+ * - `done`：正常给了结论；
+ * - `empty`：跑完了但一个字都没吐（步数耗尽 / 模型空转）—— 父上下文拿到的是
+ *   「子任务没有产出可用结论」那句兜底文案；
+ * - `failed`：抛了异常（详情只进服务端日志，**绝不进父上下文**，见 `subagents.ts`）；
+ * - `aborted`：父轮被停止 / 应用退出，子 run 跟着停（两者 signal 取或）。
+ *
+ * 分这么细是因为用户要能回答「这次派活为什么没结论」：`empty` 和 `failed` 的排查方向
+ * 完全不同（前者看步数与提示词，后者看日志）。
+ */
+export type SubagentRunStatus = 'running' | 'done' | 'empty' | 'failed' | 'aborted'
+
+/**
+ * 一次子任务（派活）的完整过程记录，挂在派活卡（`tool-call.delegation`）上、随消息落盘。
+ *
+ * `parts` 与主消息完全同构 —— 这是「attach 到子任务看它像主任务」的全部实现基础：
+ * 渲染端把 `{ role: 'assistant', parts }` 交给 `MessageParts` 就得到同一套折叠条、
+ * 思考条、工具卡，不需要为子任务再写一套 UI。
+ */
+export interface SubagentDelegation {
+  /** 子任务类型（`explorer` / `reviewer` …） */
+  subagentId: SubagentId
+  /** 派出去的任务原文（父模型写的 task） */
+  task: string
+  /** 子 agent 的完整过程（思考 / 工具调用 / 正文） */
+  parts: AgentMessagePart[]
+  status: SubagentRunStatus
+  startedAt: number
+  /** 结束时间；`status === 'running'` 时没有 */
+  endedAt?: number
+}
+
+/**
+ * 子任务内部的流事件（`subagent-event.event` 的形状）。
+ *
+ * 刻意只取 `AgentStreamEvent` 里的这四个分支：它们正是「一条助手消息」的全部内容
+ * （正文 / 思考 / 工具调用 / 结果），足够让子任务和主任务长得一样，又不会让子任务
+ * 的帧里再套一层派活 / 压缩 / finish 之类的父级语义。
+ */
+export type DelegationStreamEvent =
+  | { type: 'text-delta'; delta: string }
+  | { type: 'reasoning-delta'; delta: string }
+  | { type: 'tool-call'; toolCallId: string; toolName: string; input: unknown }
+  | { type: 'tool-result'; toolCallId: string; toolName: string; output: unknown; isError?: boolean }
+
 /** Agent 流事件（形状与 AiStreamEvent 一致；reasoning-delta 为思考内容增量） */
 export type AgentStreamEvent =
   | { type: 'text-delta'; delta: string }
   | { type: 'reasoning-delta'; delta: string }
   /**
-   * 子任务（subagent）的**输出文本增量**：父 agent 派活后，子 agent 一边跑一边
-   * 把它的正文发回来，让用户在派活卡上看到「它在干什么」。
+   * 子任务（subagent）**开跑**：父侧派活卡（`toolCallId` = 那次 `agent-<id>` 调用）
+   * 从这一刻有了完整过程记录。
    *
-   * `toolCallId` = 父侧那次派活的 tool-call id（即 `agent-<subagentId>` 那张卡）。
-   * 只带文本：子 agent 自己的工具过程（读文件明细）**不上来** —— 那会变成二级
-   * 卡片树，界面立刻撑爆（设计文档 §3.6 的结论：只加一行「含 N 个子工具调用」，
-   * 不铺开）。
-   *
-   * ⚠️ 渲染端把它折叠进 tool-call 的 `inputText`（复用既有的入参预览通道），
-   * 见 `AgentMessagePart` 的 tool-call.preview 字段。
+   * 为什么不让服务端从 tool-call 的 `toolName` / `input.task` 自己推：那要解析 `agent-`
+   * 前缀再拆 input，等于在两处维护同一份约定；派活方本来就知道 `subagentId` 和 task，
+   * 直接说一声最省事、也不会因为父侧 input 还没收口而丢字段。
    */
-  | { type: 'subagent-delta'; toolCallId: string; delta: string }
+  | { type: 'subagent-start'; toolCallId: string; subagentId: SubagentId; task: string }
   /**
-   * 子任务**工具进度**：子 agent 每次发起工具调用时上报一条（只给工具名，不含结果）。
+   * 子任务**过程事件**：子 run 的原始流事件（思考 / 正文 / 工具调用 / 工具结果）原样转发。
    *
-   * 与 `subagent-delta` 同一个 `toolCallId`（父侧派活卡）。子 agent 可能连续翻十几
-   * 个文件才吐第一段正文，没有这条时派活卡在整个工具阶段都没有任何动静 —— 用户看到
-   * 的就是「派活了、一直没输出」。
+   * 折叠进派活卡 `delegation.parts`（与主消息同一套 part 形状），所以子任务能在面板里
+   * 一整段铺开、跟主任务长得一模一样。从前只转正文与工具名（怕变成二级卡片树），
+   * 结果是「派活卡里除了一段结论什么都没有」—— 过程不留在本地，事后也没得查。
+   */
+  | { type: 'subagent-event'; toolCallId: string; event: DelegationStreamEvent }
+  /**
+   * 子任务**结束**：带上终态，用来区分「正常给结论」和「跑完但没吐字」。
+   *
+   * 没有这一帧时只能靠父侧 `tool-result` 的文案猜（`RESULT_TEXT_EMPTY` 那句话就是给
+   * 模型看的，不该被界面反解析）—— 状态由派活方自己报最准。
    */
   | {
-      type: 'subagent-progress'
+      type: 'subagent-end'
       toolCallId: string
-      /** 子侧工具名（如 `read_file`）；取不到就不带 */
-      toolName?: string
-      /** 子侧 toolCallId：前端据此对同一次调用去重 */
-      childToolCallId?: string
+      /** 终态（不会是 `running`） */
+      status: Exclude<SubagentRunStatus, 'running'>
+      /** 子 run 自己跑了多久（毫秒；拿不到就不带） */
+      durationMs?: number
     }
   // -------------------------------------------------------------------------
   // 多智能体协作（collab）：**全部是运行态的旁路事件**，不参与主消息落盘
@@ -1957,6 +2131,14 @@ export type AgentStreamEvent =
       ok?: boolean
       /** 工具入参 / 结果的短摘要（服务端截断，仅展示） */
       label?: string
+      /**
+       * 入参（`start`）/ 结果（`end`）的全文，服务端截断到 600 字符。
+       *
+       * `label` 只有一行摘要，够画布角标用；右侧对话区要把它拼成**工具卡**，卡片上得能
+       * 看出「读的是哪个文件、跑出来什么」—— 摘要到不了那个粒度。
+       */
+      input?: string
+      output?: string
     }
   | {
       /**
@@ -2759,6 +2941,16 @@ export type SubagentId = 'explorer' | 'reviewer'
 export const SUBAGENT_IDS: readonly SubagentId[] = ['explorer', 'reviewer']
 
 /**
+ * 子任务步数上限的可设范围。
+ *
+ * 下限 1 是「至少能查一次」；上限 128 是防手滑：步数直接换算成 provider 调用次数，
+ * 填 1000 就是在设置里埋一个烧钱的开关。默认值（80）必须落在范围内，
+ * 所以这里不能压到 64 以下。真需要更大时改这个常量，而不是放开输入。
+ */
+export const SUBAGENT_MIN_STEPS = 1
+export const SUBAGENT_MAX_STEPS = 128
+
+/**
  * 子任务偏好：**默认关闭**。
  *
  * 为什么默认关：这改变的是**模型的行为**（父 agent 会多几个 `agent-*` 工具，
@@ -2779,6 +2971,16 @@ export interface SubagentSettings {
   modelConfigId?: string | null
   /** 见 `modelConfigId`；两者成对使用 */
   modelId?: string | null
+  /**
+   * 每个子任务自己的步数上限（搜索 / 读文件 / 每次工具调用各算一步）。
+   *
+   * 缺省 = 用 `SUBAGENT_META[id].defaultMaxSteps`。这是**按 id 分开**的，因为侦察和审查
+   * 的步数需求不一样（审查要「读改动 + 读被调用方」两遍）。
+   *
+   * 为什么给用户调：步数是「能想多深」与「花多少钱」之间唯一的旋钮 —— 步数不够会在
+   * 中途停下（那时只能交回半成品结论），太多则可能对着一个死胡同反复试。
+   */
+  maxSteps?: Partial<Record<SubagentId, number>>
 }
 
 export const DEFAULT_SUBAGENT_SETTINGS: SubagentSettings = { enabled: [] }
@@ -2790,15 +2992,52 @@ export const DEFAULT_SUBAGENT_SETTINGS: SubagentSettings = { enabled: [] }
  * `@fizz/agent-kit`）不能依赖 `@fizz/agent` —— 那会 引擎 + 整条 provider
  * 依赖链进浏览器产物。agent 侧的真源是 `SUBAGENT_SPECS`，两边新增时同步改。
  */
-export const SUBAGENT_META: Record<SubagentId, { name: string; hint: string }> = {
+export const SUBAGENT_META: Record<
+  SubagentId,
+  {
+    name: string
+    hint: string
+    /**
+     * 默认步数上限。**这里是真源**：`packages/agent` 的 `SUBAGENT_SPECS` 直接引用它，
+     * 设置页拿它当输入框的占位符（用户没改过时看到的就是「默认 80」）。
+     */
+    defaultMaxSteps: number
+  }
+> = {
   explorer: {
     name: '侦察',
-    hint: '只读：定位符号、查找用法并汇总。'
+    hint: '只读：定位符号、查找用法并汇总。',
+    // 80 步 = 十来次搜索 + 二三十次读文件还留着收尾余量：大仓库里定位、跨文件核对、
+    // 发现方向不对再换一条路，这些都很吃步数。用不完会提前收尾，不额外花钱。
+    defaultMaxSteps: 80
   },
   reviewer: {
     name: '审查',
-    hint: '只读：检查改动并列出问题。'
+    hint: '只读：检查改动并列出问题。',
+    // 审查要「读改动 + 读被调用方」两遍，还要顺着调用链看几层；与小步数不同，
+    // 审查的价值恰恰在于看完，宁可多给。
+    defaultMaxSteps: 80
   }
+}
+
+/**
+ * 步数收敛：只留合法 id + `[SUBAGENT_MIN_STEPS, SUBAGENT_MAX_STEPS]` 内的整数。
+ *
+ * 越界的整条**丢掉**（回到默认值），而不是夹到最近边界 —— 用户填 500 想要的是「更多」，
+ * 悄悄给 64 会让他以为设置生效了却依旧中途停下。
+ */
+function normalizeMaxSteps(value: unknown): Partial<Record<SubagentId, number>> | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const input = value as Record<string, unknown>
+  const out: Partial<Record<SubagentId, number>> = {}
+  for (const id of SUBAGENT_IDS) {
+    const raw = input[id]
+    if (typeof raw !== 'number' || !Number.isFinite(raw)) continue
+    const steps = Math.trunc(raw)
+    if (steps < SUBAGENT_MIN_STEPS || steps > SUBAGENT_MAX_STEPS) continue
+    out[id] = steps
+  }
+  return Object.keys(out).length > 0 ? out : undefined
 }
 
 /** 收敛：手改坏的数据文件 / 老版本缺字段都不该让读接口抛错 */
@@ -2811,10 +3050,12 @@ export function normalizeSubagentSettings(value: unknown): SubagentSettings {
       : null
   const modelId =
     typeof input.modelId === 'string' && input.modelId.trim() ? input.modelId.trim() : null
+  const maxSteps = normalizeMaxSteps(input.maxSteps)
   return {
     enabled: Array.isArray(raw) ? raw.filter((id) => SUBAGENT_IDS.includes(id)) : [],
     // 成对才生效：只有一半时服务端会退回父模型，这里也直接收敛成「没配」
-    ...(modelConfigId && modelId ? { modelConfigId, modelId } : {})
+    ...(modelConfigId && modelId ? { modelConfigId, modelId } : {}),
+    ...(maxSteps ? { maxSteps } : {})
   }
 }
 

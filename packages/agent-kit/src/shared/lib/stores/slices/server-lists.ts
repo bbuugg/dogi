@@ -343,6 +343,13 @@ export interface ServerListsSlice {
    */
   setSubagentModel: (model: { configId: string; modelId: string } | null) => Promise<boolean>
   /**
+   * 保存某个子任务的步数上限（`null` = 回到规格默认值）。
+   *
+   * 与 `toggleSubagent` 同款：先读当前这份 → 改一个 id → 整体写回（服务端是全量替换）。
+   * 只传 `maxSteps`，服务端「缺字段 = 保留」，所以不会把启停与模型改掉。
+   */
+  setSubagentMaxSteps: (id: SubagentId, steps: number | null) => Promise<boolean>
+  /**
    * 保存系统监控偏好（只传要改的字段）。关掉后服务端停采、状态栏也不再渲染监控条；
    * 走 `withRefresh`，保存成功后靠全量刷新把 store 里的 `systemMonitorSettings` 写回。
    */
@@ -1060,6 +1067,13 @@ export const createServerListsSlice: StateCreator<AgentStore, [], [], ServerList
             : { modelConfigId: null, modelId: null }
         )
       ),
+    setSubagentMaxSteps: (id, steps) => {
+      const next = { ...(get().subagentSettings?.maxSteps ?? {}) }
+      // null = 恢复默认：**删掉这个 key** 而不是写 null（服务端只认数字）
+      if (steps === null) delete next[id]
+      else next[id] = steps
+      return withRefresh(() => requireApi().saveSubagents({ maxSteps: next }))
+    },
     /**
      * 系统监控偏好：与浏览器偏好同款 —— 原样透传要改的字段（服务端「缺字段 = 保留」），
      * 保存成功后服务端会同步采样器启停，`withRefresh` 再把新的 `systemMonitorSettings`

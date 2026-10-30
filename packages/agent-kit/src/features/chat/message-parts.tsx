@@ -22,7 +22,12 @@ import {
   workDurationLabel
 } from '@fizz/agent-kit/shared/lib/turn-step'
 import { useAgentStore } from '@fizz/agent-kit/shared/lib/stores/agent-store'
-import { isErrorText, textOf, toolState } from '@fizz/agent-kit/shared/lib/parts'
+import {
+  isErrorText,
+  isStoppableToolRunning,
+  textOf,
+  toolState
+} from '@fizz/agent-kit/shared/lib/parts'
 import {
   normalizeFollowup,
   formatFollowupAnswer,
@@ -157,6 +162,20 @@ function MessagePartsInner({
    * 同一个开关、同一个语义，否则组抬头有意图、点开卡片却是纯工具名。
    */
   const showToolIntent = useAgentStore((s) => s.toolIntent)
+  /**
+   * 「只停这一条」的通道（组抬头那颗停止钮用）：store 上的稳定引用，放进依赖不引发重渲。
+   *
+   * 与工具卡头部 / 输入框上方 chip 是同一个 action —— `stopCommand(toolCallId)` 内部自己
+   * 取当前会话在跑那轮的 requestId，服务端只 abort 这一个工具（命令杀进程树 / 抓取 abort /
+   * 子任务 abort 子 run），整轮继续。
+   */
+  const stopCommand = useAgentStore((s) => s.stopCommand)
+  /*
+   * 「查看子任务过程」的**打开通道由会话宿主提供**（`ChatSurface`），不在这里做：
+   * 早先这块 state + Dialog 长在本组件里，于是过程面板只能是个弹窗、且存的是
+   * 「点开那一刻」的 delegation 快照（运行中打开就冻住）。
+   * 现在宿主拿 `toolCallId` 逐帧重取，直接把主会话换成子任务的消息流。
+   */
   const isStreamingLast = streaming && index === total - 1
   // 一轮完成的判据：助手消息且不是「正在流式的末条」。
   // ⚠️ 不能拿 `message.usage` 当完成标记：usage 只在内置 agent 的 finish 帧里有，
@@ -338,6 +357,11 @@ function MessagePartsInner({
     /** 尾 part 的类型 —— 抬头名字左边那颗图标（扳手 / 脑）靠它，口径与左格文案一致 */
     kind: 'tool' | 'reasoning'
     preview?: { text: string; lineKey: number }
+    /**
+     * 这一段「此刻能就地停掉」时给那一步的 `toolCallId`（`undefined` = 不给停止钮）。
+     * 抬头那行本来就写着「现在在干什么」，停止就该在它旁边 —— 见 `TurnStepGroup.onStop`。
+     */
+    stopToolCallId?: string
   } => {
     const parts = steps.map((step) => step.part)
     const tail = steps[steps.length - 1]
@@ -347,13 +371,35 @@ function MessagePartsInner({
     // 与 `turnStepActivity` 同一个分支：只有尾 part 是 tool-call 才走「工具」那一档，
     // 其余（思考 / 空组）按思考算 —— 否则图标会和那行文案对不上
     const kind: 'tool' | 'reasoning' = tail.part.type === 'tool-call' ? 'tool' : 'reasoning'
+    /*
+     * 「这一组现在能不能停」的唯一判据，与工具卡头部那颗钮同源（`isStoppableToolRunning`：
+     * execute_command / web_fetch / 派活工具 `agent-*`，且已拿到完整入参、还没出结果）。
+     *
+     * 三条同时成立才给：
+     * - `isStreamingLast`：历史里因中止 / 断线残留的未结算 part 也停在 `input-available`，
+     *   给它们一颗能点的钮是在骗人（点了服务端没有任何可 abort 的对象）；
+     * - 尾 part 是 `tool-call`：抬头报的是「最后做的那一件事」，停的也只能是它；
+     * - `isStoppableToolRunning`：入参还在流式生成时没有可停的东西 —— 工具卡那颗此时
+     *   退回「中止整轮」，组抬头干脆不给（多停一整轮比少给一颗钮的代价大得多）。
+     *
+     * 组里并行多个工具时只停尾 part：抬头只展示了最后那一个，一颗钮停一个才说得清
+     * 「按下它会发生什么」。其它几条要点开组、用各自卡片上的钮。
+     */
+    const stopToolCallId =
+      !turnDone &&
+      isStreamingLast &&
+      tail.part.type === 'tool-call' &&
+      isStoppableToolRunning(tail.part)
+        ? tail.part.toolCallId
+        : undefined
     if (!turnDone) {
       return {
         label: turnStepActivity(parts, { showIntent: showToolIntent, active: running }),
         active: running,
         live,
         kind,
-        preview
+        preview,
+        stopToolCallId
       }
     }
     // 整轮结束：**不给 preview**（右格留白）—— 抬头这时是一句总结，不是「下一步做什么」。
@@ -380,7 +426,7 @@ function MessagePartsInner({
     if (!run.length) return
     const current = run
     run = []
-    const { label, active, live, kind, preview } = groupHead(current)
+    const { label, active, live, kind, preview, stopToolCallId } = groupHead(current)
     nodes.push(
       <TurnStepGroup
         key={`${message.id}-steps-${current[0].partIndex}`}
@@ -389,6 +435,8 @@ function MessagePartsInner({
         active={active}
         live={live}
         kind={kind}
+        // 只停这一段里正在跑的那一步（判据在 `groupHead`），整轮继续
+        onStop={stopToolCallId ? () => void stopCommand(stopToolCallId) : undefined}
       >
         {current.map(({ part: stepPart, partIndex: stepIndex }) =>
           renderPart(stepPart, stepIndex)

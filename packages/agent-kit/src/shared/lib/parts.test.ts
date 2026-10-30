@@ -7,7 +7,7 @@
  * ② 有意图时明细丢了工具名 —— 「为什么」和「用什么干的」得同时看得到。
  */
 import { describe, expect, it } from 'vitest'
-import { toolCardHead, toolCardTitle, type ToolCallPart } from './parts'
+import { isStoppableToolName, toolCardHead, toolCardTitle, type ToolCallPart } from './parts'
 
 /** 造一个最小的 tool-call part（只填头部用得上的字段） */
 const call = (toolName: string, input: Record<string, unknown> = {}): ToolCallPart =>
@@ -47,5 +47,21 @@ describe('toolCardHead', () => {
     expect(toolCardHead(call('execute_command', { intent: '启动开发服务器' }), '$ npm run dev', false)).toEqual(
       { title: '执行命令', detail: '$ npm run dev' }
     )
+  })
+})
+
+/**
+ * 派活工具（`agent-<id>`）也能单条停止。
+ *
+ * 防的回归：判据被收紧回 `STOPPABLE_TOOLS.has(...)` —— 那样所有派活卡的停止钮都会消失，
+ * 而且不会有任何地方报错（服务端照样登记了 stop，只是前端不给入口）。
+ */
+describe('isStoppableToolName', () => {
+  it('命令 / 抓取 / 派活都算，普通工具不算', () => {
+    expect(isStoppableToolName('execute_command')).toBe(true)
+    expect(isStoppableToolName('web_fetch')).toBe(true)
+    // 前缀判定，不依赖具体 id：新增的 SubagentId 自动就有停止钮
+    expect(isStoppableToolName('agent-explorer')).toBe(true)
+    expect(isStoppableToolName('read_file')).toBe(false)
   })
 })

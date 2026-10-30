@@ -116,6 +116,11 @@ export interface RunAgentOptions {
    */
   subagentModel?: AiModelConfig
   /**
+   * 设置页给的子任务步数上限（按 id）。缺省 = 各子任务的规格默认值
+   * （真源是 contracts 的 `SUBAGENT_META.defaultMaxSteps`，见 `resolveMaxSteps`）。
+   */
+  subagentMaxSteps?: Partial<Record<SubagentId, number>>
+  /**
    * confirm 模式下执行破坏性操作（execute_command / delete_file）前的请示。
    *
    * ⚠️ **不传就等于 full**：`buildAgentTools` 里 `needConfirm = 权限是 confirm && 有回调`，
@@ -966,13 +971,16 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
               ...(opts.subagentModel
                 ? { subagentModel: withModelApiStyle(opts.subagentModel) }
                 : {}),
+              ...(opts.subagentMaxSteps ? { maxSteps: opts.subagentMaxSteps } : {}),
               /**
                * 子 run 的事件**不经过父流**（它是工具里自己起的流），所以看门狗的心跳
                * 必须在这里刷新 —— 否则一个跑了 3 分钟但一直在吐字的子任务会被当成卡死。
                */
               emit: (event: AgentStreamEvent) => {
                 if (
-                  (event.type === 'subagent-delta' || event.type === 'subagent-progress') &&
+                  (event.type === 'subagent-start' ||
+                    event.type === 'subagent-event' ||
+                    event.type === 'subagent-end') &&
                   event.toolCallId
                 ) {
                   const info = activeDelegations.get(event.toolCallId)
@@ -981,6 +989,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
                 emitEvent(event)
               },
               signal: runSignal,
+              /**
+               * 单条停止：派活卡上的停止钮与 `execute_command` 走**同一张表**、
+               * 同一个 `POST /api/chat/command/stop` —— 停一个子任务不必废掉整轮。
+               */
+              ...(opts.commandStops ? { commandStops: opts.commandStops } : {}),
               stats
             })
           : {}
@@ -1230,7 +1243,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
           activeDelegations.delete(event.toolCallId)
         }
         // 子任务的任何动静都算「它还活着」（看门狗判的是「完全没动静」）
-        if (event.type === 'subagent-delta' || event.type === 'subagent-progress') {
+        if (
+          event.type === 'subagent-start' ||
+          event.type === 'subagent-event' ||
+          event.type === 'subagent-end'
+        ) {
           const info = activeDelegations.get(event.toolCallId)
           if (info) info.lastAt = Date.now()
         }

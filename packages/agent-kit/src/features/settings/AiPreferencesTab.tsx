@@ -31,7 +31,13 @@ import {
 import { cn } from '@fizz/agent-kit/shared/lib/utils'
 import type { AgentApp } from '@fizz/agent-kit/shared/hooks/useAgentApp'
 import { permissionOption, permissionOptions } from '@fizz/agent-kit/shared/lib/permission'
-import { SUBAGENT_IDS, SUBAGENT_META } from '@fizz/contracts/types'
+import {
+  SUBAGENT_IDS,
+  SUBAGENT_MAX_STEPS,
+  SUBAGENT_META,
+  SUBAGENT_MIN_STEPS,
+  type SubagentId
+} from '@fizz/contracts/types'
 import {
   DEFAULT_MAX_STEPS,
   DEFAULT_TOOL_CALL_CONCURRENCY,
@@ -87,6 +93,40 @@ export function AiPreferencesTab({ app }: { app: AgentApp }) {
       return
     }
     toast.success(next ? tr('已保存子任务模型') : tr('子任务已改为沿用父会话模型'))
+  }
+
+  /**
+   * 提交一个子任务的步数上限（空 = 回到默认值）。
+   *
+   * 越界**不静默夹到边界**：夹了之后界面上看不出「我填的 200 变成了 64」，
+   * 用户只会觉得「设了没用，它还是中途停」。所以直接拒绝并说清范围。
+   */
+  const saveSubagentMaxSteps = async (
+    id: SubagentId,
+    name: string,
+    raw: string
+  ): Promise<void> => {
+    const trimmed = raw.trim()
+    const steps = trimmed === '' ? null : Number(trimmed)
+    if (
+      steps !== null &&
+      (!Number.isInteger(steps) || steps < SUBAGENT_MIN_STEPS || steps > SUBAGENT_MAX_STEPS)
+    ) {
+      toast.error(
+        tr('步数需为 {min}–{max} 的整数', { min: SUBAGENT_MIN_STEPS, max: SUBAGENT_MAX_STEPS })
+      )
+      return
+    }
+    const ok = await app.setSubagentMaxSteps(id, steps)
+    if (!ok) {
+      toast.error(tr('保存失败：{error}', { error: useAgentStore.getState().error ?? tr('未知原因') }))
+      return
+    }
+    toast.success(
+      steps === null
+        ? tr('「{name}」已恢复默认步数', { name })
+        : tr('「{name}」步数上限已设为 {n}', { name, n: steps })
+    )
   }
 
   return (
@@ -189,10 +229,13 @@ export function AiPreferencesTab({ app }: { app: AgentApp }) {
         <div className="text-sm font-medium">{tr('子任务（subagent）')}</div>
         <p className="text-xs leading-4 text-muted-foreground">
           {tr('把只读、产出长的任务交给子 Agent，减少主对话上下文占用。子任务')}<b>{tr('不能修改文件或执行命令')}</b>{tr('。')}
+          {tr('每项可以单独设步数上限（搜索 / 读文件各算一步），留空用默认值。')}
         </p>
         <div className="space-y-2">
           {SUBAGENT_IDS.map((id) => {
             const enabled = (app.subagentSettings?.enabled ?? []).includes(id)
+            /** 用户设过的步数；`null` = 没设，输入框留空并显示默认值占位 */
+            const savedSteps = app.subagentSettings?.maxSteps?.[id] ?? null
             const meta = SUBAGENT_META[id]
             return (
               <div
@@ -235,6 +278,22 @@ export function AiPreferencesTab({ app }: { app: AgentApp }) {
                     <code className="text-[0.625rem] text-muted-foreground">agent-{id}</code>
                   </div>
                   <div className="text-xs leading-4 text-muted-foreground">{tr(meta.hint)}</div>
+                  <div className="mt-1.5 flex items-center gap-1.5">
+                    <span className="text-[0.625rem] text-muted-foreground">{tr('步数上限')}</span>
+                    {/* 非受控 + key 跟着落库值走：只在外部值变了才重挂，打字过程不发请求 */}
+                    <Input
+                      key={`steps-${id}-${savedSteps ?? 'default'}`}
+                      type="number"
+                      min={SUBAGENT_MIN_STEPS}
+                      max={SUBAGENT_MAX_STEPS}
+                      step={1}
+                      defaultValue={savedSteps ?? ''}
+                      placeholder={tr('默认 {n}', { n: meta.defaultMaxSteps })}
+                      aria-label={tr('「{name}」步数上限', { name: meta.name })}
+                      onBlur={(event) => void saveSubagentMaxSteps(id, meta.name, event.target.value)}
+                      className="h-7 w-20 font-mono text-xs"
+                    />
+                  </div>
                 </div>
               </div>
             )

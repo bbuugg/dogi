@@ -851,6 +851,10 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
        */
       subagents: backend === 'builtin' && !isCollab ? subagentSettings.enabled : [],
       ...(backend === 'builtin' && subagentModel ? { subagentModel } : {}),
+      // 步数上限同理只在真会派活时下传：没启用子任务时这两个字段都是垃圾
+      ...(backend === 'builtin' && !isCollab && subagentSettings.maxSteps
+        ? { subagentMaxSteps: subagentSettings.maxSteps }
+        : {}),
       /**
        * 上下文窗口按「这一轮真正选中的模型」解析：`resolveModelConfig` 已经把
        * `model` 覆盖成选中那个 id，所以直接用 `modelConfig.model` 查表即可。

@@ -20,6 +20,7 @@ import type {
   AgentChatMessage,
   AgentConfirmInput,
   AgentConversation,
+  AgentMessagePart,
   AgentStreamEvent,
   AgentWorkspace,
   AiModelConfig,
@@ -35,6 +36,8 @@ import type {
 import { DEFAULT_COLLAB_SETTINGS, normalizeCollabSettings } from '@fizz/contracts/types'
 import type { SkillInfo } from '@fizz/skills'
 import { buildAgentSetup, runAgent, type RunAgentResult } from './agent'
+import { appendPartDelta, appendToolCall, foldToolResult, trimCollabParts } from './collab-parts'
+import { pickCollabTools } from './collab-tools'
 import type { ProjectDoc } from './project-doc'
 
 export interface CollabRuntimeOptions {
@@ -471,12 +474,26 @@ export class CollabRuntime {
     let lastEventAt = Date.now()
     let steps = 0
     const maxSteps = agent.maxSteps ?? this.settings.maxTurnsPerTask
+    /**
+     * 这一轮的过程记录（与主消息 parts 同构）。
+     *
+     * 前端只拿得到流式文本（`collab-delta`）与工具进度的单行摘要（`collab-tool`），
+     * 任务跑完之后这些就没了 —— 用户点开子 Agent 只能看到最终那段结论，看不到它翻过
+     * 哪些文件、跑过什么命令。这里按事件累积，收口时挂到 `task.parts` 上（裁剪见
+     * `collab-parts.ts`）。
+     */
+    const parts: AgentMessagePart[] = []
+
+    /** 收口：把过程记录挂到任务上（没有事件就保持原样，别塞空数组） */
+    const settle = (current: CollabTask): CollabTask =>
+      parts.length ? { ...current, parts: trimCollabParts(parts) } : current
 
     const onEvent = (event: AgentStreamEvent): void => {
       lastEventAt = Date.now()
       switch (event.type) {
         case 'text-delta':
           text += event.delta
+          appendPartDelta(parts, 'text', event.delta)
           this.opts.emit({
             type: 'collab-delta',
             agentId: agent.id,
@@ -487,6 +504,7 @@ export class CollabRuntime {
           break
         case 'reasoning-delta':
           reasoning += event.delta
+          appendPartDelta(parts, 'reasoning', event.delta)
           this.opts.emit({
             type: 'collab-delta',
             agentId: agent.id,
@@ -497,6 +515,7 @@ export class CollabRuntime {
           break
         case 'tool-call':
           steps += 1
+          appendToolCall(parts, event)
           this.setStatus(agent.id, {
             status: 'running',
             taskId: task.id,
@@ -510,10 +529,12 @@ export class CollabRuntime {
             toolCallId: event.toolCallId,
             toolName: event.toolName,
             phase: 'start',
-            label: textOf(event.input, 300)
+            label: textOf(event.input, 300),
+            input: textOf(event.input, 600)
           })
           break
         case 'tool-result':
+          foldToolResult(parts, event)
           this.setStatus(agent.id, { status: 'running', taskId: task.id, step: steps })
           this.opts.emit({
             type: 'collab-tool',
@@ -523,7 +544,8 @@ export class CollabRuntime {
             toolName: event.toolName,
             phase: 'end',
             ok: !event.isError,
-            label: textOf(event.output, 300)
+            label: textOf(event.output, 300),
+            output: textOf(event.output, 600)
           })
           break
         case 'error':
@@ -606,11 +628,9 @@ export class CollabRuntime {
       extraTools: askTool
     })
     setup.instructions = `${setup.instructions}\n\n## 你的角色（多智能体协作）\n你是「${agent.name}」。${agent.role ? `职责：${agent.role}。` : ''}\n${agent.instructions || '完成主智能体交给你的子任务；只做与任务相关的工作，不要擅自扩大范围。'}\n\n你的输出会作为材料交给主智能体汇总，请直接给出结论、证据与必要的文件/行号引用；不要寒暄，不要复述任务。`
-    // 工具白名单：只保留配置里列出的工具（运行时找不到的键静默忽略，避免旧配置炸掉整轮）
-    const allowed = new Set([...agent.tools, ...Object.keys(askTool)])
-    setup.tools = Object.fromEntries(
-      Object.entries(setup.tools).filter(([name]) => allowed.has(name))
-    )
+    // 工具白名单：只保留配置里列出的工具（运行时找不到的键静默忽略，避免旧配置炸掉整轮）。
+    // `read_skill` 例外，始终放行 —— 技能清单就写在提示词里，理由见 `collab-tools.ts`。
+    setup.tools = pickCollabTools(setup.tools, [...agent.tools, ...Object.keys(askTool)])
 
     const thread = this.threads.get(agent.id) ?? []
     const promptParts = [
@@ -661,12 +681,12 @@ export class CollabRuntime {
       setup.ctx?.dispose()
     }
 
-    if (this.closed) return this.finishTask(task, 'cancelled', undefined, '已取消')
+    if (this.closed) return this.finishTask(settle(task), 'cancelled', undefined, '已取消')
     if (result?.finishReason === 'aborted') {
-      return this.finishTask(task, 'cancelled', text, '已取消')
+      return this.finishTask(settle(task), 'cancelled', text, '已取消')
     }
     if (result?.finishReason === 'error' || error || result?.error) {
-      return this.finishTask(task, 'error', text, error ?? result?.error ?? '子任务失败')
+      return this.finishTask(settle(task), 'error', text, error ?? result?.error ?? '子任务失败')
     }
     if (!text.trim() && reasoning.trim()) text = reasoning
     const output = text.trim() || '（子 Agent 没有输出）'
@@ -679,7 +699,7 @@ export class CollabRuntime {
       taskId: task.id
     })
     return this.finishTask(
-      { ...task, ...(usage ? { usage } : {}) },
+      settle({ ...task, ...(usage ? { usage } : {}) }),
       'done',
       output.slice(0, TASK_OUTPUT_LIMIT)
     )

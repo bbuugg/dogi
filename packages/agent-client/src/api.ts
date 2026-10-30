@@ -1879,11 +1879,14 @@ export function createApi(
     /**
      * 保存子任务偏好。`enabled` 是全量清单（传 `[]` = 全关）；模型两项缺省 =
      * **保留原值**（`null` 才是清空），所以启停开关不会顺手把模型设置抹掉。
+     *
+     * `maxSteps` 也是整体替换（传 `{}` = 全部回默认），缺省 = 保留。
      */
     saveSubagents: (patch: {
       enabled?: SubagentId[];
       modelConfigId?: string | null;
       modelId?: string | null;
+      maxSteps?: Partial<Record<SubagentId, number>>;
     }) =>
       request<SubagentsResponse>(API_ROUTES.subagents, {
         method: "POST",

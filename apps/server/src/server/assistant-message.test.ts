@@ -15,8 +15,10 @@
  * 有 `usage` 就只写 `usage`（它自带耗时），没有才写 `durationMs`，绝不两个都写。
  */
 import { describe, expect, it } from 'vitest'
-import type { TurnUsage } from '@fizz/contracts/types'
+import type { AgentChatMessage, TurnUsage } from '@fizz/contracts/types'
 import { buildAssistantMessage } from './assistant-message'
+
+type ToolCallPart = Extract<AgentChatMessage['parts'][number], { type: 'tool-call' }>
 
 const parts = [{ type: 'text' as const, text: '半截回复' }]
 
@@ -63,5 +65,60 @@ describe('buildAssistantMessage · 整轮耗时', () => {
     expect(message.durationMs).toBeUndefined()
     expect(message.usage).toBeUndefined()
     expect(message.id).toBe('a-1')
+  })
+})
+
+/**
+ * 派活卡上的子任务记录在**落盘那一刻**必须有个终态。
+ *
+ * 防的是：进程被杀 / 服务端重启 / 看门狗强杀时 `subagent-end` 那一帧没机会发出去，
+ * `status: 'running'` 被原样写进历史 —— 之后每次打开这条会话，派活卡上都挂着一句
+ * 「运行中…」，永远等不到结果。
+ */
+describe('buildAssistantMessage · 子任务记录收敛', () => {
+  /** 一张还带着「运行中」记录的派活卡 */
+  const runningCard = (): ToolCallPart => ({
+    type: 'tool-call',
+    toolCallId: 'parent-1',
+    toolName: 'agent-explorer',
+    input: { task: '看看 auth 相关代码' },
+    delegation: {
+      subagentId: 'explorer',
+      task: '看看 auth 相关代码',
+      parts: [],
+      status: 'running',
+      startedAt: 1_000
+    }
+  })
+
+  it('落盘的 running 收敛成 aborted，并用落盘时间补齐 endedAt', () => {
+    const card = runningCard()
+    const message = buildAssistantMessage({ parts: [card], id: 'a-1', now: 5_000 })
+    const part = message.parts[0]
+    if (part.type !== 'tool-call' || !part.delegation) throw new Error('派活卡丢了')
+
+    expect(part.delegation.status).toBe('aborted')
+    expect(part.delegation.endedAt).toBe(5_000)
+    // 原对象不被原地改：流式期间那份 parts 还要继续 fold
+    expect(card.delegation?.status).toBe('running')
+  })
+
+  it('已有终态的记录原样保留（连数组引用都不换）', () => {
+    const card: ToolCallPart = {
+      ...runningCard(),
+      delegation: {
+        subagentId: 'explorer',
+        task: '看看 auth 相关代码',
+        parts: [],
+        status: 'done',
+        startedAt: 1_000,
+        endedAt: 2_000
+      }
+    }
+    const settled = [card]
+    const message = buildAssistantMessage({ parts: settled, id: 'a-1', now: 9_000 })
+
+    expect(message.parts).toBe(settled)
+    expect((message.parts[0] as ToolCallPart).delegation?.status).toBe('done')
   })
 })

@@ -20,6 +20,37 @@
  */
 import type { AgentChatMessage, TurnUsage } from '@fizz/contracts/types'
 
+/**
+ * 落盘前把「还没结束」的子任务记录收敛成 `aborted`。
+ *
+ * 正常运行一定以 `subagent-end` 收尾（`subagents.ts` 里每条提前返回的路都调了 `finish`）；
+ * 但进程被杀 / 服务端重启 / 看门狗强杀时那一帧根本没机会发出去，`status: 'running'` 会被
+ * 原样写进历史 —— 之后每次打开这条会话，派活卡上都挂着一句「运行中…」，永远等不到结果。
+ *
+ * 落盘这一刻它就是不跑了：`aborted` 才是真话。
+ */
+function settleDelegations(
+  parts: AgentChatMessage['parts'],
+  now: number
+): AgentChatMessage['parts'] {
+  // 没有「还没结束」的记录就原样返回（同一引用）：绝大多数轮次没派活，不该白拷一份数组
+  const hasRunning = parts.some(
+    (part) => part.type === 'tool-call' && part.delegation?.status === 'running'
+  )
+  if (!hasRunning) return parts
+  return parts.map((part) => {
+    if (part.type !== 'tool-call' || part.delegation?.status !== 'running') return part
+    return {
+      ...part,
+      delegation: {
+        ...part.delegation,
+        status: 'aborted' as const,
+        endedAt: part.delegation.endedAt ?? now
+      }
+    }
+  })
+}
+
 export interface BuildAssistantMessageInput {
   /** 这一轮的正文 / 思考 / 工具过程（已按 fold 规则折好） */
   parts: AgentChatMessage['parts']
@@ -42,7 +73,8 @@ export function buildAssistantMessage(input: BuildAssistantMessageInput): AgentC
   return {
     id: input.id ?? `a-${now}`,
     role: 'assistant',
-    parts: input.parts,
+    // 子任务记录在这里收敛（见 settleDelegations）：落盘 = 这一轮结束了
+    parts: settleDelegations(input.parts, now),
     createdAt: now,
     ...(input.usage
       ? { usage: input.usage }

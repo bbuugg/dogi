@@ -23,8 +23,12 @@
  *
  * 它们通过 `leading` / `trailing` / `header` / `above` / `renderActions` 这几个槽位进来。
  */
-import { useRef, type ReactNode } from 'react'
-import { Loader2, MessageSquare, RotateCw, Unplug } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { ChevronLeft, Loader2, MessageSquare, RotateCw, Square, Unplug } from 'lucide-react'
+import { Button } from '@fizz/ui/button'
+import { SubagentViewProvider, type OpenSubagent } from '@fizz/agent-kit/features/chat/subagent-view'
+import { SUBAGENT_META, type SubagentDelegation } from '@fizz/contracts/types'
+import { workDurationLabel } from '@fizz/agent-kit/shared/lib/turn-step'
 import {
   Conversation,
   ConversationContent,
@@ -46,6 +50,8 @@ import {
   type MessageFollowupBridge
 } from '@fizz/agent-kit/features/chat/message-parts'
 import type { AgentChatMessage } from '@fizz/contracts/agent-api'
+import { toolLabel } from '@fizz/agent-kit/shared/lib/parts'
+import { useAgentStore } from '@fizz/agent-kit/shared/lib/stores/agent-store'
 import type { ContextCompactionState } from '@fizz/agent-kit/shared/lib/stores/slices/conversation'
 import { cn } from '@fizz/agent-kit/shared/lib/utils'
 
@@ -729,12 +735,410 @@ export interface ChatSurfaceProps {
   between?: ReactNode
 }
 
+/**
+ * 会话主界面 + **子任务过程视图**的宿主。
+ *
+ * ## 为什么子任务视图挂在这一层
+ *
+ * 它是「消息列表 + 输入框」的边界：盖住时输入框也跟着被盖住（子任务只读，不能对它
+ * 发消息），返回时两样一起回来。挂在 `MessageList` 里就只能盖住消息区，输入框还杵在
+ * 下面 —— 用户会以为在跟子 agent 说话。
+ *
+ * ## 为什么是**覆盖层**而不是换掉主列表
+ *
+ * 换掉的话主列表会卸载重挂：滚动位置丢了、返回后跳到底部；更糟的是主会话可能正在流式
+ * 输出，卸载期间的增量全靠重新拉历史补。覆盖层让主列表一直活着 —— 返回时位置、草稿、
+ * 流式全都还是原样。
+ *
+ * ## 为什么不存 `delegation` 快照
+ *
+ * 子任务跑着的时候每帧都会重建 `delegation` 对象。只存快照的话，运行中打开看到的是
+ * 「点开那一刻」的过程，后面全冻住。所以只存 `toolCallId`，每次渲染从当前消息里重新取
+ * （见下面的 `findDelegation`），流式期就能跟着往下走。找不到（消息被删 / 切了会话）
+ * 就退回打开时的快照，不会白屏。
+ */
 export function ChatSurface({ list, composer, between }: ChatSurfaceProps) {
+  /** 正在看的子任务：工具调用 id + 兜底快照 */
+  const [viewing, setViewing] = useState<{
+    toolCallId: string
+    delegation: SubagentDelegation
+  } | null>(null)
+  /** 覆盖层：进子任务时把焦点从输入框抢走，否则按回车会把字发进被盖住的主会话 */
+  const overlayRef = useRef<HTMLDivElement | null>(null)
+
+  /** ⚠️ 引用要稳定：它是 context 的值，变了会让整列 `PartView`（都 memo 了）白重渲 */
+  const openSubagent = useCallback<OpenSubagent>(
+    (toolCallId, delegation) => setViewing({ toolCallId, delegation }),
+    []
+  )
+  const closeSubagent = useCallback(() => setViewing(null), [])
+
+  /*
+   * 切会话就退出子任务视图。
+   *
+   * 不靠 `findDelegation` 找不到来自动退出：它找不到时还要用快照兜底（历史刚加载的
+   * 一瞬间会找不到），两者混在一起会「切了会话还停在上一个会话的子任务里」。
+   */
+  const conversationId = list.conversationId
+  useEffect(() => {
+    setViewing(null)
+  }, [conversationId])
+
+  // Esc 返回主会话：与弹窗的惯用键一致，进子任务后不用去找那颗按钮。
+  // 焦点在覆盖层里，keydown 会冒泡到 window，所以监听 window 就够。
+  useEffect(() => {
+    if (!viewing) return
+    overlayRef.current?.focus()
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setViewing(null)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [viewing])
+
+  /**
+   * 当前会话里**还在跑**的子任务（输入框上方那排 chip 的数据源）。
+   *
+   * 每次渲染现扫消息：子任务每帧都会重建 `delegation`，缓存下来的只会是过期快照。
+   * 消息量级是「一轮对话几十条 part」，扫一遍比维护一份同步状态便宜且不会漏。
+   */
+  const runningSubagents = collectRunningSubagents(list.messages, list.streaming)
+
+  return (
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      <SubagentViewProvider value={openSubagent}>
+        <MessageList {...list} />
+      </SubagentViewProvider>
+      {between}
+      <ChatComposer
+        {...composer}
+        /*
+         * 运行中的子任务钉在**输入框上方**，不进消息流：派活卡随时会滚出屏幕、或者
+         * 一直处在折叠状态，而「现在有几个后台活在跑、点进去看」应当是常驻可见的。
+         * 挂 `above` 与队列卡 / 待答复卡同一处，滚动时不动。
+         */
+        above={
+          <>
+            {runningSubagents.length ? (
+              <RunningSubagents items={runningSubagents} onOpen={openSubagent} />
+            ) : null}
+            {composer.above}
+          </>
+        }
+      />
+      {viewing ? (
+        /*
+         * 铺满整个 surface（含输入框）：`z-20` 高于消息区与输入区，低于 Dialog 的 portal。
+         * `tabIndex={-1}` 只为可编程聚焦，键盘进来后不会再 Tab 到后面的主会话。
+         */
+        <div
+          ref={overlayRef}
+          tabIndex={-1}
+          className="absolute inset-0 z-20 flex flex-col bg-background outline-none"
+        >
+          <SubagentTranscript
+            delegation={findDelegation(list.messages, viewing.toolCallId) ?? viewing.delegation}
+            conversationId={list.conversationId}
+            onBack={closeSubagent}
+          />
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * 从消息流里按 `toolCallId` 找那份 delegation。
+ *
+ * 扫全部消息而不是只扫末条：子任务可能连着好几轮都在派活，而打开的是历史上任意一张卡。
+ * 同名 toolCallId 在一份历史里是唯一的（模型每次调用都自己生成 id），所以命中即是。
+ */
+function findDelegation(
+  messages: AgentChatMessage[],
+  toolCallId: string
+): SubagentDelegation | null {
+  for (const message of messages) {
+    for (const part of message.parts) {
+      if (part.type === 'tool-call' && part.toolCallId === toolCallId && part.delegation) {
+        return part.delegation
+      }
+    }
+  }
+  return null
+}
+
+/** 输入框上方那排「运行中的子任务」里的一个 */
+interface RunningSubagentItem {
+  toolCallId: string
+  delegation: SubagentDelegation
+  /** 子 agent 此刻正在用的工具（`read_file` 之类）；还没动手时没有 */
+  tool?: string
+}
+
+/**
+ * 收集当前会话里**还在跑**的子任务。
+ *
+ * `live`（本轮是否还在流式）是必需的门：进程被杀 / 断电时，落盘的派活记录会一直停在
+ * `running`，重启后照它画 chip 就是一条永不结束的「正在运行」。子任务真的在跑时主轮
+ * 必然还在流式 —— 子 run 的 signal 与父轮取或（见 `subagents.ts`）。
+ */
+function collectRunningSubagents(
+  messages: AgentChatMessage[],
+  live: boolean
+): RunningSubagentItem[] {
+  if (!live) return []
+  const items: RunningSubagentItem[] = []
+  for (const message of messages) {
+    for (const part of message.parts) {
+      if (part.type !== 'tool-call') continue
+      const delegation = part.delegation
+      if (!delegation || delegation.status !== 'running') continue
+      items.push({ toolCallId: part.toolCallId, delegation, tool: part.subagentTool })
+    }
+  }
+  return items
+}
+
+/** 每秒提一次的「现在」，只给运行时长用；`enabled` 为假时不起 interval */
+function useNow(enabled: boolean): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!enabled) return
+    // 挂上时先对齐一次：chip 往往是流式期间才出现的，别等到下一个整秒还是 0s
+    setNow(Date.now())
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [enabled])
+  return now
+}
+
+/**
+ * 输入框上方那排「运行中的子任务」chip：点左半进那个子任务的消息流，点右半**只停这一个**。
+ *
+ * ## 为什么是这个位置
+ *
+ * 子任务全程只表现为消息流里一张**收起**的卡：跑起来之后用户既看不到它在干什么，
+ * 也没有入口进去看（那张卡可能早就滚出屏幕）。这一排是「此刻有 N 个后台活在跑」的
+ * 常驻信号，钉在输入框上方，长会话翻到哪儿都看得见。
+ *
+ * ## 为什么停止钮要挂在这里
+ *
+ * 派活卡上也有停止钮，但那张卡随时会滚出屏幕、也多半是收起态。用户看到「这个子任务在
+ * 白跑」（方向错了 / 派重了）时，手边最近的入口就是这排 chip —— 要停必须**就地能停**，
+ * 而不是先翻回去找卡，或者狠心停掉整轮。
+ *
+ * 走的是与派活卡**同一个** action（`stopCommand(toolCallId)`，服务端查 run 的停止表
+ * abort 这一个子 run，父轮继续），所以两边不存在语义差异。
+ *
+ * ## 为什么只列运行中的
+ *
+ * 跑完的子任务留在派活卡内容区（`PartView` 的 `SubagentProcessEntry`）—— 那是**回看**，
+ * 要翻到那条消息才看，不该在输入框上方常驻占位。
+ */
+function RunningSubagents({
+  items,
+  onOpen
+}: {
+  items: RunningSubagentItem[]
+  onOpen: OpenSubagent
+}) {
+  const tr = useT()
+  const now = useNow(items.length > 0)
+  /**
+   * 只停**这一条**子任务的通道 —— 与派活卡头部那颗停止钮是同一个 action。
+   *
+   * 从 store 拿而不是从 props 一路透传：`stopCommand(toolCallId)` 内部自己取当前会话
+   * 在跑那轮的 requestId（见 `createRunActions.stopCommand`），调用方只需要 toolCallId。
+   */
+  const stopCommand = useAgentStore((s) => s.stopCommand)
+  /** 已点、服务端还没回：那颗钮换成转圈并禁用，免得连点（子 run 收尾有几十毫秒的窗口） */
+  const [stopping, setStopping] = useState<ReadonlySet<string>>(() => new Set())
+  if (!items.length) return null
+
+  const stop = (toolCallId: string): void => {
+    setStopping((prev) => new Set(prev).add(toolCallId))
+    // 幂等：子任务刚好在这时自己结束 = 服务端 `{ stopped: false }`，静默收场即可，
+    // 不值得为它弹错误（chip 随之消失，用户看到的就是「停掉了」）
+    void stopCommand(toolCallId)
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {items.map((item) => {
+        const meta = SUBAGENT_META[item.delegation.subagentId]
+        const seconds = Math.max(0, Math.floor((now - item.delegation.startedAt) / 1000))
+        const isStopping = stopping.has(item.toolCallId)
+        return (
+          /*
+           * 分段胶囊：左半进过程视图、右半停止。
+           *
+           * ⚠️ 必须是**两个平级 button**，不能把停止钮塞进「进过程」那颗里面：
+           * `<button>` 套 `<button>` 是非法 HTML，浏览器会把内层拍平 —— 点停止会连带
+           * 进过程视图，还会嵌套触发一次。外壳那个 `span` 只负责画出药丸外观。
+           */
+          <span
+            key={item.toolCallId}
+            className="inline-flex h-7 max-w-full min-w-0 items-stretch overflow-hidden rounded-full border border-border bg-background text-xs text-foreground shadow-xs"
+          >
+            <button
+              type="button"
+              className="flex min-w-0 items-center gap-1.5 px-2.5 transition-colors hover:bg-accent/60"
+              title={tr('查看子任务过程')}
+              aria-label={tr('查看子任务过程')}
+              onClick={() => onOpen(item.toolCallId, item.delegation)}
+            >
+              <Loader2 className="size-3.5 shrink-0 animate-spin" />
+              <span className="shrink-0">
+                {tr('子任务 · {name}', { name: meta?.name ?? item.delegation.subagentId })}
+              </span>
+              {item.tool ? (
+                <span className="min-w-0 truncate text-muted-foreground">
+                  {tr('· 正在 {tool}', { tool: toolLabel(item.tool) })}
+                </span>
+              ) : null}
+              <span className="shrink-0 text-muted-foreground tabular-nums">{seconds}s</span>
+            </button>
+            <button
+              type="button"
+              disabled={isStopping}
+              aria-label={tr('停止子任务')}
+              title={tr('停止子任务')}
+              onClick={() => stop(item.toolCallId)}
+              className="flex w-6 shrink-0 items-center justify-center border-l border-border text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:pointer-events-none disabled:opacity-60"
+            >
+              {isStopping ? (
+                <Loader2 className="size-3 animate-spin" />
+              ) : (
+                <Square className="size-3" />
+              )}
+            </button>
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
+ * 子任务的完整过程：**把 `delegation.parts` 当成一条普通助手消息**交给 `MessageParts`。
+ *
+ * 「attach 进子任务、看到的消息和主任务一模一样」的全部实现就是这一句 —— 不复制渲染逻辑，
+ * 所以折叠条、思考条、工具卡、正文的观感天然一致：跑着时正文逐段露出、思考与工具收进
+ * 一条过程，跑完后合成一条「已工作 N 秒」，跟主对话完全同源。
+ *
+ * ⚠️ 这里是 `MessageParts` 引用自己：子 agent 没有派活工具（只读白名单），`parts` 里不会
+ * 再有 `delegation`，所以不会无限套娃。
+ *
+ * ⚠️ 标题**不用**派活卡的 `label`：那个会随工具意图开关变成「侦察代码库」之类，
+ * 这里要的是稳定的「子任务 · 侦察」。
+ */
+function SubagentTranscript({
+  delegation,
+  conversationId,
+  onBack
+}: {
+  delegation: SubagentDelegation
+  conversationId?: string
+  onBack: () => void
+}) {
+  const tr = useT()
+  const { subagentId, task, parts, status, startedAt, endedAt } = delegation
+  const running = status === 'running'
+  const elapsed = endedAt != null ? endedAt - startedAt : undefined
+  /** 一句话说清「它现在 / 最后怎么了」—— `empty` / `failed` 就是用户最想知道的两种 */
+  const stateText = running
+    ? tr('运行中…')
+    : status === 'empty'
+      ? tr('跑完了，但没有产出结论')
+      : status === 'failed'
+        ? tr('执行失败（详情只在服务端日志里）')
+        : status === 'aborted'
+          ? tr('已中止')
+          : elapsed != null
+            ? tr('已工作 {time}', { time: workDurationLabel(elapsed) })
+            : tr('已完成')
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <MessageList {...list} />
-      {between}
-      <ChatComposer {...composer} />
+      <div className="flex items-center gap-1 border-b border-border/60 px-2 py-1.5 sm:px-3">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onBack}
+          aria-label={tr('返回主会话')}
+          className="-ml-1 h-7 shrink-0 gap-1 px-1.5 text-xs"
+        >
+          <ChevronLeft className="size-4" />
+          {tr('返回主会话')}
+        </Button>
+        <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
+          <span className="shrink-0 text-xs font-medium text-foreground">
+            {tr('子任务 · {name}', { name: SUBAGENT_META[subagentId]?.name ?? subagentId })}
+          </span>
+          <span className="truncate text-xs text-muted-foreground">{stateText}</span>
+        </div>
+      </div>
+
+      <Conversation
+        className="min-h-0 flex-1"
+        // 打开时落底一次（看最新一步）；流式中再按平滑跟随往上走
+        resetKey={`subagent-${startedAt}`}
+        smoothResize={running}
+      >
+        <ConversationContent className="mx-auto w-full max-w-3xl px-2 py-3 sm:px-6">
+          {/*
+            派给它的任务 → **一条用户消息**，而不是头栏下面那块说明条。
+
+            子任务的心智模型就是「主 agent 给它发了一条消息」：任务原文右对齐、进气泡，
+            跟主会话里你发出去的那条长得一模一样，助手的过程接在下面。做成固定说明条的话，
+            它既不随消息流滚走（长过程里永远占着首屏）、也不像「说过的话」——用户得自己
+            转换一次「这行灰字是它的输入」。
+          */}
+          {task.trim() ? (
+            <Message from="user" className="mb-6">
+              <MessageContent className="text-[0.9375rem]">
+                <MessageParts
+                  message={{
+                    id: `subagent-task-${startedAt}`,
+                    role: 'user',
+                    parts: [{ type: 'text', text: task }],
+                    createdAt: startedAt
+                  }}
+                  index={0}
+                  total={1}
+                  streaming={false}
+                  conversationId={conversationId}
+                />
+              </MessageContent>
+            </Message>
+          ) : null}
+          {parts.length ? (
+            <Message from="assistant" className="mb-6">
+              <MessageContent className="text-[0.9375rem]">
+                <MessageParts
+                  message={{
+                    id: `subagent-${startedAt}`,
+                    role: 'assistant',
+                    parts,
+                    createdAt: startedAt,
+                    // 与主消息同口径：只在没有 usage 时单独给耗时，抬头才会报「已工作 N 秒」
+                    ...(elapsed != null && !running ? { durationMs: elapsed } : {})
+                  }}
+                  index={0}
+                  total={1}
+                  streaming={running}
+                  conversationId={conversationId}
+                />
+              </MessageContent>
+            </Message>
+          ) : (
+            <div className="py-6 text-center text-xs text-muted-foreground">
+              {tr('还没有过程记录')}
+            </div>
+          )}
+        </ConversationContent>
+        <ConversationScrollButton />
+      </Conversation>
     </div>
   )
 }

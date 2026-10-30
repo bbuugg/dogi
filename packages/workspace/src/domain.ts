@@ -2483,7 +2483,8 @@ export class AgentDomain {
    * 存子任务偏好。
    *
    * ⚠️ `undefined` = **保留**（与 `saveSkillSettings` 同款）：前端可能只改其中一项，
-   * 不能把没传的那项清空。要真的清空 `enabled` 得显式传 `[]`，清空模型要显式传 `null`。
+   * 不能把没传的那项清空。要真的清空 `enabled` 得显式传 `[]`，清空模型要显式传 `null`，
+   * 步数要回到默认值得显式传 `{}`。
    */
   saveSubagentSettings(patch: Partial<SubagentSettings>): SubagentSettings {
     this.store.mutate((d) => {
@@ -2491,7 +2492,9 @@ export class AgentDomain {
       d.subagentSettings = normalizeSubagentSettings({
         enabled: [...new Set(patch.enabled ?? prev.enabled)],
         modelConfigId: patch.modelConfigId !== undefined ? patch.modelConfigId : prev.modelConfigId,
-        modelId: patch.modelId !== undefined ? patch.modelId : prev.modelId
+        modelId: patch.modelId !== undefined ? patch.modelId : prev.modelId,
+        // 步数整体替换：调用方（设置页）先合并好要留的 id 再传，缺 id = 该子任务回默认
+        maxSteps: patch.maxSteps !== undefined ? patch.maxSteps : prev.maxSteps
       })
     })
     return this.store.snapshot().subagentSettings

@@ -17,6 +17,7 @@ import type {
   AcpModesState,
   AcpPermissionMode,
   AcpThoughtLevelState,
+  AgentMessagePart,
   AskFollowupAnswer,
   CollabSettings,
   CollabState,
@@ -176,6 +177,14 @@ export interface CollabClientState {
   state: CollabState;
   /** agentId → 正在流式输出的文本（收到任务结果后清空） */
   liveText: Record<string, string>;
+  /**
+   * agentId → 运行中的**过程记录**（正文 / 思考 / 工具调用，与 `CollabTask.parts` 同构）。
+   *
+   * 服务端的 `parts` 要等任务收口才写进快照；在那之前右侧对话区就靠这份现场，
+   * 让工具卡边跑边出现（不然只有流式正文，跑完才「啪」地补出全部卡片）。
+   * 任务到终态时清空，交给快照里的 `parts`。
+   */
+  liveParts: Record<string, AgentMessagePart[]>;
 }
 
 /**

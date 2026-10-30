@@ -537,6 +537,8 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
     toggleSubagent: s.toggleSubagent,
     /** 设置子任务专用模型（`null` = 沿用父会话模型） */
     setSubagentModel: s.setSubagentModel,
+    /** 设置某个子任务的步数上限（`null` = 回到规格默认值） */
+    setSubagentMaxSteps: s.setSubagentMaxSteps,
     /**
      * 保存**当前会话**的浏览器偏好（总开关 / 来源）。只传要改的字段，与当前值合并后整体
      * 落库到会话（下一轮生效）。每个会话各记一份 —— 工具条按会话显示、按会话切换。

@@ -49,12 +49,26 @@ export type ToolHeaderProps = {
   type: ToolUIPart["type"];
   state: ToolUIPart["state"];
   /**
-   * 明细（命令 / 主入参等）：**不进触发行**，只作为标题的补充 —— 桌面悬停名字时在 Tooltip
-   * 第二行显示，触屏点名字时在全文弹窗里显示。命令类工具的内容区还会再回声一份
-   * （见 PartView），所以就算不悬停也不会丢。
+   * 明细（命令 / 主入参 / 读写的文件）：单行截断着排在标题右侧，**卡片收起时也看得见**。
    *
-   * ⚠️ 曾经把它截断着排在标题后面，结果两者互抢宽度：命令越长，名字被挤得越短。
-   * 名字是「这一步在干什么」，优先级更高，所以明细让位到 Tooltip / 弹窗里。
+   * 为什么值得占这一行的宽度：工具名本身（`read_file` / `bash`）几乎不携带信息，
+   * 「读的是哪个文件、跑的是哪条命令」才是扫一眼对话流时真正要确认的东西。
+   *
+   * 宽度：**不给固定上限**，按内容宽铺开（有位置就完整显示），只有真的超出行宽才由
+   * flex 收缩让位 —— 顺序是 运行态文案 → 明细 → 标题（`shrink` 权重 99 → 99 → 1，
+   * 见 `STATUS_SHRINK`）。**压缩先压右侧**：明细先被压掉，标题只在明细压完还不够时才
+   * 单行截断（`…`，不折行）；最右侧的状态图标 / 停止钮 / 箭头 `shrink-0`，不会被挤出去。
+   *
+   * ⚠️ 别给明细加 `max-w-[55%]` 这类百分比：外层那一行是 `inline-flex`（宽度由内容撑），
+   * 百分比基数跟着内容变，会出现「整行右边还空着、明细已被砍半」；也别加 `min-w-*`，
+   * 短明细会被撑宽，文本后面凭空多一段空白。
+   *
+   * 被截断的全文：桌面悬停名字（或明细）出 Tooltip，触屏点名字开全文弹窗；
+   * 命令类工具的内容区还会再回声一份（见 PartView）。
+   *
+   * ⚠️ 别给标题 `shrink-0` 换「明细不被压缩」：那会让这一行的 min-content 等于整句意图，
+   * 窄屏上把右侧的状态图标 / 停止钮顶出容器（用户报过）。标题保宽度靠的是「权重最低」，
+   * 不是「不参与收缩」。
    */
   detail?: string;
   /**
@@ -64,11 +78,12 @@ export type ToolHeaderProps = {
    */
   status?: ReactNode;
   /**
-   * 停掉这次工具调用（工具在飞的时候给的回调）：传了就渲染一颗停止钮，排在触发行右侧。
+   * 停掉这次工具调用（工具在飞的时候给的回调）：传了就渲染一颗停止钮，排在**箭头左侧**
+   * （状态图标之后、展开箭头的正前面）。
    *
-   * ⚠️ 按钮**必须与 CollapsibleTrigger 平级**、不能塞进触发器里 —— 触发器本身就是开合热区，
-   * 把按钮放进去，点「停止」会先被 composeEventHandlers 展开 / 收起一次（按钮还会被
-   * Radix 的 trigger 语义当成卡片的一部分）。
+   * ⚠️ 按钮**不能塞进 CollapsibleTrigger 里** —— 触发器本身就是开合热区，把按钮放进去，
+   * 点「停止」会先被 composeEventHandlers 展开 / 收起一次（按钮还会被 Radix 的 trigger
+   * 语义当成卡片的一部分）。所以头部的箭头单独成一个 Trigger，按钮夹在两个 Trigger 中间。
    */
   onStop?: () => void;
   /** 停止钮文案（缺省「停止」） */
@@ -115,10 +130,16 @@ const RUNNING_STATES = new Set<ToolUIPart["state"]>(["input-streaming", "input-a
 /**
  * 头部**运行态文案**的收缩权重。
  *
- * 明细已经挪出头部（见标题处注释），这一行现在只剩「图标 + 标题 + 状态文案 + 状态图标 + 箭头」，
- * 唯一还在跟标题抢宽度的是 `{status}`。它同样是附加信息 —— 状态图标（转圈 / 绿勾 / 黄叹号）
- * 已经把结论说清楚了，文案只是补充 —— 所以给它一个大权重：空间不够时先把文案压掉，
- * 标题拿剩下的全部宽度。
+ * 这一行是「图标 + 标题 + 明细 + 状态文案 + 状态图标 + 停止钮 + 箭头」，几样东西在争宽度，
+ * 让位顺序按信息价值排（权重越大越先被压掉）：
+ *
+ * 1. 运行态文案（`shrink-[99]`）—— 状态图标（转圈 / 绿勾 / 黄叹号）已经把结论说清楚了，
+ *    文案只是补充，空间一紧就先压没；
+ * 2. 明细（命令 / 路径，同样 `shrink-[99]`）—— 随后被压，按 basis 比例只砍超出部分，
+ *    原文还有 Tooltip / 弹窗 / 内容区三处回声；
+ * 3. 标题（意图 / 工具名）—— 最后才让位：`shrink`（权重 1）保住宽度，真的放不下才单行
+ *    `truncate`（见 `ToolHeadLabel`），**不折行**；
+ * 4. 状态图标 / 停止钮 / 箭头 —— `shrink-0`，不参与压缩、也不换行，永远留在行尾。
  */
 const STATUS_SHRINK = "shrink-[99]";
 
@@ -239,6 +260,44 @@ function DetailDialog({
   );
 }
 
+/**
+ * 触发行里的「标题 + 明细」两段文本（图标与状态图标之外的所有文字）。
+ *
+ * 两段**都是单行截断**，但让位顺序相反：先压明细，标题最后才出省略号。
+ *
+ * - 标题是「这一步在干什么」，是扫对话流时唯一必须读懂的那句 —— 所以给它的收缩权重
+ *   最低（默认 `shrink`，即 1）：有位置就完整显示，真的放不下才 `truncate` 出 `…`
+ *   （全文在 Tooltip / 触屏弹窗里）。
+ * - 明细（命令 / 路径）是补充信息：`shrink-[99]`，一挤就先被压掉。它有三处回声
+ *   （Tooltip / 全文弹窗 / 内容区），截断不丢信息。
+ *
+ * ⚠️ 标题**不要改回 `break-words` 折行**：折行会让这一行高度随内容变，而右侧那组
+ * 图标（状态 / 停止 / 箭头）是按首行 `h-5` 对齐的 —— 一行变两行就错位；长 prompt
+ * 折成三四行还会把整条对话流撑散（用户报过「工具名换行了」）。行高恒定 = 扫读节奏恒定。
+ *
+ * ⚠️ 也**不要**给标题 `shrink-0` 换「明细不被压缩」：那会让这一行的 min-content 等于
+ * 整句意图，窄屏上把右侧图标顶出容器（用户报过）。标题保宽度靠的是「权重最低」，
+ * 不是「不参与收缩」。
+ *
+ * 明细前面那截 `max-w-*` **不要加**：外层那一行是 `inline-flex`（宽度由内容撑到
+ * shrink-to-fit，好让状态图标紧跟文字），百分比基数跟着内容变 —— 于是整行右边还空着一大片，
+ * 明细已经被砍到一半（用户原话：「明明有位置可以正常显示」）。同理别加 `min-w-*`：短明细
+ * （`$ ls`、`.`）会被撑得比文本还宽，文本后面凭空多一段空白，状态图标被推远。
+ *
+ * 抽成组件是因为触屏与桌面两条分支渲染的是同一对文本，只是外层交互不同
+ * （点开弹窗 / 悬停 Tooltip）。
+ */
+function ToolHeadLabel({ titleText, detail }: { titleText: string; detail?: string }) {
+  return (
+    <>
+      <span className="min-w-0 truncate text-sm">{titleText}</span>
+      {detail ? (
+        <span className="min-w-0 shrink-[99] truncate font-mono text-xs">{detail}</span>
+      ) : null}
+    </>
+  );
+}
+
 export const ToolHeader = ({
   className,
   title,
@@ -258,21 +317,17 @@ export const ToolHeader = ({
    */
   const touch = useIsMobile();
   const [detailOpen, setDetailOpen] = useState(false);
-  // inline-flex 而非 w-full justify-between：触发区只占内容宽度，箭头贴着标题文本，
-  // 不被推到整行最右端。展开 = 箭头朝下，收起 = 朝右。
-  //
-  // ⚠️ 这里的 `group` 不能删：箭头的 `group-data-[state=open]:rotate-90` 要有祖先同时带
-  // `group` 类和 `data-state` 才生效。Radix 的 Trigger 自己就带 `data-state`，
-  // 所以把 `group` 挂在触发器上是最小范围的做法 —— 之前没有 `group`，箭头就永远朝右。
+  // 触发区只占内容宽度（`flex-col` + `max-w-full`），不铺满整行 —— 右侧那组按钮紧跟在它
+  // 后面，不会被推到容器最右端。展开 = 箭头朝下，收起 = 朝右。
   //
   // 颜色 / 字重与 ReasoningTrigger（「思考了几秒」行）同一口径：整行 text-muted-foreground、
   // 常规字重，hover 整体提亮 —— 图标和标题都不带自己的颜色类，靠继承跟随 hover 变化。
   //
-  // 标题**独占这一行**：命令 / 路径那些明细**不再排在标题后面** —— 两者同排必然互抢宽度，
-  // 名字（意图 / 工具名）就是被命令挤成省略号的那个。现在明细随标题一起进 Tooltip（桌面）/
-  // 点标题开全文弹窗（触屏），命令类工具还会在内容区第一行再回声一份
+  // 标题 + **明细**同排：「这一步干什么」（意图 / 工具名）后面紧跟「对谁干的」（命令 / 文件）。
+  // 两段都单行截断、**不设宽度上限**（行是 shrink-to-fit，百分比会误伤，见 `ToolHeadLabel`）：
+  // 先压明细、标题最后才省略，让位顺序与理由见 `STATUS_SHRINK`。
+  // 明细全文在 Tooltip（桌面）/ 全文弹窗（触屏）里；命令类工具的内容区还会再回声一份
   // （见 PartView 的 `renderBuiltinDirect` / `renderAcpDirect`）。
-  // 于是这一行只剩「标题 + 运行态文案」在争宽度，文案的收缩权重见 `STATUS_SHRINK`。
   // 头部外壳：触发行 + 可选的停止钮（平级，见 ToolHeaderProps.onStop 的说明）。
   /*
    * ⚠️ **触发器始终可点**（含 `input-available` 正在跑那一档）：实时输出、流式入参都在
@@ -294,13 +349,14 @@ export const ToolHeader = ({
   const titleOpenable = touch && !!detail;
   const openDetail = (): void => setDetailOpen(true);
 
+  /*
+   * 内容触发器：图标 + 标题 + 明细 + 状态，**不含箭头**（箭头移到了 `head` 里，排在
+   * 停止钮右侧 —— 见下面 `head` 的说明）。
+   */
   const trigger = (
     <CollapsibleTrigger
       className={cn(
-        // `group/row`：箭头 hover 显示要按「这一行」算，不能用裸 `group` —— 消息气泡自带
-        // 一个裸 group，那样会变成「鼠标停在消息任意处、所有箭头一起亮」（见 REVEAL_ON_HOVER_ARROW）。
-        // 裸 `group` 保留给下面的 `group-data-[state=open]:rotate-90`。
-        "group group/row flex min-w-0 max-w-full flex-col items-start gap-1 rounded-md text-left text-muted-foreground transition-colors hover:text-foreground",
+        "flex min-w-0 max-w-full flex-col items-start gap-1 rounded-md text-left text-muted-foreground transition-colors hover:text-foreground",
         className
       )}
       {...props}
@@ -308,21 +364,17 @@ export const ToolHeader = ({
       <span className="inline-flex min-w-0 max-w-full items-center gap-2">
         <WrenchIcon className="size-4 shrink-0" />
         {/*
-         * ⚠️ 标题**恒为单行、可截断**（`min-w-0 truncate`）。
-         * 这里**不要**改成折行（`break-words` 去掉 `truncate`）：工具行折成两行会把对话流
-         * 撑得忽高忽低，用户明确否掉了。全文靠 Tooltip（桌面）/ 弹窗（触屏）兜。
+         * 标题**不截断**（宽度不够就折行），明细**单行截断** —— 两段的待遇与理由见
+         * `ToolHeadLabel`。核心是：「这一步干什么」是扫对话流时唯一必须读懂的那句，
+         * 宁可这一行高一点，也不出省略号。
          *
-         * 也不能退回 `shrink-0`：那会让这一行的 min-content 等于整句意图，手机窄屏下整行比容器
-         * 还宽、右侧状态图标 / 停止钮被顶到外面（用户报过）。`min-w-0` 保证它仍可被压到容器宽，
-         * 超出的部分才用省略号收尾。
-         *
-         * 宽度是怎么来的：明细（命令 / 路径）已经挪出这一行，同排只剩运行态文案在争，
-         * 而它的 shrink 权重远大于标题（`STATUS_SHRINK`）。也就是说**标题现在能拿到整行
-         * 减去图标 / 箭头后的全部宽度**，再截断只能是「这句意图本身就比整行还长」。
+         * ⚠️ 也**不要**给标题 `shrink-0` 换「一定不被压缩」：那会让这一行的 min-content
+         * 等于整句意图，手机窄屏下整行比容器还宽、右侧状态图标 / 停止钮被顶到外面（用户报过）。
+         * 标题要的是「不被省略」，靠折行做到，不靠「不被压缩」。
          */}
         {titleOpenable ? (
-          // 触屏：标题就是那一句意图，截断了没处看全文 —— 点它开与明细同一个弹窗
-          // （阻止冒泡，否则会同时触发卡片展开 / 收起，与下面明细的做法一致）
+          // 触屏：没有 hover，点名字（或明细）开全文弹窗 —— 弹窗里标题与明细都在。
+          // 阻止冒泡，否则会同时触发卡片展开 / 收起。
           <span
             role="button"
             tabIndex={0}
@@ -338,17 +390,19 @@ export const ToolHeader = ({
               event.stopPropagation();
               openDetail();
             }}
-            className="min-w-0 cursor-pointer truncate text-sm transition-colors hover:text-foreground"
+            className="flex min-w-0 max-w-full cursor-pointer items-center gap-2 transition-colors hover:text-foreground"
           >
-            {titleText}
+            <ToolHeadLabel titleText={titleText} detail={detail} />
           </span>
         ) : (
           <Tooltip delayDuration={100}>
             <TooltipTrigger asChild>
-              <span className="min-w-0 truncate text-sm">{titleText}</span>
+              {/* 名字与明细一起做触发区：被截断的往往是明细，悬停它同样该出全文 */}
+              <span className="flex min-w-0 max-w-full items-center gap-2">
+                <ToolHeadLabel titleText={titleText} detail={detail} />
+              </span>
             </TooltipTrigger>
-            {/* 明细不再单独占一行：跟标题一起放进同一个 Tooltip（第二行小字），
-                悬停名字就能同时看到「这一步干什么 + 具体命令 / 路径」。 */}
+            {/* 明细与标题同一个 Tooltip：悬停就能同时看到「这一步干什么 + 具体命令 / 路径」 */}
             <TooltipContent className="max-w-[28rem]">
               <div className="break-words">{titleText}</div>
               {detail ? (
@@ -380,41 +434,65 @@ export const ToolHeader = ({
           </TooltipTrigger>
           <TooltipContent>{tr(STATUS_LABELS[state])}</TooltipContent>
         </Tooltip>
-        {/*
-         * 箭头平时隐形、悬停整行才浮出来（规则与理由见 `REVEAL_ON_HOVER_ARROW`）：
-         * 鼠标停在这条工具行上时它才是有用的提示（能展开 / 能收起），平时只是噪音。
-         * 触屏靠那条 `[@media(hover:none)]` 常显 —— 否则手机上完全看不出卡片能点开。
-         *
-         * **不按状态隐藏**：运行中也要能展开（看实时输出 / 半截入参），
-         * 见上面 `trigger` 那段注释。
-         */}
-        <ChevronRightIcon
-          className={cn(REVEAL_ON_HOVER_ARROW, "size-4 shrink-0 group-data-[state=open]:rotate-90")}
-        />
       </span>
     </CollapsibleTrigger>
   );
-  const head = !onStop ? (
-    trigger
-  ) : (
-    // `min-w-0`：这一行是 flex 容器，不给它 min-w-0 的话触发器那一侧会把整行撑到
-    // min-content（长标题 / 长明细），停止钮跟着被挤出容器（手机窄屏）。
-    <div className="flex min-w-0 max-w-full items-center gap-2">
+  /*
+   * 头部一行三段：内容触发器 → 停止钮（可选）→ 箭头触发器。
+   *
+   * 为什么把箭头从触发器里拆出来：停止钮要排在**箭头左侧**，而真正的按钮塞不进
+   * CollapsibleTrigger（它本身就是 `<button>`，套一层既是非法 HTML，点停止还会先被
+   * 触发器当成开合热区吞掉一次）。于是箭头单独成一个 Trigger —— Radix 允许一个
+   * Collapsible 挂多个 Trigger，点内容、点箭头都开合。
+   *
+   * `group/row` 挂在整行上：箭头「悬停这一行才浮现」要按这一行算 —— 消息气泡自带一个
+   * 裸 group，用裸 `group-hover:` 会变成「鼠标停在消息任意处、所有箭头一起亮」
+   * （见 REVEAL_ON_HOVER_ARROW）。`min-w-0` 留给触发器：长标题 / 长明细自己折行、
+   * 截断，不把右侧那组顶出容器（手机窄屏踩过）。
+   *
+   * 右侧那组 `h-5`：与首行（`text-sm` 的 20px 行高）等高居中 —— 标题折成多行时，
+   * 停止钮和箭头仍贴着第一行，不会漂到整块中间去。停止钮自己 `h-6` 会溢出这 20px
+   * 上下各 2px，但那只影响绘制、不撑高布局（`overflow` 默认可见）。
+   */
+  const head = (
+    <div className="group/row flex min-w-0 max-w-full items-start gap-2">
       {trigger}
-      <Button
-        size="sm"
-        variant="outline"
-        aria-label={stopLabel ?? tr("停止")}
-        title={stopLabel ?? tr("停止")}
-        className="h-6 shrink-0 gap-1 px-2 text-xs"
-        onClick={onStop}
-      >
-        <Square className="size-3" />
-        {stopLabel ?? tr("停止")}
-      </Button>
+      <div className="flex h-5 shrink-0 items-center gap-2">
+        {onStop ? (
+          <Button
+            size="sm"
+            variant="outline"
+            aria-label={stopLabel ?? tr("停止")}
+            title={stopLabel ?? tr("停止")}
+            className="h-6 shrink-0 gap-1 px-2 text-xs"
+            onClick={onStop}
+          >
+            <Square className="size-3" />
+            {stopLabel ?? tr("停止")}
+          </Button>
+        ) : null}
+        {/* 箭头（第二个 Trigger）：平时隐形、悬停整行才浮出来（规则见 REVEAL_ON_HOVER_ARROW），
+            触屏常显；**不按状态隐藏** —— 运行中也要能展开，看实时输出 / 半截入参。
+            旋转靠它自己的 `data-state`，所以裸 `group` 挂在它身上。纯图标按钮没有文字，
+            靠 aria-label 报「展开 / 收起」（具体的开合状态由 Radix 的 aria-expanded 给出）。 */}
+        <CollapsibleTrigger
+          aria-label={tr("展开 / 收起")}
+          className="group flex shrink-0 items-center rounded-md text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <ChevronRightIcon
+            className={cn(
+              REVEAL_ON_HOVER_ARROW,
+              // 键盘 Tab 到这个 Trigger 上时箭头必须现身（`REVEAL_ON_HOVER_ARROW` 里的
+              // `group-focus-visible/row` 要求整行 `group/row` 自身被聚焦，而它是 div、
+              // 不可聚焦 —— 这里用 Trigger 自己的 `group` 补一条）。
+              "size-4 shrink-0 group-focus-visible:opacity-100 group-data-[state=open]:rotate-90"
+            )}
+          />
+        </CollapsibleTrigger>
+      </div>
     </div>
   );
-  // 桌面端 DOM 一个字都不加（head 就是原来那两段之一）；触屏多一个全文弹窗
+  // 桌面端只渲染这一行（没有额外的外壳 DOM）；触屏多一个全文弹窗
   if (!touch || !detail) return head;
   return (
     <>

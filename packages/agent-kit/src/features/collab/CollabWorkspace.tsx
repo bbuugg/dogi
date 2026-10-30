@@ -3,16 +3,18 @@
 /**
  * 多智能体协作画布：主智能体 + 可配置子 Agent，实时显示状态 / 任务 / 消息。
  *
- * 画布只负责**可视化与配置**，真正的编排在 `@fizz/agent` 的 `CollabRuntime`；对话输入
- * 仍是右侧的 `ChatPanel`（同一个主智能体）。节点位置属于协作配置，拖拽结束后整份 PATCH。
+ * 画布只负责**可视化与配置**，真正的编排在 `@fizz/agent` 的 `CollabRuntime`；
+ * 右侧那块对话区由 `ConversationTab` 组合：默认是主智能体的 `ChatPanel`，
+ * 点画布上任意一个子 Agent 就换成 `CollabAgentChatPanel`（原地替换，不弹窗、不新开标签）。
+ * 节点位置属于协作配置，拖拽结束后整份 PATCH。
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   Bot,
-  Check,
   ChevronRight,
   CircleStop,
+  LayoutGrid,
   Link2,
   Loader2,
   MessagesSquare,
@@ -48,13 +50,11 @@ import {
 import '@xyflow/react/dist/style.css'
 import { Button } from '@fizz/ui/button'
 import { Badge } from '@fizz/ui/badge'
-import { Input } from '@fizz/ui/input'
 import { Label } from '@fizz/ui/label'
 import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle
 } from '@fizz/ui/dialog'
@@ -69,18 +69,23 @@ import { Switch } from '@fizz/ui/switch'
 import { cn } from '@fizz/agent-kit/shared/lib/utils'
 import { toolLabel } from '@fizz/agent-kit/shared/lib/parts'
 import { useConfirm } from '@fizz/agent-kit/shared/components/ConfirmProvider'
-import { CopyOnlyActions, MessageList } from '@fizz/agent-kit/features/chat/chat-surface'
 import { useIsMobile } from '@fizz/agent-kit/shared/hooks/useIsMobile'
 import { useTheme } from '@fizz/agent-kit/shared/hooks/useTheme'
 import { useT } from '@fizz/agent-kit/shared/lib/language'
 import type { AgentApp } from '@fizz/agent-kit/shared/hooks/useAgentApp'
-import type { AgentChatMessage } from '@fizz/contracts/agent-api'
+import { AgentConfigDialog } from '@fizz/agent-kit/features/collab/AgentConfigDialog'
+import {
+  EMPTY_MESSAGES,
+  EMPTY_STATUSES,
+  EMPTY_TASKS,
+  STATUS_META,
+  displayLiveText
+} from '@fizz/agent-kit/features/collab/agent-messages'
 import {
   COLLAB_MAIN_ID,
   DEFAULT_COLLAB_SETTINGS,
   createCollabAgent,
   normalizeCollabSettings,
-  type AiPermissionMode,
   type CollabAgentConfig,
   type CollabAgentRuntime,
   type CollabAgentStatus,
@@ -102,35 +107,14 @@ const NODE_H = 148
  */
 const TOPOLOGY_EDGE_PREFIX = 'topology:'
 
-// 这些空值必须模块级稳定：`?? {}` / `?? []` 每次渲染都会产生新引用，
-// 而它们进了同步节点的 useEffect 依赖 —— 会 setNodes → 重渲染 → 再 setNodes，
-// 最终触发 React #185（Maximum update depth exceeded）。
-const EMPTY_STATUSES: Record<string, CollabAgentRuntime> = {}
-const EMPTY_TASKS: CollabTask[] = []
-const EMPTY_MESSAGES: CollabMessage[] = []
-const EMPTY_LIVE_TEXT: Record<string, string> = {}
-
-const TOOL_OPTIONS: Array<{ key: string; label: string; hint: string }> = [
-  { key: 'read_file', label: '读文件', hint: 'read_file' },
-  { key: 'list_files', label: '列目录', hint: 'list_files' },
-  { key: 'search_files', label: '搜内容', hint: 'search_files' },
-  { key: 'find_files', label: '找文件', hint: 'find_files' },
-  { key: 'write_file', label: '写文件', hint: 'write_file' },
-  { key: 'edit_file', label: '改文件', hint: 'edit_file' },
-  { key: 'delete_file', label: '删文件', hint: 'delete_file' },
-  { key: 'execute_command', label: '执行命令', hint: 'execute_command' },
-  { key: 'web_fetch', label: '抓网页', hint: 'web_fetch' }
-]
-
-const STATUS_META: Record<CollabAgentStatus, { label: string; dot: string; text: string }> = {
-  idle: { label: '空闲', dot: 'bg-muted-foreground/40', text: 'text-muted-foreground' },
-  queued: { label: '排队', dot: 'bg-amber-500', text: 'text-amber-600 dark:text-amber-400' },
-  running: { label: '运行中', dot: 'bg-emerald-500 animate-pulse', text: 'text-emerald-600 dark:text-emerald-400' },
-  waiting: { label: '等回答', dot: 'bg-sky-500', text: 'text-sky-600 dark:text-sky-400' },
-  done: { label: '完成', dot: 'bg-emerald-500', text: 'text-emerald-600 dark:text-emerald-400' },
-  error: { label: '出错', dot: 'bg-destructive', text: 'text-destructive' },
-  cancelled: { label: '已取消', dot: 'bg-muted-foreground/40', text: 'text-muted-foreground' }
-}
+/*
+ * 空值常量（`EMPTY_STATUSES` / `EMPTY_TASKS` / ...）、状态配色（`STATUS_META`）与
+ * 「任务流水 → 消息列表」的拼装都搬去了 `agent-messages.ts`：右侧对话区的
+ * `CollabAgentChatPanel` 与这张画布必须看到**同一份**消息与同一套状态文案，别再在这里写第二份。
+ *
+ * ⚠️ 那边的常量仍然是模块级稳定的 —— 它们进同步节点的 effect 依赖，`?? {}` / `?? []`
+ * 每次渲染都是新引用，会 setNodes → 重渲染 → 再 setNodes，最终 React #185。
+ */
 
 interface NodeAccent {
   /** 节点边框 / 小地图颜色（与流程画布的角色色同一套观感） */
@@ -138,22 +122,6 @@ interface NodeAccent {
   /** 头部底色 */
   bg: string
   color: string
-}
-
-/** 流式文本里可能混着模型原样吐出的工具调用标记；节点上只展示「做了什么」 */
-function displayLiveText(text: string): string {
-  return text
-    .replace(
-      /<invoke\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>[\s\S]*?<\/invoke>/gi,
-      (_match, name: string) => `[${toolLabel(name)}]`
-    )
-    .replace(
-      /<invoke\b[^>]*\bname\s*=\s*["']([^"']+)["'][^>]*>[\s\S]*$/i,
-      (_match, name: string) => `[${toolLabel(name)}]`
-    )
-    .replace(/<\/?invoke\b[^>]*>/gi, '')
-    .replace(/<parameter\b[^>]*>|<\/parameter>/gi, '')
-    .trim()
 }
 
 const MAIN_ACCENT: NodeAccent = {
@@ -170,49 +138,54 @@ const SUB_ACCENTS: NodeAccent[] = [
   { border: 'border-cyan-300 dark:border-cyan-700', bg: 'bg-cyan-50 dark:bg-cyan-950/30', color: '#06b6d4' }
 ]
 
-/**
- * 把一个子 Agent 的「任务流水」翻成消息列表（喂给与主会话同一个 `MessageList`）。
- *
- * 子 Agent 没有自己的会话记录 —— 它每被派一次活就是一个任务（prompt 进、output/error 出），
- * 所以一轮 = 一问一答两条消息。正在跑的那轮把流式文本接在助手消息里；还没有任何输出时
- * 给一条 `parts: []` 的助手消息（`MessageParts` 见到空 parts 会渲染「正在思考…」）。
- */
-function agentChatMessages(tasks: CollabTask[], live?: string): AgentChatMessage[] {
-  const out: AgentChatMessage[] = []
-  for (const task of tasks) {
-    out.push({
-      id: `${task.id}:ask`,
-      role: 'user',
-      createdAt: task.createdAt,
-      // 主智能体补的上下文拼在 prompt 前面（服务端派活时也是这么拼的，见 CollabRuntime）
-      parts: [{ type: 'text', text: task.context ? `${task.context}\n\n${task.prompt}` : task.prompt }]
-    })
-    const running = task.status === 'running' || task.status === 'queued'
-    const body = running
-      ? displayLiveText(live ?? '')
-      : task.status === 'error'
-        ? (task.error ?? '')
-        : (task.output ?? '')
-    // 跑着的任务即使还没有输出也要占一条助手消息：空 parts 才会渲染「正在思考…」
-    if (running || body) {
-      out.push({
-        id: `${task.id}:reply`,
-        role: 'assistant',
-        createdAt: task.finishedAt ?? task.startedAt ?? task.createdAt,
-        parts: body ? [{ type: 'text', text: body }] : []
-      })
-    }
-  }
-  return out
-}
-
 interface Point {
   x: number
   y: number
 }
 
+/** 列步长：卡片宽 250 + 100 间距 */
+const COL_STEP = 350
+/** 行步长：卡片高约 120 + 80 间距 */
+const ROW_STEP = 200
+/**
+ * 主节点固定落位（它不可拖，位置不落盘）：横向居中在三列之上
+ * （列中心 40 + 350 + 125 = 515，节点宽 250 → x = 390）。
+ */
+const MAIN_POSITION: Point = { x: 390, y: 30 }
+/**
+ * 第一行子节点的 y。
+ *
+ * 主节点底部是**唯一**的接线位（出 / 入叠在同一个点上），而它的底边在 y≈150 附近：
+ * 子节点要是从 190 起排，缝隙只剩 40px，第三个 Agent 加进来后卡片正好把这颗点围住 ——
+ * 想从主智能体拉一条线出去，既没有地方下拖，拖出来也被卡片盖住读不出连的是谁。
+ * 留 120px 的走线通道，三条线并排也看得清。
+ */
+const FIRST_ROW_Y = 270
+
 function defaultPosition(index: number): Point {
-  return { x: 40 + (index % 3) * 350, y: 190 + Math.floor(index / 3) * 180 }
+  return {
+    x: 40 + (index % 3) * COL_STEP,
+    y: FIRST_ROW_Y + Math.floor(index / 3) * ROW_STEP
+  }
+}
+
+/**
+ * 新增 Agent 的落位：跳过已被占用的槽位。
+ *
+ * 直接按 `agents.length` 取第 N 个槽有个坑 —— 删过 Agent 之后 index 会撞上仍在用的位置，
+ * 新卡片直接叠在老卡片上（表现就是「点了添加，画布上什么都没多出来」）。
+ */
+function freePosition(agents: readonly CollabAgentConfig[]): Point {
+  const occupied = (spot: Point): boolean =>
+    agents.some((agent, index) => {
+      const at = agent.position ?? defaultPosition(index)
+      return Math.abs(at.x - spot.x) < COL_STEP / 2 && Math.abs(at.y - spot.y) < ROW_STEP / 2
+    })
+  for (let index = 0; index < 500; index += 1) {
+    const spot = defaultPosition(index)
+    if (!occupied(spot)) return spot
+  }
+  return defaultPosition(agents.length)
 }
 
 function mainSpec(settings: CollabSettings): CollabAgentConfig {
@@ -239,7 +212,7 @@ interface CollabFlowNodeData {
   /**
    * ⚠️ 这里**刻意不放任务正文与流式文本**：那两样一秒能变十几次，灌进节点 data 会让
    * `useNodesState` 的同步 effect 每帧重建节点（画布闪烁），而且卡片上也读不全。
-   * 要看内容就点开弹窗，数据从 `liveText` / `tasks` 现取。
+   * 要看内容就点节点把右侧对话区换成它（`CollabAgentChatPanel` 从 `tasks` 现取）。
    */
   selected: boolean
   onSelect: () => void
@@ -346,7 +319,8 @@ function CollabAgentNode({ data }: NodeProps<CollabFlowNode>) {
       </div>
       {/*
         卡片上**不显示任务与流式正文**：这两样变化最快，写在卡片上会让节点高度一直抖，
-        也读不全。点卡片弹窗看完整消息（`AgentMessagesDialog`，与主会话同一套 `MessageList`）。
+        也读不全。点卡片把右侧对话区换成这个 Agent（`CollabAgentChatPanel`，与主会话
+        同一套 `MessageList`），完整历史在那里看。
       */}
       <div className="px-3 py-2">
         <p className="line-clamp-2 text-xs leading-snug text-muted-foreground">
@@ -551,7 +525,22 @@ function CollabTopologyEdge({
 
 const COLLAB_EDGE_TYPES = { comm: CollabCommEdge, topology: CollabTopologyEdge }
 
-export function CollabWorkspace({ app }: { app: AgentApp }) {
+export function CollabWorkspace({
+  app,
+  viewingAgentId,
+  onViewAgent
+}: {
+  app: AgentApp
+  /**
+   * 右侧对话区正在看哪个子 Agent（null = 主智能体）。
+   *
+   * 状态**由 `ConversationTab` 持有**，不在这里：右侧那块面板不是画布的子节点
+   * （画布在左、对话在右，手机上画布在上、对话在下），只有共同的父级能同时影响两边。
+   */
+  viewingAgentId: string | null
+  /** 请求右侧对话区换成某个 Agent 的消息（null = 换回主智能体） */
+  onViewAgent: (agentId: string | null) => void
+}) {
   // 订阅语言：画布顶栏那几个按钮 / 角标的文案在渲染期用 `tr()` 现算
   const tr = useT()
   const confirm = useConfirm()
@@ -562,12 +551,16 @@ export function CollabWorkspace({ app }: { app: AgentApp }) {
     [conversation?.collab]
   )
   const state = app.collab?.state
-  const liveText = app.collab?.liveText ?? EMPTY_LIVE_TEXT
   const [selected, setSelected] = useState<string>(MAIN_ID)
   const [editing, setEditing] = useState<{ agent: CollabAgentConfig; isNew: boolean } | null>(null)
-  /** 消息弹窗正在看哪个子 Agent（null = 关着）。桌面点节点、手机点卡片都走它 */
-  const [detailId, setDetailId] = useState<string | null>(null)
   const [logOpen, setLogOpen] = useState(false)
+  /*
+   * 对话区被**外部**切回主智能体时（面板头部那颗返回箭头），画布上的选中环也要回到主节点 ——
+   * 否则会出现「右侧已经是主对话、画布还圈着某个子 Agent」的错位，键盘 Delete 也会删错人。
+   */
+  useEffect(() => {
+    setSelected(viewingAgentId ?? MAIN_ID)
+  }, [viewingAgentId])
   /**
    * 协作设置弹窗。
    *
@@ -691,32 +684,6 @@ export function CollabWorkspace({ app }: { app: AgentApp }) {
     else connectAgents({ source: MAIN_ID, target: agentId, sourceHandle: null, targetHandle: null })
   }
 
-  /** 消息弹窗里正在看的那个子 Agent（null = 关着）。桌面点节点、手机点卡片都会打开它 */
-  const detailAgent = detailId ? settings.agents.find((a) => a.id === detailId) : undefined
-  /**
-   * 这个 Agent 的任务流水，按开始时间排好。
-   *
-   * 刻意用 `agentId` 而不是「收发的消息」：`CollabMessage` 里 `delegate` 那条的正文就是
-   * prompt、`result` 那条是摘要，用任务拼出来的「问 + 答」才和主会话的对话结构对得上。
-   */
-  const detailTasks = useMemo(
-    () =>
-      detailId
-        ? tasks
-            .filter((task) => task.agentId === detailId)
-            .sort((a, b) => a.createdAt - b.createdAt)
-        : [],
-    [tasks, detailId]
-  )
-  const detailMessages = useMemo(
-    () => agentChatMessages(detailTasks, detailId ? liveText[detailId] : undefined),
-    [detailTasks, detailId, liveText]
-  )
-  const detailLast = detailTasks[detailTasks.length - 1]
-  /** 末个任务还没落地 = 这一轮还在跑：消息列表据此做平滑跟随、末条不出操作行 */
-  const detailStreaming = !!detailLast && (detailLast.status === 'running' || detailLast.status === 'queued')
-  const detailMeta = STATUS_META[detailId ? (statuses[detailId]?.status ?? 'idle') : 'idle']
-
   const nameOf = (id: string): string =>
     id === MAIN_ID ? settings.mainName : agents.find((agent) => agent.id === id)?.name ?? id
 
@@ -735,7 +702,7 @@ export function CollabWorkspace({ app }: { app: AgentApp }) {
       {
         id: MAIN_ID,
         type: 'collab',
-        position: { x: 465, y: 30 },
+        position: MAIN_POSITION,
         draggable: false,
         data: {
           agent: mainSpec(settings),
@@ -743,7 +710,12 @@ export function CollabWorkspace({ app }: { app: AgentApp }) {
           accent: MAIN_ACCENT,
           status: mainStatus,
           selected: selected === MAIN_ID,
-          onSelect: () => setSelected(MAIN_ID)
+          // 点主智能体 = 右侧对话区回到主会话（从任何子 Agent 的面板切回来都走这里）
+          onSelect: () => {
+            setSelected(MAIN_ID)
+            setSelectedEdge(null)
+            onViewAgent(null)
+          }
         }
       },
       ...agents.map((agent, index) => {
@@ -759,11 +731,11 @@ export function CollabWorkspace({ app }: { app: AgentApp }) {
             accent: SUB_ACCENTS[index % SUB_ACCENTS.length]!,
             status: runtime,
             selected: selected === agent.id,
-            // 点节点 = 选中 + 打开消息弹窗（主智能体的对话就是右侧那个面板，不弹）
+            // 点节点 = 右侧对话区换成这个 Agent（原地换内容，不弹窗、不新开标签）
             onSelect: () => {
               setSelected(agent.id)
               setSelectedEdge(null)
-              setDetailId(agent.id)
+              onViewAgent(agent.id)
             },
             onEdit: () => setEditing({ agent, isNew: false }),
             onDelete: () => void removeAgent(agent),
@@ -945,6 +917,23 @@ export function CollabWorkspace({ app }: { app: AgentApp }) {
   }
 
   /**
+   * 把节点摊回默认网格。
+   *
+   * 给**老会话**留的出路：默认布局的走线通道（见 `FIRST_ROW_Y`）只对新建的 Agent 生效，
+   * 已经落盘的 `position` 不会自己挪 —— 用户把第三张卡拖到主节点底下之后，画布就一直是挤的。
+   * 一键重排比让他逐张拖回去省事，也不会动模型 / 工具这些配置。
+   */
+  const tidyLayout = (): void => {
+    saveSettings({
+      ...settings,
+      agents: settings.agents.map((agent, index) => ({
+        ...agent,
+        position: defaultPosition(index)
+      }))
+    })
+  }
+
+  /**
    * 键盘删除（Delete / Backspace）。
    *
    * 删的是**看得见的那个选中**：接线优先（点中它才会进选中态，而点节点会把接线选中清掉，
@@ -959,7 +948,7 @@ export function CollabWorkspace({ app }: { app: AgentApp }) {
     if (event.key !== 'Delete' && event.key !== 'Backspace') return
     if (event.isComposing || event.repeat) return
     // 弹窗开着时这一下属于弹窗：编辑框里的 Backspace 是删字，确认框里可能是「不要」
-    if (editing || settingsOpen || logOpen || detailId) return
+    if (editing || settingsOpen || logOpen) return
     const target = event.target as HTMLElement | null
     if (
       target &&
@@ -1032,8 +1021,8 @@ export function CollabWorkspace({ app }: { app: AgentApp }) {
           )}
         </div>
         {/*
-          工具栏只留「添加 Agent」。并行 / 深度 / 互问 / 交互记录全部进了设置弹窗 ——
-          状态角标留在左边当读数，不占操作位。
+          工具栏只留「设置 / 重排 / 添加 Agent」。并行 / 深度 / 互问 / 交互记录全部进了设置弹窗
+          —— 状态角标留在左边当读数，不占操作位。
         */}
         <div className="flex shrink-0 items-center gap-1.5">
           <Button
@@ -1047,13 +1036,24 @@ export function CollabWorkspace({ app }: { app: AgentApp }) {
             <Settings2 className="size-3.5" />
           </Button>
           <Button
+            size="icon-sm"
+            variant="ghost"
+            className="size-7 text-muted-foreground"
+            aria-label={tr('重新排列节点')}
+            title={tr('重新排列节点：卡片挤在一起、主 Agent 底部没有走线空间时用')}
+            disabled={agents.length === 0}
+            onClick={tidyLayout}
+          >
+            <LayoutGrid className="size-3.5" />
+          </Button>
+          <Button
             size="sm"
             className="h-7 gap-1 text-xs"
             onClick={() =>
               setEditing({
                 isNew: true,
                 agent: createCollabAgent({
-                  position: defaultPosition(settings.agents.length)
+                  position: freePosition(settings.agents)
                 })
               })
             }
@@ -1083,10 +1083,10 @@ export function CollabWorkspace({ app }: { app: AgentApp }) {
             ].map(({ id, agent, status, editable }) => {
               const runtime = id === MAIN_ID ? undefined : statuses[id]
               const meta = STATUS_META[status]
-              /** 主智能体的对话就在旁边的面板里，手机上点它没有「另一份消息」可看 */
+              /** 手机上画布折成了列表，点一行同样把**下方**的对话区换成这个 Agent */
               const open = (): void => {
                 setSelected(id)
-                if (id !== MAIN_ID) setDetailId(id)
+                onViewAgent(id === MAIN_ID ? null : id)
               }
               return (
                 <div
@@ -1191,7 +1191,7 @@ export function CollabWorkspace({ app }: { app: AgentApp }) {
                   <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
                     {agent.role || '通用协作助手'}
                   </p>
-                  {/* 任务与流式正文不进卡片：点开弹窗看完整消息（与主会话同一套 UI） */}
+                  {/* 任务与流式正文不进卡片：点一行把下方对话区换成它（与主会话同一套 UI） */}
                 </div>
               )
             })}
@@ -1214,7 +1214,7 @@ export function CollabWorkspace({ app }: { app: AgentApp }) {
             edgeTypes={COLLAB_EDGE_TYPES}
             onNodesChange={onFlowNodesChange}
             onNodeClick={() => {
-              // 选中 / 打开消息弹窗都在节点自己的 `onSelect` 里（那是卡片根节点的 onClick，
+              // 选中 / 切换右侧对话区都在节点自己的 `onSelect` 里（那是卡片根节点的 onClick，
               // 卡片上的按钮 stopPropagation 之后不会误触发）；这里只负责「换目标」这一件事：
               // 接线不再算选中，否则 Delete 会删到上次点的那条线
               setSelectedEdge(null)
@@ -1255,74 +1255,6 @@ export function CollabWorkspace({ app }: { app: AgentApp }) {
           </div>
         )}
       </div>
-
-      {detailAgent && (
-        <Dialog
-          open
-          onOpenChange={(open) => {
-            if (!open) setDetailId(null)
-          }}
-        >
-          {/*
-            宽度取 `4xl` 而不是 `3xl`：消息列本身是 `max-w-3xl`，主会话面板通常比它宽，
-            所以列两侧有留白。弹窗如果正好 3xl，消息就会**贴着弹窗边缘**，一眼看着就不是
-            同一个界面。多留一档，列在弹窗里居中，观感才对得上。
-          */}
-          <DialogContent className="flex max-h-[85dvh] flex-col gap-0 overflow-hidden p-0 sm:max-w-4xl">
-            <DialogHeader className="sr-only">
-              <DialogTitle>{detailAgent.name}</DialogTitle>
-              <DialogDescription>这个 Agent 的任务与消息</DialogDescription>
-            </DialogHeader>
-            {/*
-              头一条：名字 + 状态 + 编辑。
-              横向内边距与消息列**同一套**（`px-2 sm:px-6`，就是 `MessageList` 默认的
-              `contentClassName`），所以名字和下面第一条消息的左缘是一条线 —— 主会话里
-              标题与消息也是这么对齐的。`pr-12` 只在窄屏（弹窗满宽、右上角那颗 ✕ 会压过来）
-              时生效，宽屏由 `sm:px-6` 接管。
-            */}
-            <div className="shrink-0 border-b">
-              <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-2 py-2 pr-12 sm:px-6">
-                <Bot className="size-4 shrink-0 text-muted-foreground" />
-                <span className="truncate text-sm font-medium">{detailAgent.name}</span>
-                <span className={cn('flex shrink-0 items-center gap-1 text-xs', detailMeta.text)}>
-                  <span className={cn('size-1.5 rounded-full', detailMeta.dot)} />
-                  {detailMeta.label}
-                </span>
-                <Button
-                  size="xs"
-                  variant="ghost"
-                  className="shrink-0 gap-1 text-muted-foreground"
-                  onClick={() => {
-                    setDetailId(null)
-                    setEditing({ agent: detailAgent, isNew: false })
-                  }}
-                >
-                  <Pencil className="size-3" />
-                  编辑
-                </Button>
-              </div>
-            </div>
-            {/*
-              消息列表与主会话**同一套**（`MessageList`）：气泡、代码块、工具卡、滚动跟随
-              全部复用，只有数据来源不同 —— 子 Agent 的一轮 = 一个任务（问 + 答）。
-              ⚠️ 刻意**不传 `contentClassName`**、并显式 `outline`：主会话那边是
-              `outline: true` + 默认列宽（`ChatPanel` 的 `list` 就是这么配的）。
-              这两项一改，消息的左右留白和右侧那条「消息目录」竖线就跟着变 ——
-              用户一眼就能看出「和主会话不一样」。
-            */}
-            <MessageList
-              messages={detailMessages}
-              streaming={detailStreaming}
-              resetKey={detailAgent.id}
-              outline
-              renderActions={({ message, index, total }) => (
-                <CopyOnlyActions message={message} index={index} total={total} />
-              )}
-              emptyState={<p className="text-sm text-muted-foreground">还没有派过活</p>}
-            />
-          </DialogContent>
-        </Dialog>
-      )}
 
       {settingsOpen && (
         <Dialog open onOpenChange={setSettingsOpen}>
@@ -1501,7 +1433,7 @@ export function CollabWorkspace({ app }: { app: AgentApp }) {
       )}
 
       {editing && (
-        <AgentDialog
+        <AgentConfigDialog
           app={app}
           agent={editing.agent}
           isNew={editing.isNew}
@@ -1510,11 +1442,27 @@ export function CollabWorkspace({ app }: { app: AgentApp }) {
           }}
           onSave={(next) => {
             const exists = settings.agents.some((a) => a.id === next.id)
+            /*
+             * 新建的 Agent 默认带一条「主智能体 → 它」的接线（与 `normalizeCollabSettings`
+             * 给老配置补的默认接线同一个口径）：主节点底部只有**一个**接线位，卡片一多
+             * 就没有地方下拖，「加了 Agent 却派不到它」不该靠一次精确拖拽去解决。
+             * 不想要这条线，点线上那颗小叉即可。
+             */
+            const wired = settings.edges.some(
+              (edge) => edge.source === MAIN_ID && edge.target === next.id
+            )
             saveSettings({
               ...settings,
               agents: exists
                 ? settings.agents.map((a) => (a.id === next.id ? next : a))
-                : [...settings.agents, next]
+                : [...settings.agents, next],
+              edges:
+                exists || wired
+                  ? settings.edges
+                  : [
+                      ...settings.edges,
+                      { id: `${MAIN_ID}->${next.id}`, source: MAIN_ID, target: next.id }
+                    ]
             })
             setSelected(next.id)
             setEditing(null)
@@ -1525,172 +1473,3 @@ export function CollabWorkspace({ app }: { app: AgentApp }) {
   )
 }
 
-function AgentDialog({
-  app,
-  agent,
-  isNew,
-  onOpenChange,
-  onSave
-}: {
-  app: AgentApp
-  agent: CollabAgentConfig
-  isNew: boolean
-  onOpenChange: (open: boolean) => void
-  onSave: (agent: CollabAgentConfig) => void
-}) {
-  const [draft, setDraft] = useState<CollabAgentConfig>(agent)
-  const modelValue = draft.configId && draft.modelId ? `${draft.configId}::${draft.modelId}` : 'inherit'
-
-  const set = (patch: Partial<CollabAgentConfig>): void => setDraft((prev) => ({ ...prev, ...patch }))
-
-  return (
-    <Dialog open onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[85dvh] flex-col gap-3 overflow-hidden sm:max-w-md">
-        <DialogHeader className="shrink-0">
-          <DialogTitle>{isNew ? '添加协作 Agent' : `编辑「${agent.name}」`}</DialogTitle>
-          <DialogDescription>
-            Agent 与主智能体共享同一工作区。默认只读；需要改动文件 / 执行命令时再放开权限。
-          </DialogDescription>
-        </DialogHeader>
-        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-          <div className="grid gap-3">
-          <div className="grid gap-1.5">
-            <Label htmlFor="collab-name">名字</Label>
-            <Input
-              id="collab-name"
-              value={draft.name}
-              onChange={(event) => set({ name: event.target.value })}
-              placeholder="例如：调研员"
-            />
-          </div>
-          <div className="grid gap-1.5">
-            <Label htmlFor="collab-role">职责</Label>
-            <Input
-              id="collab-role"
-              value={draft.role}
-              onChange={(event) => set({ role: event.target.value })}
-              placeholder="一句话说明它擅长什么，主智能体据此选人"
-            />
-          </div>
-          <div className="grid gap-1.5">
-            <Label htmlFor="collab-instructions">提示词（可选）</Label>
-            <textarea
-              id="collab-instructions"
-              value={draft.instructions}
-              onChange={(event) => set({ instructions: event.target.value })}
-              rows={3}
-              className="min-h-16 w-full resize-y rounded-md border border-input bg-transparent px-2.5 py-2 text-sm outline-none focus-visible:border-ring"
-              placeholder="这个 Agent 的工作方式 / 输出格式 / 边界"
-            />
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="grid min-w-0 gap-1.5">
-              <Label>模型</Label>
-              <Select
-                value={modelValue}
-                onValueChange={(value) => {
-                  if (value === 'inherit') {
-                    setDraft((prev) => {
-                      const next = { ...prev }
-                      delete next.configId
-                      delete next.modelId
-                      return next
-                    })
-                    return
-                  }
-                  const [configId, modelId] = value.split('::')
-                  set({ configId, modelId })
-                }}
-              >
-                <SelectTrigger size="sm" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="inherit">跟随主会话</SelectItem>
-                  {app.models.flatMap((config) =>
-                    (config.models ?? []).map((model) => (
-                      <SelectItem
-                        key={`${config.id}::${model.id}`}
-                        value={`${config.id}::${model.id}`}
-                      >
-                        {config.name} / {model.id}
-                      </SelectItem>
-                    ))
-                  )}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="grid min-w-0 gap-1.5">
-              <Label>权限</Label>
-              <Select
-                value={draft.permissionMode}
-                onValueChange={(value) => set({ permissionMode: value as AiPermissionMode })}
-              >
-                <SelectTrigger size="sm" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="readonly">只读</SelectItem>
-                  <SelectItem value="confirm">改动需确认</SelectItem>
-                  <SelectItem value="full">完全访问</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          <div className="grid gap-1.5">
-            <Label>工具</Label>
-            <div className="flex flex-wrap gap-1.5">
-              {TOOL_OPTIONS.map((tool) => {
-                const checked = draft.tools.includes(tool.key)
-                return (
-                  <button
-                    key={tool.key}
-                    type="button"
-                    title={tool.hint}
-                    onClick={() =>
-                      set({
-                        tools: checked
-                          ? draft.tools.filter((t) => t !== tool.key)
-                          : [...draft.tools, tool.key]
-                      })
-                    }
-                    className={cn(
-                      'flex items-center gap-1 rounded-full border px-2 py-1 text-xs transition-colors',
-                      checked
-                        ? 'border-primary/40 bg-primary/10 text-foreground'
-                        : 'text-muted-foreground hover:bg-accent'
-                    )}
-                  >
-                    {checked ? <Check className="size-3" /> : <X className="size-3 opacity-40" />}
-                    {tool.label}
-                  </button>
-                )
-              })}
-            </div>
-            <p className="text-[0.65rem] text-muted-foreground">
-              白名单外的工具不会挂给这个 Agent；写类工具还需要权限档允许。
-            </p>
-          </div>
-          </div>
-        </div>
-        <DialogFooter className="shrink-0">
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            取消
-          </Button>
-          <Button
-            onClick={() =>
-              onSave({
-                ...draft,
-                name: draft.name.trim() || '未命名智能体',
-                role: draft.role.trim(),
-                ...(draft.modelId?.trim() ? { modelId: draft.modelId.trim() } : {})
-              })
-            }
-          >
-            {isNew ? '添加' : '保存'}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}

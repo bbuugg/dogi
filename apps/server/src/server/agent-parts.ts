@@ -33,6 +33,8 @@ export function excerptOf(parts: AgentChatMessage['parts'], max = 120): string |
  * - tool-call:按 toolCallId 更新或追加;
  * - tool-result:按 toolCallId 回填输出;
  * - tool-call-delta:只喂流式渲染,不进落盘形状(落盘以完整 tool-call 的 input 为准);
+ * - subagent-start / subagent-event / subagent-end:派活卡上的**子任务过程记录**,
+ *   子 run 的事件递归折叠进 `part.delegation.parts`(与主消息同一套形状,所以**会落盘**);
  * - retry:从头再跑这一轮,丢掉失败尝试已累积的部分输出(避免正文重复);
  * - finish / context-usage:不产生 part(finish 的 usage 由调用方自行采集)。
  */
@@ -84,6 +86,41 @@ export function foldEventIntoParts(parts: AgentMessagePart[], event: AgentStream
         output: event.output,
         ...(event.isError ? { isError: true } : {})
       })
+    }
+  } else if (event.type === 'subagent-start') {
+    /**
+     * 派活开跑:在**派活卡**上建一份过程记录。找不到卡就丢弃 —— 父侧 tool-call 一定
+     * 先于 start 到达(引擎先发 tool-call 才开始执行工具),丢了只是少一份过程记录。
+     */
+    const index = parts.findIndex((p) => p.type === 'tool-call' && p.toolCallId === event.toolCallId)
+    if (index < 0) return
+    const call = parts[index] as Extract<AgentMessagePart, { type: 'tool-call' }>
+    parts[index] = {
+      ...call,
+      delegation: {
+        subagentId: event.subagentId,
+        task: event.task,
+        parts: [],
+        status: 'running',
+        startedAt: Date.now()
+      }
+    }
+  } else if (event.type === 'subagent-event') {
+    // 子 run 的过程事件:递归折叠进它自己那份 parts —— 与主消息用**同一个函数**,
+    // 这正是「勾进子任务后看到的消息流和主任务完全一样」的保证。
+    const index = parts.findIndex((p) => p.type === 'tool-call' && p.toolCallId === event.toolCallId)
+    if (index < 0) return
+    const call = parts[index] as Extract<AgentMessagePart, { type: 'tool-call' }>
+    if (!call.delegation) return
+    foldEventIntoParts(call.delegation.parts, event.event)
+  } else if (event.type === 'subagent-end') {
+    const index = parts.findIndex((p) => p.type === 'tool-call' && p.toolCallId === event.toolCallId)
+    if (index < 0) return
+    const call = parts[index] as Extract<AgentMessagePart, { type: 'tool-call' }>
+    if (!call.delegation) return
+    parts[index] = {
+      ...call,
+      delegation: { ...call.delegation, status: event.status, endedAt: Date.now() }
     }
   } else if (event.type === 'error') {
     parts.push(errorPart(event.message))
