@@ -137,6 +137,35 @@ describe('turnStepPreview（右格：这一步的内容）', () => {
     })
   })
 
+  it('编辑文件也要报路径（内置 path / ACP 的 filePath 两种形状）', () => {
+    expect(
+      turnStepPreview([
+        call('edit_file', { input: { path: 'src/parts.ts', edits: [{ oldText: 'a', newText: 'b' }] } })
+      ])
+    ).toEqual({ text: 'src/parts.ts', lineKey: -1 })
+    expect(
+      turnStepPreview([
+        call('edit', { input: { filePath: 'packages/agent/src/engine.ts', oldString: 'a', newString: 'b' } })
+      ])
+    ).toEqual({ text: 'packages/agent/src/engine.ts', lineKey: -1 })
+  })
+
+  it('入参只给了 ACP title 时用它兜底（否则编辑文件抬头右侧是空的）', () => {
+    expect(turnStepPreview([call('edit', { input: {}, title: 'src/app/app-shell.tsx' })])).toEqual({
+      text: 'src/app/app-shell.tsx',
+      lineKey: -1
+    })
+  })
+
+  it('尾巴是孤儿 tool-result 时，往前找最近一条有内容的 tool-call', () => {
+    expect(
+      turnStepPreview([
+        call('read_file', { input: { path: 'README.md' }, output: 'ok' }),
+        { type: 'tool-result', toolCallId: 'orphan', toolName: 'read_file', output: 'ok' }
+      ] as AgentMessagePart[])
+    ).toEqual({ text: 'README.md', lineKey: -1 })
+  })
+
   it('入参还在流式生成（inputText 半截 JSON）也要认得', () => {
     expect(
       turnStepPreview([call('execute_command', { inputText: '{"command": "pnpm test", "path": ' })])

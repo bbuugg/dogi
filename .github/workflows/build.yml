@@ -130,8 +130,16 @@ jobs:
   #
   # `apps/mobile/android/` 是 `cap add android` 的生成物（已 gitignore），所以每次都要
   # 先重建平台再 `cap sync`（`build:mobile` 会跑 vite build + sync + 图标铺回）。
-  # 产出的是 **debug APK**：用 CI 每次新生成的 debug keystore 签名，可直接侧载安装，
-  # 但**不能用于覆盖安装已发布版本**（签名不同）。正式分发要接 release 签名 Secrets。
+  # 产出的是 **release APK**，用固定的 release keystore 签名（见下方 Secrets）。
+  # ⚠️ 不要退回 `assembleDebug`：GitHub Actions 的 runner 每次都全新，
+  #    `~/.android/debug.keystore` 每次现场生成、密钥各不相同，打出来的包**无法覆盖安装**
+  #    上一版（系统报「签名不一致」，只能卸载重装、应用数据全丢）。这正是历史事故的根因。
+  #
+  # 需要的仓库 Secrets（缺一个都直接失败，别让它悄悄退回 debug 签名）：
+  #   ANDROID_KEYSTORE_BASE64       keystore 文件的 base64（见 README「安卓端」）
+  #   ANDROID_KEYSTORE_PASSWORD     store 密码
+  #   ANDROID_KEY_ALIAS             key 别名（通常 apk 的 alias）
+  #   ANDROID_KEY_PASSWORD          key 密码（可与 store 密码相同）
   android:
     name: Build Android APK
     runs-on: ubuntu-latest
@@ -169,24 +177,46 @@ jobs:
         env:
           CI: true
 
-      - name: Build debug APK
-        working-directory: apps/mobile/android
-        run: ./gradlew assembleDebug --no-daemon
+      # 把固定 keystore 从 Secrets 还原到工作区，并导出签名环境变量给下一步的 Gradle。
+      # ⚠️ 这里**故意缺 Secret 就失败**：宁可红一次把签名配齐，也不要静默退回 debug 签名，
+      #    否则又会打出「每次签名都不同」的包（用户必须卸载重装）。
+      - name: Restore release keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ] || [ -z "$ANDROID_KEYSTORE_PASSWORD" ] || [ -z "$ANDROID_KEY_ALIAS" ] || [ -z "$ANDROID_KEY_PASSWORD" ]; then
+            echo "::error::签名 Secrets 不完整（需要 ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD），否则 release 包会退回 debug 签名、无法覆盖安装。见 README「安卓端」。"
+            exit 1
+          fi
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/android-release.keystore"
+          {
+            echo "FIZZ_ANDROID_KEYSTORE=$GITHUB_WORKSPACE/android-release.keystore"
+            echo "FIZZ_ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD"
+            echo "FIZZ_ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS"
+            echo "FIZZ_ANDROID_KEY_PASSWORD=$ANDROID_KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
 
-      # 改个能看出版本的名字：Release 里多个版本并存时 `app-debug.apk` 一律同名，
+      - name: Build release APK
+        working-directory: apps/mobile/android
+        run: ./gradlew assembleRelease --no-daemon
+
+      # 改个能看出版本的名字：Release 里多个版本并存时 `app-release.apk` 一律同名，
       # 用户下载根本分不清是哪个 tag 的包（版本号取 mobile 的 package.json）。
       - name: Rename APK
         run: |
           version=$(node -p "require('./apps/mobile/package.json').version")
-          mv apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk \
-             "apps/mobile/android/app/build/outputs/apk/debug/Fizz-${version}-android-debug.apk"
+          mv apps/mobile/android/app/build/outputs/apk/release/app-release.apk \
+             "apps/mobile/android/app/build/outputs/apk/release/Fizz-${version}-android.apk"
 
       # Artifacts 只能是 zip（GitHub 强制打包），想要「点开就是 .apk」只能走 Release。
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: fizz-android-debug
-          path: apps/mobile/android/app/build/outputs/apk/debug/*.apk
+          name: fizz-android
+          path: apps/mobile/android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
 
       # 与桌面端**同一个** Release（tag）追加 APK。
@@ -196,7 +226,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: apps/mobile/android/app/build/outputs/apk/debug/*.apk
+          files: apps/mobile/android/app/build/outputs/apk/release/*.apk
           draft: false
           prerelease: false
           max_retries: 3

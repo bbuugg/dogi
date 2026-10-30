@@ -317,8 +317,10 @@ function MessagePartsInner({
    * - **整轮结束**：左格报整轮耗时（`durationMs`，见上）；连耗时都拿不到（比如 ACP 会话
    *   被 `session/load` 重建）才退回计数摘要。
    *
-   * 右格（`preview`）两个阶段都有：思考的最后一行 / 命令 / 路径 —— 折叠状态下也能看出
-   * 「这一步到底做的什么」，不用点开。
+   * 右格（`preview`）**只在整轮还没结束时**给：思考的最后一行 / 命令 / 路径 —— 流式中折叠
+   * 着也能看出「这一步到底做的什么」，不用点开。整轮结束后抬头已经是一句总结（耗时 /
+   * 计数），再把最后那一步的内容挂在右边，等于在总结后面接了个「当时在干什么」的尾巴：
+   * 那一步的结果早就写在正文里了，用户要的是这一轮花了多久（用户明确要求）。
    *
    * `active`（抬头扫光 + 预览跟最新字）只在这段**真还在跑**时为真：整轮还在流式、这一段是
    * 最后一段可见内容、尾 part 自己真的在跑（见 `isStepInFlight`，等用户作答的提问卡不算）。
@@ -354,10 +356,10 @@ function MessagePartsInner({
         preview
       }
     }
-    if (durationMs != null) {
-      return { label: workDurationLabel(durationMs), active: false, live: false, kind, preview }
-    }
-    return { label: turnStepSummary(parts), active: false, live: false, kind, preview }
+    // 整轮结束：**不给 preview**（右格留白）—— 抬头这时是一句总结，不是「下一步做什么」。
+    // 刻意不写成 `preview: undefined`，省得将来有人以为漏传了。
+    const doneLabel = durationMs != null ? workDurationLabel(durationMs) : turnStepSummary(parts)
+    return { label: doneLabel, active: false, live: false, kind }
   }
 
   // 按原始顺序走一遍：连续的「要折叠的」part 各自成组，其余穿插在各组之间

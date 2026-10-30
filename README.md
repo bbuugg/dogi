@@ -198,10 +198,37 @@ npm run dist:desktop    # 当前平台安装包（另有 dist:win / dist:mac / d
 ```bash
 npm run add:android --workspace @fizz/mobile   # 新机器第一次必须先跑
 npm run build:mobile                          # 构建 + cap sync
-npm run android:build                         # 出 APK
+npm run android:build                         # 出 release APK
 ```
 
 APK 首次登录必须填服务端绝对地址（页面 origin 是 `https://localhost`），填完存本机，换服务器不用重装。
+
+**签名（重要）**：`android/` 是 `cap add android` 的生成物，默认没有签名配置；CI 若用
+`assembleDebug` 会每台 runner 现场生成一把随机 debug keystore，**每次构建签名都不同**，
+覆盖安装时系统报「签名不一致」，只能卸载重装。所以发布包统一用固定 release keystore 签名。
+
+1. 生成一把（只需一次，之后一直复用；丢了就再也无法覆盖安装已发布的版本）：
+
+```bash
+keytool -genkeypair -v -keystore fizz-release.keystore \
+  -alias fizz -keyalg RSA -keysize 2048 -validity 10000 \
+  -storepass <store密码> -keypass <key密码>
+base64 -w0 fizz-release.keystore    # Windows: certutil -encode fizz-release.keystore tmp.b64
+```
+
+2. 在仓库 Secrets 里配置（Android job 缺任意一个都会直接失败，不会静默退回 debug 签名）：
+
+| Secret | 值 |
+| --- | --- |
+| `ANDROID_KEYSTORE_BASE64` | 上面 base64 的整行内容 |
+| `ANDROID_KEYSTORE_PASSWORD` | store 密码 |
+| `ANDROID_KEY_ALIAS` | 别名（上面是 `fizz`） |
+| `ANDROID_KEY_PASSWORD` | key 密码 |
+
+3. 本地出包时导出同名环境变量（`FIZZ_ANDROID_KEYSTORE` 指向 keystore 路径、
+   `FIZZ_ANDROID_KEYSTORE_PASSWORD` / `FIZZ_ANDROID_KEY_ALIAS` / `FIZZ_ANDROID_KEY_PASSWORD`），
+   `npm run android:build` 会用同一把签名；不导出则退回 debug 签名（仅供本地自测，不可覆盖安装）。
+   签名注入由 `apps/mobile/scripts/configure-android-signing.mjs` 在 `npm run sync` 时完成。
 
 ---
 

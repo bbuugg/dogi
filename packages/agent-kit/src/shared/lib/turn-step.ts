@@ -105,18 +105,30 @@ export function turnStepActivity(
 export function turnStepPreview(
   parts: AgentMessagePart[]
 ): { text: string; lineKey: number } | undefined {
-  const last = parts[parts.length - 1]
-  if (!last) return undefined
-
-  if (last.type === 'reasoning') {
-    if (!last.text.trim()) return undefined
-    const { line, lineKey } = reasoningPreview(last.text)
-    return line ? { text: line, lineKey } : undefined
+  /*
+   * 从尾巴往前找第一个「有内容可看」的 part，而不是只看最后一个。
+   *
+   * 正常落盘形状里工具结果是回填到 tool-call 上的，尾巴就是 tool-call，等价于只看最后一个；
+   * 但 ACP 的补全 / 孤儿结果可能让尾巴变成一个没有入参的 `tool-result`（见 `lib/parts.ts`
+   * 的 applyEvent 兜底分支）。只看最后一个的话，整组抬头右侧会突然空掉 —— 而它前面那条
+   * tool-call 明明带着路径 / 命令。往前找一格就能保住预览。
+   */
+  for (let i = parts.length - 1; i >= 0; i -= 1) {
+    const part = parts[i]
+    // 正文是分组的边界：越过它就变成「报上一步的内容」，而整轮结束的组尾部常压着正文，
+    // 那样抬头会显示很早以前的工具明细（与「最后一步」的语义不符）。
+    if (part.type === 'text') return undefined
+    if (part.type === 'reasoning') {
+      if (!part.text.trim()) continue
+      const { line, lineKey } = reasoningPreview(part.text)
+      if (line) return { text: line, lineKey }
+      continue
+    }
+    if (part.type !== 'tool-call') continue
+    const detail = toolDetailOf(part)
+    if (detail) return { text: detail, lineKey: -1 }
   }
-  if (last.type !== 'tool-call') return undefined
-
-  const detail = toolDetailOf(last)
-  return detail ? { text: detail, lineKey: -1 } : undefined
+  return undefined
 }
 
 /** 毫秒 →「N 秒」/「N 分 N 秒」（不足 1 秒按 1 秒算，别显示「0 秒」） */

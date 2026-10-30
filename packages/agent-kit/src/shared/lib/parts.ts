@@ -580,12 +580,30 @@ export function toolDetailOf(part: ToolCallPart): string | undefined {
 
   const command = pick(['command', 'cmd'])
   if (command) return oneLine(`$ ${command}`)
+  // 文件类：内置 agent 用 path，ACP 的编辑工具则常见 filePath（opencode/claude 都是它）。
   const path = pick(['path', 'file_path', 'filePath'])
   if (path) return oneLine(path)
-  const pattern = pick(['pattern', 'query'])
+  // 搜索类：内置 search_files 是 pattern，ACP 的 glob / grep 常见 query / keyword。
+  const pattern = pick(['pattern', 'query', 'keyword'])
   if (pattern) return oneLine(pattern)
+  // 抓取 / 截图类主入参是 URL。
+  const url = pick(['url'])
+  if (url) return oneLine(url)
+  // 技能 / 终端按键：没有路径也没有命令，主入参就是名字 / 按了什么键。
+  const target = pick(['name', 'skill'])
+  if (target) return oneLine(target)
+  const keys = pick(['keys'])
+  if (keys) return oneLine(keys)
   const prompt = pick(['prompt'])
   if (prompt) return oneLine(prompt)
+  /*
+   * 兜底：ACP 工具可能只给了 `title`（不少 agent 在第一条 update 里不带 rawInput，
+   * 见 `packages/acp/src/acp.ts` 的 mergeAcpInput）。编辑类的 title 本身就是文件路径，
+   * 命令类已被上面的 command 拦截 —— 没有其它可用字段时，title 就是「这一步干了什么」。
+   * 不放这条的话，编辑文件这类工具在过程分组抬头右侧就是空的。
+   */
+  const title = typeof part.title === 'string' ? part.title.trim() : ''
+  if (title) return oneLine(title)
   return undefined
 }
 
