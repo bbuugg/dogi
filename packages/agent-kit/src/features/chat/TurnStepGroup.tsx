@@ -17,8 +17,8 @@
  * 名字左边**最多一个图形**（并排就是左边堆了两个图形，用户报过），四档互斥：
  * - **进行中 + 收起** → 三根跳动的竖条（`WorkBars`）：这时「在不在跑」更急，而且竖条
  *   是**位置标记**（眼睛扫一列时不用读字就知道哪一组在动）；
- * - **进行中 + 展开** → 打字气泡（`TypingBubble`）：抬头是「正在工作…」一句话，气泡与
- *   消息底部的「正在思考…」同形，也不再区分工具 / 思考；
+ * - **进行中 + 展开** → 同样是三根竖条（`WorkBars`）：抬头这时是「正在工作…」一句话，
+ *   左边不换形状，免得同一列在折叠 / 展开之间换两种动效；
  * - **本轮还在跑、但在等模型下一步** → 一颗类型图标（`kind`：工具 → 扳手、思考 → 脑，与
  *   工具卡 `ToolHeader` / 思考条 `ReasoningTrigger` 同一套）：这时抬头是「做什么」，那行字
  *   说不出「这一步是工具还是思考」，只有这颗图标能一眼分辨；
@@ -27,7 +27,7 @@
  *
  * 进行中 + 收起时名字本身还会走扫光（`ShimmerLabel`）：那是「模型还在往外吐字」的粒度信号。
  *
- * **进行中 + 展开**时竖条与扫光全部撤掉（气泡留着），名字直接换成「正在工作…」：细节就在下面
+ * **进行中 + 展开**时扫光撤掉（竖条留着），名字直接换成「正在工作…」：细节就在下面
  * 一行不落地流着，抬头不需要再演示「还在跑」。折叠回去立刻恢复原样；一组落地后（不论开合）
  * 也退回纯文字 —— 历史消息里不会留一排还在跳的组，也不会留一排状态图标。
  * 这句「正在工作」挂的是 `live` 而不是 `active`（差在「工具出结果 → 模型生成下一次调用」
@@ -41,7 +41,6 @@
 import { useState, type ReactNode } from 'react'
 import { Brain, ChevronRight, Wrench } from 'lucide-react'
 import { ShimmerLabel } from '@fizz/agent-kit/shared/ai-elements/shimmer-label'
-import { TypingBubble } from '@fizz/agent-kit/features/chat/TypingBubble'
 import { WorkBars } from '@fizz/agent-kit/shared/ai-elements/work-bars'
 import { ReasoningPreview } from '@fizz/agent-kit/shared/ai-elements/reasoning'
 import { useConversationOptional } from '@fizz/agent-kit/shared/ai-elements/conversation'
@@ -115,13 +114,12 @@ export function TurnStepGroup({
   const showPreview = !!preview && !open
 
   /*
-   * 展开 + 进行中：抬头直接报「正在工作…」，左侧换成打字气泡（`TypingBubble`）。
+   * 展开 + 进行中：抬头直接报「正在工作…」，左侧仍是那三根竖条（`WorkBars`）。
    *
-   * 竖条与扫光是**收起态**的东西：眼睛扫一列收起的抬头时，靠「哪一组的竖条在跳」定位
-   * 哪一组还在跑，那是一个位置标记。可一旦展开，细节（思考全文 / 命令输出）就在下面
-   * 一行不落地流着 —— 抬头还有三根竖条在跳、还有一道光在扫，纯属噪音。用户要的只是
-   * 「这组在干活」，那就只留这句话；气泡与「正在思考…」那行同形，一句话里就把「在动」
-   * 说完了（也和这一步是工具还是思考无关）。
+   * 扫光是**收起态**的东西：眼睛扫一列收起的抬头时，靠「哪一组还在扫光」定位哪一组还在跑。
+   * 可一旦展开，细节（思考全文 / 命令输出）就在下面一行不落地流着 —— 抬头还有一道光在扫，
+   * 纯属噪音。用户要的只是「这组在干活」，那就只留这句话；竖条不撤，左边不换形状
+   * （也和这一步是工具还是思考无关）。
    *
    * ⚠️ 判据是 `live` 而**不是** `active`：`active` 在「工具出了结果、模型还在生成下一次
    * 调用」的那几秒会翻 false，挂在它上面的话，这行字会在「正在工作」和
@@ -133,7 +131,7 @@ export function TurnStepGroup({
    */
   const working = live && open
   const ticking = active && !open
-  // 展开态那句固定「正在工作…」（省略号是文案的一部分，不是动画）：配上左边的打字气泡，
+  // 展开态那句固定「正在工作…」（省略号是文案的一部分，不是动画）：配上左边还在跳的竖条，
   // 读起来就是「还在往外说」
   const labelText = working ? tr('正在工作…') : label
 
@@ -174,11 +172,11 @@ export function TurnStepGroup({
       <CollapsibleTrigger className="group group/row flex w-fit max-w-full items-center gap-2 rounded-md text-left text-muted-foreground text-sm transition-colors hover:text-foreground">
         {/* 左格最多**一个**图形，四档互斥（用条件而不是 hidden，不留空槽把名字推歪）：
             - 进行中 + 收起 → 三根跳动的竖条（位置标记，一眼看出这组在动）；
-            - 进行中 + 展开 → 打字气泡（`TypingBubble`）：这时抬头是「正在工作…」一句话，
-              气泡和旁边「正在思考…」那行的观感一致，也不管这一步是工具还是思考；
+            - 进行中 + 展开 → 同样是三根竖条（`WorkBars`）：抬头这时是「正在工作…」，
+              左边不换形状，免得同一列在折叠 / 展开之间换两种动效；
             - 本轮还在跑、等模型下一步 → 类型图标（扳手 / 脑）；
             - 本轮已结束（「已工作 N 秒」）→ 留空 —— 那是一句总结，不是「下一步做什么」 */}
-        {ticking ? <WorkBars /> : working ? <TypingBubble /> : live ? kindIcon : null}
+        {ticking ? <WorkBars /> : working ? <WorkBars /> : live ? kindIcon : null}
         {/* 预览在时名字不被压缩（`min-w-0` 留给预览那一格，它自己截断 / 横向滚动），
             与 ReasoningTrigger 里那对 span 同一处理；展开后预览让位，名字恢复可压缩 */}
         <span className={cn('min-w-0 truncate', showPreview && 'shrink-0')}>

@@ -699,8 +699,6 @@ function ApiSidebarBody({ app }: { app: AgentApp }) {
               {isEmpty ? (
                 <div className="mx-1 mt-2 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs leading-5">
                   还没有保存的请求。
-                  <br />
-                  点上面的「新建请求」，或导入 cURL / OpenAPI。
                 </div>
               ) : noMatch ? (
                 <div className="mx-1 mt-6 rounded-md px-3 py-6 text-center text-xs text-muted-foreground">
@@ -1382,7 +1380,7 @@ function HistorySection({ app }: { app: AgentApp }) {
           </RowActionButton>
         </IconTip>
       }
-      empty="还没有请求历史。发一次请求，这里会自动记下来。"
+      empty="还没有请求历史。"
     >
       {/* 按天分桶：`space-y-1` 让「日期标签 + 它的几行」成一块，块与块之间才断开 */}
       <div className="space-y-1">

@@ -442,9 +442,7 @@ export function NotesSidebar({
                 }
                 empty={
                   <span className="block px-1.5 py-5 text-center leading-5">
-                    还没有笔记目录。
-                    <br />
-                    点上面的「添加笔记目录」选一个放 Markdown 的文件夹。
+                    还没有笔记。
                   </span>
                 }
               >
