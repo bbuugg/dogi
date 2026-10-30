@@ -23,6 +23,7 @@ import { buildReadSkillTool, type AgentSkill } from '@fizz/skills'
 import { createIgnoreChecker, relPathOf, resolveInside } from '@fizz/contracts/workspace'
 import { tr } from '@fizz/i18n'
 import { applyTolerantEdit } from './edit-match'
+import { createAnsiStripper, stripAnsi } from './ansi'
 import {
   clipToBudget,
   MAX_TOOL_RESULT_CHARS,
@@ -473,6 +474,9 @@ async function runCommand(
   })
   let stdout = ''
   let stderr = ''
+  // 实时转发的清洗器（每条流各一份：chunk 边界会把转义序列劈开，见 ansi.ts）
+  const cleanStdout = createAnsiStripper()
+  const cleanStderr = createAnsiStripper()
 
   return new Promise<string>((resolve) => {
     let settled = false
@@ -495,8 +499,14 @@ async function runCommand(
           : reason === 'timeout'
             ? `（超时 ${timeoutMs}ms，已终止进程树）`
             : '（已中止）'
-      const err = stderr.trim()
-      const full = `$ ${command}\n${info}\n${stdout.trim()}${err ? `\n${err}` : ''}`
+      /*
+       * 先剥 ANSI 再 trim：命令是经管道跑的，但 `npm run` 会给脚本注入 `FORCE_COLOR`，
+       * vite / tsc / jest 照样吐颜色（`\u001b[32m➜\u001b[39m`）。不剥的话模型拿到的是
+       * `[32m` 这种残渣，既占字符预算又会被当成正文照抄。见 `ansi.ts`。
+       */
+      const out = stripAnsi(stdout).trim()
+      const err = stripAnsi(stderr).trim()
+      const full = `$ ${command}\n${info}\n${out}${err ? `\n${err}` : ''}`
       resolve(
         await summarizeLongOutput(full, {
           root,
@@ -536,15 +546,18 @@ async function runCommand(
     // 只保留最新的一段，防 `yes` / `find /` 之类把内存吃光；丢的部分只发生在超出
     // MAX_CMD_CAPTURE 的极端情况下，正常命令的输出是完整的
     child.stdout.on('data', (d: Buffer) => {
-      stdout += d.toString('utf8')
+      const chunk = d.toString('utf8')
+      stdout += chunk
       if (stdout.length > MAX_CMD_CAPTURE) stdout = stdout.slice(-MAX_CMD_CAPTURE)
-      // 实时增量：纯转发（不在这里缓存），防爆由调用方负责（见 parts.ts 的 MAX_LIVE_OUTPUT）
-      sink?.onOutput('stdout', d.toString('utf8'))
+      // 实时增量：纯转发（不在这里缓存），防爆由调用方负责（见 parts.ts 的 MAX_LIVE_OUTPUT）；
+      // 渲染态是文本，转义序列要在这里就剥掉（收口时的结果另有一份完整清洗）
+      sink?.onOutput('stdout', cleanStdout(chunk))
     })
     child.stderr.on('data', (d: Buffer) => {
-      stderr += d.toString('utf8')
+      const chunk = d.toString('utf8')
+      stderr += chunk
       if (stderr.length > MAX_CMD_CAPTURE) stderr = stderr.slice(-MAX_CMD_CAPTURE)
-      sink?.onOutput('stderr', d.toString('utf8'))
+      sink?.onOutput('stderr', cleanStderr(chunk))
     })
     child.on('error', (err) => {
       if (settled) return

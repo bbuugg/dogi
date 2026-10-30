@@ -28,6 +28,13 @@ import { HTML5Backend } from 'react-dnd-html5-backend'
 import { AppProvider } from '@fizz/agent-kit/shell/app-provider'
 import { ConfirmProvider } from '@fizz/agent-kit/shared/components/ConfirmProvider'
 import { ChatPanel } from '@fizz/agent-kit/features/chat/ChatPanel'
+// 行首图标槽（类型 + 在跑 / 等确认 / 等回答）与主侧栏共用一份，别在这里另写映射
+import { ConversationRowIcon } from '@fizz/agent-kit/features/chat/ConversationRowIcon'
+import {
+  getActivity,
+  initConversationActivity,
+  useActivities
+} from '@fizz/agent-kit/shared/lib/conversation-activity'
 import {
   useAgentAppView,
   useAttachRemoteRun,
@@ -107,6 +114,16 @@ function FloatShell({ initialConversationId }: { initialConversationId?: string 
 
   const app = useAgentAppView(selection.conversationId) // 会话态订该会话；草稿态传 null
   useAttachRemoteRun(selection.conversationId)
+
+  /**
+   * 运行态事件绑定：**浮窗没有外壳**，`useNotifyWatcher()`（里面调
+   * `initConversationActivity()`）挂在 `AppShell` 上，这个窗口没有它的份 —— 不在这里接一次，
+   * 会话列表的「在跑 / 等在确认」永远不会亮（`useActivities()` 只是订阅者，绑定要有人做）。
+   * 幂等，重复调无副作用。
+   */
+  useEffect(() => {
+    initConversationActivity()
+  }, [])
 
   // 会话态：把 store 活跃会话设成它（发送 / 审批 / 插话都按活跃会话走）
   useEffect(() => {
@@ -207,6 +224,7 @@ function FloatShell({ initialConversationId }: { initialConversationId?: string 
           groups={groups}
           selection={selection}
           projectId={projectId}
+          runningConversations={app.runningConversations}
           onSelectConversation={pickConversation}
           onSelectProject={pickProject}
           onClose={() => setListOpen(false)}
@@ -369,7 +387,8 @@ function FloatNotice({ children }: { children: ReactNode }) {
  * 浮窗是同一个应用的第二个窗口，用户对「项目 → 会话」这套树的印象来自主侧栏 ——
  * 两边长得不一样（这边原来是 12px 灰字、`bg-secondary` 方块、缩进靠 `pl-4` 硬推），
  * 一打开就显出「临时拼的」。所以行高 / 圆角 / 字号 / 选中态全部沿用主侧栏那一套：
- * - 行：`rounded-md px-1.5 py-1.5 text-sm`，行首一颗类型图标（`size-4`）；
+ * - 行：`rounded-md px-1.5 py-1.5 text-sm`，行首一格图标槽（`size-4`，类型 / 在跑 / 等确认，
+ *   与主侧栏共用 `ConversationRowIcon`）；
  * - 选中：`bg-primary-subtle`；hover：`bg-primary-soft`（主题色深浅度，随强调色走，
  *   不用中性 `secondary` —— 那在暗色下几乎看不出选中）；
  * - 缩进：会话列表整体缩进一层（`pl-3`），行内不再写 `pl-*`，标题与项目名错开一格
@@ -393,6 +412,7 @@ function FloatProjectList({
   groups,
   selection,
   projectId,
+  runningConversations,
   onSelectConversation,
   onSelectProject,
   onClose
@@ -401,10 +421,19 @@ function FloatProjectList({
   groups: ReadonlyArray<FloatProjectGroup>
   selection: FloatSelection
   projectId: string | null
+  /** 本端自己订着的流（会话行运行态的一半，另一半是服务端广播的 `activity`） */
+  runningConversations: AgentApp['runningConversations']
   onSelectConversation: (id: string, ws: string) => void
   onSelectProject: (pid: string) => void
   onClose: () => void
 }) {
+  /**
+   * 订阅**服务端广播**的运行态：别的会话在跑、在等确认，浮窗这边照样看得到。
+   *
+   * 必须在列表组件顶层调一次（没有它，`getActivity` 只是读一次快照，之后再也不重渲染）。
+   * 浮窗是独立窗口、独立 store，主窗口那次订阅管不到这里。
+   */
+  useActivities()
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent): void => {
@@ -587,6 +616,12 @@ function FloatProjectList({
                         g.conversations.map((c) => {
                           const renaming = renamingId === c.id
                           const confirmingArchive = confirmArchiveId === c.id
+                          // 运行态两路来源：服务端广播（别的窗口 / 定时任务起的）+
+                          // 本端自己订着的流；等待优先于在跑（见 `ConversationRowIcon`）
+                          const activity = getActivity(c.id)
+                          const waiting = activity.waiting
+                          const running =
+                            !waiting && (activity.running || !!runningConversations[c.id])
                           return (
                             <div
                               key={c.id}
@@ -603,7 +638,13 @@ function FloatProjectList({
                             >
                               {renaming ? (
                                 <>
-                                  <MessageSquare className="ml-1.5 size-4 shrink-0 text-muted-foreground" />
+                                  <ConversationRowIcon
+                                    backend={c.backend}
+                                    kind={c.kind}
+                                    waiting={waiting}
+                                    running={running}
+                                    className="ml-1.5"
+                                  />
                                   <input
                                     autoFocus
                                     value={renameTitle}
@@ -630,7 +671,12 @@ function FloatProjectList({
                                   className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md py-1.5 pl-1.5 pr-1 text-left text-sm transition-[padding] group-hover:pr-14 max-md:pr-14"
                                   title={c.title}
                                 >
-                                  <MessageSquare className="size-4 shrink-0 text-muted-foreground" />
+                                  <ConversationRowIcon
+                                    backend={c.backend}
+                                    kind={c.kind}
+                                    waiting={waiting}
+                                    running={running}
+                                  />
                                   <span className="min-w-0 flex-1 truncate">{c.title}</span>
                                 </button>
                               )}

@@ -13,6 +13,8 @@
  *   `.fizz/tool-output/`（返回相对路径 + 全文行数 + 本次返回哪几行）；续读不靠专用工具，
  *   模型用本来就有的 `read_file`（offset/limit 按行翻）或 `search_files`（关键词检索）——
  *   早先那套 `read_log` 工具已移除，理由见该文件顶部。其余工具靠自己的分页参数，不走这里。
+ * - `ansi.ts` —— 命令输出的 ANSI 转义清洗（颜色 / 清行 / OSC 超链接）。命令是经管道跑
+ *   却仍带颜色（`npm run` 注入 `FORCE_COLOR`），工具结果与后台任务日志都要先过它。
  * - `git-read.ts` —— `git_read`：只读 git 视图（status / diff / log / show）。**刻意不给**
  *   写仓库的动作（checkout / add / commit …），也不进 `buildAgentTools` 的 all ——
  *   它只服务没有 execute_command 的 subagent（父 agent 要看 diff 自己跑 git，那边有审批）。
@@ -27,6 +29,7 @@ export * from './ask-followup'
 export * from './web-fetch'
 export * from './screenshot'
 export * from './output-log'
+export * from './ansi'
 export * from './git-read'
 export * from './project-tools'
 export * from './playwright-browsers'

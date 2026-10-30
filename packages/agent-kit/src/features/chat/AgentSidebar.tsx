@@ -72,7 +72,6 @@ import {
 import {
   Archive,
   ArrowRightLeft,
-  Bot,
   CalendarClock,
   Check,
   ChevronRight,
@@ -83,9 +82,6 @@ import {
   GitBranch,
   Loader2,
   MoreHorizontal,
-  MessageCircleQuestion,
-  Network,
-  MessageSquare,
   MessageSquarePlus,
   Pencil,
   Play,
@@ -122,6 +118,7 @@ import { ContainerSettingsDialog } from "@fizz/agent-kit/features/projects/Conta
 import { DeleteConversationDialog } from "@fizz/agent-kit/features/chat/DeleteConversationDialog";
 import { ConvertAcpDialog } from "@fizz/agent-kit/features/chat/ConvertAcpDialog";
 import { TypingBubble } from "@fizz/agent-kit/features/chat/TypingBubble";
+import { ConversationRowIcon } from "@fizz/agent-kit/features/chat/ConversationRowIcon";
 import { WorkspaceDeleteDialog } from "@fizz/agent-kit/features/projects/WorkspaceDeleteDialog";
 import { GitInstallDialog } from "@fizz/agent-kit/features/projects/GitInstallDialog";
 import { IconTip } from "@fizz/agent-kit/shared/components/IconTip";
@@ -703,10 +700,8 @@ export function AgentSidebar({
     const running =
       !waiting &&
       (activity.running || !!app.runningConversations[conversation.id]);
-    /** 外部 ACP agent 驱动的会话：行首图标与内置 内置会话区分开 */
+    /** 外部 ACP agent 驱动的会话：行尾「更多」里的重启 / 重新加载只给它 */
     const isAcp = conversation.backend === "acp";
-    /** 多智能体协作会话（主智能体 + 子 Agent 班子）：行首图标与普通对话区分开 */
-    const isCollab = conversation.kind === "collab";
     /**
      * 临时会话（`scratch` 工作区）的目录：`<数据目录>/conversations/<会话 id>`。
      *
@@ -757,47 +752,15 @@ export function AgentSidebar({
         )}
         title={statusText}
       >
-        {/* 行首 = **类型图标**：会话分普通对话 / 多智能体协作 / 外部 ACP 三种，
-            光看标题分不清点下去会开什么，所以每行都用图标标明类型。
-            会话在跑时这个槽换成转圈（进行中一目了然），卡在等确认 / 等回答时换成盾牌问号；
-            停下来就回到类型图标。 */}
-        {waiting ? (
-          // 区分两种「等你」：权限申请用盾牌、AI 提问用问号气泡
-          waiting.kind === "confirm" ? (
-            <ShieldQuestion
-              className="size-4 shrink-0 text-amber-500"
-              aria-label={t("等待确认")}
-            />
-          ) : (
-            <MessageCircleQuestion
-              className="size-4 shrink-0 text-amber-500"
-              aria-label={t("等待回答")}
-            />
-          )
-        ) : running ? (
-          // 会话在跑：打字气泡（不是转圈 —— 一屏十几行转圈太晃，也读不出「在输出」）
-          <TypingBubble />
-        ) : isAcp ? (
-          // ACP 会话（外部 agent）用机器人图标与内置 内置会话区分；
-          // 判定一律 `=== 'acp'`，旧值 `'ai-sdk'` 落进 else 分支即内置 Agent
-          <Bot
-            className="size-4 shrink-0 text-muted-foreground"
-            aria-label={t("ACP 会话")}
-          />
-        ) : isCollab ? (
-          // 多智能体协作会话：用**流程画布那颗图标**（`Network`）——
-          // 流程功能整个删掉后这个图标空了出来，而协作画布本身就是「连智能体、接线」，
-          // 语义正好接得上；协作会话和普通对话在侧栏一眼就能分开。
-          <Network
-            className="size-4 shrink-0 text-muted-foreground"
-            aria-label={t("多智能体协作会话")}
-          />
-        ) : (
-          <MessageSquare
-            className="size-4 shrink-0 text-muted-foreground"
-            aria-label={t("对话会话")}
-          />
-        )}
+        {/* 行首图标槽（类型 + 运行态）与桌面会话浮窗**共用一份**，见 `ConversationRowIcon`：
+            会话分普通对话 / 多智能体协作 / 外部 ACP 三种，在跑 / 等确认 / 等回答时临时盖掉类型图标。
+            两边各写一套映射一定会漂（浮窗原来就恒画对话气泡）。 */}
+        <ConversationRowIcon
+          backend={conversation.backend}
+          kind={conversation.kind}
+          waiting={waiting}
+          running={running}
+        />
         {/*
           定时任务跑出来的会话：**还没被点开过**就点一颗红点。
           只有这一种会话会有它（见 `AgentConversation.unseen`）—— 它是自己到点冒出来的，

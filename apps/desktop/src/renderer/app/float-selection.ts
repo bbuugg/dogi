@@ -89,6 +89,13 @@ export type FloatConversation = {
   id: string
   title: string
   workspaceId: string
+  /**
+   * 会话类型（与 `AgentConversation` 同口径），行首图标据此选：
+   * `acp` → 机器人、`collab` → 网络、其余 → 对话气泡。
+   * 浮窗列表是照着主侧栏做的第二处渲染，少了这两个字段就只能恒画对话图标。
+   */
+  backend?: 'builtin' | 'acp'
+  kind?: 'chat' | 'collab'
   /** 归档时间（epoch 毫秒，与 `AgentConversation.archivedAt` 同口径）；有值 = 已归档，不进浮窗列表（浮窗没有「已归档」分区可放） */
   archivedAt?: number
 }

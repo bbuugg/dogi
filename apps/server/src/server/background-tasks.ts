@@ -35,6 +35,7 @@ import type {
   BackgroundTaskStatus,
   BackgroundTaskView
 } from '@fizz/contracts/agent-api'
+import { cleanLogLine } from '@fizz/tools'
 import { emitServerEvent } from './state'
 
 /** 已结束的任务最多留这么多条（运行中的不占名额、也不会被挤掉） */
@@ -283,13 +284,18 @@ export function startBackgroundTask(input: StartBackgroundTaskInput): Background
   notifyChanged()
 
   /**
-   * 写一行日志：裁剪单行长度 → 进度行原地替换 → 追加 → 裁掉超量的老行。
+   * 写一行日志：剥 ANSI → 裁剪单行长度 → 进度行原地替换 → 追加 → 裁掉超量的老行。
+   *
+   * 剥 ANSI 放在最前面：外部命令哪怕走的是管道也会带颜色（`npm run` 注入 `FORCE_COLOR`，
+   * dev server 的启动横幅就是 `\u001b[32m➜\u001b[39m…`），而日志面板是**纯文本渲染**，
+   * 不剥就会原样显示 `[32m➜[39m`。只有转义的行剥完是空的，正好一起丢掉 —— 那是清行 /
+   * 光标移动，纯文本里等于空行。规则见 `@fizz/tools` 的 `ansi.ts`。
    *
    * 进度行替换这一步是必需的：`git clone --progress` 在 `\r` 上反复刷同一行，
    * 不归并的话 400 行的额度几秒就被一个进度条吃光，真正的报错反而被挤掉。
    */
   const log: BackgroundTaskLogger = (text, level = 'info') => {
-    const trimmed = String(text ?? '').trim()
+    const trimmed = cleanLogLine(String(text ?? ''))
     if (!trimmed) return
     const clipped =
       trimmed.length > MAX_LOG_LINE_CHARS ? `${trimmed.slice(0, MAX_LOG_LINE_CHARS)}…` : trimmed
