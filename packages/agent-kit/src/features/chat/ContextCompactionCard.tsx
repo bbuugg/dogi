@@ -1,16 +1,16 @@
 /**
  * 上下文压缩（compaction 摘要）的折叠块。
  *
- * 与思考 part 共用同一套视觉 / 交互：可展开收起、流式时自动展开、结束后按「自动折叠」
- * 偏好决定是否收起。自动压缩展示在触发压缩的那条助手消息里（见 `MessageParts`）；
+ * 与思考 part 共用同一套视觉 / 交互：可展开收起、流式时自动展开、结束后收起。
+ * 自动压缩展示在触发压缩的那条助手消息里（见 `MessageParts`）；
  * 手动压缩没有绑定消息，展示在消息列表末尾（见 `MessageList` 的 trailing compaction）。
  * 不是独立的 sticky 横幅。
  *
  * ⚠️ 数据仍来自会话级 `compaction` 展示态，不写进消息 parts：摘要不是对话内容，
  * 刷新后的真源是会话上的 `autoSummary` / `contextSummary`。
  */
-import { CheckCircleIcon, ChevronRight, ClockIcon, Minimize2 } from 'lucide-react'
-import { Badge } from '@fizz/ui/badge'
+import { CheckCircleIcon, ChevronRight, Loader2Icon, Minimize2 } from 'lucide-react'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@fizz/ui/tooltip'
 import { useEffect, useState } from 'react'
 import {
   Reasoning,
@@ -20,7 +20,6 @@ import {
 import { cn } from '@fizz/agent-kit/shared/lib/utils'
 import { REVEAL_ON_HOVER_ARROW } from '@fizz/agent-kit/shared/lib/hover-reveal-arrow'
 import { useT } from '@fizz/agent-kit/shared/lib/language'
-import { autoCollapsesReasoning, useAutoCollapse } from '@fizz/agent-kit/shared/lib/auto-collapse'
 import { useConversationOptional } from '@fizz/agent-kit/shared/ai-elements/conversation'
 import type { ContextCompactionState } from '@fizz/agent-kit/shared/lib/stores/slices/conversation'
 
@@ -31,15 +30,13 @@ export function ContextCompactionCard({
 }) {
   const t = useT()
   const streaming = compaction.status === 'streaming'
-  const autoCollapse = useAutoCollapse()
-  const autoClose = autoCollapsesReasoning(autoCollapse)
-  const [open, setOpen] = useState(streaming || !autoClose)
+  const [open, setOpen] = useState(streaming)
   const conversation = useConversationOptional()
 
+  // 压缩中自动展开（正在出摘要得看得见），结束就收起来（用户仍可手动点开）
   useEffect(() => {
-    if (streaming) setOpen(true)
-    else if (autoClose) setOpen(false)
-  }, [streaming, autoClose])
+    setOpen(streaming)
+  }, [streaming])
 
   return (
     <Reasoning
@@ -55,7 +52,7 @@ export function ContextCompactionCard({
       <ReasoningTrigger>
         {/*
          * ⚠️ **全部靠左、排成一行**，不要 `w-full` + `ml-auto`：
-         * 那样会把「状态徽标 + 折叠箭头」推到行的最右端，和标题隔开一整屏，看起来像
+         * 那样会把「状态图标 + 折叠箭头」推到行的最右端，和标题隔开一整屏，看起来像
          * 两条互不相干的元素（用户明确要求它们紧跟标题）。这里与工具卡 `ToolHeader`
          * 同一套排法：图标 → 标题 → 状态 → 箭头，`inline-flex` 只占内容宽度。
          */}
@@ -65,28 +62,30 @@ export function ContextCompactionCard({
             <Minimize2 className="size-3.5" />
             {t('压缩上下文')}
           </span>
-          /*
-           * 状态指示沿用「图标 + 文案 + secondary 底色」：进行中 = 脉冲时钟，完成 = 绿勾。
-           * ⚠️ 工具卡（`ToolHeader`）已改成**只留图标、无底色**，这里没跟着改 —— 压缩卡
-           * 出现在正文里、没有工具名和明细挤同一行，那点文案反而有用。
-           * 压缩前 / 后 token、摘要条数不再铺在头部（详情看上下文圆环）。
-           */
-          <Badge
-            variant="secondary"
-            className="shrink-0 gap-1.5 rounded-full text-xs"
-          >
-            {streaming ? (
-              <>
-                <ClockIcon className="size-4 animate-pulse" />
-                {t('压缩中…')}
-              </>
-            ) : (
-              <>
-                <CheckCircleIcon className="size-4 text-green-600 dark:text-green-500" />
-                {t('完成')}
-              </>
-            )}
-          </Badge>
+          {/*
+           * 状态与工具卡 `ToolHeader` **完全同一口径**：只有一颗图标，无底色、无文案 ——
+           * 文案挂在 tooltip 里（悬停可看），读屏靠 `role="img"` + `aria-label`。
+           *
+           * 进行中用 `Loader2` 转圈而不是脉冲时钟：与工具卡同一个理由（见 `tool.tsx` 的
+           * `statusIcon`）—— 脉冲幅度小，长任务里扫一眼分不出它和静止图标。完成用同一颗
+           * 绿勾、同一个绿（`text-green-600`）。
+           */}
+          <Tooltip delayDuration={100}>
+            <TooltipTrigger asChild>
+              <span
+                role="img"
+                aria-label={t(streaming ? '压缩中…' : '完成')}
+                className="inline-flex shrink-0 items-center"
+              >
+                {streaming ? (
+                  <Loader2Icon className="size-4 shrink-0 animate-spin" />
+                ) : (
+                  <CheckCircleIcon className="size-4 shrink-0 text-green-600" />
+                )}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>{t(streaming ? '压缩中…' : '完成')}</TooltipContent>
+          </Tooltip>
           {/* 箭头与思考行 / 工具卡同一口径：平时隐形，悬停整行才浮出来（触屏常显） */}
           <ChevronRight
             className={cn(REVEAL_ON_HOVER_ARROW, 'size-4 shrink-0', open && 'rotate-90')}

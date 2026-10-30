@@ -80,9 +80,9 @@ export interface MessageListProps {
    */
   resetKey: string
   /**
-   * 消息列的壳类名。其中的 `max-w-*` **与 `MessageOutline` 的定位强相关**：
-   * 竖线要落在「消息列右缘 → 面板右缘」那条空白带里，落点公式拿消息列宽当输入
-   * （见那边的 `RAIL_PADDING_RIGHT`）。改这里的宽度上限就要同步改那边，否则竖线会偏。
+   * 消息列的壳类名。其中的 `max-w-*` 就是「内容右缘到面板右缘」那条空白带的宽度来源：
+   * 面板够宽（≥820px）时带子宽得放得下目录那列横杠，不必给内容让位；面板一窄就靠
+   * `--rail-channel` 补右内边距（见下面对 `ConversationContent` 的注释）。
    *
    * 纵向内边距压到最小（上下各 4px）：用户明确要求「下面空白太大不能接受」，
    * 而滚动容器是贴底的 —— 这里的 `pb` 会**原样变成滚到底之后那片空白的底**。
@@ -242,18 +242,14 @@ export function MessageList({
          */
         smoothResize={streaming && !replaying}
       >
-        {/* ⚠️ 两处都与 `MessageOutline` 的竖线耦合，改要一起改：
-            1) 这里的宽度上限（`max-w-3xl`）是竖线落点的输入（见那边的 RAIL_PADDING_RIGHT）；
-            2) 面板一窄，竖线就退化成贴着面板右缘（占「右起 inset+1 ~ inset+23」这条带），而**用户
-               消息是右对齐的**（ai-elements 的 `ml-auto`）、操作行也靠在消息右缘 —— 不让开位置，竖线
-               正好压在用户消息下面那排按钮（删除）上，点不动（手机上必现）。
-               所以窄面板要给内容补右内边距：`--rail-channel` = 竖线通道 + 列宽 + 缝，与竖线自己的
-               落点**同源**（都由 `styles.css` 的 `--rail-inset` 推导）—— 不再各写一个魔数靠注释互指。
-               ⚠️ 手机贴边后这个通道只有 ~32px（原来是 44px）：窄屏横向每一像素都值钱，竖线本身
-               只占 ~22px，多让出来的都是白扔的空白。
-               用**容器查询**而不是 `md:` 视口断点：挤压来自面板宽度（侧栏 / 右侧分栏都会挤），
-               跟视口多宽没关系；阈值 820px 取自「内容右内边距自然值 ≥ 通道」的临界点
-               （面板 ≥ 820 时居中留白已经够宽，竖线根本够不着内容）。 */}
+        {/* 面板一窄，目录那列横杠就贴着面板右缘，而**用户消息是右对齐的**（ai-elements 的
+            `ml-auto`）、操作行也靠在消息右缘 —— 不让开位置，横杠正好压在用户消息下面那排
+            按钮（删除）上，点不动（手机上必现）。所以窄面板要给内容补右内边距：
+            `--rail-channel` = 横杠通道 + 列宽 + 缝，与横杠自己的落点**同源**（都由
+            `styles.css` 的 `--rail-inset` 推导）—— 不再各写一个魔数靠注释互指。
+            用**容器查询**而不是 `md:` 视口断点：挤压来自面板宽度（侧栏 / 右侧分栏都会挤），
+            跟视口多宽没关系；阈值 820px 取自「内容右内边距自然值 ≥ 通道」的临界点
+            （面板 ≥ 820 时居中留白已经够宽，横杠根本够不着内容）。 */}
         <ConversationContent
           className={cn(
             contentClassName,
@@ -319,13 +315,13 @@ export function MessageList({
                     data-role={message.role}
                     // 有目录时消息的宽度上限，**按面板宽窄分两档**（判据是容器查询，与上面 `pr` 同一口径）：
                     // - **窄面板（≤820px）→ `max-w-full`**：那儿已经由 `--rail-channel` 整段让出了
-                    //   竖线通道，再叠一个百分比就是**双重让位** —— 助手的长内容（代码块 / 表格）右缘
-                    //   会平白多空出一段（手机上「92% 的剩余宽度 + 44px 通道」合起来能到 ~71px，正是
+                    //   横杠通道，再叠一个百分比就是**双重让位** —— 助手的长内容（代码块 / 表格）右缘
+                    //   会平白多空出一段（手机上「92% 的剩余宽度 + 40px 通道」合起来能到 ~67px，正是
                     //   用户报的「右侧一大片空白」）。让位只留一处，通道说了算。
                     //   ⚠️ 必须**显式**写 `max-w-full`：ai-elements 的 `Message` 自带 `max-w-[95%]`，
                     //   不覆盖它就还是双重让位（用户消息右对齐不受影响，助手内容是左对齐的，会少一截）。
-                    // - **宽面板（>820px）→ 95%**：竖线挪到消息列右侧的空白带里，但面板刚过 820px 时
-                    //   那条带还很窄（26px 上下），收一档才留得住余量。
+                    // - **宽面板（>820px）→ 95%**：横杠列在面板右缘，但面板刚过 820px 时空白带还很窄
+                    //   （26px 上下），内容收一档才留得住余量。
                     // ⚠️ 早先这里写的是 `max-w-[92%] md:max-w-[95%]` —— `md:` 是**视口**断点，于是
                     // 桌面窄分栏会被判成「宽」（95% 叠上通道）、手机反而被多让一次，两头都不对。
                     className={cn(
@@ -345,16 +341,15 @@ export function MessageList({
                     >
                       {/*
                         零 part 的助手消息有两种，必须分开：
-                        - **正在跑**：还没吐第一个 part，显示「正在思考…」；
+                        - **正在跑**：还没吐第一个 part，显示「正在思考…」（由下面那个状态行槽渲染）；
                         - **已经跑完却什么都没吐**（外部 ACP agent 直接 end_turn、模型返回空流…）：
                           绝不能还转圈。原来这里无条件渲染 ThinkingRow，实测「pi-acp 复用会话的
                           第二轮」整轮只有一条 finish 事件 → parts 永远为空 → 界面永久停在
                           「正在思考…」，且一条报错都没有。
                       */}
                       {message.parts.length === 0 && !messageCompaction ? (
-                        streaming && isStreamingLast ? (
-                          <StreamingStatusNotice retryNotice={retryNotice} reconnectNotice={reconnectNotice} />
-                        ) : (
+                        /* 空 parts 且正在跑：交给下面那个「状态行槽」渲染，别在两处各放一份 */
+                        streaming && isStreamingLast ? null : (
                           <div className="text-sm text-muted-foreground">{tr('（本轮没有返回内容）')}</div>
                         )
                       ) : (
@@ -368,16 +363,33 @@ export function MessageList({
                           compaction={messageCompaction}
                         />
                       )}
-                      {/* 思考 / 工具都落地了、整轮还在跑：把「正在思考…」补在消息底部，
-                          直到下一个 part 开始（正文 / 思考一开流它就不满足条件了）或整轮停止。
-                          与上面 0 part 时的那个是同一个组件，观感一致。 */}
+                      {/*
+                        消息底部状态行（正在思考… / 第 N 次重试 / 正在重连）的**固定高度槽位**。
+
+                        ⚠️ 这行是**时有时无**的：尾段一落地就补上「正在思考…」，下一个 part 一开流
+                        （正文 / 思考重新开始）又撤掉。直接放进内容流里，内容高度就在流式途中反复
+                        ±20px —— 贴底时 `use-stick-to-bottom` 每变一次尺寸都要重算滚动位置，
+                        眼睛看到的就是「列表被顶了一下」外加一次滚动（用户报的）。槽位高度恒等于
+                        一行 `text-sm` 的行高，行里有没有东西都不再改变内容高度；只有真正的正文
+                        变长才推动列表。
+
+                        ⚠️ 槽位只挂在**最后一条助手消息**上（`isStreamingLast`）：历史消息后面
+                        不能留一片空白。整轮结束时槽位跟着撤掉，那一下由下面的操作行接上。
+                      */}
                       {streaming &&
-                        message.role === 'assistant' &&
-                        isStreamingLast &&
-                        messageCompaction?.status !== 'streaming' &&
-                        isWaitingNextStep(message.parts) && (
-                          <StreamingStatusNotice retryNotice={retryNotice} reconnectNotice={reconnectNotice} />
-                        )}
+                      message.role === 'assistant' &&
+                      isStreamingLast &&
+                      messageCompaction?.status !== 'streaming' ? (
+                        <div className="min-h-5">
+                          {/* 空 parts：只有「这一轮还什么都没吐」时才说正在思考 —— 已经挂了压缩卡
+                              的那种空 parts 属于「有内容但不在 parts 里」，别在这儿补一句干等 */}
+                          {(message.parts.length === 0
+                            ? !messageCompaction
+                            : isWaitingNextStep(message.parts)) ? (
+                            <StreamingStatusNotice retryNotice={retryNotice} reconnectNotice={reconnectNotice} />
+                          ) : null}
+                        </div>
+                      ) : null}
                     </MessageContent>
 
                     {/* 文档入口：紧贴正文之下（交付物）。「本轮用量」不在这里 —— 它是操作行
@@ -423,7 +435,7 @@ export function MessageList({
         </div>
       )}
 
-      {/* 消息目录：右侧拉线时间轴，桌面与窄屏同一形态（见 MessageOutline） */}
+      {/* 消息目录：右缘一列横杠，hover 展开成摘要清单（见 MessageOutline） */}
       {outline ? <MessageOutline messages={messages} onJump={jumpToMessage} /> : null}
 
       {/* 会话内查找（Ctrl/Cmd+F）：浮在消息区右上角，不开时不占位（见 chat-find.tsx） */}

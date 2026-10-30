@@ -10,10 +10,18 @@
  */
 import { memo, useState, type ReactNode } from 'react'
 import { Check, Copy, ArrowRightLeft, GitBranch, Pencil, Trash2 } from 'lucide-react'
-import { Loader } from '@fizz/agent-kit/shared/ai-elements/loader'
+import { ShimmerLabel } from '@fizz/agent-kit/shared/ai-elements/shimmer-label'
 import { Button } from '@fizz/ui/button'
 import { PartView } from '@fizz/agent-kit/features/chat/PartView'
-import { TurnStepGroup, turnStepSummary } from '@fizz/agent-kit/features/chat/TurnStepGroup'
+import { TurnStepGroup } from '@fizz/agent-kit/features/chat/TurnStepGroup'
+import {
+  isStepInFlight,
+  turnStepActivity,
+  turnStepPreview,
+  turnStepSummary,
+  workDurationLabel
+} from '@fizz/agent-kit/shared/lib/turn-step'
+import { useAgentStore } from '@fizz/agent-kit/shared/lib/stores/agent-store'
 import { isErrorText, textOf, toolState } from '@fizz/agent-kit/shared/lib/parts'
 import {
   normalizeFollowup,
@@ -21,7 +29,7 @@ import {
   getResumedFollowup,
   isUnansweredFollowup
 } from '@fizz/agent-kit/shared/lib/ask-followup'
-import { autoCollapsesReasoning, autoCollapsesTools, useAutoCollapse } from '@fizz/agent-kit/shared/lib/auto-collapse'
+import { formatMessageTime, formatMessageTimeExact } from '@fizz/agent-kit/shared/lib/message-time'
 import { ContextCompactionCard } from '@fizz/agent-kit/features/chat/ContextCompactionCard'
 import type { ContextCompactionState } from '@fizz/agent-kit/shared/lib/stores/slices/conversation'
 import { cn } from '@fizz/agent-kit/shared/lib/utils'
@@ -31,14 +39,16 @@ import type { AgentChatMessage } from '@fizz/contracts/agent-api'
 
 /**
  * 消息底部的「正在思考…」行：还没有任何 part 时、以及「在等模型下一步」时共用同一个观感。
+ *
+ * 文案用 `ShimmerLabel`（与分组抬头、思考条触发器同一份组件）：同一个「思考中」不能
+ * 一会儿扫光、一会儿转圈，观感要一致。
  */
 export function ThinkingRow() {
   // 订阅语言：切成英文后这行字要跟着变（`useT()` 同时提供文案）
   const tr = useT()
   return (
     <div className="flex items-center gap-2 text-sm text-muted-foreground">
-      <Loader size={14} />
-      {tr('正在思考…')}
+      <ShimmerLabel>{tr('正在思考…')}</ShimmerLabel>
     </div>
   )
 }
@@ -50,7 +60,7 @@ export function ThinkingRow() {
  *
  * 判据只看**尾段自己有没有「正在进行」的观感**，有就不补：
  * - `text`：正文还在流，本身就是进行中；
- * - `reasoning`：思考条的触发器在 streaming 时自己闪着「正在思考…」（`Shimmer`）；
+ * - `reasoning`：思考条的触发器在 streaming 时自己闪着「正在思考…」（`ShimmerLabel`）；
  * - `tool-call` **还没出结果**：卡片上是 Running 徽章 —— 出了结果（`hasOutput`）才算落地；
  * - 孤儿 `tool-result`：落地。
  *
@@ -59,7 +69,7 @@ export function ThinkingRow() {
  */
 export function isWaitingNextStep(parts: AgentMessagePart[]): boolean {
   const last = parts[parts.length - 1]
-  // 一个 part 都还没有的情况由调用方的三元分支单独渲染（同一个 ThinkingRow），
+  // 一个 part 都还没有的情况由调用方按 `parts.length === 0` 单独认（同一个 ThinkingRow），
   // 这里返回 false 是为了别在同一处渲染两遍
   if (!last) return false
   if (last.type === 'text' || last.type === 'reasoning') return false
@@ -91,26 +101,22 @@ export interface MessageFollowupBridge {
  *
  * 助手消息**两个阶段各有一套折叠口径**，靠同一段分组代码实现（差别只在「正文要不要收」）：
  *
- * 1. **流式中**：正文一段都不收。于是折叠条只出现在**两段正文之间** —— 读起来是
- *    `正文 → [过程] → 正文 → [过程] → 正在写的那段`。最后一段正文之后的那几步是**正在跑**
- *    的那一步（工具还在转），不收，原样铺开（见 `flushRun` 里对尾巴的处理）。
+ * 1. **流式中**：正文一段都不收（正在写的字必须看得见），但**思考 / 工具调用一律收进分组** ——
+ *    包括最后那段正文之后的尾巴（正在思考 / 正在跑命令的那几步）。抬头左格报**最后做的那一件事**
+ *    （工具的 `intent`，没有就工具名）、右格报**这一步的内容**（思考最后一行 / 命令 / 路径），
+ *    **不报耗时** —— 读起来是 `[跑一下单测 · $ pnpm test] → 正文 → [思考中… · 最后一行]`。
  * 2. **一轮结束**（助手消息且不是正在流式的末条 —— 完成判据见 `turnDone` 的注释）：
- *    **只保留最后一段正文**，其余一切（前面各段正文、思考、工具调用、提问卡……）连成
- *    **一个**折叠条。典型结果是 `[思考 ×1 · 工具调用 ×3] → 最后那段结论` ——
- *    中间那些「一段一折」全部合并掉了（摘要只报过程，不报「文本 ×N」，见 `turnStepSummary`）。
+ *    所有组连成**一个**（前面各段正文、思考、工具调用、提问卡……），**这时抬头才换成**
+ *    整轮耗时（拿不到 usage 时退回 `turnStepSummary` 的计数）。
+ *
+ * 组内每一张卡（思考条 / 工具卡）**默认收起、可点开**，两个阶段一个口径 —— 组只管
+ * 「这一段过程整体露不露」，细看哪一步交给用户自己点（不做嵌套自动展开）。
  *
  * 「最后一段正文」由 `lastTextIndex` 认定（最后一个有内容的 text part）。错误块（`⚠️ ` 前缀）
  * **永不折叠** —— 它带着「重新加载」按钮。用户消息整条原样铺开，不参与折叠。
  *
- * **哪些类型归组由「自动折叠」偏好评出**（设置 → 通用，见 `lib/auto-collapse.ts`）：
- * 不折叠 = 一个都不归组、全部铺在消息里（连文本也不收）；折叠思考 / 折叠工具 = 只收那一类，
- * 但过程性的正文段照收（否则「只留最后一段」这条就失效了）；全部折叠（缺省）= 都收。
- * 判定在下面 `foldable` 里，折叠条只吃连续的同类 part。
- * 单卡（思考条 / 工具卡）**自身的默认展开态用同一套判定**，见 `PartView` —— 两处不会各说各话。
- *
  * 整轮只有一段正文、没有任何思考 / 工具时没有折叠条（就是一条普通回复）；只调了工具
- * 就收尾时，折叠条就是这条消息的全部内容；分了好几段说但只有一段被留下的情况也一样
- * 只剩「折叠条 + 那一段」。
+ * 就收尾时，折叠条就是这条消息的全部内容。
  *
  * ⚠️ 空白文本不算「文本」：模型会在思考 / 工具之间偶发输出纯换行的 text part
  * （实测存量数据里大量「\n\n\n」），它没有可见内容，若不打断会被当成正文渲染成
@@ -144,6 +150,13 @@ function MessagePartsInner({
 }: MessagePartsProps) {
   // 订阅语言：折叠条摘要（思考 ×N / 工具调用 ×N）在渲染期用 `t()` 算，切语言要跟着变
   useT()
+  /**
+   * 抬头是否显示工具的「意图」（设置 → AI → 通用 → 工具意图）。
+   *
+   * 关掉时连历史里已有 intent 的组也回到工具名 —— 与工具卡（`PartView` 的 `cardHead`）
+   * 同一个开关、同一个语义，否则组抬头有意图、点开卡片却是纯工具名。
+   */
+  const showToolIntent = useAgentStore((s) => s.toolIntent)
   const isStreamingLast = streaming && index === total - 1
   // 一轮完成的判据：助手消息且不是「正在流式的末条」。
   // ⚠️ 不能拿 `message.usage` 当完成标记：usage 只在内置 agent 的 finish 帧里有，
@@ -152,8 +165,14 @@ function MessagePartsInner({
   // parts 只往当前正在跑的那条占位消息里追加，历史消息都是已终结的轮次，
   // 所以「非流式末条」本身就是完成信号。
   const turnDone = message.role === 'assistant' && !isStreamingLast
-  // 「自动折叠」偏好（设置 → 通用）：决定哪些 part 归到折叠条里、哪些原样铺开
-  const autoCollapse = useAutoCollapse()
+  /*
+   * 整轮耗时**只在整轮结束后**才报（服务端 `usage.durationMs`，含网络与工具耗时；ACP 从不带
+   * usage → undefined，抬头退回计数摘要，见 `groupHead`）。
+   *
+   * 流式中不再边走边报「已工作 N 秒」：那个数每秒都在变，占着抬头却什么也没说 ——
+   * 用户明确要求「没结束就报最后做的那件事的名字 / 意图，结束了再报耗时」。
+   */
+  const durationMs = message.usage?.durationMs
 
   const ownCompaction =
     compaction && compaction.messageId === message.id ? compaction : null
@@ -213,50 +232,50 @@ function MessagePartsInner({
     )
   }
 
-  /** 原样铺开全部 parts（用户消息走这条；折叠相关的一切都不参与） */
-  const renderFlat = (): ReactNode => {
-    const flat: ReactNode[] = []
+  /** 原样铺开全部 parts（用户消息走这条；分组 / 折叠相关的一切都不参与） */
+  const renderAll = (): ReactNode => {
+    const out: ReactNode[] = []
     message.parts.forEach((part, partIndex) => {
-      if (compactionNode && partIndex === compactionIndex) flat.push(compactionNode)
-      flat.push(renderPart(part, partIndex))
+      if (compactionNode && partIndex === compactionIndex) out.push(compactionNode)
+      out.push(renderPart(part, partIndex))
     })
-    if (compactionNode && compactionIndex >= message.parts.length) flat.push(compactionNode)
-    return <>{flat}</>
+    if (compactionNode && compactionIndex >= message.parts.length) out.push(compactionNode)
+    return <>{out}</>
   }
 
   // 用户消息：原样铺开 —— 它只有正文，没有任何可折叠的过程
-  if (message.role !== 'assistant') return renderFlat()
+  if (message.role !== 'assistant') return renderAll()
 
   // 空白文本（纯换行 / 空格）没有任何可见内容 —— 见函数头注释
   const isBlankText = (part: AgentMessagePart): boolean =>
     part.type === 'text' && !part.text.trim()
 
   /**
-   * 最后一段有内容的正文的下标。两种状态下含义不同、但取值是同一个：
-   *
-   * - **流式中**：它是「已经落地的最新一段」。在它**之后**的那些 part 就是正在跑的那一步
-   *   （工具还在转 / 思考还在出），不能收（见 `flushRun` 里对尾巴的处理）。
-   * - **一轮结束后**：它是**唯一留在明面上**的那一段，前面各段跟着过程一起收进折叠条。
+   * 最后一段有内容的正文的下标：**一轮结束后它留在明面上**，前面各段跟着过程一起收进
+   * 折叠条。流式中它只有一个用途 —— 标出「过程段到哪里算落地了」（组抬头的进行中 / 耗时切换）。
    *
    * 一轮里模型常常分几段说话（段与段之间夹着思考 / 工具调用），全铺出来会把结论淹在过程
    * 里。错误块（`⚠️ ` 前缀）不参与竞争：它带着「重新加载」按钮，收进折叠条等于让人找不到
    * 恢复入口 —— 它永远单独铺在明面上（见下面 `foldable` 里的那条早退）。
    */
   let lastTextIndex = -1
+  /** 最后一个「有东西」的 part（空白文本不算）：判断哪一段过程是正在跑的尾巴 */
+  let lastVisibleIndex = -1
   message.parts.forEach((part, i) => {
+    if (isBlankText(part)) return
+    lastVisibleIndex = i
     if (part.type === 'text' && part.text.trim() && !isErrorText(part.text)) lastTextIndex = i
   })
 
   /**
-   * 这个 part 要不要收进折叠条。
+   * 这个 part 要不要收进分组。
    *
    * - `text`：**流式中一段都不收**（正在写的正文必须看得见）；**一轮结束后只留最后一段**
-   *   （见 `lastTextIndex`）。后者不细分「自动折叠」偏好里选了哪一类 —— 只要不是「不折叠」，
-   *   过程性的正文就该跟过程一起收起来。「不折叠」是用户明确要求全部铺开，那时连文本也不收
-   *   （否则等于偷偷违背他的设置）。
-   * - `reasoning` / `tool-call` / `tool-result`：由「自动折叠」偏好评出（设置 → 通用）。
+   *   （见 `lastTextIndex`）。
+   * - `reasoning` / `tool-call` / `tool-result`：**一律收** —— 流式中也收（抬头是最后那件事的
+   *   `intent` / 工具名 + 一行内容，点开才看完整过程），不再有「自动折叠」开关。
    *
-   * 没被选中的 part 照常铺在消息里，而且**会打断折叠条**（折叠条只吃连续的同类 part，
+   * 没被收的 part 照常铺在消息里，而且**会打断分组**（分组只吃连续的同类 part，
    * 时间线不会被重排）。
    */
   const foldable = (part: AgentMessagePart, partIndex: number): boolean => {
@@ -265,14 +284,13 @@ function MessagePartsInner({
       if (isErrorText(part.text)) return false
       // 流式中每段正文都看得见；一轮结束后只留最后一段
       if (!turnDone) return false
-      if (partIndex === lastTextIndex) return false
-      return autoCollapse !== 'none'
+      return partIndex !== lastTextIndex
     }
-    if (part.type === 'reasoning') return autoCollapsesReasoning(autoCollapse)
+    if (part.type === 'reasoning') return true
     if (part.type === 'tool-call' || part.type === 'tool-result') {
       /**
-       * ⚠️ 没拿到答案的提问卡**不收进折叠条**：它是可点的（补答），而折叠条默认收起
-       * —— 藏进「N 个步骤」里等于让人看不见那张还能答的卡。
+       * ⚠️ 没拿到答案的提问卡**不收进分组**：它是可点的（补答），而分组默认收起
+       * —— 藏进去等于让人看不见那张还能答的卡。
        * 补答过之后（`getResumedFollowup` 有值）就变回普通的「已回答」横条，照常折叠。
        */
       if (
@@ -282,41 +300,89 @@ function MessagePartsInner({
       ) {
         return false
       }
-      return autoCollapsesTools(autoCollapse)
+      return true
     }
     return false
+  }
+
+  /**
+   * 组抬头，两档口径（一行两格：左边名字、右边这一步的内容预览）：
+   *
+   * - **整轮还没结束**：左格报「最后做的那一件事」—— 工具的 `intent`（没有就工具名）、
+   *   思考在跑时是「思考中…」、落地后是「思考过程」。**不报耗时**：那个数每秒都在变，
+   *   占着抬头却看不出在干什么。
+   * - **整轮结束**：左格报整轮耗时（`usage.durationMs`）；拿不到（ACP）退回计数摘要。
+   *
+   * 右格（`preview`）两个阶段都有：思考的最后一行 / 命令 / 路径 —— 折叠状态下也能看出
+   * 「这一步到底做的什么」，不用点开。
+   *
+   * `active`（抬头扫光 + 预览跟最新字）只在这段**真还在跑**时为真：整轮还在流式、这一段是
+   * 最后一段可见内容、尾 part 自己真的在跑（见 `isStepInFlight`，等用户作答的提问卡不算）。
+   *
+   * `live` 是更宽的一档，只差尾 part 那一条：**这组还是本轮最后一段可见内容**就算。
+   * 给展开态的「正在工作」用 —— 工具刚出结果、模型还在生成下一次调用的那几秒，
+   * `isStepInFlight` 会翻 false，文案挂在 `active` 上就会来回闪（见 `TurnStepGroup`）。
+   */
+  const groupHead = (
+    steps: { part: AgentMessagePart; partIndex: number }[]
+  ): {
+    label: string
+    active: boolean
+    live: boolean
+    /** 尾 part 的类型 —— 抬头名字左边那颗图标（扳手 / 脑）靠它，口径与左格文案一致 */
+    kind: 'tool' | 'reasoning'
+    preview?: { text: string; lineKey: number }
+  } => {
+    const parts = steps.map((step) => step.part)
+    const tail = steps[steps.length - 1]
+    const live = !turnDone && tail.partIndex === lastVisibleIndex
+    const running = live && isStepInFlight(tail.part)
+    const preview = turnStepPreview(parts)
+    // 与 `turnStepActivity` 同一个分支：只有尾 part 是 tool-call 才走「工具」那一档，
+    // 其余（思考 / 空组）按思考算 —— 否则图标会和那行文案对不上
+    const kind: 'tool' | 'reasoning' = tail.part.type === 'tool-call' ? 'tool' : 'reasoning'
+    if (!turnDone) {
+      return {
+        label: turnStepActivity(parts, { showIntent: showToolIntent, active: running }),
+        active: running,
+        live,
+        kind,
+        preview
+      }
+    }
+    if (durationMs != null) {
+      return { label: workDurationLabel(durationMs), active: false, live: false, kind, preview }
+    }
+    return { label: turnStepSummary(parts), active: false, live: false, kind, preview }
   }
 
   // 按原始顺序走一遍：连续的「要折叠的」part 各自成组，其余穿插在各组之间
   // （时间线保持原样）。part 保留原始下标 —— key 与 PartView 的接线都靠它保持稳定。
   //
   // 于是同一段代码天然给出两种观感：
-  // - **流式中**：正文一段不收，所以组只出现在「两段正文之间」—— 一段过程一个折叠条，
-  //   聊天读起来是 正文 → [过程] → 正文 → [过程] → 正在写的那段；
+  // - **流式中**：正文一段不收，过程段（含最后那段正文之后的尾巴）全部成组 ——
+  //   抬头一律是「最后做的那件事 + 它的内容」：
+  //   `[跑一下单测 · $ pnpm test] → 正文 → [读取文件 · src/parts.ts] → 正文 → [思考中… · …]`；
   // - **一轮结束**：只有最后一段正文不收，前面所有过程（连同前面各段正文）连成**一个**
-  //   折叠条，紧跟着就是那段结论。它之后若还有 part（少见：正文之后又调了工具），那些
-  //   会重新起一组，仍排在正文下方，不会被提到上面去。
+  //   折叠条，紧跟着就是那段结论；抬头这时才换成「已工作 N 秒」。
+  //
+  // 组内每张卡（思考条 / 工具卡）都是**收起且可点开**的，流式中与结束后一个口径：
+  // 组只管「这一段过程整体露不露」，细看哪一步由用户自己点。
   const nodes: ReactNode[] = []
   let run: { part: AgentMessagePart; partIndex: number }[] = []
   const flushRun = (): void => {
     if (!run.length) return
     const current = run
     run = []
-    /**
-     * 流式中的「尾巴」= 最后一段正文**之后**的那几步 —— 那是正在跑的那一步（工具还在转、
-     * 思考还在出）。收进折叠条等于把实时输出藏起来，所以原样铺开；等下一段正文落地、它变成
-     * 「两段正文之间」的过程时再收（那一趟会走下面的分支）。
-     *
-     * 一轮结束后没有「正在跑」这回事，尾巴也照收 —— 于是整轮只剩「一个折叠条 + 最后一段」。
-     */
-    if (!turnDone && current[0].partIndex > lastTextIndex) {
-      for (const { part, partIndex } of current) nodes.push(renderPart(part, partIndex))
-      return
-    }
+    const { label, active, live, kind, preview } = groupHead(current)
     nodes.push(
       <TurnStepGroup
         key={`${message.id}-steps-${current[0].partIndex}`}
-        summary={turnStepSummary(current.map((s) => s.part))}
+        label={label}
+        preview={preview}
+        active={active}
+        live={live}
+        kind={kind}
       >
         {current.map(({ part: stepPart, partIndex: stepIndex }) =>
           renderPart(stepPart, stepIndex)
@@ -359,8 +425,7 @@ function MessagePartsInner({
  *   **最新**值，引用变化不需要重渲。
  *
  * 其余依赖（`message` / `index` / `total` / `streaming`）都是「老消息引用不变、
- * 末条引用必变」的形状，逐项比即可。`useAutoCollapse` 走 `useSyncExternalStore`，
- * 自身订阅照常触发重渲，**不受 memo 影响**。
+ * 末条引用必变」的形状，逐项比即可。
  *
  * `onResume`（补答通道）只比**有没有**：它决定「没拿到答案的提问卡能不能补答」，
  * 而它本身同样是个内联箭头函数（闭包读 store 最新值），引用变化不需要重渲。
@@ -453,6 +518,36 @@ export function MessageActionRow({
   const actionButton =
     'rounded p-1 text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground'
 
+  /*
+   * 这一排里那格时刻。**位置左右不对称**，跟着角色走：
+   *
+   * - 用户消息：整排靠右（`self-end`），时间放在**按钮左边** —— 再往右就顶到消息区的
+   *   右边距了，而左边还有富余；
+   * - 助手消息：整排靠左（`self-start`），时间放在**按钮右边**。
+   *
+   * 语义上：
+   * - 用户消息：**发送时间**（`createdAt` 就是发出去的那一刻）；
+   * - 助手消息：**这一轮的结束时间** —— 服务端是整轮跑完才落盘，`createdAt` 取的就是
+   *   收尾那一刻的 `Date.now()`（见 `chat-turn.ts` 的 `persistAssistantMessage`）。
+   *   流式期间那条占位消息的 `createdAt` 是「开始」语义，但它不会渲染这一排
+   *   （`MessageList` 统一不给流式末条挂操作行），所以这里不会先显示开始时间再跳成结束时间。
+   *
+   * 取不到就整格不渲染：ACP 会话没有可用时间戳（`acp.ts` 回放时给全体消息打同一个
+   * `now`），不过那边走的是 `CopyOnlyActions`，压根到不了这一行。
+   */
+  const stamp = formatMessageTime(message.createdAt)
+  const stampNode = stamp ? (
+    <span
+      title={tr(message.role === 'user' ? '发送时间 {time}' : '结束时间 {time}', {
+        time: formatMessageTimeExact(message.createdAt)
+      })}
+      // `tabular-nums` 让 1 和 8 一样宽，显隐切换时不抖
+      className="px-1 text-xs text-muted-foreground tabular-nums"
+    >
+      {stamp}
+    </span>
+  ) : null
+
   return (
     <div
       className={cn(
@@ -462,6 +557,10 @@ export function MessageActionRow({
       )}
       onClick={(e) => e.stopPropagation()}
     >
+      {/* 用户消息的时刻在**按钮左边**（这一排靠右，右边再放就顶到边距了）；
+          助手消息留在末尾，见下方 */}
+      {message.role === 'user' ? stampNode : null}
+
       {/* 「本轮用量」在前：它是**读数**，复制 / 编辑 / 删除是**动作** —— 读在动之前 */}
       {usageSlot}
 
@@ -548,6 +647,10 @@ export function MessageActionRow({
           <Trash2 className="size-4" />
         </button>
       )}
+
+      {/* 助手消息的时刻压在按钮右侧（整排最后一个）：动作在前、时间在后，
+          读起来像「复制完了，这轮是 14:03 收的尾」 */}
+      {message.role === 'assistant' ? stampNode : null}
     </div>
   )
 }

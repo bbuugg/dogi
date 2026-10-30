@@ -21,7 +21,8 @@ import {
 } from "react";
 import { Streamdown } from "streamdown";
 import { useStickToBottom } from "use-stick-to-bottom";
-import { Shimmer } from "@fizz/agent-kit/shared/ai-elements/shimmer";
+import { ShimmerLabel } from "@fizz/agent-kit/shared/ai-elements/shimmer-label";
+import { reasoningPreview } from "@fizz/agent-kit/shared/lib/preview-text";
 import { useStreamdownOptions } from "@fizz/agent-kit/shared/lib/streamdown";
 import { useT } from "@fizz/agent-kit/shared/lib/language";
 import { t } from "@fizz/i18n";
@@ -139,36 +140,13 @@ export type ReasoningTriggerProps = ComponentProps<typeof CollapsibleTrigger> & 
 };
 
 /**
- * 思考正文 → 行内预览：**最后一行**的纯文本 + 这一行的行号。
+ * 思考正文 → 行内预览（**最后一行**的纯文本 + 行号）。
  *
- * **只取最后一行**（最后一个 `\n` 之后那段）—— 一行的高度只放得下一行，与其把整段塞进来
- * 再靠 CSS 截断（那样永远只看得见开头几个字），不如让这一行始终跟着**最新的一行**走。
- *
- * 返回的 `lineKey`（最后一个 `\n` 的下标）是「换行发生了」的判据，交给 `ReasoningPreview`
- * 决定要不要把预览整体上滚一格。⚠️ **不能靠「新文本不是旧文本的前缀」来判换行**：
- * 下面剥 markdown 记号时，`**bo` → `bo` 就不是前缀了，会被误判成换行、凭空滚一下。
- *
- * 顺手去掉的 markdown 记号：预览是纯文本一行，`**粗体**` / `` `代码` `` / `- 列表` 这些
- * 记号留在一行里只是噪点（又要省掉重新解析 markdown 的开销）。
- *
- * ⚠️ 调用方（PartView）必须在**自己知道 open 的时候**调用它、只把切好的一行传进来：
- * 把原始 text 传进来的话，展开状态下每来一个 token 都会改 props，`memo` 的
- * ReasoningTrigger 连同里面的 Shimmer 就跟着重渲染（现在它们在展开时是不重渲染的）。
+ * 实现在 `shared/lib/preview-text.ts`：过程分组的抬头右侧也要同一行预览，
+ * 而 `lib` 不能反向依赖 `ai-elements`（会成环）。这里保留同名导出，
+ * PartView 等既有调用方的 import 路径不用动。
  */
-export function reasoningPreview(text: string): { line: string; lineKey: number } {
-  const lineKey = text.lastIndexOf("\n");
-  const line = text
-    .slice(lineKey + 1)
-    // 行首的标题 / 引用 / 列表符号（「-5 是负数」里的「-」后面没空格，不会误伤）
-    .replace(/^\s*(?:#{1,6}|>|[-*+]|\d+[.)])\s+/, "")
-    .replace(/`([^`]*)`/g, "$1") // 行内代码
-    .replace(/\*\*([^*]+)\*\*/g, "$1") // 粗体
-    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1") // 链接只留文字
-    .replace(/[*_~]+/g, "") // 其余强调 / 删除线记号
-    .replace(/\s+/g, " ")
-    .trim();
-  return { line, lineKey };
-}
+export { reasoningPreview };
 
 /**
  * 换行滚动的两半动画。**必须同长**（200ms），否则一进一出对不上，看着像两行在错位。
@@ -254,7 +232,7 @@ const PreviewTrack = memo(function PreviewTrack({ text }: { text: string }) {
  * ⚠️ 窗口高度写死 `h-5`（= `text-sm` 的 20px 行高）：绝对定位的上一行需要窗口有确定
  * 高度才裁得干净。改触发行的字号时这里要跟着改，否则会露半行。
  */
-const ReasoningPreview = memo(function ReasoningPreview({
+export const ReasoningPreview = memo(function ReasoningPreview({
   text,
   lineKey,
 }: {
@@ -318,7 +296,7 @@ const ReasoningPreview = memo(function ReasoningPreview({
  */
 const defaultGetThinkingMessage = (isStreaming: boolean, duration?: number) => {
   if (isStreaming) {
-    return <Shimmer duration={1}>{t('正在思考…')}</Shimmer>;
+    return <ShimmerLabel>{t('正在思考…')}</ShimmerLabel>;
   }
   // ⚠️ 只有「正在流式」才该显示闪烁的「正在思考…」。原来 `duration === 0` 也走这个分支，
   // 于是思考不到 1 秒就结束时，收起后头部会一直闪着「Thinking...」（像还没想完）。
@@ -341,15 +319,44 @@ export const ReasoningTrigger = memo(
     // 订阅语言：memo 组件不订阅的话，切语言时这行字不会跟着变（见 defaultGetThinkingMessage）
     useT();
 
+    /*
+     * ⚠️ `flex w-fit` 而不是 `inline-flex`（别改回去）：
+     * inline-flex 是**行内级**盒子，会落进块级父元素的行盒里，被父级 line-height
+     * （这里是 15px 正文的 22.5px）撑到 24.5px —— 触发器本身只有 20px，
+     * 多出来的 4.5px 全掉在**下方**，于是这条「思考了几秒」看着比工具条偏上、
+     * 与下一条的间距也比上一条松（工具条是 display:flex 的 20px 盒子，没有行盒）。
+     * `flex` 让它变成块级盒子、脱离行盒，`w-fit` 保住「触发区只占内容宽度」。
+     */
+    const content = children ?? (
+      <>
+        <BrainIcon className="size-4 shrink-0" />
+        {/* 预览在时标题不许被压缩（min-w-0 留给预览那一格，它自己横向滚动） */}
+        <span className={cn("truncate", previewText != null && "shrink-0")}>
+          {getThinkingMessage(isStreaming, duration)}
+        </span>
+        {previewText != null ? (
+          /*
+           * 折叠 + 流式时的行内实时预览：横向跟最新字、纵向跟最新行（换行滚一格）。
+           * 窗口的宽度由流内的当前行撑出（`min-w-0 flex-1` 与触发器的 `w-fit max-w-full`
+           * 搭配：文字短时整行贴合内容、右侧箭头紧跟，长了就顶满并把旧字从左边推出）。
+           * 实现与坑见 `ReasoningPreview`。
+           */
+          <ReasoningPreview
+            text={previewText}
+            lineKey={previewLineKey ?? -1}
+          />
+        ) : null}
+        <ChevronRightIcon
+          className={cn(
+            REVEAL_ON_HOVER_ARROW,
+            "size-4 shrink-0",
+            isOpen ? "rotate-90" : "rotate-0"
+          )}
+        />
+      </>
+    );
+
     return (
-      /*
-       * ⚠️ `flex w-fit` 而不是 `inline-flex`（别改回去）：
-       * inline-flex 是**行内级**盒子，会落进块级父元素的行盒里，被父级 line-height
-       * （这里是 15px 正文的 22.5px）撑到 24.5px —— 触发器本身只有 20px，
-       * 多出来的 4.5px 全掉在**下方**，于是这条「思考了几秒」看着比工具条偏上、
-       * 与下一条的间距也比上一条松（工具条是 display:flex 的 20px 盒子，没有行盒）。
-       * `flex` 让它变成块级盒子、脱离行盒，`w-fit` 保住「触发区只占内容宽度」。
-       */
       <CollapsibleTrigger
         className={cn(
           // `group/row`：箭头 hover 显示按「这一行」算（消息气泡自带裸 group，用裸 group-hover
@@ -359,34 +366,7 @@ export const ReasoningTrigger = memo(
         )}
         {...props}
       >
-        {children ?? (
-          <>
-            <BrainIcon className="size-4 shrink-0" />
-            {/* 预览在时标题不许被压缩（min-w-0 留给预览那一格，它自己横向滚动） */}
-            <span className={cn("truncate", previewText != null && "shrink-0")}>
-              {getThinkingMessage(isStreaming, duration)}
-            </span>
-            {previewText != null ? (
-              /*
-               * 折叠 + 流式时的行内实时预览：横向跟最新字、纵向跟最新行（换行滚一格）。
-               * 窗口的宽度由流内的当前行撑出（`min-w-0 flex-1` 与触发器的 `w-fit max-w-full`
-               * 搭配：文字短时整行贴合内容、右侧箭头紧跟，长了就顶满并把旧字从左边推出）。
-               * 实现与坑见 `ReasoningPreview`。
-               */
-              <ReasoningPreview
-                text={previewText}
-                lineKey={previewLineKey ?? -1}
-              />
-            ) : null}
-            <ChevronRightIcon
-              className={cn(
-                REVEAL_ON_HOVER_ARROW,
-                "size-4 shrink-0",
-                isOpen ? "rotate-90" : "rotate-0"
-              )}
-            />
-          </>
-        )}
+        {content}
       </CollapsibleTrigger>
     );
   }

@@ -3,12 +3,14 @@
  *
  * 用的是 ai-elements 的原生组件：
  * - 正文 `MessageResponse`（走 streamdown，流式 markdown）
- * - 思考 `Reasoning`（可折叠，流式时自动展开、结束后按「自动折叠」偏好决定收不收）
- * - 工具调用 `Tool`（可折叠，头部显示「中文工具名 + 主入参明细（截断，悬停看全文）+ 状态徽章」）
+ * - 思考 `Reasoning`（默认收起，头部报「正在思考…」，可随时展开）
+ * - 工具调用 `Tool`（默认收起，头部显示「中文工具名 + 主入参明细（截断，悬停看全文）+ 状态徽章」）
  *
- * **折叠档位统一由设置 → 通用 →「自动折叠」决定**（见 `lib/auto-collapse.ts`）：
- * 被选中的那一类（思考 / 工具调用）收起来（列表里归进折叠条、单卡默认收起），
- * 没被选中的那一类则摊开（思考保持展开、工具卡默认展开）。用户仍可逐个手动开合。
+ * 分组是**列表侧统一收口**的：一条助手消息里的思考 / 工具调用都由 `message-parts.tsx`
+ * 收进 `TurnStepGroup`（抬头左格说「最后做的那件事」——工具的 `intent` / 工具名 / 「思考中…」，
+ * 右格说这一步的内容；**整轮结束**才换成「已工作 N 秒」）。
+ * 组内每张卡仍是**收起的、可点开的**（流式中、一轮结束后都一样）—— 组只管「这一段过程
+ * 整体要不要露出来」，细看哪一步由用户自己点，不做嵌套自动展开。
  *
  * 我们的事件模型是服务端自定义的 `AgentMessagePart`，这里负责把它翻译成
  * ai-elements 期望的形状（`ToolUIPart['type']` / `['state']`）。
@@ -55,45 +57,32 @@ import {
   isTerminalTool,
   terminalOutputForDisplay
 } from '@fizz/agent-kit/shared/lib/terminal/display'
-import { autoCollapsesReasoning, autoCollapsesTools, useAutoCollapse } from '@fizz/agent-kit/shared/lib/auto-collapse'
 import { collapsedBody, shouldRefreshSnapshot } from '@fizz/agent-kit/shared/lib/collapse-swap'
 import { loadMediaObjectUrl } from '@fizz/agent-kit/shared/lib/media-url'
 import type { AgentMessagePart, TodoItem } from '@fizz/contracts/types'
 import type { AskFollowupAnswer } from '@fizz/contracts/types'
 
 /**
- * 思考段：**思考中自动展开；结束后要不要自动折叠由设置决定**（设置 → 通用 → 自动折叠）。
+ * 思考段：**默认收起、随时可展开**（流式中也一样，一轮结束后同样可开合）。
  *
  * 不能只靠 ai-elements 自带的 `defaultOpen`：那个只在**挂载时**取一次初值
- * （`useControllableState` 的 defaultProp），而这里的 part 是流式过程中才被追加进来的，
- * 之后 streaming 由 true 变 false 时它不会自己收 —— 而且它内置的「1 秒后自动收」
- * 是 `hasAutoClosed` 只跑一次，用户手动点开一个已结束的思考还会被它再收回去。
+ * （`useControllableState` 的 defaultProp），而且它内置的「播完 1 秒自动收」是
+ * `hasAutoClosed` 只跑一次 —— 用户手动点开一个已结束的思考还会被它再收回去。
  *
- * 所以自己控 `open`：`defaultOpen={false}` 把组件内部那套自动开合关掉，
- * 由 `streaming` + 「自动折叠」偏好驱动开合；收起来之后用户仍可自己点开，不会再被自动收走。
- *
- * 「自动折叠」选了不折叠 / 只折叠工具时 `autoClose` 为假：结束也不收，而且历史消息里的
- * 思考一开始就是展开的（用户选这个档就是不想让它自己消失）。
+ * 所以自己控 `open`：`defaultOpen={false}` 把组件内部那套自动开合让开。初值一律收起，
+ * **不跟 `streaming` 联动**：思考过程已经收进外层分组（见 `message-parts.tsx` 的
+ * `TurnStepGroup`），组内每张卡都默认折叠；一到流式就自己弹开，会把分组撑成一大片、
+ * 也违背「过程默认折叠」的口径。
  *
  * **折叠 + 仍在思考时**，触发行上会跟着一行实时预览（思考正文的最后一行）：不然思考条只剩
  * 「正在思考…」四个字，长时间思考时完全看不出它在写什么。
  */
 function ReasoningView({ text, streaming }: { text: string; streaming: boolean }) {
-  /** 思考结束要不要自动收起（折叠思考 / 全部折叠才算） */
-  const autoCollapse = useAutoCollapse()
-  const autoClose = autoCollapsesReasoning(autoCollapse)
-  const [open, setOpen] = useState(autoClose ? streaming : true)
+  const [open, setOpen] = useState(false)
   // 消息区的滚动上下文（可能不在 Conversation 里，拿不到就退化成空操作）
   const conversation = useConversationOptional()
 
-  // 开始思考 → 展开；结束（开始说正文 / 调工具 / 整轮结束）→ 按偏好决定收不收。
-  // 思考过程中用户手动收起后，streaming 没变，effect 不会重跑，不会被强行撑开。
-  useEffect(() => {
-    if (streaming) setOpen(true)
-    else if (autoClose) setOpen(false)
-  }, [streaming, autoClose])
-
-  // 折叠 + 流式 → 触发行上多跟一行实时预览（最新一行）；不折叠 / 不流式时传 undefined。
+  // 折叠 + 流式 → 触发行上多跟一行实时预览（最新一行）；展开 / 不流式时不传。
   // `lineKey` 一起传：预览靠它判「换行」，好把这一行整体上滚一格（见 reasoningPreview）。
   const preview = !open && streaming && text.trim() ? reasoningPreview(text) : undefined
 
@@ -104,13 +93,15 @@ function ReasoningView({ text, streaming }: { text: string; streaming: boolean }
       open={open}
       defaultOpen={false}
       // 用户手动开合：暂停自动贴底，让内容向下长（否则一展开就被拽到底、点的那条往上跳）。
-      // 上面由 streaming 驱动的展开不走这里，所以流式时照旧跟随底部。
       onOpenChange={(next) => {
         conversation?.holdScroll()
         setOpen(next)
       }}
     >
-      <ReasoningTrigger previewText={preview?.line} previewLineKey={preview?.lineKey} />
+      <ReasoningTrigger
+        previewText={preview?.line}
+        previewLineKey={preview?.lineKey}
+      />
       <ReasoningContent>{text}</ReasoningContent>
     </Reasoning>
   )
@@ -119,9 +110,9 @@ function ReasoningView({ text, streaming }: { text: string; streaming: boolean }
 /**
  * 工具卡：**所有工具调用的统一折叠外壳**（内置 / ACP、有无直显内容都走它）。
  *
- * 「默认展开还是收起」**统一由设置 → 通用 →「自动折叠」决定**：选了「折叠工具 /
- * 全部折叠」就默认收起（只由用户点开），选「不折叠 / 折叠思考」就默认展开 ——
- * 与列表侧「哪一类进折叠条」是同一套判定（`autoCollapsesTools`），不会两边各说各话。
+ * 默认**收起、只由用户点开**（流式中也一样，运行中也能展开看实时输出）：
+ * 它已经在消息列表的过程分组里（抬头就是它的 `intent` + 命令 / 路径），
+ * 组内每张卡再自动摊开，就等于把过程直接铺在明面上，与「统一折叠成一个组」相悖。
  *
  * 展开后的内容形态由调用方决定：没有直显内容时给「输入 / 输出 JSON」，
  * 有直显内容（diff / 命令 / 文本）时直接铺那块内容 —— 头部与折叠行为完全一致。
@@ -133,12 +124,8 @@ function ReasoningView({ text, streaming }: { text: string; streaming: boolean }
  * 跟着变，整棵子树**重新挂载**，`defaultOpen` 被重新取值 → 表现就是
  * 「一跑完所有工具卡自己全展开」。同理，工具在流式过程中完成也不会自动弹开。
  *
- * 所以自己控 `open`：初值 = 折叠偏好（`defaultOpen={false}` 是为了把 Radix 内部那套
- * 初值逻辑彻底让开，与 ReasoningView 同一写法）。
- *
- * 例外是**入参流式生成期**（调用方显式传 `defaultOpen` 且为真）：那时候卡片本来就是给
- * 用户看的「正在写什么」，不展开就白流了；收口（完整 tool-call 到达）后调用方不再传
- * `defaultOpen`，effect 就回到折叠偏好那一档。
+ * 所以自己控 `open`：`defaultOpen={false}` 是为了把 Radix 内部那套初值逻辑彻底让开
+ * （与 ReasoningView 同一写法）；初值一律收起，之后只由用户开合 —— 一轮结束后同样可开合。
  */
 function ToolCallCard({
   title,
@@ -146,7 +133,6 @@ function ToolCallCard({
   state,
   detail,
   status,
-  defaultOpen,
   onStop,
   live = true,
   children
@@ -158,8 +144,6 @@ function ToolCallCard({
   detail?: string
   /** 工具名右侧的运行态（子任务「运行中 · 正在读文件 · 已调用 N 个工具」） */
   status?: ReactNode
-  /** 显式指定展开态（目前只有流式期的入参预览用）；不传 = 跟随「自动折叠」偏好 */
-  defaultOpen?: boolean
   /** 工具在飞（pending / 执行中）时给的停止回调，透传给头部那颗停止钮 */
   onStop?: () => void
   /**
@@ -171,24 +155,9 @@ function ToolCallCard({
   live?: boolean
   children: ReactNode
 }) {
-  /** 「折叠工具 / 全部折叠」= 默认收起；其余两档 = 默认展开（用户改设置时已渲染的卡片也跟着变） */
-  const autoCollapse = useAutoCollapse()
-  const expandedByDefault = !autoCollapsesTools(autoCollapse)
   // 消息区的滚动上下文（可能不在 Conversation 里，拿不到就退化成空操作）
   const conversation = useConversationOptional()
-
-  // 展开态的驱动值：「显式指定（入参还在流式生成 / 命令正在跑）」优先，否则跟折叠偏好。
-  const driver = defaultOpen ?? expandedByDefault
-  const [open, setOpen] = useState(driver)
-  const [prevDriver, setPrevDriver] = useState(driver)
-  // ⚠️ 在**渲染期**同步 state，不放 useEffect：effect 要等 commit 之后才跑，而内容
-  // （children）在同一个 commit 里已经换成新的了 —— 中间会多出一帧「还开着 + 已是新
-  // 内容」，用户看到的就是「内容先变 diff、才开始折叠」。
-  // 渲染期 setState（同一组件内）是 React 认可的写法：会立刻重渲染、不会落到 DOM 上。
-  if (driver !== prevDriver) {
-    setPrevDriver(driver)
-    setOpen(driver)
-  }
+  const [open, setOpen] = useState(false)
 
   /**
    * 「先折叠、再换内容」：收起动画（ToolContent 的 animate-out，150ms）期间继续渲染
@@ -309,7 +278,7 @@ function delegationPromptOf(input: unknown): string | undefined {
 }
 
 /**
- * 入参**流式生成期**的预览：从半截 JSON 里抠出「主入参」（头部明细）+「正在写的内容」。
+ * 入参**流式生成期**的预览：从半截 JSON 里抠出「主入参」（明细）+「正在写的内容」。
  *
  * 与 `buildFileDiff` 的分工：那个吃完整 `input`、生成前后对比；这个吃 `inputText`、
  * 只给一坨正在变长的文本。两者不会同时命中（有 `inputText` 就说明还没收口）。
@@ -324,8 +293,9 @@ function renderStreamingPreview(part: AgentMessagePart): { detail?: string; text
     partialJsonString(raw, 'filePath')
   const command = partialJsonString(raw, 'command') || partialJsonString(raw, 'cmd')
   const content = partialJsonString(raw, 'content') || partialJsonString(raw, 'newText')
-  // 命令类：命令本身就够看（走头部明细），内容区没有别的东西 → 不展开
-  if (command) return { detail: `$ ${command}` }
+  // 命令类：明细已经移出头部（见 ToolHeaderProps.detail），命令得铺到内容区才有得看 ——
+  // 只给 detail 的话，卡片上除了标题就一片空白。
+  if (command) return { detail: `$ ${command}`, text: `$ ${command}` }
   if (path || content) {
     return {
       ...(path ? { detail: path } : {}),
@@ -509,11 +479,12 @@ function AcpTextBlock({ text, singleLine }: { text: string; singleLine?: boolean
 }
 
 /**
- * 直显内容 + 头部明细。
+ * 直显内容 + 明细。
  *
  * `content`：展开后的内容区（diff / 输出文本等）；
- * `detail`：命令 / 主入参，**截断显示在工具名后面**、悬停出 Tooltip 看全文 ——
- * 命令不放内容区第一块了，折叠状态下也能直接看到跑的是什么。
+ * `detail`：命令 / 主入参，**不进头部**（头部只留标题，见 `ToolHeaderProps.detail`），
+ * 只作为标题的 Tooltip 补充 / 触屏弹窗全文。命令类工具另有一份回声在 `content` 第一行
+ * （`$ 命令`），展开卡片就能看到跑的是什么。
  */
 type DirectResult = { content: ReactNode; detail?: string }
 
@@ -545,7 +516,7 @@ function renderAcpDirect(part: AgentMessagePart): DirectResult | null {
     // 交给下面的 execute 分支直显输出
   }
 
-  // 头部明细：默认给 agent 的标题；命令执行类优先入参里的命令
+  // 明细：默认给 agent 的标题；命令执行类优先入参里的命令
   //（agent 标题常带「Bash: 」前缀 / 是整段脚本，命令本身更干净）
   let detail = part.title
   if (nodes.length === 0 && (part.acpKind === 'execute' || content.some((i) => i?.type === 'terminal'))) {
@@ -554,7 +525,10 @@ function renderAcpDirect(part: AgentMessagePart): DirectResult | null {
     if (command) detail = `$ ${command}`
     // output 是 tool-result 回填进来的（contracts 的 tool-call 形状没声明）：运行时一定在
     const outputText = toolOutputText((part as { output?: unknown }).output)
-    if (outputText) nodes.push(<AcpTextBlock key="output" text={outputText} singleLine />)
+    // 明细已移出头部（见 ToolHeaderProps.detail）：命令必须在内容区第一行回声一份，
+    // 否则这张卡折叠/展开都只剩标题，看不到跑的到底是什么。
+    const echoed = [command ? `$ ${command}` : '', outputText ?? ''].filter(Boolean).join('\n')
+    if (echoed) nodes.push(<AcpTextBlock key="output" text={echoed} singleLine />)
   }
 
   if (nodes.length === 0 && !detail) return null
@@ -587,7 +561,7 @@ function renderBuiltinDirect(
    * Result 两坨 JSON」的兜底卡：终端输出被 `JSON.stringify` 当 JSON 高亮，数字全被拆成
    * 独立 span（用户看到的「满屏乱跳的数字」，`x86_64` 还会被切成 `x` + `86` + `_` + `64`）。
    *
-   * 所以按 `execute_command` 的样子直显：头部 `$ 命令`，结果文本铺在内容区。
+   * 所以按 `execute_command` 的样子直显：`$ 命令` 铺在内容区第一行，后面接结果文本。
    * 两处与 execute_command 不同：
    * - **命令什么都没输出时不铺内容区**：工具会回一句「（等待期内没有捕获到新输出…）」，
    *   那是给模型的（免得它以为调用失败），摆给用户看就是一句废话；
@@ -601,9 +575,11 @@ function renderBuiltinDirect(
       part.isError === true || !hasOutput || part.toolName === 'send_keys'
         ? null
         : terminalOutputForDisplay(toolOutputText(output) ?? '')
+    // 明细已移出头部：命令要铺到内容区第一行，否则卡的标题下面什么都看不到
+    const echoed = command ? (body ? `$ ${command}\n${body}` : `$ ${command}`) : body
     return {
       ...(command ? { detail: `$ ${command}` } : keys ? { detail: t('按键 {keys}', { keys }) } : {}),
-      content: body ? <AcpTextBlock text={body} singleLine /> : null
+      content: echoed ? <AcpTextBlock text={echoed} singleLine /> : null
     }
   }
 
@@ -638,9 +614,14 @@ function renderBuiltinDirect(
   }
   if (!subject) return null
 
-  const detail = part.toolName === 'execute_command' ? `$ ${subject}` : subject
+  const isExec = part.toolName === 'execute_command'
+  const detail = isExec ? `$ ${subject}` : subject
   // 结果文本：抠不出来（结构化对象 / 还没结果）就不硬造一块 —— 有结果才给
   const outputText = toolOutputText(output)
+  // execute_command 的结果文本**本身就以 `$ 命令` 开头**（`（退出码 N）` 也在里面，见
+  // tools.ts 的 runCommand.finish）——所以这里不能再 echo 一遍，否则卡片上同一行命令
+  // 会连着出现两次（用户实测反馈）。别的工具的结果不含主入参，才需要补那一行。
+  const echo = isExec ? `$ ${subject}` : ''
   if (outputText) {
     return { content: <AcpTextBlock text={outputText} singleLine />, detail }
   }
@@ -648,7 +629,7 @@ function renderBuiltinDirect(
     // 结果在但抠不出人话：回退折叠卡，别丢信息
     return null
   }
-  return { content: null, detail }
+  return { content: echo ? <AcpTextBlock text={echo} singleLine /> : null, detail }
 }
 
 /** 结果是否「等于没信息」（{} / [] / 空串）—— 与 toolErrorText 里的判断同一口径 */
@@ -879,8 +860,6 @@ function PartViewInner({
           part,
           items.length ? t('{done}/{total} 已完成', { done, total: items.length }) : undefined
         )}
-        // 清单是给人看的进度，有内容就默认展开（与命令实时输出同一取舍）
-        defaultOpen={items.length > 0}
       >
         {items.length ? (
           <TodoChecklist items={items} />
@@ -898,8 +877,7 @@ function PartViewInner({
   //   - 内容区只渲染**结论的 markdown**，工具过程已被主进程的 slimDelegationOutput
   //     收敛掉（实测 subAgentToolResults 会把整份文件塞进来，还会原样进会话历史）。
   //
-  // 打开方式分两档：还在跑（有流式文本、还没结果）时自动展开 —— 内容一帧帧在长，
-  // 折叠起来等于白流；出了结果就跟随「工具自动折叠」偏好，与其余工具卡一个待遇。
+  // 与其余工具卡一个待遇：默认收起，要看子任务产出自己点开（运行态在头部，折叠也不瞎）。
   const subText = typeof (part as { subagentText?: unknown }).subagentText === 'string'
     ? ((part as { subagentText?: string }).subagentText as string)
     : ''
@@ -922,8 +900,6 @@ function PartViewInner({
             <DelegationRunning toolName={part.subagentTool} toolCount={part.subagentToolCount} />
           ) : undefined
         }
-        // 只在真有流式正文时才自动展开：运行态已经上头部了，空内容区不该被撑开
-        defaultOpen={delegationStreaming}
         onStop={onStop}
       >
         {isError && <AcpTextBlock text={toolErrorText(output)} />}
@@ -942,8 +918,8 @@ function PartViewInner({
   // ⚠️ 判据用 `isCommandRunning(part)`，**不能**加「liveOutput 在不在」这一条
   // （最早就是这么写的，实测踩到）：那个字段只在**第一段输出**到达时才被创建，
   // 而「在跑但什么都不吐」的命令（sleep 30 / 长编译 / 等网络）整轮都没有输出 ——
-  // 于是整张卡只剩一行头部，而头部箭头在未结算态是 disabled 的，停止按钮
-  // 在内容块里、内容块压根不渲染：用户看不到也停不掉。
+  // 于是整张卡只剩一行头部，内容区（含那块占位与输出区）压根不渲染，看起来像卡死。
+  // 停止钮不受影响：它挂在**头部**（`onStop`），收起时也点得到。
   if (isCommandRunning(part)) {
     const cmdRaw = (part.input as { command?: unknown } | undefined)?.command
     const cmd = typeof cmdRaw === 'string' ? cmdRaw : ''
@@ -956,10 +932,13 @@ function PartViewInner({
         state={state}
         live={turnLive}
         {...cardHead(part, `$ ${cmd}`)}
-        // 运行中**强制展开**：实时输出是这块卡存在的意义，折叠起来等于白流
-        defaultOpen
+        // 默认收起（与其余卡一致），要看实时输出点开 —— 头部有运行态图标与停止钮，
+        // 折叠状态下也能判断「还在跑」、也能停。
         onStop={onStop}
       >
+        {/* 明细已移出头部（见 ToolHeaderProps.detail）：运行中也要先把「跑的是什么」铺出来，
+            否则这张卡从头到尾都只有一句意图，用户不知道当前在跑哪条命令。 */}
+        {cmd ? <AcpTextBlock text={`$ ${cmd}`} singleLine /> : null}
         <LiveOutputBlock live={live} />
       </ToolCallCard>
     )
@@ -975,8 +954,7 @@ function PartViewInner({
         state={state}
         live={turnLive}
         {...cardHead(part, preview?.detail)}
-        // 有内容可看才自动展开：命令类只有头部明细，展开是一片空白
-        defaultOpen={Boolean(preview?.text)}
+        // 默认收起：入参在长的时候头部明细已经跟着截断刷新了，要细看半截 JSON 自己点开
         onStop={onStop}
       >
         {preview?.text ? <StreamingInputBlock text={preview.text} /> : null}

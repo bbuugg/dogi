@@ -185,6 +185,16 @@ body {
     ::-webkit-scrollbar-thumb:hover {
       background-color: color-mix(in oklab, var(--muted-foreground) 55%, transparent);
     }
+
+    /*
+     * 消息区（`Conversation` 的滚动容器）**始终预留滚动条槽位**：条出现 / 消失不再让
+     * 内容盒少 10px，否则整列内容会横缩一下、和下方输入框错开（用户报的「滚动条前后
+     * 宽度变化」）。写在这条 media 里与「画滚动条」同源；`both-edges` 让内容盒中心
+     * 与面板中心重合（只留右侧会左偏半个槽位）。详见 `conversation.tsx` 类名注释。
+     */
+    [data-message-scroll] {
+      scrollbar-gutter: stable both-edges;
+    }
   }
 
   @media (pointer: coarse),

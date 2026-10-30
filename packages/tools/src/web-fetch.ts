@@ -28,7 +28,7 @@ import { tool, type ToolSet } from 'ai'
 import { z } from 'zod'
 import { summarizeLongOutput } from './output-log'
 import { ensureChromiumReady } from './playwright-browsers'
-import { abortableSleep, launchHeadlessChromium } from './headless'
+import { abortableSleep, launchHeadlessChromium, pageErrorMessage } from './headless'
 
 /**
  * 返回 Markdown 的正文默认上限（字符）。
@@ -374,7 +374,10 @@ export function buildWebFetchTool(root: string, stopHooks: WebFetchStopHooks = {
               : await fetchByHttp(target, timeout, signal)
           return await formatPage(page, target.toString(), clampedMax, root)
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
+          // 先剥掉 playwright 附带的终端样式（Call log 是灰字），再做超时判定：
+          // 判据看的是错误码与 timeout 字样，样式字节对正则没影响，但多余的 ESC 会让
+          // 模型看到 `[2m` 这种残渣（与 execute_command 同一个问题，见 ansi.ts）
+          const msg = pageErrorMessage(err)
           // 用户主动点了「停止」（单条或整轮）：别当成抓取失败，模型据此直接收场、不要重试
           if (signal.aborted) {
             return 'web_fetch 已被用户中止（点了「停止」），本轮不再重试。'

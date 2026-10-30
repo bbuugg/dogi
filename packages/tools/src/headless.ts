@@ -8,6 +8,7 @@
  *
  * 这里只放「与抓取逻辑无关的浏览器生命周期」，不 import 任何业务模块（避免循环依赖）。
  */
+import { stripAnsi } from './ansi'
 
 /** 浏览器类型（playwright 是可选依赖，只取类型、运行时才动态 import） */
 type HeadlessBrowser = Awaited<ReturnType<typeof import('playwright').chromium.launch>>
@@ -79,4 +80,18 @@ export async function launchHeadlessChromium(
   } finally {
     clearTimeout(timer)
   }
+}
+
+/**
+ * playwright 的报错 → 可直接拼进工具结果的纯文本。
+ *
+ * playwright 的错误文本带**终端样式**：`Call log:` 下面那几行是灰字
+ * （`\u001b[2m  - navigating to "…", waiting until "domcontentloaded"\u001b[22m`）。ESC 是不可见
+ * 字符，原样进工具结果就只剩 `[2m … [22m` —— 界面上是噪音，模型还可能把 `[22m` 当正文照抄。
+ * 截图 / 抓取都走管道，没有任何地方会解释这些字节，所以在这里一次剥干净。
+ *
+ * 只剥样式，正文（错误码、URL、Call log 逐行）全留着：那是判断「为什么打不开」的唯一线索。
+ */
+export function pageErrorMessage(err: unknown): string {
+  return stripAnsi(err instanceof Error ? err.message : String(err)).trim()
 }

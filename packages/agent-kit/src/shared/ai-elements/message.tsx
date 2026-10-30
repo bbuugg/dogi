@@ -49,6 +49,12 @@ export const MessageContent = ({
   <div
     className={cn(
       "is-user:dark flex w-fit max-w-full min-w-0 flex-col gap-2 overflow-hidden text-base",
+      // 助手一侧**必须撑满**：`w-fit` 是「按内容最宽那行收缩」，而流的是一列按 part 排的
+      // 盒子 —— 一旦这一段只剩一行折叠条（思考 / 工具全收进分组，宽度 = 抬头那行字的
+      // max-content），整列就被收成一条窄柱，组内的工具卡 / 命令输出全被挤扁（用户报过：
+      // 「折叠成组之后内容宽度不对，一轮结束有正文了又正常」）。
+      // 用户气泡仍要 `w-fit` 贴右收缩，所以只给助手这一档加 `w-full`。
+      "group-[.is-assistant]:w-full",
       "group-[.is-user]:ml-auto group-[.is-user]:rounded-lg group-[.is-user]:bg-secondary group-[.is-user]:px-4 group-[.is-user]:py-3 group-[.is-user]:text-foreground",
       "group-[.is-assistant]:text-foreground",
       className

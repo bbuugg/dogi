@@ -24,6 +24,7 @@ import { createIgnoreChecker, relPathOf, resolveInside } from '@fizz/contracts/w
 import { tr } from '@fizz/i18n'
 import { applyTolerantEdit } from './edit-match'
 import { createAnsiStripper, stripAnsi } from './ansi'
+import { createOutputDecoder } from './output-decoder'
 import {
   clipToBudget,
   MAX_TOOL_RESULT_CHARS,
@@ -477,6 +478,10 @@ async function runCommand(
   // 实时转发的清洗器（每条流各一份：chunk 边界会把转义序列劈开，见 ansi.ts）
   const cleanStdout = createAnsiStripper()
   const cleanStderr = createAnsiStripper()
+  // 输出解码（每条流各一份）：Windows 上同一批命令可能吐 UTF-8（Git Bash 的 coreutils）
+  // 也可能是 GBK（命令里显式调的 powershell 5.1），见 output-decoder.ts 的头注释
+  const decodeStdout = createOutputDecoder()
+  const decodeStderr = createOutputDecoder()
 
   return new Promise<string>((resolve) => {
     let settled = false
@@ -504,6 +509,9 @@ async function runCommand(
        * vite / tsc / jest 照样吐颜色（`\u001b[32m➜\u001b[39m`）。不剥的话模型拿到的是
        * `[32m` 这种残渣，既占字符预算又会被当成正文照抄。见 `ansi.ts`。
        */
+      // 没有换行结尾的残留（最后一行 / 进度条）也要吐出来，否则最后一句报错会丢
+      stdout += decodeStdout.flush()
+      stderr += decodeStderr.flush()
       const out = stripAnsi(stdout).trim()
       const err = stripAnsi(stderr).trim()
       const full = `$ ${command}\n${info}\n${out}${err ? `\n${err}` : ''}`
@@ -546,7 +554,10 @@ async function runCommand(
     // 只保留最新的一段，防 `yes` / `find /` 之类把内存吃光；丢的部分只发生在超出
     // MAX_CMD_CAPTURE 的极端情况下，正常命令的输出是完整的
     child.stdout.on('data', (d: Buffer) => {
-      const chunk = d.toString('utf8')
+      // 解码走 output-decoder（UTF-8 优先、整行回退 GBK）：直接 toString('utf8')
+      // 会把 powershell 的 GBK 中文解成 `�`（用户实测的「一堆乱码」）
+      const chunk = decodeStdout.decode(d)
+      if (!chunk) return
       stdout += chunk
       if (stdout.length > MAX_CMD_CAPTURE) stdout = stdout.slice(-MAX_CMD_CAPTURE)
       // 实时增量：纯转发（不在这里缓存），防爆由调用方负责（见 parts.ts 的 MAX_LIVE_OUTPUT）；
@@ -554,7 +565,8 @@ async function runCommand(
       sink?.onOutput('stdout', cleanStdout(chunk))
     })
     child.stderr.on('data', (d: Buffer) => {
-      const chunk = d.toString('utf8')
+      const chunk = decodeStderr.decode(d)
+      if (!chunk) return
       stderr += chunk
       if (stderr.length > MAX_CMD_CAPTURE) stderr = stderr.slice(-MAX_CMD_CAPTURE)
       sink?.onOutput('stderr', cleanStderr(chunk))
@@ -639,8 +651,18 @@ export function spawnBackgroundShell(
     else opts.signal.addEventListener('abort', onAbort, { once: true })
   }
 
-  child.stdout?.on('data', (d: Buffer) => opts.onOutput?.('stdout', d.toString('utf8')))
-  child.stderr?.on('data', (d: Buffer) => opts.onOutput?.('stderr', d.toString('utf8')))
+  // 解码与 runCommand 同一套（UTF-8 优先、整行回退 GBK）：后台任务的日志同样会被
+  // 命令里 powershell 的 GBK 输出污染，而它还要进面板日志、落盘给模型读
+  const decodeStdout = createOutputDecoder()
+  const decodeStderr = createOutputDecoder()
+  child.stdout?.on('data', (d: Buffer) => {
+    const chunk = decodeStdout.decode(d)
+    if (chunk) opts.onOutput?.('stdout', chunk)
+  })
+  child.stderr?.on('data', (d: Buffer) => {
+    const chunk = decodeStderr.decode(d)
+    if (chunk) opts.onOutput?.('stderr', chunk)
+  })
 
   const done = new Promise<BackgroundShellExit>((resolve) => {
     let settled = false
@@ -651,7 +673,14 @@ export function spawnBackgroundShell(
       resolve(result)
     }
     child.on('error', (err) => settle({ code: null, error: err.message, killed }))
-    child.on('exit', (code) => settle({ code: code ?? null, killed }))
+    child.on('exit', (code) => {
+      // 最后一行没有换行结尾时还压在解码器里，收口前吐出来（否则日志会缺最后一句报错）
+      const tailOut = decodeStdout.flush()
+      if (tailOut) opts.onOutput?.('stdout', tailOut)
+      const tailErr = decodeStderr.flush()
+      if (tailErr) opts.onOutput?.('stderr', tailErr)
+      settle({ code: code ?? null, killed })
+    })
   })
 
   return { kill, done }

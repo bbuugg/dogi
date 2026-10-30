@@ -24,6 +24,7 @@ import {
   createBrowserSessionHandlers,
   type BrowserSession
 } from './engine'
+import { pageErrorMessage } from '../headless'
 
 /** 回给模型的快照字符上限 */
 const MAX_SNAPSHOT_CHARS = 6000
@@ -47,8 +48,8 @@ function truncate(s: string, max: number): string {
 }
 
 function errText(err: unknown): string {
-  const msg = err instanceof Error ? err.message : String(err)
-  return msg.split('\n')[0]
+  // 只回第一行（Call log 太啰嗦），但要先剥掉 playwright 附带的终端样式
+  return pageErrorMessage(err).split('\n')[0]
 }
 
 interface Target {

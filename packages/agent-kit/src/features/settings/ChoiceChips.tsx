@@ -1,5 +1,5 @@
 /**
- * 设置页的「胶囊单选」：工具权限 / 自动折叠 / 明暗 / 默认终端 / 背景质感 / 背景显示方式共用。
+ * 设置页的「胶囊单选」：工具权限 / 明暗 / 默认终端 / 背景质感 / 背景显示方式共用。
  *
  * 用 Radix `ToggleGroup`（`type="single"`）替掉手写的 `role="radiogroup"` + `role="radio"`
  * 按钮：单选语义（radiogroup / radio / aria-checked）、方向键切换与 roving tabindex 都由

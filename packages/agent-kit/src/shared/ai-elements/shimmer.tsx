@@ -25,8 +25,12 @@ const ShimmerComponent = ({
   duration = 2,
   spread = 2,
 }: TextShimmerProps) => {
-  const MotionComponent = motion.create(
-    Component as keyof JSX.IntrinsicElements
+  // ⚠️ `motion.create` 每次 render 都造一个**新的组件类型**，React 会当成换了个组件、
+  // 把子树整个重挂载 —— 扫光动画就每帧从头开始，看着一顿一顿（思考条每个 token 都重渲染，
+  // 分组抬头还每秒刷新一次耗时）。按 `as` 记住它，同样的标签复用同一个类型，动画才连续。
+  const MotionComponent = useMemo(
+    () => motion.create(Component as keyof JSX.IntrinsicElements),
+    [Component]
   );
 
   const dynamicSpread = useMemo(

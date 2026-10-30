@@ -71,6 +71,10 @@
    * 外圈辉光胀缩 + 三个点错峰上浮。 */
   --animate-preview-halo: preview-halo 1.8s ease-in-out infinite;
   --animate-preview-dot: preview-dot 1.1s ease-in-out infinite;
+  /* 过程分组抬头的「还在跑」标记（`@fizz/agent-kit` 的 WorkBars）：
+   * 三根竖条错峰伸缩（像电平表在跳），条与条之间有相位差 —— 一眼就是「在干活」，
+   * 又不像转圈的 loader 那样在任何产品里都长一个样。 */
+  --animate-work-bar: work-bar 1.05s ease-in-out infinite;
 }
 
 @keyframes typing-dot {
@@ -125,6 +129,19 @@
 
   30% {
     transform: translateY(-3px);
+    opacity: 1;
+  }
+}
+
+@keyframes work-bar {
+  0%,
+  100% {
+    transform: scaleY(0.3);
+    opacity: 0.55;
+  }
+
+  50% {
+    transform: scaleY(1);
     opacity: 1;
   }
 }

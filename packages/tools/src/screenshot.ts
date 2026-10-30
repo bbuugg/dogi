@@ -22,7 +22,7 @@ import { tool, type ToolSet } from 'ai'
 import { z } from 'zod'
 import { resolveDataDir } from '@fizz/workspace'
 import { ensureChromiumReady } from './playwright-browsers'
-import { abortableSleep, launchHeadlessChromium } from './headless'
+import { abortableSleep, launchHeadlessChromium, pageErrorMessage } from './headless'
 
 /** 截图落盘子目录（相对数据目录） */
 const SCREENSHOT_DIR = 'screenshots'
@@ -128,8 +128,8 @@ export function buildScreenshotTool(): ToolSet {
             `（图片地址：${servePath}；格式：${fmt}；整页：${fullPage ? '是' : '否'}）`
           ].join('\n')
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          return `screenshot 截图 ${url} 失败：${msg}`
+          // pageErrorMessage：playwright 的报错自带终端样式（Call log 是灰字），必须剥掉
+          return `screenshot 截图 ${url} 失败：${pageErrorMessage(err)}`
         }
       }
     })

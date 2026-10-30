@@ -1,15 +1,15 @@
 /**
  * AI 通用设置（导航上：设置 → AI → 通用）：从「通用」组里抽出来的、**只作用于 AI 的那几条**
- * —— 工具权限 + 工具调用并发 + 工具步数上限 + 命令审批超时 + 模型请求重试 + 自动折叠 +
- * 子任务（subagent）。
+ * —— 工具权限 + 工具调用并发 + 工具步数上限 + 工具意图 + 子任务（subagent）+
+ * 命令审批超时 + 模型请求重试。
  *
  * 为什么单开一页而不是留在通用里：通用里真正「跟 AI 无关」的只剩通知 / 常亮 / 监控 / 更新
  * 那几项，而守在通用里找「它能改什么、能跑多快」的正好是 AI 组里的这些配置。现在
  * 设置 → AI → 通用 就是「这套 AI 怎么干活」的唯一入口。
  *
  * ⚠️ 导航上叫「通用」不叫「偏好」：这一页装的是 AI 的**默认行为**（权限档 / 并发 / 步数 /
- * 折叠），不是个人口味，叫「偏好」会让人以为里面是主题、字号。**tab id 仍是 `ai-prefs`**，
- * 别跟着改（`SettingsContent` / `types.ts` 都按它分发）。
+ * 意图 / 子任务），不是个人口味，叫「偏好」会让人以为里面是主题、字号。**tab id 仍是
+ * `ai-prefs`**，别跟着改（`SettingsContent` / `types.ts` 都按它分发）。
  *
  * ⚠️ 这里只搬了 UI：所有偏好仍然读写同一份 store（`useAgentStore` / `app.*`），
  * 落盘字段、`DATA_VERSION` 迁移、服务端上送路径一律没动 —— 搬家不改数据。
@@ -18,7 +18,7 @@
  * （它们是宿主环境与提醒的事，不是 AI 的行为）。
  */
 import { toast } from 'sonner'
-import { Check, ChevronsDownUp, ShieldCheck } from 'lucide-react'
+import { Check, ShieldCheck } from 'lucide-react'
 import { Input } from '@fizz/ui/input'
 import { Switch } from '@fizz/ui/switch'
 import {
@@ -41,16 +41,12 @@ import {
   resolveToolCallConcurrency
 } from '@fizz/contracts'
 import { useAgentStore } from '@fizz/agent-kit/shared/lib/stores/agent-store'
-import { AUTO_COLLAPSE_OPTIONS, setAutoCollapse, useAutoCollapse } from '@fizz/agent-kit/shared/lib/auto-collapse'
 import { ChoiceChips } from '@fizz/agent-kit/features/settings/ChoiceChips'
 import { useT } from '@fizz/agent-kit/shared/lib/language'
 
 export function AiPreferencesTab({ app }: { app: AgentApp }) {
   const tr = useT()
   const current = permissionOption(app.permissionMode)
-
-  /** 自动折叠：会话消息里思考 / 工具调用的自动收起档位（纯客户端偏好） */
-  const autoCollapse = useAutoCollapse()
 
   /**
    * 子任务模型选项：把所有模型配置下的模型摊平成一份清单。
@@ -187,25 +183,6 @@ export function AiPreferencesTab({ app }: { app: AgentApp }) {
             {app.toolIntent ? tr('已开启') : tr('已关闭（工具卡只显示工具名）')}
           </label>
         </div>
-      </section>
-
-      <section className="space-y-2">
-        <div className="flex items-center gap-1.5 text-sm font-medium">
-          <ChevronsDownUp className="size-3.5" />
-          {tr('自动折叠')}
-        </div>
-        <p className="text-xs leading-4 text-muted-foreground">
-          {tr('一轮结束后，思考与工具卡是否自动收起。不影响流式过程和手动开合。')}
-        </p>
-        <ChoiceChips
-          ariaLabel={tr('自动折叠')}
-          value={autoCollapse}
-          onChange={setAutoCollapse}
-          options={AUTO_COLLAPSE_OPTIONS}
-        />
-        <p className="text-xs leading-4 text-muted-foreground">
-          {tr(AUTO_COLLAPSE_OPTIONS.find((option) => option.value === autoCollapse)?.hint ?? '')}
-        </p>
       </section>
 
       <section className="space-y-2">

@@ -373,26 +373,34 @@ export const Conversation = ({
            * 消息区自己被认成横向滚动容器时，右滑开抽屉就整个失效。
            * 代码块 / 表格自带 `overflow-x-auto`，不受这一条影响。
            */
-          "relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden no-scrollbar",
           /*
-           * 消息区**不画滚动条**（`no-scrollbar`，见 styles.css）：滚轮 / 触摸 / 键盘滚动照常。
+           * 消息区**要画滚动条**：长会话里得看得见「我在哪儿 / 还有多长」。
+           * 样式见 `styles.css` 那条 base 层 `::-webkit-scrollbar`（10px、圆角、半透明滑块），
+           * 只在「有鼠标 + ≥768px」时生效 —— 触屏 / 手机宽度下 `display: none`，
+           * 占位式滚动条会白吃 10px 横向空间，那种屏幕上不该画。
            *
-           * ⚠️ 这个类**必须留着**：`c21b40d` 那次改动把它误删过一次，于是桌面端（`pointer: fine`
-           * + `≥768px`，见 styles.css 那条 base 层 `::-webkit-scrollbar { width: 10px }`）消息区
-           * 又开始画 10px 占位式滚动条 —— 长会话里条一出现，内容列就横向缩 10px、和下方输入框
-           * 错开，短会话又弹回去（用户报的「滚动条前后宽度变化」）。去掉它 = 让宽度重新变得不定。
+           * ⚠️ 占位式滚动条的经典毛病：条从「没有」到「出现」，内容盒宽度少 10px ——
+           * 整列内容横向缩一下、和下方输入框错开，短会话又弹回去（用户早先报的
+           * 「滚动条前后宽度变化」）。解法不是把条藏掉（那是上一版的做法，代价是
+           * 长会话里完全没有位置感），而是**让槽位始终存在**：`scrollbar-gutter`。
            *
-           * 这里以前预留着滚动条槽位（`scrollbar-gutter: stable`），为的是「条一出现内容
-           * 别横向跳 10px」—— 那是**占位式**滚动条才有的烦恼（styles.css 那条 base 层
-           * `::-webkit-scrollbar { width: 10px }` 只在桌面宽度下生效）。现在条本身不画了，
-           * 宽度恒定，槽位与所有为它做的对齐补偿（见 ChatComposer）一并撤掉；
-           * 别再给任何一侧补 padding 去「对齐槽位」—— 那会真的错开半个槽位。
+           * ⚠️ 用 `stable both-edges` 而不是只写 `stable`：只留右侧槽位时内容盒中心会比
+           * 面板中心左偏半个槽位（5px），消息列与下方输入框就差了这 5px；两侧各留一个槽，
+           * 内容盒中心重新与面板中心重合，上下对齐。代价是可用宽度少 20px —— 宽屏无感，
+           * 而触屏 / 窄屏的滚动条宽度是 0（`display: none`），槽位宽度也就是 0，不白吃像素。
+           *
+           * 滚动位置由 `use-stick-to-bottom` 显式管理（见下面 `overflowAnchor`）。
            */
+          "relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden",
           className
         )}
         /*
          * overflow-anchor: none —— 关掉 Chromium 的滚动锚定。流式内容增长 / markdown 重排时
          * 它会「帮忙」修正滚动位置，造成偶发跳顶。滚动位置由 use-stick-to-bottom 显式管理。
+         *
+         * ⚠️ `scrollbar-gutter` **不在这里写**：它必须和「什么时候画滚动条」那条 media
+         * 查询放在一起（`styles.css` 里 `[data-message-scroll]` 的那一条），否则触屏 /
+         * 窄视口下会白留一段槽位。上面 `data-message-scroll` 属性就是给那条规则用的。
          */
         style={{ overflowAnchor: "none", ...style }}
         {...props}

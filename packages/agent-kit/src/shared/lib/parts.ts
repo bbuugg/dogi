@@ -540,6 +540,55 @@ export function toolCardHead(
   return extra ? { title: intent, detail: `${label} · ${extra}` } : { title: intent, detail: label }
 }
 
+/** 把多行入参（命令 / 脚本 / prompt）压成一行：抬头右侧只有一行的高度 */
+function oneLine(text: string, max = 160): string {
+  const line = text.replace(/\s+/g, ' ').trim()
+  return line.length > max ? `${line.slice(0, max)}…` : line
+}
+
+/**
+ * 工具调用的**主入参明细**：命令 / 路径 / 搜索词 / 派活 prompt（一行）。
+ *
+ * 与 `ToolHeader` 的 `detail` 是两个用途：那个是卡片自己的明细位，由 `PartView` 按分支
+ * 各算各的（todo 是「3/5 已完成」这种摘要）；这里只服务**过程分组抬头右侧那一行**——
+ * 要求各工具口径一致，而且**入参还在流式生成时也认得**（`input` 还没收口，只能从
+ * `inputText` 的半截 JSON 里抠）。
+ *
+ * 命令带 `$` 前缀（与卡片内容区同一写法），一眼能分出「这是条命令」。
+ */
+export function toolDetailOf(part: ToolCallPart): string | undefined {
+  const input = (part.input && typeof part.input === 'object' ? part.input : {}) as Record<
+    string,
+    unknown
+  >
+  const fromInput = (keys: string[]): string | undefined => {
+    for (const key of keys) {
+      const value = input[key]
+      if (typeof value === 'string' && value.trim()) return value
+    }
+    return undefined
+  }
+  const fromPartial = (keys: string[]): string | undefined => {
+    if (!part.inputText) return undefined
+    for (const key of keys) {
+      const value = partialJsonString(part.inputText, key)
+      if (value?.trim()) return value
+    }
+    return undefined
+  }
+  const pick = (keys: string[]): string | undefined => fromInput(keys) ?? fromPartial(keys)
+
+  const command = pick(['command', 'cmd'])
+  if (command) return oneLine(`$ ${command}`)
+  const path = pick(['path', 'file_path', 'filePath'])
+  if (path) return oneLine(path)
+  const pattern = pick(['pattern', 'query'])
+  if (pattern) return oneLine(pattern)
+  const prompt = pick(['prompt'])
+  if (prompt) return oneLine(prompt)
+  return undefined
+}
+
 /** ask_followup_question 工具名（与 @fizz/tools 侧的 ASK_FOLLOWUP_TOOL 一致；web 不依赖 Node 侧包） */
 export const ASK_FOLLOWUP_TOOL = 'ask_followup_question'
 

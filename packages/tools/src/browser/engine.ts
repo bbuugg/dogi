@@ -36,6 +36,7 @@ import {
 import { nextButtonsMask, toCdpCommand } from './input'
 import { launchAttempts, type LaunchAttempt } from './resolver'
 import { ensureChromiumReady } from '../playwright-browsers'
+import { pageErrorMessage } from '../headless'
 
 /** screencast 帧节流：最多 ~30fps，避免把 CPU 都喂给编码（静止页面也会持续推帧） */
 const MIN_FRAME_INTERVAL = 33
@@ -540,8 +541,8 @@ export function normalizeUrl(input: string): string {
 }
 
 function errText(err: unknown): string {
-  const msg = err instanceof Error ? err.message : String(err)
-  return msg.split('\n')[0]
+  // 只回第一行（Call log 太啰嗦），但要先剥掉 playwright 附带的终端样式
+  return pageErrorMessage(err).split('\n')[0]
 }
 
 // ---------------------------------------------------------------------------

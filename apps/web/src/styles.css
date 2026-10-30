@@ -185,6 +185,20 @@ body {
     ::-webkit-scrollbar-thumb:hover {
       background-color: color-mix(in oklab, var(--muted-foreground) 55%, transparent);
     }
+
+    /*
+     * 消息区（`Conversation` 的滚动容器）**始终预留滚动条槽位**：条从「不出现」到
+     * 「出现」时不再让内容盒少 10px（否则整列内容横缩一下、和下方输入框错开 —— 用户
+     * 早先报的「滚动条前后宽度变化」）。
+     *
+     * 必须写在**这条** media 里而不是组件上：判据与「画滚动条」完全同源 —— 窄视口 /
+     * 触屏本来就不命中它，既不画那 10px 的条，也不预留槽位，横向像素不会被白吃。
+     * `both-edges` 的理由见 `conversation.tsx` 那条类名注释（只留右侧会让消息列左偏半个槽位，
+     * 与输入框错开 5px）。
+     */
+    [data-message-scroll] {
+      scrollbar-gutter: stable both-edges;
+    }
   }
 
   @media (pointer: coarse),
