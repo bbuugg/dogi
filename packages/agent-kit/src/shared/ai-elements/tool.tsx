@@ -270,8 +270,8 @@ export const ToolHeader = ({
   // 颜色 / 字重与 ReasoningTrigger（「思考了几秒」行）同一口径：整行 text-muted-foreground、
   // 常规字重，hover 整体提亮 —— 图标和标题都不带自己的颜色类，靠继承跟随 hover 变化。
   //
-  // 明细（detail）用 min-w-0 truncate：工具名 shrink-0 不缩，空间不够时先截断明细，
-  // 全文走 Tooltip（原生 title 要悬停一秒才出，这里 100ms）。
+  // 标题与明细**都可截断**（min-w-0 truncate）：空间不够时先结尾，右侧的状态图标 / 停止钮
+  // 永远留在容器里。全文走 Tooltip（原生 title 要悬停一秒才出，这里 100ms），触屏走全文弹窗。
   // 头部外壳：触发行 + 可选的停止钮（平级，见 ToolHeaderProps.onStop 的说明）。
   /*
    * ⚠️ **不要**给触发器加原生 `disabled`：按钮一旦 disabled，浏览器会吞掉它内部所有
@@ -280,6 +280,17 @@ export const ToolHeader = ({
    * `preventDefault()` 会让 Radix 的 composeEventHandlers 跳过 toggle
    * （见 @radix-ui/primitive），明细自己的 onClick 里 stopPropagation 不受影响。
    */
+  const titleText = title ?? type.split("-").slice(1).join("-");
+  /**
+   * 标题能不能点开全文弹窗。
+   *
+   * 触屏没有 hover，长标题只能靠弹窗看全文；但**只有真的会渲染弹窗时**（`detail` 存在，
+   * 见函数末尾那个 `!touch || !detail` 的短路）才把它变成可点区域 —— 否则点了一下没反应，
+   * 比不能点更糟。
+   */
+  const titleOpenable = touch && !!detail;
+  const openDetail = (): void => setDetailOpen(true);
+
   const trigger = (
     <CollapsibleTrigger
       className={cn(
@@ -299,9 +310,43 @@ export const ToolHeader = ({
     >
       <span className="inline-flex min-w-0 max-w-full items-center gap-2">
         <WrenchIcon className="size-4 shrink-0" />
-        <span className="shrink-0 text-sm">
-          {title ?? type.split("-").slice(1).join("-")}
-        </span>
+        {/*
+         * ⚠️ 标题**必须可截断**（min-w-0 truncate）。
+         * 这里原来是 `shrink-0`：标题恒为工具名（短，不该被挤掉）。现在标题可能是模型写的
+         * 「意图」整句（见 `toolCardHead`），`shrink-0` 让这一行的 min-content 等于那一整句 ——
+         * 手机窄屏下整行比容器还宽，右侧的状态图标 / 停止钮被顶到外面（用户报过）。
+         * 改成可截断后，空间不够先结尾，右侧控件永远留在视口内。
+         */}
+        {titleOpenable ? (
+          // 触屏：标题就是那一句意图，截断了没处看全文 —— 点它开与明细同一个弹窗
+          // （阻止冒泡，否则会同时触发卡片展开 / 收起，与下面明细的做法一致）
+          <span
+            role="button"
+            tabIndex={0}
+            title={titleText}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              openDetail();
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" && event.key !== " ") return;
+              event.preventDefault();
+              event.stopPropagation();
+              openDetail();
+            }}
+            className="min-w-0 cursor-pointer truncate text-sm transition-colors hover:text-foreground"
+          >
+            {titleText}
+          </span>
+        ) : (
+          <Tooltip delayDuration={100}>
+            <TooltipTrigger asChild>
+              <span className="min-w-0 truncate text-sm">{titleText}</span>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-[28rem] break-words">{titleText}</TooltipContent>
+          </Tooltip>
+        )}
         {status ? <span className="min-w-0 shrink truncate">{status}</span> : null}
         {detail &&
           (touch ? (
@@ -368,7 +413,9 @@ export const ToolHeader = ({
   const head = !onStop ? (
     trigger
   ) : (
-    <div className="flex max-w-full items-center gap-2">
+    // `min-w-0`：这一行是 flex 容器，不给它 min-w-0 的话触发器那一侧会把整行撑到
+    // min-content（长标题 / 长明细），停止钮跟着被挤出容器（手机窄屏）。
+    <div className="flex min-w-0 max-w-full items-center gap-2">
       {trigger}
       <Button
         size="sm"

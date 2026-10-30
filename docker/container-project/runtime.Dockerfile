@@ -4,7 +4,7 @@
 #
 #   docker build -t fizz/agent-runtime:latest -f docker/container-project/runtime.Dockerfile .
 #
-# 这一层装了：Node 24 + git / ripgrep / rtk 等常用命令行 + `runtime.mjs`（@fizz 源码打成的
+# 这一层装了：Node 24 + git / ripgrep 等常用命令行 + `runtime.mjs`（@fizz 源码打成的
 # bundle）+ `agent-host.mjs`（容器内 HTTP 控制面，监听 :8080）+ 内置技能。
 # 各运行环境镜像（node / php / golang / vite）都 `FROM fizz/agent-runtime:latest`，
 # 只在自己的 Dockerfile 里补该语言的工具链，**不动这一层**。
@@ -29,6 +29,9 @@ RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debia
       bash \
  && rm -rf /var/lib/apt/lists/*
 
+# ⚠️ 这里**刻意不装 rtk**：容器运行环境不需要它。宿主侧 `plugins/rtk` 里的改写器遇到
+#    没装 rtk（ENOENT / EACCES）会降级成原命令，容器里的命令照常执行，不会报错。
+
 # 容器内运行时依赖：`npm ci --omit=dev` 用下面那份 lockfile
 # ⚠️ PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD：`playwright` 的 postinstall 默认会去下 Chromium
 #    （几百 MB，镜像直接翻倍）。浏览器**首次用到时在线下载**（与仓库既有策略一致，
@@ -40,38 +43,11 @@ ENV npm_config_registry=https://registry.npmmirror.com \
 
 WORKDIR /app
 COPY docker/container-project/runtime/package.json docker/container-project/runtime/package-lock.json ./
+# ⚠️ 改这份 `package.json` 的 dependencies 必须**同时重生成 lockfile**，否则镜像构建在这一步
+#    直接 exit 1（`npm ci` 只认 lockfile 与 package.json 完全同步，不会自己去补）：
+#      cd docker/container-project/runtime && npm install --package-lock-only \
+#        --ignore-scripts --registry=https://registry.npmmirror.com
 RUN npm ci --omit=dev
-
-# ── rtk（Rust Token Killer）：把 git / 构建类命令的输出压掉 60~90% 再交给模型 ──────
-#
-# 装的是 **oss 版**（纯 Apache-2.0）。标准版 `rtk` 里那个压缩引擎是 BUSL-1.1，而 BUSL
-# 明确排除「把 RTK 或其衍生物作为商业产品或服务提供给第三方」—— 随本产品的镜像分发正好
-# 落在这一条里（要的话得向 rtk-ai 买商用授权）。oss 版带**全部命令过滤器**，只是没有引擎：
-# `rtk git status / diff / log` 这些照压。
-#
-# ⚠️ 默认走 ghfast.top 代理：构建机在境内，github.com:443 直连不通（实测 21s 超时）。
-#    校验和钉死在这里 —— 代理即使投毒，也只会让构建失败，不会装进别的东西。
-#    海外构建机可以覆盖：--build-arg RTK_BASE_URL=https://github.com/rtk-ai/rtk/releases/download
-#
-# ⚠️ 放在 `npm ci` **之后**：换版本时只重跑这一层，不会把 200MB 的依赖再装一遍。
-ARG RTK_VERSION=1.0.1
-ARG RTK_BASE_URL=https://ghfast.top/https://github.com/rtk-ai/rtk/releases/download
-RUN set -eux; \
-    arch="$(dpkg --print-architecture)"; \
-    case "$arch" in \
-      amd64) target='x86_64-unknown-linux-musl'; \
-             sha='a44e8ffc43981100b4ddf1710399a1649a6c874591aa6d0c0727fe6cbd983c41' ;; \
-      arm64) target='aarch64-unknown-linux-gnu'; \
-             sha='ee24a43dac9162de55fea8460b5efcd56d401ec28b5117c921bffa8a57bc136e' ;; \
-      *) echo "rtk: 不支持的架构 $arch" >&2; exit 1 ;; \
-    esac; \
-    curl -fsSL --connect-timeout 15 --max-time 300 \
-      "$RTK_BASE_URL/v$RTK_VERSION/rtk-oss-$target.tar.gz" -o /tmp/rtk.tar.gz; \
-    echo "$sha  /tmp/rtk.tar.gz" | sha256sum -c -; \
-    tar -xzf /tmp/rtk.tar.gz -C /usr/local/bin rtk; \
-    chmod 0755 /usr/local/bin/rtk; \
-    rm -f /tmp/rtk.tar.gz; \
-    rtk --version
 
 # 容器内运行时与 HTTP 控制面（`runtime.mjs` 是入库的构建产物，见根 `npm run build:runtime`）
 # `bootstrap.mjs` 是启动入口：先跑工作区里的 `.fizz/container/start.mjs`（失败也不影响），

@@ -273,11 +273,26 @@ function readDeclared() {
   const manifestPath = resolve(RUNTIME_DIR, 'package.json')
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
   const declared = Object.keys(manifest.dependencies ?? {})
-  return { manifestPath, declared, declaredSet: new Set(declared) }
+  return { manifestPath, manifest, declared, declaredSet: new Set(declared) }
+}
+
+/**
+ * 读 lockfile 的根依赖表。
+ *
+ * 为什么这里也管：镜像里那步是 `npm ci`，它**只认 lockfile 与 package.json 完全同步**
+ * （缺一个包 / 版本区间对不上就 exit 1，且不会自己去补）。曾经只加清单不重生成 lockfile，
+ * 产物校验一路绿、镜像构建在 `RUN npm ci --omit=dev` 直接失败，报错还只有一句退出码。
+ */
+function readLocked() {
+  const lockPath = resolve(RUNTIME_DIR, 'package-lock.json')
+  if (!existsSync(lockPath)) return { lockPath, lockedDeps: null }
+  const lock = JSON.parse(readFileSync(lockPath, 'utf8'))
+  return { lockPath, lockedDeps: lock.packages?.['']?.dependencies ?? {} }
 }
 
 function main() {
-  const { manifestPath, declared, declaredSet } = readDeclared()
+  const { manifestPath, manifest, declared, declaredSet } = readDeclared()
+  const { lockPath, lockedDeps } = readLocked()
   const used = new Map() // 包名 -> Set<产物文件>
   const missingPaths = []
 
@@ -304,6 +319,10 @@ function main() {
 
   const missing = [...used.keys()].filter((pkg) => !declaredSet.has(pkg)).sort()
   const unused = declared.filter((pkg) => !used.has(pkg)).sort()
+  /** 清单里有、lockfile 的根依赖表里没有（或区间不同）= `npm ci` 必失败 */
+  const drifted = lockedDeps
+    ? declared.filter((pkg) => lockedDeps[pkg] !== manifest.dependencies?.[pkg])
+    : []
 
   console.log(`容器运行时依赖校验：${ARTIFACTS.join(' + ')}`)
   console.log(`  声明清单：${manifestPath}`)
@@ -311,6 +330,22 @@ function main() {
 
   if (unused.length) {
     console.log(`  · 清单里声明但产物未直接导入（${unused.length}，仅提示）：${unused.join(', ')}`)
+  }
+
+  if (!lockedDeps) {
+    console.error(`\n✗ 找不到 ${lockPath}`)
+    console.error('  镜像里是 `npm ci`，没有 lockfile 就装不了依赖。')
+    process.exit(1)
+  }
+
+  if (drifted.length) {
+    console.error(`\n✗ 有 ${drifted.length} 个依赖与 lockfile 不同步（镜像里 \`npm ci --omit=dev\` 会直接失败）：`)
+    for (const pkg of drifted) {
+      console.error(`    ${pkg}   package.json: ${manifest.dependencies?.[pkg]}   lockfile: ${lockedDeps[pkg] ?? '(缺失)'}`)
+    }
+    console.error('\n  重生成：cd docker/container-project/runtime && npm install --package-lock-only \\')
+    console.error('    --ignore-scripts --registry=https://registry.npmmirror.com')
+    process.exit(1)
   }
 
   if (missing.length) {

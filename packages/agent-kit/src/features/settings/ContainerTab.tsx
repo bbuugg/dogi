@@ -56,6 +56,7 @@ import type {
 } from '@fizz/contracts/types'
 import { Badge } from '@fizz/ui/badge'
 import { Button } from '@fizz/ui/button'
+import { SpinnerButton } from '@fizz/ui/spinner-button'
 import {
   Collapsible,
   CollapsibleContent,
@@ -123,10 +124,13 @@ function ImageRow({
   return (
     <div className="space-y-2 rounded-lg border border-border/60 p-3">
       <div className="flex items-start gap-2">
+        {/*
+          图标只表达「这个镜像在不在」，**不跟构建状态联动**：构建中换成 spinner 会让
+          整行图标在每次轮询里闪，而「正在构建」该由右侧那颗按钮自己说（见下面的
+          `SpinnerButton`）。
+        */}
         <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md bg-muted">
-          {building ? (
-            <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
-          ) : info.exists ? (
+          {info.exists ? (
             <Check className="size-3.5 text-muted-foreground" />
           ) : (
             <Box className="size-3.5 text-muted-foreground" />
@@ -150,10 +154,15 @@ function ImageRow({
             {info.tag}
           </div>
         </div>
-        <Button
+        {/*
+          构建中由**这颗按钮自己**表达（spinner 在文字前、loading 时自动 disabled），
+          与启动页 / Git 面板同一套 `SpinnerButton` 观感；不再让左侧图标转圈。
+        */}
+        <SpinnerButton
           type="button"
           size="sm"
           variant="outline"
+          loading={building}
           disabled={!canBuild}
           onClick={onBuild}
           title={
@@ -165,7 +174,7 @@ function ImageRow({
           }
         >
           {building ? tr('构建中…') : info.exists ? tr('重新构建') : tr('构建')}
-        </Button>
+        </SpinnerButton>
       </div>
 
       <div className="text-xs leading-5 text-muted-foreground">
