@@ -478,6 +478,8 @@ export async function startContainerTurn(
 
   const assistantParts: AgentChatMessage['parts'] = []
   let turnUsage: TurnUsage | undefined
+  /** 没有 `usage` 时 finish 帧单独给的耗时（中止 / 出错的轮次）—— 见 onEvent */
+  let turnDurationMs: number | undefined
   /** 收尾事件的 `error` 字段：准备阶段抛出来的、或容器自报的 */
   let runError: string | undefined
   /** 是否已经收过场：中止与跑流可能同时触发收尾，必须幂等 */
@@ -510,6 +512,11 @@ export async function startContainerTurn(
 
   const onEvent = (event: AgentStreamEvent): void => {
     if (event.type === 'finish' && event.usage) turnUsage = event.usage
+    // 中止 / 出错的轮次常常一个 usage chunk 都没收到，耗时只有 finish 帧单独给的这一份
+    // （有 usage 时它自带 `durationMs`，别重复）。缺了它折叠条抬头只能报「思考 ×N」计数
+    if (event.type === 'finish' && !event.usage && event.durationMs != null) {
+      turnDurationMs = event.durationMs
+    }
     if (event.type === 'tool-result' && !event.isError && FILE_WRITE_TOOLS.has(event.toolName)) {
       notifyFilesChanged()
     }
@@ -699,7 +706,13 @@ export async function startContainerTurn(
         followup: followupGate.requestFollowup
       })
 
-      persistAssistantMessage(conversation.id, assistantParts, turnUsage, input.assistantMessageId)
+      persistAssistantMessage(
+        conversation.id,
+        assistantParts,
+        turnUsage,
+        input.assistantMessageId,
+        turnDurationMs
+      )
       if (result.finishReason === 'error' && result.error) {
         console.error('[server] 容器里这一轮出错：', result.error)
       }

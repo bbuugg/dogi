@@ -166,13 +166,16 @@ function MessagePartsInner({
   // 所以「非流式末条」本身就是完成信号。
   const turnDone = message.role === 'assistant' && !isStreamingLast
   /*
-   * 整轮耗时**只在整轮结束后**才报（服务端 `usage.durationMs`，含网络与工具耗时；ACP 从不带
-   * usage → undefined，抬头退回计数摘要，见 `groupHead`）。
+   * 整轮耗时**只在整轮结束后**才报，两个来源（互斥）：
+   * - `usage.durationMs`：内置后端正常跑完（服务端采集，含网络与工具耗时）；
+   * - `message.durationMs`：没有 `usage` 但知道耗时的轮次 —— ACP 全程如此（它没有 token
+   *   用量），内置后端**被中断 / 出错**时也是（那一轮常常一个 usage chunk 都没收到）。
+   * 两个都没有才退回计数摘要（`groupHead`），比如 ACP 会话被 `session/load` 重建之后。
    *
    * 流式中不再边走边报「已工作 N 秒」：那个数每秒都在变，占着抬头却什么也没说 ——
    * 用户明确要求「没结束就报最后做的那件事的名字 / 意图，结束了再报耗时」。
    */
-  const durationMs = message.usage?.durationMs
+  const durationMs = message.usage?.durationMs ?? message.durationMs
 
   const ownCompaction =
     compaction && compaction.messageId === message.id ? compaction : null
@@ -311,7 +314,8 @@ function MessagePartsInner({
    * - **整轮还没结束**：左格报「最后做的那一件事」—— 工具的 `intent`（没有就工具名）、
    *   思考在跑时是「思考中…」、落地后是「思考过程」。**不报耗时**：那个数每秒都在变，
    *   占着抬头却看不出在干什么。
-   * - **整轮结束**：左格报整轮耗时（`usage.durationMs`）；拿不到（ACP）退回计数摘要。
+   * - **整轮结束**：左格报整轮耗时（`durationMs`，见上）；连耗时都拿不到（比如 ACP 会话
+   *   被 `session/load` 重建）才退回计数摘要。
    *
    * 右格（`preview`）两个阶段都有：思考的最后一行 / 命令 / 路径 —— 折叠状态下也能看出
    * 「这一步到底做的什么」，不用点开。

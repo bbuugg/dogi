@@ -44,3 +44,30 @@ export function appendAcpTranscript(
 export function forgetAcpTranscript(conversationId: string): void {
   acpTranscripts.delete(conversationId)
 }
+
+/**
+ * 把上一份快照里记下的「本轮耗时」搬到 `session/load` 重建出来的消息上。
+ *
+ * 为什么要搬：ACP 一轮的耗时只在 finish 帧里出现过一次（`AgentChatMessage.durationMs`），
+ * 服务端把它挂进快照就丢了源 —— agent 侧协议没有这个数，回放重建出来的消息天然没有它。
+ * 不搬的话「刚跑完显示已工作 N 秒、刷新一下变回思考 ×3 · 工具调用 ×5」。
+ *
+ * 为什么只能按顺序搬，不能按 id：回放的消息 id 是现编的（`a-replay-N`），与快照里那个
+ * （客户端给的 `assistantMessageId`）没有对应关系；唯一稳定的是「一轮 = 一条助手消息」。
+ * 所以只在**两边助手消息条数一致**时逐条搬 —— 条数不一致就一定错位，宁可不搬
+ * （抬头退回计数摘要，与没有这个字段时一致），也别把 A 轮的耗时挂到 B 轮上。
+ */
+export function carryOverDurations(
+  from: AgentChatMessage[],
+  to: AgentChatMessage[]
+): void {
+  const fromAssistants = from.filter((m) => m.role === 'assistant')
+  const toAssistants = to.filter((m) => m.role === 'assistant')
+  if (!fromAssistants.length || fromAssistants.length !== toAssistants.length) return
+  for (let i = 0; i < toAssistants.length; i += 1) {
+    const durationMs = fromAssistants[i].durationMs
+    if (durationMs != null && toAssistants[i].durationMs == null) {
+      toAssistants[i].durationMs = durationMs
+    }
+  }
+}

@@ -9,7 +9,11 @@
 import { replayAcpSession, type AcpAgentConfig } from '@fizz/acp'
 import { domain } from '@/lib/server/state'
 import { findActiveByConversation } from '@/lib/server/chat-run'
-import { getAcpTranscript, setAcpTranscript } from '@/lib/server/acp-transcripts'
+import {
+  carryOverDurations,
+  getAcpTranscript,
+  setAcpTranscript
+} from '@/lib/server/acp-transcripts'
 import { refreshAcpSessionState } from '@/lib/server/acp-session-state'
 import { describeError, jsonError } from '@/app/api/_lib/auth'
 
@@ -66,6 +70,9 @@ export async function GET(
      */
     const after = getAcpTranscript(conversationId) ?? []
     const appended = before ? after.slice(before.length) : after
+    // 回放重建出来的消息没有「本轮耗时」（agent 协议不给）：把快照里记的那份按顺序搬回来，
+    // 否则刷新一下折叠条抬头就从「已工作 1 分 12 秒」退回计数摘要
+    if (before) carryOverDurations(before, messages)
     setAcpTranscript(conversationId, [...messages, ...appended])
     // load 会把 agent 广告的档位带回来（可能被重置成默认）：刷新进会话配置，保留用户选的档
     refreshAcpSessionState(conversationId, agent.id)

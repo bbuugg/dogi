@@ -53,6 +53,7 @@ import { startBackgroundTask } from './background-tasks'
 import { refreshAcpSessionState } from './acp-session-state'
 import { appendAcpTranscript } from './acp-transcripts'
 import { describeError } from './lib/http'
+import { buildAssistantMessage } from './assistant-message'
 
 /** confirm 模式审批的缺省超时与等待体工厂迁到了 `./confirm-gate`(聊天 / 助手共用) */
 
@@ -117,21 +118,28 @@ export function persistAssistantMessage(
    * 拿服务端权威历史覆盖本地现场，id 不变才不会把刚跑完这一轮的子树整棵重挂载。
    * 缺省（老客户端 / 插话兜底起的新一轮）才自生成。
    */
-  id?: string
+  id?: string,
+  /**
+   * 这一轮的耗时 —— **只在没有 `usage` 时才需要**（`usage` 自带 `durationMs`，两个都写
+   * 会打架）。
+   *
+   * 内置后端被中止的那一轮常常一个 usage chunk 都没收到（用户点停止时模型可能正卡在
+   * 思考或工具执行里），这时耗时只能由 finish 帧单独给（见 `agent.ts` 的 `finishTiming`）。
+   * 折叠条抬头读 `usage?.durationMs ?? message.durationMs`（`message-parts.tsx`），
+   * 少了它整轮就退回「思考 ×5 · 工具调用 ×5」的计数摘要 —— 用户看到的是「这一轮
+   * 好像没结束」。
+   */
+  durationMs?: number
 ): void {
   try {
-    domain.appendMessages(conversationId, [
-      {
-        id: id ?? `a-${Date.now()}`,
-        role: 'assistant',
-        parts,
-        createdAt: Date.now(),
-        ...(usage ? { usage } : {})
-      }
-    ],
-    undefined,
-    usage
-  )
+    domain.appendMessages(
+      conversationId,
+      [buildAssistantMessage({ parts, usage, id, durationMs })],
+      // 标题：助手回复不改标题（由这一轮的用户消息决定）
+      undefined,
+      // 会话级用量统计：没有 `usage`（中止的轮次）就不累计
+      usage
+    )
   } catch (err) {
     console.error('[server] 助手回复落盘失败：', err)
   }
@@ -494,6 +502,17 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
   const assistantParts: AgentChatMessage['parts'] = []
   let turnUsage: TurnUsage | undefined
   /**
+   * 这一轮的耗时（finish 帧的 `durationMs`）。收尾时挂到助手消息上，折叠条抬头才报得出
+   * 「已工作 N 秒」（见 `AgentChatMessage.durationMs`）。
+   *
+   * 两个来源：
+   * - **ACP**：它没有 token 用量，每轮都只能给这个数；
+   * - **内置**：只在**没有 `usage`** 时给 —— 中止 / 出错的那一轮常常一个 usage chunk 都
+   *   没收到（用户点停止时模型可能正卡在思考或工具执行里），正常完成则有
+   *   `usage.durationMs`，不该重复。
+   */
+  let turnDurationMs: number | undefined
+  /**
    * 运行中插话的注入记录：`index` = user-injected 事件到达时 assistantParts 的长度
    * （= 该条插话之前已产出的部分），`message` = 那条 user 消息（含 id）。
    * 收尾时按这些边界把 assistantParts 切成多段，与插话交错落盘（真实时序）。
@@ -513,7 +532,12 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
       // 但边界必须取「这条插话之前」的 parts 长度。
       steerBoundaries.push({ index: assistantParts.length, message: event.message })
     }
-    if (event.type === 'finish' && event.usage) turnUsage = event.usage
+    if (event.type === 'finish') {
+      // 两个来源互斥：有 `usage` 时耗时在它里面（内置后端正常跑完），没有时才是单独的
+      // `durationMs`（ACP 全程如此；内置被中止 / 出错时也常常一个 usage chunk 都没收到）
+      if (event.usage) turnUsage = event.usage
+      if (event.durationMs != null) turnDurationMs = event.durationMs
+    }
     // 内容折叠(聊天 / 助手共用,见 `agent-parts.ts`):tool-call-delta 不落盘、retry 清空
     // 已累积的部分输出,其余按形状归位;帧本身照旧下发(前端要的就是它)。
     foldEventIntoParts(assistantParts, event)
@@ -913,7 +937,9 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
           role: 'assistant',
           parts,
           createdAt: Date.now(),
-          ...(turnUsage ? { usage: turnUsage } : {})
+          ...(turnUsage ? { usage: turnUsage } : {}),
+          // ACP 没有 token 用量，耗时单独挂（前端折叠条抬头报「已工作 N 秒」靠它）
+          ...(turnDurationMs != null ? { durationMs: turnDurationMs } : {})
         }
       ])
       return
@@ -921,7 +947,7 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
     /** 客户端给的这一轮助手消息 id（缺省自生成 —— 见 persistAssistantMessage） */
     const baseId = input.assistantMessageId
     if (steerBoundaries.length === 0) {
-      persistAssistantMessage(conversation.id, parts, turnUsage, baseId)
+      persistAssistantMessage(conversation.id, parts, turnUsage, baseId, turnDurationMs)
       return
     }
     /**
@@ -966,7 +992,9 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
         id: segmentId(segIndex) ?? `a-${Date.now()}-${messages.length}`,
         role: 'assistant',
         parts: tail,
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        // 整轮耗时与 `usage` 同口径：挂在尾段（有 usage 时它自带耗时，这里不重复）
+        ...(turnUsage || turnDurationMs == null ? {} : { durationMs: turnDurationMs })
       })
     }
     try {

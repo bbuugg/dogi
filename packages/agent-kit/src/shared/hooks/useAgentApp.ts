@@ -170,8 +170,25 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
     saveCollabSettings: s.saveCollabSettings,
     /** 取消协作会话里某个正在跑的子任务 */
     cancelCollabTask: s.cancelCollabTask,
-    /** 会话切换后历史还没拉回来的装载中标记（消息区此时显示装载中而不是旧列表） */
-    messagesLoading: activeSlice?.loading ?? false,
+    /**
+     * 会话切换后历史还没拉回来的装载中标记（消息区此时显示装载中而不是旧列表）。
+     *
+     * 还有一种「本屏绑了会话、但本地现场还没建」的窗口，也必须是 true：**刷新页面后**
+     * 主区域的对话标签会先拿自己那条会话 id 渲染（`useAgentAppView(id)`），而 `slices`
+     * 里还没有它 —— 真正的装载（`openConversation`）要等会话清单落地，由 `PanelView`
+     * 把「当前会话」对齐到焦点标签时才触发。这段窗口若报 false，消息区就按「一条消息
+     * 都没有」渲染空态（「在「工作区」里说点什么」），清单 + 历史一回来又被消息顶掉：
+     * 就是那个「刷新闪一下空态」。ACP 会话尤其明显，它比内置会话多一次 `session/load`
+     * 回放往返。
+     *
+     * 判据里带上 `conversations.some(...)`：指向**已删除**的会话（标签还挂着个野 id）
+     * 时保持 false —— 那种视图永远不会装载，别让它卡在骨架上。
+     */
+    messagesLoading:
+      activeSlice?.loading ??
+      (!!conversationId &&
+        (!s.conversationsLoaded ||
+          s.conversations.some((c) => c.id === conversationId))),
     /**
      * 正在删消息（「仅本条」/「本条及其后」/ 编辑重发里的那一步）：消息区挂「正在删除…」
      * 并暂时不收点击 —— 删除完成后要整体回拉历史，中途再点只会让两边互相盖。

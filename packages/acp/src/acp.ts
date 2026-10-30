@@ -1802,6 +1802,15 @@ export async function runAcpAgent(
   }
 
   const run = async (): Promise<RunAgentResult> => {
+    /**
+     * 本轮耗时的起点 —— 记在 `run` 内部而不是函数入口：上面那段 `current.chain` 排队
+     * 是在等**上一轮**结束，用户点完发送后排队等着不算「在工作」。
+     *
+     * 只有 finish 帧会带它（`durationMs`）：ACP 没有 token 用量，做不出 `TurnUsage`，
+     * 前端靠这个数在折叠条抬头报「已工作 N 秒」（见 `AgentChatMessage.durationMs`）。
+     */
+    const turnStartedAt = Date.now();
+    const elapsedMs = (): number => Math.max(0, Date.now() - turnStartedAt);
     current.turn = {
       requestId: opts.requestId,
       ...(opts.confirmTimeoutMs !== undefined
@@ -1913,6 +1922,7 @@ export async function runAcpAgent(
           emit({
             type: "finish",
             finishReason: cancelled ? "aborted" : "done",
+            durationMs: elapsedMs(),
           });
           return { finishReason: cancelled ? "aborted" : "done" };
         }
@@ -1925,16 +1935,16 @@ export async function runAcpAgent(
         );
         for (const event of events) emit(event);
       }
-      emit({ type: "finish", finishReason: "aborted" });
+      emit({ type: "finish", finishReason: "aborted", durationMs: elapsedMs() });
       return { finishReason: "aborted" };
     } catch (err) {
       const message = describeError(err);
       if (opts.signal?.aborted) {
-        emit({ type: "finish", finishReason: "aborted" });
+        emit({ type: "finish", finishReason: "aborted", durationMs: elapsedMs() });
         return { finishReason: "aborted" };
       }
       emit({ type: "error", message });
-      emit({ type: "finish", finishReason: "error" });
+      emit({ type: "finish", finishReason: "error", durationMs: elapsedMs() });
       return { finishReason: "error", error: message };
     } finally {
       opts.signal?.removeEventListener("abort", onAbort);

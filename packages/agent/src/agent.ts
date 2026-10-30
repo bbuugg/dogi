@@ -783,6 +783,20 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
   }
 
   /**
+   * finish 帧上的「这一轮工作了多久」。
+   *
+   * 有 `usage` 时它自带 `durationMs`（**别再重复给**，两个数会打架），没有时单独给一个
+   * 裸耗时 —— **被中止 / 出错的那一轮常常一个 usage chunk 都没收到**（用户点停止时模型
+   * 可能正卡在思考或工具执行里），可「已经工作了 3 分 12 秒」仍然是用户想看的信息：
+   * 缺了这个数，折叠条抬头只能退回「思考 ×5 · 工具调用 ×5」的计数摘要
+   * （见 `packages/agent-kit/.../message-parts.tsx` 的 `durationMs`）。
+   */
+  const finishTiming = (
+    usage?: TurnUsage
+  ): { usage?: TurnUsage; durationMs?: number } =>
+    usage ? { usage } : { durationMs: Math.max(0, Date.now() - startedAt) }
+
+  /**
    * 静态部分（系统提示词 + 工具集）整轮只建一次：它们同时是**上下文估算**的输入
    * （见 `estimateBaseTokens`），重建不会变，但每次尝试重算会白跑一遍 schema 序列化。
    */
@@ -1272,7 +1286,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
           ? buildTurnUsage(rawUsage, startedAt, firstOutputAt, contextTokens, stats.subagents)
           : undefined
         emitEvent({ type: 'error', message: watchdogFired })
-        emitEvent({ type: 'finish', finishReason: 'error', ...(usage ? { usage } : {}) })
+        emitEvent({ type: 'finish', finishReason: 'error', ...finishTiming(usage) })
         return finish('error', usage, watchdogFired)
       }
       // 手动 break 出来的收尾：与 catch 里的中止分支同一语义，不算错误。
@@ -1281,13 +1295,13 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         const usage = rawUsage
           ? buildTurnUsage(rawUsage, startedAt, firstOutputAt, contextTokens, stats.subagents)
           : undefined
-        emitEvent({ type: 'finish', finishReason: 'aborted', ...(usage ? { usage } : {}) })
+        emitEvent({ type: 'finish', finishReason: 'aborted', ...finishTiming(usage) })
         return finish('aborted', usage)
       }
       const usage = rawUsage
         ? buildTurnUsage(rawUsage, startedAt, firstOutputAt, contextTokens, stats.subagents)
         : undefined
-      emitEvent({ type: 'finish', finishReason: 'done', ...(usage ? { usage } : {}) })
+      emitEvent({ type: 'finish', finishReason: 'done', ...finishTiming(usage) })
       return finish('done', usage)
     } catch (err) {
       const message = describeError(err)
@@ -1297,13 +1311,13 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         : undefined
       if (watchdogFired) {
         emitEvent({ type: 'error', message: watchdogFired })
-        emitEvent({ type: 'finish', finishReason: 'error', ...(usage ? { usage } : {}) })
+        emitEvent({ type: 'finish', finishReason: 'error', ...finishTiming(usage) })
         return finish('error', usage, watchdogFired)
       }
       // 用户主动中止：不算错误（桌面端同样是 aborted 语义）
       const aborted = runSignal.aborted || /abort/i.test(message)
       if (aborted) {
-        emitEvent({ type: 'finish', finishReason: 'aborted', ...(usage ? { usage } : {}) })
+        emitEvent({ type: 'finish', finishReason: 'aborted', ...finishTiming(usage) })
         return finish('aborted', usage)
       }
       /**
@@ -1332,13 +1346,13 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         const waited = await sleepWithSignal(retryDelayMs(retries), runSignal)
         // 退避期间用户点了停止：按中止收场，不再重试
         if (!waited) {
-          emitEvent({ type: 'finish', finishReason: 'aborted' })
+          emitEvent({ type: 'finish', finishReason: 'aborted', ...finishTiming(usage) })
           return finish('aborted')
         }
         continue
       }
       emitEvent({ type: 'error', message })
-      emitEvent({ type: 'finish', finishReason: 'error', ...(usage ? { usage } : {}) })
+      emitEvent({ type: 'finish', finishReason: 'error', ...finishTiming(usage) })
       return finish('error', usage, message)
     }
   }

@@ -1063,6 +1063,25 @@ export interface AgentChatMessage {
   /** 这一轮的用量统计（只有助手消息、且一轮跑完后才有） */
   usage?: TurnUsage
   /**
+   * 这一轮的耗时（毫秒）—— **只在没有 `usage` 时单独给**。
+   *
+   * 两种来路：
+   * - **ACP**：它的 finish 帧从不带 token 用量（agent 协议里没有这层），每轮都只能给这个数；
+   * - **内置后端被中断 / 出错**：中止的那一轮常常一个 usage chunk 都没收到（用户点停止时
+   *   模型可能正卡在思考或工具执行里），`usage` 做不出来，但「已经工作了多久」仍然要看。
+   *
+   * 「这一轮用了多久」是 UI 真需要的一个数 —— 折叠条抬头拿它显示「已工作 1 分 12 秒」，
+   * 缺了就只剩「思考 ×3 · 工具调用 ×5」的计数摘要（看着像这一轮没结束）。
+   *
+   * 因此耗时单独一个字段，`usage` 保持「有 token 才算有」（用量统计 / 消息底部那行
+   * 不会被 0 token 污染）。渲染端读 `usage.durationMs ?? durationMs`。
+   *
+   * ⚠️ 落盘口径：内置后端会随助手消息落盘（`chat-turn.ts` 的 `persistAssistantMessage`），
+   * 刷新后仍在；ACP 的消息本来就不落本地（真源在 agent 侧），这个字段只活在服务端的
+   * 进程内快照里 —— 重启后靠 `session/load` 重建的视图没有它，抬头退回计数摘要。
+   */
+  durationMs?: number
+  /**
    * 上下文占用快照（见流事件的 `context-usage`）。
    *
    * 与 `usage` 分开：`usage` 是一轮跑完才有的完整统计；这个字段是「当前上下文用了
@@ -2006,7 +2025,18 @@ export type AgentStreamEvent =
       type: 'user-injected'
       message: AgentChatMessage
     }
-  | { type: 'finish'; finishReason: string; usage?: TurnUsage }
+  /**
+   * 一轮结束。
+   *
+   * `usage` 只有内置后端给（它从上游 finish 帧拿到 token 数）；**ACP 从不带** —— 那种轮次
+   * 只给 `durationMs`（见 `AgentChatMessage.durationMs`），前端据此仍能报「已工作 N 秒」。
+   * 两个字段互不替代：有 `usage` 时它自带 `durationMs`，别再重复给 `durationMs`。
+   *
+   * 内置后端**没有 `usage` 时也带 `durationMs`**：中止 / 出错的那一轮往往一个 usage chunk
+   * 都没收到（`agent.ts` 的 `finishTiming`），耗时仍然要给 —— 否则折叠条抬头只能退回
+   * 「思考 ×N · 工具调用 ×N」的计数摘要。
+   */
+  | { type: 'finish'; finishReason: string; usage?: TurnUsage; durationMs?: number }
   | { type: 'error'; message: string }
   | {
       /**

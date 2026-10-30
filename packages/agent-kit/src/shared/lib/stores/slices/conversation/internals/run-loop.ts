@@ -601,8 +601,17 @@ export function createConversationRunLoop(ctx: ConvCore) {
                 parts: applyEvent(message.parts, event),
                 // finish 带来的一轮用量统计：立刻展示（跑完还会拉一次服务端权威历史，把它落定）。
                 // 服务端把 usage 挂在切片后的最后一段上，两边一致
-                ...(event.type === "finish" && event.usage
-                  ? { usage: event.usage }
+                //
+                // `durationMs` 是没有 token 用量、只有耗时的那些轮次（ACP 全程如此；内置后端
+                // 被中止 / 出错时也常常一个 usage chunk 都没收到）：同样当场挂上，否则这轮刚
+                // 结束、权威历史还没换下来的这一瞬，折叠条抬头会先退回计数摘要
+                ...(event.type === "finish"
+                  ? {
+                      ...(event.usage ? { usage: event.usage } : {}),
+                      ...(event.durationMs != null
+                        ? { durationMs: event.durationMs }
+                        : {}),
+                    }
                   : {}),
               }
             : message,
@@ -633,6 +642,23 @@ export function createConversationRunLoop(ctx: ConvCore) {
     if (!get().conversationsLoaded) {
       writeSlice(conversationId, (s) => ({ ...s, loading: true }));
       await waitConversationsLoaded();
+    }
+    /**
+     * acp 会话下面还要走两个往返：`peekActiveRun`（这一轮是不是还在跑）+ 回放 / attach。
+     * 而 `loadMessages` 收尾已经把装载标记撤掉了 —— **清单已经到齐的路径根本没进上面那个
+     * 分支**，于是这段窗口 `loading` 是 false、`messages` 还空着，消息区就按「一条消息都
+     * 没有」渲染空态（「在「x」里说点什么」），回放一到又被消息顶掉。
+     *
+     * 刷新页面必中：现在的恢复入口是 `PanelView` 等清单落地后把当前会话对齐到焦点标签，
+     * 所以进 `loadConversation` 时 `conversationsLoaded` 恒为 true。ACP 比内置多这两个
+     * 往返，肉眼就是「刷新闪一下空态」。
+     *
+     * 这里补亮，撤掉的地方不变（各分支的 finally 与收尾统一撤）。
+     */
+    if (
+      get().conversations.find((c) => c.id === conversationId)?.backend === "acp"
+    ) {
+      writeSlice(conversationId, (s) => ({ ...s, loading: true }));
     }
     // 协作会话：任务 / 消息状态在独立的 collab.json，随打开一起拉（失败不挡主历史）
     if (
@@ -669,9 +695,9 @@ export function createConversationRunLoop(ctx: ConvCore) {
        * 失败（用户看到的就是这条报错）。正确恢复方式是「进程内视图快照 + attach 帧日志」：
        * 快照给出已完成的轮次与本轮用户消息，attach 从帧日志头部回放当前助手消息并接回直播。
        */
+      // 装载标记已在上面按 backend 亮起（含 `peekActiveRun` 这次往返），这里不再重复写
       const activeRun = await peekActiveRun(conversationId);
       if (activeRun) {
-        writeSlice(conversationId, (s) => ({ ...s, loading: true }));
         try {
           const api = get().getApi();
           // 有 active run 时服务端只读内存快照，不会碰 agent 进程；sessionId / cwd
