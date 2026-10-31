@@ -17,7 +17,7 @@
     "dev:web": "npm run copy:monaco && vite -c apps/web/vite.config.ts",
     "dev:mobile": "npm run copy:monaco && npm run dev --workspace @fizz/mobile",
     "dev:desktop": "npm run copy:monaco && node scripts/dev.mjs --app apps/desktop",
-    "dev:server": "node apps/server/dist/index.js",
+    "dev:server": "node scripts/dev-server.mjs",
     "dev:stack": "npm run build:server && npm run build:web && node apps/server/dist/index.js",
     "server": "npm run build:server && node apps/server/dist/index.js",
     "build:server": "vite build -c apps/server/vite.config.ts",
