@@ -233,7 +233,9 @@ export function TurnStepGroup({
       }}
       className="w-full"
     >
-      {/* 整行三段：内容触发器 → 停止钮 → 箭头触发器。`w-fit` 让三段贴着文字排，
+      {/* 整行三段：内容触发器 → 停止钮 → 箭头触发器（后两者包进同一个 `h-5` 盒子，
+          理由见下面那段注释：不锁高度的话停止钮出现 / 消失会让整行跳 4px）。
+          `w-fit` 让三段贴着文字排，
           不会被推到容器最右端（组抬头是一行摘要，不像工具卡那样需要贴右的按钮）。
           `group/row` 挂在整行上：箭头「悬停这一行才浮现」要按这一行算 —— 规则与坑见
           `REVEAL_ON_HOVER_ARROW`（消息气泡自带裸 group，用裸 `group-hover:` 会让整轮
@@ -246,41 +248,54 @@ export function TurnStepGroup({
               而且抬头这时读的是「正在工作…」这类进行时描述，右边不该挤一个动作按钮。
             它是真正的 <button>，塞不进内容触发器 —— `<button>` 套 `<button>` 是非法 HTML，
             点停止还会被触发器当成开合热区吞掉一次，所以整行拆成两个平级触发器，按钮夹在中间。 */}
-        {onStop && !open ? (
-          <Tooltip delayDuration={100}>
-            <TooltipTrigger asChild>
-              <Button
-                size="icon-xs"
-                variant="ghost"
-                aria-label={tr('停止')}
-                className="shrink-0"
-                onClick={onStop}
-              >
-                <Square className="size-3 text-destructive" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{tr('停止')}</TooltipContent>
-          </Tooltip>
-        ) : null}
-        {/* 箭头单独成一个 Trigger：收起时贴在停止钮右侧，展开时直接跟到预览后面
-            （停止钮那时不渲染），仍然是开合热区（Radix 一个 Collapsible 可以挂多个
-            Trigger，点哪个都开合）。它自己带 `data-state`，所以旋转照旧用裸
-            `group-data-[state=open]`（自身就是那个 `.group`）。
-            纯图标按钮没有文字，靠 aria-label 报「展开 / 收起」。 */}
-        <CollapsibleTrigger
-          aria-label={open ? tr('收起') : tr('展开')}
-          className="group flex shrink-0 items-center rounded-md text-muted-foreground transition-colors hover:text-foreground"
-        >
-          <ChevronRight
-            className={cn(
-              REVEAL_ON_HOVER_ARROW,
-              // 键盘 Tab 到这颗箭头 Trigger 上时箭头必须现身：`REVEAL_ON_HOVER_ARROW` 里的
-              // `group-focus-visible/row` 要求整行 `group/row` 自身被聚焦，而它是 div、
-              // 不可聚焦 —— 这里用 Trigger 自己的 `group` 补一条。
-              'size-4 shrink-0 group-focus-visible:opacity-100 group-data-[state=open]:rotate-90'
-            )}
-          />
-        </CollapsibleTrigger>
+        {/*
+          右侧那组（停止钮 / 箭头）**固定 `h-5`**，与抬头文字（`text-sm` 的 20px 行高）等高。
+
+          ⚠️ 不包这一层的话，`icon-xs` 的停止钮是 `size-6`（24px），它一出现在这行里，
+          整行就被撑到 24px；工具结算 → `onStop` 变 `undefined` → 按钮消失 → 行又缩回 20px。
+          用户看到的就是「这条抬头莫名矮了一点、下一行跟着往上蹿」。`ToolHeader` 的
+          `head` 早就是这么锁的（`flex h-5 shrink-0 items-center`），两处必须一致。
+
+          按钮 24px 在 20px 的盒子里上下各溢出 2px —— 那只是绘制溢出（默认 `overflow` 可见），
+          **不参与布局**，所以行高恒定；不要改成给按钮 `size-5`，点击区会缩到 20px。
+        */}
+        <div className="flex h-5 shrink-0 items-center gap-2">
+          {onStop && !open ? (
+            <Tooltip delayDuration={100}>
+              <TooltipTrigger asChild>
+                <Button
+                  size="icon-xs"
+                  variant="ghost"
+                  aria-label={tr('停止')}
+                  className="shrink-0"
+                  onClick={onStop}
+                >
+                  <Square className="size-3 text-destructive" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{tr('停止')}</TooltipContent>
+            </Tooltip>
+          ) : null}
+          {/* 箭头单独成一个 Trigger：收起时贴在停止钮右侧，展开时直接跟到预览后面
+              （停止钮那时不渲染），仍然是开合热区（Radix 一个 Collapsible 可以挂多个
+              Trigger，点哪个都开合）。它自己带 `data-state`，所以旋转照旧用裸
+              `group-data-[state=open]`（自身就是那个 `.group`）。
+              纯图标按钮没有文字，靠 aria-label 报「展开 / 收起」。 */}
+          <CollapsibleTrigger
+            aria-label={open ? tr('收起') : tr('展开')}
+            className="group flex shrink-0 items-center rounded-md text-muted-foreground transition-colors hover:text-foreground"
+          >
+            <ChevronRight
+              className={cn(
+                REVEAL_ON_HOVER_ARROW,
+                // 键盘 Tab 到这颗箭头 Trigger 上时箭头必须现身：`REVEAL_ON_HOVER_ARROW` 里的
+                // `group-focus-visible/row` 要求整行 `group/row` 自身被聚焦，而它是 div、
+                // 不可聚焦 —— 这里用 Trigger 自己的 `group` 补一条。
+                'size-4 shrink-0 group-focus-visible:opacity-100 group-data-[state=open]:rotate-90'
+              )}
+            />
+          </CollapsibleTrigger>
+        </div>
       </div>
       <CollapsibleContent className="pt-2">
         <div className="flex flex-col gap-2">{children}</div>

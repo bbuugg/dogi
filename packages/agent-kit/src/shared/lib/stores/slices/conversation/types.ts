@@ -519,15 +519,19 @@ export interface ConversationSlice {
     id: string,
   ) => Promise<{ ok: boolean; nextId: string | null }>;
   clearConversation: (id: string) => Promise<void>;
-  /** 只删某一条消息（后面的消息保留） */
-  deleteMessage: (messageId: string) => Promise<void>;
-  deleteMessagesFrom: (messageId: string) => Promise<void>;
+  /** 只删某一条消息（后面的消息保留）。`scope` 语义同 `setChatTarget` */
+  deleteMessage: (messageId: string, scope?: string | null) => Promise<void>;
+  deleteMessagesFrom: (
+    messageId: string,
+    scope?: string | null,
+  ) => Promise<void>;
   /** 编辑并重发：先删掉该条及其后的消息，再当新消息发出去（返回值同 `send`） */
   resendMessage: (
     messageId: string,
     text: string,
     files?: UploadFileRef[],
     onStarted?: () => void,
+    scope?: string | null,
   ) => Promise<boolean>;
 
   // ---------- 发一轮 ----------
@@ -540,23 +544,33 @@ export interface ConversationSlice {
     files?: UploadFileRef[],
     scope?: string | null,
   ) => void;
-  removeQueuedMessage: (id: string) => void;
-  updateQueuedMessage: (id: string, text: string) => void;
+  removeQueuedMessage: (id: string, scope?: string | null) => void;
+  updateQueuedMessage: (
+    id: string,
+    text: string,
+    scope?: string | null,
+  ) => void;
   /** 拖拽排序：把 `id` 这一条挪到 `beforeId` 前面（`beforeId` 为空 = 挪到最后） */
-  moveQueuedMessage: (id: string, beforeId: string | null) => void;
+  moveQueuedMessage: (
+    id: string,
+    beforeId: string | null,
+    scope?: string | null,
+  ) => void;
   /** ↑↓ 按钮微调：`id` 这一条在队列里相对挪 `delta` 位（-1 = 更早发出） */
-  moveQueuedMessageBy: (id: string, delta: number) => void;
-  sendQueuedMessage: (id: string) => void;
+  moveQueuedMessageBy: (id: string, delta: number, scope?: string | null) => void;
+  sendQueuedMessage: (id: string, scope?: string | null) => void;
   /** 清空待发送队列（含解除失败暂停标记） */
-  clearQueuedMessages: () => void;
+  clearQueuedMessages: (scope?: string | null) => void;
   /**
-   * 会话分叉：fork 当前会话到某条消息（含），刷新列表并切到新会话。
+   * 会话分叉：fork **`scope` 那条会话**（不传 = 活跃会话）到某条消息（含），刷新列表并
+   * 切到新会话。分屏时从非焦点标签点「从此签出」必须带上它，否则分叉的是焦点会话。
    * `opts.worktreeIdentifier` 给了就先在会话所属项目下建 worktree（标识即目录名
    * `<项目>/.worktree/<标识>`，也是新分支名的一部分），再把分叉挂到新工作区上。
    */
   forkConversation: (
     upToMessageId: string,
     opts?: { worktreeIdentifier?: string; worktreeName?: string },
+    scope?: string | null,
   ) => Promise<void>;
   /**
    * 把一条 ACP 会话的内容转成**内置 agent 会话**：现拉 agent 侧转录 → 洗成内置格式 →
@@ -574,7 +588,11 @@ export interface ConversationSlice {
     upToMessageId?: string,
     opts?: { worktreeIdentifier?: string; worktreeName?: string },
   ) => Promise<boolean>;
-  pump: () => void;
+  /**
+   * 队列泵：把**`scope` 那条会话**（不传 = 活跃会话）队列里的下一条顶上来开跑。
+   * 分屏时非焦点标签上的「继续发送」必须带上它。
+   */
+  pump: (scope?: string | null) => void;
   /**
    * 真正发起一轮（`true` = 确实开跑了；`false` = 没连上 / 没选模型 / 建会话失败被拦下）。
    * `onStarted` 见 `send` 的说明 —— 由它一路透传进来。
@@ -583,6 +601,8 @@ export interface ConversationSlice {
     text: string,
     files?: UploadFileRef[],
     onStarted?: () => void,
+    /** 发到哪条会话（`null` = 新对话页 → 建新会话）。语义同 `send` 的 `scope` */
+    scope?: string | null,
   ) => Promise<boolean>;
   /**
    * 带附件时允许空正文（files 非空即可发）；流式中 → 入队，本轮结束由泵自动发出。
@@ -621,22 +641,30 @@ export interface ConversationSlice {
     scope?: string | null,
   ) => Promise<boolean>;
   /** 撤回一条还没生效的插话（removed=false = 已消费；本地照移，等 user-injected 对账） */
-  removeSteer: (messageId: string) => Promise<void>;
+  removeSteer: (messageId: string, scope?: string | null) => Promise<void>;
   /**
    * 重排插话（拖拽：把 `messageId` 挪到 `beforeId` 前面；`beforeId` 为空 = 挪到最后）。
    * 与队列的 `moveQueuedMessage` 同一套语义：本地立即生效（拖拽要跟手），
    * 服务端是**尽力而为**的补写。
    */
-  moveSteer: (messageId: string, beforeId: string | null) => void;
+  moveSteer: (
+    messageId: string,
+    beforeId: string | null,
+    scope?: string | null,
+  ) => void;
   /** ↑↓ 按钮微调：`messageId` 这条相对挪 `delta` 位（-1 = 更早生效） */
-  moveSteerBy: (messageId: string, delta: number) => void;
+  moveSteerBy: (
+    messageId: string,
+    delta: number,
+    scope?: string | null,
+  ) => void;
   /**
    * 立刻把一条还没发出去的插话发出去（行的 ➤）：与队列的 `sendQueuedMessage` 同款。
    *
    * 用户停止一轮（abort）后插话已经被服务端丢弃、这一轮也不在了，所以这里是
    * **以新一轮的普通消息发出去**（文本 + 附件一起）。会话进行中忽略（跑着时那颗钮禁用）。
    */
-  sendSteer: (messageId: string) => void;
+  sendSteer: (messageId: string, scope?: string | null) => void;
   /** 停当前会话这一轮（`scope` 语义同 `setChatTarget`；分屏时传本标签的会话） */
   stop: (scope?: string | null) => Promise<void>;
   /**

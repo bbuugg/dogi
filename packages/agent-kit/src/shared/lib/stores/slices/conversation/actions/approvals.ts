@@ -16,9 +16,12 @@ export function createApprovalsActions(
 
   return {
     // ---------- 审批 / 提问 ----------
-    resolveConfirm: async (id, approved, optionId) => {
-      // 乐观撤掉本会话的卡片（审批卡只在活跃会话渲染，撤的就是当前 slice 那张）
-      const conversationId = get().activeConversationId;
+    resolveConfirm: async (id, approved, optionId, scope) => {
+      /**
+       * 乐观撤掉**本会话**的卡片。分屏时审批卡可能出现在非焦点标签上（每个标签都渲染
+       * 自己那条会话的 `pendingConfirms`），按活跃会话撤会撤空、卡片留在屏幕上不消失。
+       */
+      const conversationId = scope === undefined ? get().activeConversationId : scope;
       if (conversationId) {
         writeSlice(conversationId, (s) => ({
           ...s,
@@ -38,13 +41,13 @@ export function createApprovalsActions(
         get().setError(errorMessage(err));
       }
     },
-    resolveFollowup: async (toolCallId, answer) => {
-      const conversationId = get().activeConversationId;
+    resolveFollowup: async (toolCallId, answer, scope) => {
+      // 与审批同一立场：按本标签的会话取题、撤卡（分屏时非焦点标签也会渲染提问卡）
+      const conversationId = scope === undefined ? get().activeConversationId : scope;
       const req = conversationId
         ? readSlice(conversationId).followupRequests[toolCallId]
         : undefined;
       if (req && conversationId) {
-        // 乐观撤掉活跃会话的这张提问卡（提问卡只在活跃会话渲染）
         writeSlice(conversationId, (s) => {
           if (!(toolCallId in s.followupRequests)) return s;
           const next = { ...s.followupRequests };

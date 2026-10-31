@@ -975,8 +975,10 @@ export function createConversationRunLoop(ctx: ConvCore) {
    * `runRound` 与 `attachRun`（含断线重接循环）共用同一套收场语义。
    */
 
-  const pump = (): void => {
-    const conversationId = get().activeConversationId;
+  const pump = (scope?: string | null): void => {
+    // `scope` 不传 = 活跃会话（内部调用都只在自己那条是活跃时才泵，见 settleRound）；
+    // 分屏时非焦点标签的「继续发送」带上自己的 id，才不会去泵焦点会话的队列
+    const conversationId = scope === undefined ? get().activeConversationId : scope;
     if (!conversationId) return;
     if (get().runningConversations[conversationId]) return;
     const queue = readSlice(conversationId).queuedMessages;
@@ -985,7 +987,7 @@ export function createConversationRunLoop(ctx: ConvCore) {
     // 有下一条要发：失败暂停的标记就地解除（继续执行 = 用户拍板过了）
     writeSlice(conversationId, (s) => ({ ...s, queuePausedReason: null }));
     patchQueue(conversationId, queue.slice(1));
-    void get().runRound(next.text, next.files);
+    void get().runRound(next.text, next.files, undefined, conversationId);
   };
 
   /**
@@ -1050,6 +1052,12 @@ export function createConversationRunLoop(ctx: ConvCore) {
     text: string,
     files?: UploadFileRef[],
     onStarted?: () => void,
+    /**
+     * 发到哪条会话。不传 = 旧行为（活跃会话）；`null` = 明确「新对话页」→ 建新会话
+     * （**不要回落到焦点会话**：分屏时草稿标签旁边可能有另一个会话标签）。
+     * 视图层按标签传入（见 `agentAppFrom`），否则非焦点标签发的消息会插到焦点会话里。
+     */
+    scope?: string | null,
   ): Promise<boolean> => {
     const api = get().getApi();
     if (!api) return false;
@@ -1057,17 +1065,26 @@ export function createConversationRunLoop(ctx: ConvCore) {
     if (!trimmed && !(files && files.length > 0)) return false;
 
     /**
-     * 发之前先确认目标还成立（见 `guardTarget`）。校验必须放在建会话之前，否则会留下
-     * 一条绑着死目标的空会话。
+     * 这一轮的现场（模型 / 思考强度）取**本会话**那份：焦点会话就是 store 里全局那份，
+     * 非焦点会话按它自己的清单项派生（见 `scopedSettingsOf`）。必须在建会话之前算 ——
+     * 草稿页要靠它拿到 `chatTarget` 去建会话。
      */
-    if (!guardTarget()) return false;
+    const scoped = get().scopedSettingsOf(
+      scope === undefined ? get().activeConversationId : scope,
+    );
 
-    let conversationId = get().activeConversationId;
+    /**
+     * 发之前先确认目标还成立（见 `guardTarget`）。校验必须放在建会话之前，否则会留下
+     * 一条绑着死目标的空会话。校验的是**这条会话**的目标，不是焦点会话的。
+     */
+    if (!guardTarget(scoped.chatTarget)) return false;
+
+    let conversationId = scope === undefined ? get().activeConversationId : scope;
     if (!conversationId) {
       // 「开始新对话」页发送即建会话：会话类型在创建时就按当前选中的目标定死 ——
       // 选的是 ACP agent（或其模型）就是 acp 会话（agent 从此绑定、acpSessionId 后续回填），
       // 选的是 AI 模型（或默认）就是内置 agent 会话。类型落库后不能再换，模型可换。
-      const { chatTarget } = get();
+      const { chatTarget } = scoped;
       /**
        * 建会话这段空窗要让输入框看得见（发送钮转圈）：ACP 要起外部 agent 进程 +
        * `session/new` 才拿得到会话，几秒钟界面毫无反应，用户会以为没点上而反复点。
@@ -1107,9 +1124,9 @@ export function createConversationRunLoop(ctx: ConvCore) {
     };
     const assistantId = nextLocalId("a");
     const controller = new AbortController();
+    // 模型 / 思考强度按会话取（见上面 `scoped`）；其余是全局偏好，仍从 store 现取
+    const { chatTarget, reasoningEffort } = scoped;
     const {
-      chatTarget,
-      reasoningEffort,
       permissionMode,
       confirmTimeoutMin,
       maxRetries,

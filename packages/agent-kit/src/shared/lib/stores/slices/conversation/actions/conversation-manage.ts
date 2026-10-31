@@ -173,8 +173,9 @@ export function createConversationManageActions(
         get().setError(errorMessage(err));
       }
     },
-    deleteMessage: async (messageId) => {
-      const conversationId = get().activeConversationId;
+    deleteMessage: async (messageId, scope) => {
+      // 分屏时删的是**本标签**那条会话里的消息，不是焦点会话的
+      const conversationId = scope === undefined ? get().activeConversationId : scope;
       if (!conversationId) return;
       const slice = readSlice(conversationId);
       // 这个会话自己正在跑就不许删（别的会话在跑不妨碍）——删除会动服务端消息，与流式写冲突
@@ -186,8 +187,8 @@ export function createConversationManageActions(
       if (!slice.messages.some((m) => m.id === messageId)) return;
       await removeMessages(conversationId, messageId, "single");
     },
-    deleteMessagesFrom: async (messageId) => {
-      const conversationId = get().activeConversationId;
+    deleteMessagesFrom: async (messageId, scope) => {
+      const conversationId = scope === undefined ? get().activeConversationId : scope;
       if (!conversationId) return;
       const slice = readSlice(conversationId);
       // 这个会话自己正在跑就不许删（别的会话在跑不妨碍）——删除会动服务端消息，与流式写冲突
@@ -197,21 +198,28 @@ export function createConversationManageActions(
       if (!slice.messages.some((m) => m.id === messageId)) return;
       await removeMessages(conversationId, messageId, "from");
     },
-    resendMessage: async (messageId, text, files, onStarted) => {
+    resendMessage: async (messageId, text, files, onStarted, scope) => {
+      /**
+       * 编辑重发是「本标签那条会话」上的操作：截断与重发都必须落在它上面 —— 分屏时
+       * 按活跃会话走会把焦点会话的历史切掉。
+       */
+      const conversationId = scope === undefined ? get().activeConversationId : scope;
       /**
        * ⚠️ 编辑重发是**先删历史、再发**：目标失效（没选模型 / 配置被删 / 模型下架）时
        * 必须在删之前拦下 —— 否则用户既发不出去、又平白丢了那段历史，比「草稿被吃掉」
-       * 严重得多。`guardTarget` 正好就是这个判据，这里问得比 `runRound` 更早。
+       * 严重得多。`guardTarget` 正好就是这个判据，这里问得比 `runRound` 更早；
+       * 校验的是**本会话**的目标（分屏时焦点会话的目标与本会话无关）。
        *
        * 剩下的失败点（服务端 400 / 连不上）仍落在删之后：编辑重发本来就有「以这条为
        * 起点重来」的语义，那种情况靠 `send` 回传 `false` 让输入框把草稿还回去。
        */
-      if (!guardTarget()) return false;
+      if (!guardTarget(get().scopedSettingsOf(conversationId).chatTarget))
+        return false;
       // 已经有一个删除在飞（另一个入口刚点的）：别在它上面再叠一次「删 + 发」——
       // 那样两条回拉会互相盖，历史可能停在错的那一份
-      if (readSlice(get().activeConversationId).deleting) return false;
-      await get().deleteMessagesFrom(messageId);
-      return get().send(text, files, onStarted);
+      if (readSlice(conversationId).deleting) return false;
+      await get().deleteMessagesFrom(messageId, conversationId);
+      return get().send(text, files, onStarted, conversationId);
     },
 
   };

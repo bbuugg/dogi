@@ -89,6 +89,9 @@ export const createConversationSlice: StateCreator<
     pruneSlices: ctx.pruneSlices,
     markRunning: ctx.markRunning,
     persistTarget: ctx.persistTarget,
+    // 视图层按会话读「现场」（模型 / 思考强度 / MCP / 浏览器偏好）：分屏时非焦点标签
+    // 不能读 `chatTarget` 那四项，那是焦点会话的（见 types.ts 顶部的警告）
+    scopedSettingsOf: ctx.scopedSettingsOf,
     probeDraftAcp: ctx.probeDraftAcp,
     loadMessages: ctx.loadMessages,
     handleFrame: ctx.handleFrame,

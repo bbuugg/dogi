@@ -17,11 +17,14 @@ export function createConversationForkActions(
 
   return {
     /**
-     * 会话分叉（「从此签出」）：fork 当前会话到某条消息（含），刷新列表并**切到新会话**
-     * （走 openConversation 的装载链路）。失败（运行中 409 / ACP / 消息不存在）只提示。
+     * 会话分叉（「从此签出」）：fork **`scope` 那条会话**（不传 = 活跃会话）到某条消息
+     * （含），刷新列表并**切到新会话**（走 openConversation 的装载链路）。
+     * 分屏时从非焦点标签触发必须带上自己的 id —— 否则签出的是焦点会话的历史。
+     * 失败（运行中 409 / ACP / 消息不存在）只提示。
      */
-    forkConversation: async (upToMessageId, opts) => {
-      const conversationId = get().activeConversationId;
+    forkConversation: async (upToMessageId, opts, scope) => {
+      const conversationId =
+        scope === undefined ? get().activeConversationId : scope;
       const api = get().getApi();
       if (!api || !conversationId) return;
       try {

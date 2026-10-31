@@ -34,7 +34,16 @@ import {
   loadActiveConversationId,
   loadBlankIntent,
 } from "@fizz/agent-kit/shared/lib/stores/slices/conversation";
-import type { QueuedMessage } from "@fizz/agent-kit/shared/lib/stores/slices/conversation";
+import type {
+  QueuedMessage,
+  ChatTarget,
+} from "@fizz/agent-kit/shared/lib/stores/slices/conversation";
+import type {
+  AiReasoningEffort,
+  AskFollowupAnswer,
+  BrowserSettings,
+  UploadFileRef,
+} from "@fizz/contracts";
 export type { QueuedMessage };
 
 /**
@@ -57,13 +66,35 @@ export type { QueuedMessage };
  *
  * 视图里的 `activeConversationId` 就是**这个视图所属的会话**。这样 ChatPanel 里那些
  * 「我是不是当前会话」的判断（附件回调的归属校验、编辑重发的归属、待填草稿的键）
- * 在各自的标签里都成立。真正会写库的动作（`send` / `steer` / `resolveConfirm`…）
- * 仍然按 store 的活跃会话走 —— 而**聚焦标签会同步 `openConversation(id)`**，
- * 所以两者恒等，不会写错会话。
+ * 在各自的标签里都成立。
+ *
+ * ## 写库动作也按**视图的**会话走（`scope`）
+ *
+ * 曾经的理由是「聚焦标签会同步 `openConversation(id)`，所以两者恒等」。分屏把这句推翻
+ * 了：两个标签同时可见、都能操作，而 `activeConversationId` 只有一份 —— 在非焦点标签
+ * 里发送，消息会插到焦点会话上；读模型 / 思考强度 / MCP / 浏览器偏好也会读到焦点会话
+ * 的（用户报的「点一下标签两个 composer 的模型 pill 一起变」）。
+ *
+ * 所以这里统一把会话 id 作为**作用域**传给写动作与现场字段：
+ * - 现场字段走 `scopedSettingsOf(conversationId)`（焦点会话 = 全局那份，其余按会话派生）；
+ * - 写动作（send / steer / stop / 4 个 setter / 审批 / 追问）都把 `conversationId` 传下去。
+ *
+ * 已经作用域化的：`send` / `steer` / `stop` / `stopCommand` / 待发队列与插话的全部增删改
+ * （`sendQueuedMessage` / `sendSteer` / `moveSteer` …）/ 队列泵 `pump` / 消息的删除与编辑重发 /
+ * 审批与追问的答复 / 会话分叉 `forkConversation` / 四个现场 setter。
+ *
+ * 剩下几个本来就收 `id` 参数的（`clearConversation` / `reloadConversation` /
+ * `convertAcpConversation` / `deleteConversation`），作用域由调用方传的 id 决定，
+ * 这里原样透传 —— 传 `app.activeConversationId` 就是本标签那条。
  */
 export function agentAppFrom(s: AgentStore, conversationId: string | null) {
   const api = s.getApi();
   const activeSlice = conversationId ? s.slices[conversationId] : undefined;
+  /**
+   * 这个视图所属会话的「现场」：模型 / 思考强度 / MCP / 浏览器偏好。
+   * 焦点会话（或新对话页）就是 store 里那份；非焦点标签按自己的会话派生。
+   */
+  const scoped = s.scopedSettingsOf(conversationId);
 
   return {
     // 状态
@@ -109,21 +140,26 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
     scriptGroups: s.scriptGroups,
     /** 已登记的笔记根目录（侧栏「笔记」功能区的顶层；走快照域推送） */
     notesRoots: s.notesRoots,
-    /** 本轮后端（null = 跟随默认） */
-    chatTarget: s.chatTarget,
-    /** 当前会话的思考强度（内置 Agent；null = 跟随模型默认） */
-    reasoningEffort: s.reasoningEffort,
-    /** 改当前会话的思考强度（新任务页 = 待定选择） */
-    setReasoningEffort: s.setReasoningEffort,
+    /**
+     * 本轮后端（null = 跟随默认）。**这个视图所属会话**的那份 —— 分屏时非焦点标签
+     * 读的是它自己会话上的配置（见 `scopedSettingsOf`），不是焦点会话的。
+     */
+    chatTarget: scoped.chatTarget,
+    /** 这个视图的会话的思考强度（内置 Agent；null = 跟随模型默认） */
+    reasoningEffort: scoped.reasoningEffort,
+    /** 改这个视图的会话的思考强度（新任务页 = 待定选择） */
+    setReasoningEffort: (effort: AiReasoningEffort | null) =>
+      s.setReasoningEffort(effort, conversationId),
     /**
      * 新任务页选中的 ACP agent 的档位快照（模式 / 思考档）—— 那时还没有会话，
      * 这排 pill 的数据只能来自探测（见 `probeDraftAcp`）。`null` = 没选 ACP。
      */
     draftAcp: s.draftAcp,
-    /** 当前会话允许使用的 MCP server id 清单（持久化在会话上；空 = 全不选） */
-    mcpServerIds: s.mcpServerIds,
-    /** 改选这个会话可用的 MCP（全量覆盖） */
-    setMcpServerIds: s.setMcpServerIds,
+    /** 这个视图的会话允许使用的 MCP server id 清单（持久化在会话上；空 = 全不选） */
+    mcpServerIds: scoped.mcpServerIds,
+    /** 改选这个视图的会话可用的 MCP（全量覆盖） */
+    setMcpServerIds: (ids: string[]) =>
+      s.setMcpServerIds(ids, conversationId),
     workspaces: s.workspaces,
     conversations: s.conversations,
     /** 会话清单是否已成功拉过至少一遍（空 ≠ 没加载，见字段注释） */
@@ -132,10 +168,11 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
     /** 子任务（subagent）偏好：设置页「子任务」开关的状态源 */
     subagentSettings: s.subagentSettings,
     /**
-     * 浏览器偏好（总开关 + 来源）：**当前会话**那一份，未设过时回落到全局默认。
-     * 输入框上方 ComposerToolbar 的状态源（会话级 —— 每个会话可以不一样）。
+     * 浏览器偏好（总开关 + 来源）：**这个视图的会话**那一份，未设过时回落到全局默认。
+     * 输入框上方 ComposerToolbar 的状态源（会话级 —— 分屏时两个标签各一份）。
      */
-    browserSettings: s.browserSettings ?? s.defaultBrowserSettings,
+    browserSettings:
+      (scoped.browserSettings ?? s.defaultBrowserSettings),
     /**
      * **全局默认**的浏览器偏好（`CoreData.browserSettings`）。
      *
@@ -240,24 +277,32 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
     followupRequests: activeSlice?.followupRequests ?? NO_FOLLOWUPS,
     /** 待发送队列：会话进行中用户发的消息先排在这里，本轮结束依次执行（活跃会话那一份） */
     queuedMessages: activeSlice?.queuedMessages ?? NO_QUEUE,
-    /** 队列里删一条 */
-    removeQueuedMessage: s.removeQueuedMessage,
+    /** 队列里删一条（分屏时只动本标签那条会话的队列） */
+    removeQueuedMessage: (id: string) =>
+      s.removeQueuedMessage(id, conversationId),
     /** 队列里改一条的文本 */
-    updateQueuedMessage: s.updateQueuedMessage,
+    updateQueuedMessage: (id: string, text: string) =>
+      s.updateQueuedMessage(id, text, conversationId),
     /** 队列拖拽排序：把一条挪到另一条前面（顺序即发送顺序；一并落服务端） */
-    moveQueuedMessage: s.moveQueuedMessage,
+    moveQueuedMessage: (id: string, beforeId: string | null) =>
+      s.moveQueuedMessage(id, beforeId, conversationId),
     /** 队列 ↑↓ 按钮微调（触屏用）：-1 = 上移更早发出，1 = 下移；越界不动 */
-    moveQueuedMessageBy: s.moveQueuedMessageBy,
+    moveQueuedMessageBy: (id: string, delta: number) =>
+      s.moveQueuedMessageBy(id, delta, conversationId),
     /** 队列里挑一条立刻发（会话进行中忽略；其余的等本轮结束后按顺序续上） */
-    sendQueuedMessage: s.sendQueuedMessage,
+    sendQueuedMessage: (id: string) =>
+      s.sendQueuedMessage(id, conversationId),
     /** 清空待发送队列（失败暂停后的一键清空） */
-    clearQueuedMessages: s.clearQueuedMessages,
-    /** 会话分叉（从此签出）：fork 当前会话到某条消息（含）并切到新会话 */
-    forkConversation: s.forkConversation,
+    clearQueuedMessages: () => s.clearQueuedMessages(conversationId),
+    /** 会话分叉（从此签出）：fork 本标签的会话到某条消息（含）并切到新会话 */
+    forkConversation: (
+      upToMessageId: string,
+      opts?: { worktreeIdentifier?: string; worktreeName?: string },
+    ) => s.forkConversation(upToMessageId, opts, conversationId),
     /** 队列链为什么停了：'failed' = 上轮失败已暂停（头部提示 + 一键继续/清空） */
     queuePausedReason: activeSlice?.queuePausedReason ?? null,
     /** 队列泵：没在跑时把下一条顶上来（失败暂停后「继续发下一条」也走它） */
-    pump: s.pump,
+    pump: () => s.pump(conversationId),
     permissionMode: s.permissionMode,
     // 动作
     connect: s.connect,
@@ -274,26 +319,47 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
     newConversation: s.newConversation,
     newCollabConversation: s.newCollabConversation,
     deleteConversation: s.deleteConversation,
-    send: s.send,
+    /**
+     * 发送一轮。带上本视图的会话：分屏时两个标签同时可见，不能靠「谁是活跃会话」
+     * 决定发到哪（那会把非焦点标签的消息插到焦点会话里）。
+     */
+    send: (
+      text: string,
+      files?: UploadFileRef[],
+      onStarted?: () => void,
+    ) => s.send(text, files, onStarted, conversationId),
     /** 运行中插话（steer）：下一个工具步骤边界注入当前轮；空闲时回落普通发送 */
-    steer: s.steer,
+    steer: (
+      text: string,
+      files?: UploadFileRef[],
+      onStarted?: () => void,
+    ) => s.steer(text, files, onStarted, conversationId),
     /** 撤回一条还没生效的插话（「插入中」列表的 ✕） */
-    removeSteer: s.removeSteer,
+    removeSteer: (messageId: string) =>
+      s.removeSteer(messageId, conversationId),
     /** 插话拖拽排序：把一条挪到另一条前面（顺序即生效顺序；一并同步服务端收件箱） */
-    moveSteer: s.moveSteer,
+    moveSteer: (messageId: string, beforeId: string | null) =>
+      s.moveSteer(messageId, beforeId, conversationId),
     /** 插话 ↑↓ 按钮微调（触屏用）：-1 = 上移更早生效，1 = 下移；越界不动 */
-    moveSteerBy: s.moveSteerBy,
+    moveSteerBy: (messageId: string, delta: number) =>
+      s.moveSteerBy(messageId, delta, conversationId),
     /** 立刻发送一条还没发出去的插话（行上的 ➤）：本轮不在跑时按新一轮的普通消息发出 */
-    sendSteer: s.sendSteer,
+    sendSteer: (messageId: string) =>
+      s.sendSteer(messageId, conversationId),
     /** 已插入、还没生效的插话（活跃会话那一份；agent 消费后经 user-injected 转正出列） */
     pendingSteers: activeSlice?.pendingSteers ?? NO_STEERS,
-    stop: s.stop,
+    /** 停这个视图的会话这一轮（分屏时别去停焦点会话） */
+    stop: () => s.stop(conversationId),
     /** 停止**指定会话**的一轮（不依赖谁是当前会话）—— 关标签守卫用它先停会话再放行 */
     stopConversation: s.stopConversation,
-    /** 答复一次命令执行审批 */
-    resolveConfirm: s.resolveConfirm,
+    /** 答复一次命令执行审批（卡片可能在非焦点标签上，撤卡要撤对会话） */
+    resolveConfirm: (id: string, approved: boolean, optionId?: string) =>
+      s.resolveConfirm(id, approved, optionId, conversationId),
     /** 答复一次 ask_followup_question 提问（null = 跳过） */
-    resolveFollowup: s.resolveFollowup,
+    resolveFollowup: (
+      toolCallId: string,
+      answer: AskFollowupAnswer | null,
+    ) => s.resolveFollowup(toolCallId, answer, conversationId),
     /** 重命名会话 */
     renameConversation: s.renameConversation,
     /** 归档 / 取消归档会话（不删数据；侧栏据此收进 / 放出「已归档」区） */
@@ -311,12 +377,19 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
     convertAcpConversation: s.convertAcpConversation,
     /** 清空会话（保留会话本身） */
     clearConversation: s.clearConversation,
-    /** 删除单条消息（后面的消息保留） */
-    deleteMessage: s.deleteMessage,
+    /** 删除单条消息（后面的消息保留）。分屏时删的是本标签会话里的那条 */
+    deleteMessage: (messageId: string) =>
+      s.deleteMessage(messageId, conversationId),
     /** 删除某条消息及其之后的全部消息（「从这里重新开始」） */
-    deleteMessagesFrom: s.deleteMessagesFrom,
-    /** 编辑后重发：把某条消息改为新文本并重新走一轮 */
-    resendMessage: s.resendMessage,
+    deleteMessagesFrom: (messageId: string) =>
+      s.deleteMessagesFrom(messageId, conversationId),
+    /** 编辑后重发：把某条消息改为新文本并重新走一轮（截断 + 重发都在本标签的会话上） */
+    resendMessage: (
+      messageId: string,
+      text: string,
+      files?: UploadFileRef[],
+      onStarted?: () => void,
+    ) => s.resendMessage(messageId, text, files, onStarted, conversationId),
     /** 列工作区某目录（'' = 根） */
     listWorkspaceFiles: s.listWorkspaceFiles,
     listAcpAgentSessions: s.listAcpAgentSessions,
@@ -376,8 +449,12 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
     /** 工具卡是否显示「意图」（模型每次调工具填的一句话）与设置动作 */
     toolIntent: s.toolIntent,
     setToolIntent: s.setToolIntent,
-    /** 选本轮后端：`{backend:'acp', configId:<agent id>}` 或 `{backend:'builtin', configId:<model id>}` */
-    setChatTarget: s.setChatTarget,
+    /**
+     * 选本轮后端：`{backend:'acp', configId:<agent id>}` 或 `{backend:'builtin', configId:<model id>}`。
+     * 选的是**这个视图的会话**那一份 —— 分屏时在非焦点标签换模型，不该改焦点会话的待发目标。
+     */
+    setChatTarget: (target: ChatTarget | null) =>
+      s.setChatTarget(target, conversationId),
     /**
      * 新任务页选中 ACP agent 时探一次它的档位（模式 / 思考档）。
      * 幂等、不抛；失败只写 `draftAcp.error`，pill 退化成「默认档」。
@@ -541,12 +618,13 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
     /** 设置某个子任务的步数上限（`null` = 回到规格默认值） */
     setSubagentMaxSteps: s.setSubagentMaxSteps,
     /**
-     * 保存**当前会话**的浏览器偏好（总开关 / 来源）。只传要改的字段，与当前值合并后整体
-     * 落库到会话（下一轮生效）。每个会话各记一份 —— 工具条按会话显示、按会话切换。
+     * 保存**这个视图的会话**的浏览器偏好（总开关 / 来源）。只传要改的字段，与当前值合并后
+     * 整体落库到会话（下一轮生效）。每个会话各记一份 —— 分屏时两个标签互不覆盖。
      *
      * 与外部 playwright-mcp 的同名冲突**不用手动处理**：装配时内置会自动让位。
      */
-    saveBrowserSettings: s.setBrowserSettings,
+    saveBrowserSettings: (patch: Partial<BrowserSettings>) =>
+      s.setBrowserSettings(patch, conversationId),
     /**
      * 保存系统监控偏好（总开关）。关掉后服务端**停止采样**、状态栏也不再渲染监控条 ——
      * 只传要改的字段（服务端「缺字段 = 保留」）。见设置页「系统监控」小节。

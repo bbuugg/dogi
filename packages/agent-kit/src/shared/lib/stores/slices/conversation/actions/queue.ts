@@ -34,16 +34,16 @@ export function createQueueActions(
         item,
       ]);
     },
-    removeQueuedMessage: (id) => {
-      const conversationId = get().activeConversationId;
+    removeQueuedMessage: (id, scope) => {
+      const conversationId = scope === undefined ? get().activeConversationId : scope;
       if (!conversationId) return;
       patchQueue(
         conversationId,
         readSlice(conversationId).queuedMessages.filter((m) => m.id !== id),
       );
     },
-    updateQueuedMessage: (id, text) => {
-      const conversationId = get().activeConversationId;
+    updateQueuedMessage: (id, text, scope) => {
+      const conversationId = scope === undefined ? get().activeConversationId : scope;
       if (!conversationId) return;
       patchQueue(
         conversationId,
@@ -59,8 +59,8 @@ export function createQueueActions(
      * 组件闭包里攥着的数组那时可能是旧的，让它自己算好下标再传过来等于按错的基准
      * 插。下标一律由这里从**最新的**队列里算。
      */
-    moveQueuedMessage: (id, beforeId) => {
-      const conversationId = get().activeConversationId;
+    moveQueuedMessage: (id, beforeId, scope) => {
+      const conversationId = scope === undefined ? get().activeConversationId : scope;
       if (!conversationId || id === beforeId) return;
       const queue = readSlice(conversationId).queuedMessages;
       const from = queue.findIndex((m) => m.id === id);
@@ -79,8 +79,8 @@ export function createQueueActions(
      * 为什么不复用 `moveQueuedMessage`：那是「挪到某一条前面」的语义，而「往下挪一位」
      * 得拿后一条反过来调它（`move(next.id, id)`），读起来反直觉。下标照样由这里从最新队列算。
      */
-    moveQueuedMessageBy: (id, delta) => {
-      const conversationId = get().activeConversationId;
+    moveQueuedMessageBy: (id, delta, scope) => {
+      const conversationId = scope === undefined ? get().activeConversationId : scope;
       if (!conversationId) return;
       const queue = readSlice(conversationId).queuedMessages;
       const from = queue.findIndex((m) => m.id === id);
@@ -92,8 +92,8 @@ export function createQueueActions(
       next.splice(to, 0, moved);
       patchQueue(conversationId, next);
     },
-    sendQueuedMessage: (id) => {
-      const conversationId = get().activeConversationId;
+    sendQueuedMessage: (id, scope) => {
+      const conversationId = scope === undefined ? get().activeConversationId : scope;
       if (!conversationId || get().runningConversations[conversationId]) return;
       const queue = readSlice(conversationId).queuedMessages;
       const item = queue.find((m) => m.id === id);
@@ -105,7 +105,7 @@ export function createQueueActions(
         queue.filter((m) => m.id !== id),
       );
       void get()
-        .runRound(item.text, item.files)
+        .runRound(item.text, item.files, undefined, conversationId)
         .then((started) => {
           // 没能开跑（没选模型 / 没连上…）：这条不能就这么没了 —— 放回队列末尾
           if (!started) {
@@ -125,8 +125,8 @@ export function createQueueActions(
      * 那一轮已经结束了（用户停止 / 报错 / 断线），服务端早没有这条插话了 —— 此时唯一
      * 有意义的动作就是把它当新消息发出去。剩下的遗留条目会在 `runRound` 里转入待发送队列。
      */
-    sendSteer: (messageId) => {
-      const conversationId = get().activeConversationId;
+    sendSteer: (messageId, scope) => {
+      const conversationId = scope === undefined ? get().activeConversationId : scope;
       if (!conversationId || get().runningConversations[conversationId]) return;
       const item = readSlice(conversationId).pendingSteers.find(
         (m) => m.id === messageId,
@@ -140,7 +140,7 @@ export function createQueueActions(
         pendingSteers: s.pendingSteers.filter((m) => m.id !== messageId),
       }));
       void get()
-        .runRound(text, files)
+        .runRound(text, files, undefined, conversationId)
         .then((started) => {
           // 没能开跑（没选模型 / 没连上…）：把它放回列表，别让用户刚写的话凭空消失
           if (!started) {
@@ -152,14 +152,14 @@ export function createQueueActions(
         });
     },
     /** 清空待发送队列（一并解除失败暂停的标记；服务端那份同步覆盖为空） */
-    clearQueuedMessages: () => {
-      const conversationId = get().activeConversationId;
+    clearQueuedMessages: (scope) => {
+      const conversationId = scope === undefined ? get().activeConversationId : scope;
       if (!conversationId) return;
       writeSlice(conversationId, (s) => ({ ...s, queuePausedReason: null }));
       patchQueue(conversationId, []);
     },
-    removeSteer: async (messageId) => {
-      const conversationId = get().activeConversationId;
+    removeSteer: async (messageId, scope) => {
+      const conversationId = scope === undefined ? get().activeConversationId : scope;
       const api = get().getApi();
       if (!api || !conversationId) return;
       try {
@@ -179,8 +179,8 @@ export function createQueueActions(
      * 与队列的 `moveQueuedMessage` 同款：下标一律从**最新的**数组里算 —— 拖拽时 react-dnd
      * 的 `hover` 会连续触发，组件闭包里攥着的数组那时可能是旧的，让它自己算等于按错基准插。
      */
-    moveSteer: (messageId, beforeId) => {
-      const conversationId = get().activeConversationId;
+    moveSteer: (messageId, beforeId, scope) => {
+      const conversationId = scope === undefined ? get().activeConversationId : scope;
       if (!conversationId) return;
       const list = readSlice(conversationId).pendingSteers;
       const from = list.findIndex((m) => m.id === messageId);
@@ -197,8 +197,8 @@ export function createQueueActions(
      * ↑ / ↓ 按钮微调（触屏拖不动，见 ChatPanel 的 SortableRow）：这条相对挪 `delta` 位
      * （-1 = 往前提一位 = 更早生效）。越界（已是第一条 / 最后一条）不动。
      */
-    moveSteerBy: (messageId, delta) => {
-      const conversationId = get().activeConversationId;
+    moveSteerBy: (messageId, delta, scope) => {
+      const conversationId = scope === undefined ? get().activeConversationId : scope;
       if (!conversationId) return;
       const list = readSlice(conversationId).pendingSteers;
       const from = list.findIndex((m) => m.id === messageId);

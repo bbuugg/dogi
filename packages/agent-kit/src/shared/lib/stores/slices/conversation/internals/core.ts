@@ -586,10 +586,23 @@ export function createConversationCore(deps: ConvDeps) {
    * 补写（失败就只留本地缓存，见上面那个 helper 的说明）。
    */
 
-  const guardTarget = (): boolean => {
-    if (isTargetAlive(get().chatTarget)) return true;
-    // 悬空的目标顺手清掉（本来就是 null 时不必 set）
-    if (get().chatTarget) set({ chatTarget: null });
+  /**
+   * 校验「这一轮要用的目标」还成立。
+   *
+   * `target` 由调用方按会话给出（分屏时非焦点标签用的是它自己会话上的配置，见
+   * `scopedSettingsOf`）—— 不传会用全局那份，那是焦点会话的目标，校验它等于校验错的会话。
+   */
+  const guardTarget = (
+    target: {
+      backend: AgentBackend;
+      configId?: string;
+      modelId?: string;
+    } | null = get().chatTarget,
+  ): boolean => {
+    if (isTargetAlive(target)) return true;
+    // 悬空的目标顺手清掉（本来就是 null 时不必 set）。只清全局那份 —— 非焦点会话的
+    // 死目标由它自己的清单项表示，`targetFromConversation` 已经返回 null
+    if (target && get().chatTarget === target) set({ chatTarget: null });
     get().setError("请先在输入框上方选择模型（原来的配置或模型可能已被删除）");
     return false;
   };
