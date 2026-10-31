@@ -5,10 +5,13 @@
  * 桌面端引导加载需要全文，用 ?full=1 让服务端返回含完整消息的会话全集。
  */
 import { randomUUID } from 'node:crypto'
-import type { AgentChatMessage, AiReasoningEffort, CollabSettings } from '@fizz/contracts/types'
 import { abortAcpTurn, createAcpSession } from '@fizz/acp'
 import { domain } from '@/lib/server/state'
 import { ensurePiConfirmExtension } from '@/lib/server/acp-extension'
+import {
+  conversationCreateFields,
+  type ConversationCreateBody
+} from '@/lib/server/conversation-create-fields'
 import { describeError, jsonError, parseJsonBody } from '@/app/api/_lib/auth'
 
 export async function GET(request: Request) {
@@ -20,25 +23,14 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const input = await parseJsonBody<{
-    id?: string
-    /** 缺省 = 用户没选项目：当场建临时工作区（见下） */
-    workspaceId?: string
-    title?: string
-    /** 会话形态（缺省 = 普通对话）；`collab` 只支持内置 Agent 后端 */
-    kind?: 'chat' | 'collab'
-    /** 协作配置（仅 `kind: 'collab'`）；缺省用 `DEFAULT_COLLAB_SETTINGS` */
-    collab?: CollabSettings
-    backend?: 'builtin' | 'acp'
-    configId?: string
-    /** 创建时确定的具体模型（内置 = 配置下的模型 id；acp = agent 广告的模型值） */
-    modelId?: string
-    /** 内置 Agent 的思考强度（缺省 = 跟随模型）；ACP 忽略 */
-    reasoningEffort?: AiReasoningEffort
-    /** 导入 / 绑定 agent 侧既有会话：创建时就落 acpSessionId */
-    acpSessionId?: string
-    messages?: AgentChatMessage[]
-  }>(request)
+  /**
+   * 请求体字段的取舍**只在 `conversationCreateFields` 一处**。
+   *
+   * 以前这里内联了一份 `parseJsonBody<{...}>` 类型，漏掉 `mcpServerIds` /
+   * `browserSettings` 两个字段 —— 草稿页勾的 MCP 与开的浏览器传到服务端后被直接丢掉，
+   * 落库的会话是「全不选 + 关」，下次清单刷新就把界面覆盖回去。
+   */
+  const input = await parseJsonBody<ConversationCreateBody>(request)
   if (!input) return jsonError(400, '请求体不是合法 JSON')
   if (input.kind === 'collab' && input.backend === 'acp') {
     return jsonError(400, '多智能体协作会话只支持内置 Agent，不支持 ACP 后端')
@@ -108,12 +100,12 @@ export async function POST(request: Request) {
         workspacePath
       })
       const conversation = domain.saveConversation({
+        ...conversationCreateFields(input),
         id,
         workspaceId,
-        title: input.title,
+        // agent 侧真建出来的那个盖过请求体（含 configId / sessionId / 广告的档位）
         backend: 'acp',
         configId: agent.id,
-        modelId: input.modelId,
         acpSessionId: ready.sessionId,
         ...(ready.modes ? { acpModes: ready.modes } : {}),
         ...(ready.thoughtLevel ? { acpThoughtLevel: ready.thoughtLevel } : {})
@@ -129,17 +121,9 @@ export async function POST(request: Request) {
 
   try {
     const conversation = domain.saveConversation({
+      ...conversationCreateFields(input),
       id,
-      workspaceId,
-      title: input.title,
-      ...(input.kind === 'collab' ? { kind: 'collab' as const } : {}),
-      ...(input.kind === 'collab' && input.collab ? { collab: input.collab } : {}),
-      backend: input.backend,
-      configId: input.configId,
-      modelId: input.modelId,
-      ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
-      acpSessionId: input.acpSessionId,
-      ...(Array.isArray(input.messages) ? { messages: input.messages } : {})
+      workspaceId
     })
     return Response.json({ ...conversation, messageCount: conversation.messages.length })
   } catch (err) {

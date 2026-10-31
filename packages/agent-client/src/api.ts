@@ -10,7 +10,7 @@
  * - 对话是 SSE：`event: <start|event|end>` + `data: <ChatStreamFrame>`。
  */
 import { API_ROUTES, FILES_API } from "@fizz/contracts/agent-api";
-import type { AppLanguage, PrefsPatch, PrefsResult } from "@fizz/contracts";
+import type { AppLanguage, BrowserSettings, PrefsPatch, PrefsResult } from "@fizz/contracts";
 import type {
   AppLogFrame,
   AppLogResult,
@@ -1243,6 +1243,13 @@ export function createApi(
       acpSessionId?: string;
       /** 创建时就定下这个会话允许用哪些 MCP server（缺省 = 全不选） */
       mcpServerIds?: string[];
+      /**
+       * 创建时就一并落下的浏览器偏好（开关 + 来源）。
+       *
+       * 「开始新对话」页的这两项选择只活在 `draftSettings` 里，发出第一条消息时随本请求
+       * 交出；服务端不落它就是「发完消息浏览器自己关了、MCP 也没了」。
+       */
+      browserSettings?: BrowserSettings;
       /**
        * 创建时就一并落下的历史消息（整体写入，不做追加）。
        *
