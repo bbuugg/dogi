@@ -272,17 +272,60 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * 常见状态码的人话说明。
+ *
+ * 为什么需要：502 / 503 / 504 多半是前面的反向代理（Nginx / Cloudflare / 面板）直接回的，
+ * 错误体是一整页 HTML。以前把正文前 200 字塞进 message，用户就在 toast 里看到
+ * `<!DOCTYPE html><html>...` 半截标签 —— 既看不懂，也判断不出是网关挂了。
+ */
+const STATUS_HINTS: Record<number, string> = {
+  400: "请求有误",
+  401: "未登录或登录已过期",
+  403: "没有访问权限",
+  404: "接口不存在",
+  405: "请求方法不被允许",
+  408: "请求超时",
+  413: "请求体过大",
+  415: "不支持的请求格式",
+  429: "请求过于频繁，请稍后再试",
+  500: "服务端内部错误",
+  501: "服务端不支持该请求",
+  502: "网关错误，后端服务可能没起来",
+  503: "服务暂不可用",
+  504: "网关超时，后端服务没有响应",
+};
+
+/**
+ * 把「状态码 + 响应正文」翻成给人看的错误文案。
+ *
+ * - 正文是本服务的错误形状（`{ error }` / `{ message }`）→ 原样透出，业务话最准；
+ * - 正文不是 JSON（典型是代理回的 HTML 错误页）或为空 → **只报状态码 + 一句人话**，
+ *   绝不把 HTML 正文当消息（那是 502 被 toast 出来的原因）。
+ */
+export function httpErrorMessage(status: number, body: string): string {
+  if (body) {
+    try {
+      const parsed = JSON.parse(body) as { error?: unknown; message?: unknown };
+      const detail =
+        typeof parsed?.error === "string" && parsed.error
+          ? parsed.error
+          : typeof parsed?.message === "string" && parsed.message
+            ? parsed.message
+            : "";
+      if (detail) return detail;
+    } catch {
+      /* 非 JSON：落到下面的状态码兜底 */
+    }
+  }
+  const hint = STATUS_HINTS[status];
+  return hint ? `HTTP ${status} ${hint}` : `HTTP ${status}`;
+}
+
 /** 统一解析错误体（server 的错误形状就是 `{ error }`） */
 async function toError(res: Response): Promise<ApiError> {
   const text = await res.text().catch(() => "");
-  let message = `HTTP ${res.status}`;
-  try {
-    const body = JSON.parse(text) as { error?: string };
-    if (body.error) message = body.error;
-  } catch {
-    if (text) message = text.slice(0, 200);
-  }
-  return new ApiError(message, res.status);
+  return new ApiError(httpErrorMessage(res.status, text), res.status);
 }
 
 /**
