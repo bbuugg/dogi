@@ -133,11 +133,6 @@ export interface MessagePartsProps {
   /** 消息总条数：`index` 跟它比才知道「是不是最后一条」 */
   total: number
   streaming: boolean
-  /**
-   * 这些 part 属于哪条会话：只给错误块那颗「重新加载」用（见 `PartView` 的 `ErrorTextBlock`）。
-   * 不传 = 不渲染那颗按钮（容器工作台没有这条会话的加载语义）。
-   */
-  conversationId?: string
   /** 不传 = 提问卡只读（容器侧） */
   followup?: MessageFollowupBridge
   /** 当前会话的交接文档；只有 `messageId` 匹配的那条消息会把它插进 parts 流。 */
@@ -149,7 +144,6 @@ function MessagePartsInner({
   index,
   total,
   streaming,
-  conversationId,
   followup,
   compaction
 }: MessagePartsProps) {
@@ -234,9 +228,6 @@ function MessagePartsInner({
         streaming={isStreamingLast && partIndex === message.parts.length - 1}
         // 停止钮的判据：**整条消息在跑**（不要求是最后一个 part）—— 见 PartViewProps.turnLive。
         turnLive={isStreamingLast}
-        // 错误块（`⚠️ ` 前缀）只可能出现在**助手**消息里（客户端 / 服务端都只往那边写）；
-        // 用户自己发一句以 `⚠️ ` 开头的话不该冒出一颗「重新加载」按钮
-        conversationId={message.role === 'assistant' ? conversationId : undefined}
         followupPending={!!followupReq}
         followupResumable={resumable}
         onResolveFollowup={

@@ -24,6 +24,7 @@
  * 它们通过 `leading` / `trailing` / `header` / `above` / `renderActions` 这几个槽位进来。
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { toast } from 'sonner'
 import { ChevronLeft, Loader2, MessageSquare, RotateCw, Square, Unplug } from 'lucide-react'
 import { Button } from '@fizz/ui/button'
 import { SubagentViewProvider, type OpenSubagent } from '@fizz/agent-kit/features/chat/subagent-view'
@@ -64,9 +65,9 @@ export interface MessageListProps {
   /**
    * 这些消息属于哪条会话（`ChatPanel` 传当前那条）。
    *
-   * 只有一个用途：错误消息（`⚠️ ` 前缀的文本 part）后面那颗「重新加载」要知道重载**哪一条**
-   * —— 多标签面板里可能同时挂着好几条会话，读「当前会话」会刷错。不传（容器工作台）就不出
-   * 那颗按钮。
+   * 给「上拉刷新」用（`onRefresh` → `reloadConversation`）：多标签面板里可能同时挂着好几条
+   * 会话，读「当前会话」会刷错。不传（容器工作台）就**不挂**上拉刷新 —— 那边没有「重拉这条
+   * 会话」的语义。
    */
   conversationId?: string
   /** 本轮是否在跑（末条助手消息的处理、流式结束后的操作行都看它） */
@@ -208,6 +209,22 @@ export function MessageList({
 }: MessageListProps) {
   const tr = useT()
   /**
+   * 上拉刷新（滚到底后继续上拉、松手）→ 重拉这条会话（与标签右键的「刷新」同一个 action）。
+   *
+   * 这是原来错误块下方那颗「重新加载」的替代路径：错误只是该重拉的**一种**时机 ——
+   * 「一条消息都没有」往往是**没加载成功**，那种状态下原来根本没有按钮可点。所以不论
+   * 有没有消息、有没有报错，都支持同一个手势（见 `pull-to-refresh.tsx`）。
+   */
+  const refreshConversation = useCallback(async () => {
+    if (!conversationId) return
+    // 正在生成时 store 会拒绝（权威历史会把流式现场整段盖掉）—— 先说清为什么没反应
+    if (streaming) {
+      toast(tr('这一轮还在生成，先停止再重新加载'))
+      return
+    }
+    await useAgentStore.getState().reloadConversation(conversationId)
+  }, [conversationId, streaming, tr])
+  /**
    * 消息区根节点，给右侧「消息目录」定位用。
    *
    * 刻意不用 `document.getElementById`：桌面端能同时挂多个会话面板，同一个会话在两个
@@ -238,6 +255,8 @@ export function MessageList({
       <Conversation
         className="min-h-0 flex-1"
         resetKey={resetKey}
+        /* 没有 conversationId（容器工作台）就不挂手势：那儿没有「重拉这条会话」的语义 */
+        onRefresh={conversationId ? refreshConversation : undefined}
         /*
          * 只有「本轮正在流式输出」才用平滑跟随（消息向上流动的观感）；
          * 其余内容长高（图片加载完成、历史刷新…）一律瞬时贴底，不要自己滚。
@@ -370,7 +389,6 @@ export function MessageList({
                           index={index}
                           total={total}
                           streaming={streaming}
-                          conversationId={conversationId}
                           followup={followup}
                           compaction={messageCompaction}
                         />
@@ -884,7 +902,6 @@ export function ChatSurface({ list, composer, between }: ChatSurfaceProps) {
         >
           <SubagentTranscript
             delegation={findDelegation(list.messages, viewing.toolCallId) ?? viewing.delegation}
-            conversationId={list.conversationId}
             onBack={closeSubagent}
           />
         </div>
@@ -1080,11 +1097,9 @@ function RunningSubagents({
  */
 function SubagentTranscript({
   delegation,
-  conversationId,
   onBack
 }: {
   delegation: SubagentDelegation
-  conversationId?: string
   onBack: () => void
 }) {
   const tr = useT()
@@ -1153,7 +1168,6 @@ function SubagentTranscript({
                   index={0}
                   total={1}
                   streaming={false}
-                  conversationId={conversationId}
                 />
               </MessageContent>
             </Message>
@@ -1173,7 +1187,6 @@ function SubagentTranscript({
                   index={0}
                   total={1}
                   streaming={running}
-                  conversationId={conversationId}
                 />
               </MessageContent>
             </Message>

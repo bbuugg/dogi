@@ -551,8 +551,8 @@ function ChatPanelInner({
       <ChatSurface
         list={{
           messages,
-          // 错误块（`⚠️ ` 前缀）后面那颗「重新加载」要知道重载哪一条 —— 多标签下
-          // 同时挂着好几条会话，不能读「当前会话」
+          // 消息区上拉刷新（`onRefresh` → `reloadConversation`）要知道重拉哪一条 ——
+          // 多标签下同时挂着好几条会话，不能读「当前会话」
           ...(app.activeConversationId ? { conversationId: app.activeConversationId } : {}),
           streaming,
           // 断线重连的回放窗口：滚动跟随降级成瞬时贴底（否则内容先塌后长时会被

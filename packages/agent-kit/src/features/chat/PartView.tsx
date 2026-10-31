@@ -16,11 +16,10 @@
  * ai-elements 期望的形状（`ToolUIPart['type']` / `['state']`）。
  */
 import { memo, useEffect, useRef, useState, type ReactNode } from 'react'
-import { CheckCircle2, Circle, FileText, ImageOff, ListTree, Loader2, RefreshCw } from 'lucide-react'
+import { CheckCircle2, Circle, FileText, ImageOff, ListTree, Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@fizz/ui/button'
 import { ImageViewer } from '@fizz/ui/image-viewer'
-import { SpinnerButton } from '@fizz/ui/spinner-button'
 import { useOpenSubagent } from '@fizz/agent-kit/features/chat/subagent-view'
 import type { ToolUIPart } from 'ai'
 import { useStickToBottom } from 'use-stick-to-bottom'
@@ -646,59 +645,26 @@ function isToolResultEmpty(output: unknown): boolean {
 }
 
 /**
- * 一条**错误**（`⚠️ ` 前缀的文本 part，见 `ERROR_TEXT_PREFIX`）：正文照原样渲染，
- * 下面挂一颗「重新加载」。
+ * 一条**错误**（`⚠️ ` 前缀的文本 part，见 `ERROR_TEXT_PREFIX`）：只渲染正文，不挂任何按钮。
  *
- * ## 为什么需要这颗按钮
+ * ## 这里原来挂着一颗「重新加载」，现在挪到了消息区的下拉刷新
  *
  * 一轮失败时（断线、模型配置不对、ACP 建连失败……）客户端 / 服务端都把错误写成一条
- * 文本 part 落进历史。以前用户唯一的出路是**刷新整个页面**（手机版只能重启 App）——
- * 而「刷新页面 → 点开这个会话」做的事其实就是 `reloadConversation`：内置 拉服务端
- * 权威历史（断线期间那一轮往往已经跑完落盘了，真回复会顶掉这条错误）、acp 走
- * `session/load` 回放。所以这里直接给这条错误挂上同一个动作。
+ * 文本 part 落进历史，那颗按钮做的是 `reloadConversation`（等价于「刷新页面 → 点开它」）。
+ * 挪走的理由有三条：
  *
- * ## 两个细节
+ * - 「一条消息都没有」往往是**没加载成功** —— 那种状态下正文里**根本没有**这条错误 part，
+ *   按钮无从出现，可用户恰恰最需要重拉。手势不受这个前提约束（空态 / 错误态 / 正常态通用）。
+ * - 错误只是该重拉的**一种**时机，不是全部（断线重连后现场错乱、acp 会话要重放……）。
+ * - 按钮占着正文下方一行，窄屏上容易被输入框顶走。
  *
- * - **正在生成时禁用**：`reloadConversation` 会拒绝（权威历史会把流式现场整段盖掉），
- *   按钮先禁用比点了一下没反应好。
- * - **没有 `conversationId` 就不渲染按钮**：容器工作台 / 单独渲染的片段没有
- *   「重新加载这条会话」的语义（别拿 `activeConversationId` 顶替，多标签下会刷错会话）。
+ * ⚠️ 别把按钮加回来。重拉这条会话的入口只留消息区手势一处（`pull-to-refresh.tsx`），
+ * 多一个入口只会让「为什么这里还是旧的」这类问题更难解释。
  */
-function ErrorTextBlock({ text, conversationId }: { text: string; conversationId?: string }) {
-  const tr = useT()
-  const [busy, setBusy] = useState(false)
-  const running = useAgentStore((s) =>
-    conversationId ? !!s.runningConversations[conversationId] : false
-  )
-  const reload = (): void => {
-    if (!conversationId) return
-    setBusy(true)
-    void useAgentStore
-      .getState()
-      .reloadConversation(conversationId)
-      .finally(() => setBusy(false))
-  }
+function ErrorTextBlock({ text }: { text: string }) {
   return (
     <div className="flex flex-col items-start gap-1.5">
       <MessageResponse className="tracking-[0.02em]">{text}</MessageResponse>
-      {conversationId && (
-        <SpinnerButton
-          size="sm"
-          variant="outline"
-          className="h-7 gap-1.5 text-xs"
-          loading={busy}
-          disabled={running}
-          title={
-            running
-              ? tr('这一轮还在生成，先停止再重新加载')
-              : tr('重新从服务端拉这条会话（等同刷新页面后点开它）')
-          }
-          onClick={reload}
-        >
-          {!busy && <RefreshCw className="size-3.5" />}
-          {tr('重新加载')}
-        </SpinnerButton>
-      )}
     </div>
   )
 }
@@ -715,14 +681,6 @@ export interface PartViewProps {
    * 就没了停止钮。所以这里用「整条消息在跑」这个更宽的信号。
    */
   turnLive?: boolean
-  /**
-   * 这条 part 属于哪条会话 —— 只给错误块那颗「重新加载」用（见 `ErrorTextBlock`）。
-   *
-   * 不传就不渲染按钮：容器工作台 / 单独的片段渲染没有「重新加载这条会话」的语义。
-   * ⚠️ 别拿 store 里的 `activeConversationId` 顶替：多标签面板里同时挂着好几条会话，
-   * 后台标签上的错误会去刷**当前**那条。
-   */
-  conversationId?: string
   /** 该 part 是否是在等的 ask_followup_question（决定渲染成可作答的卡片） */
   followupPending?: boolean
   /**
@@ -738,7 +696,6 @@ function PartViewInner({
   part,
   streaming,
   turnLive,
-  conversationId,
   followupPending,
   followupResumable,
   onResolveFollowup
@@ -768,9 +725,9 @@ function PartViewInner({
      * 盒子，gap 也就不会为它留空。
      */
     if (!part.text.trim()) return null
-    // 错误（`⚠️ ` 前缀，见 `ERROR_TEXT_PREFIX`）：正文照原样渲染，后面挂「重新加载」
+    // 错误（`⚠️ ` 前缀，见 `ERROR_TEXT_PREFIX`）：正文照原样渲染（重拉走消息区下拉刷新手势）
     if (isErrorText(part.text)) {
-      return <ErrorTextBlock text={part.text} conversationId={conversationId} />
+      return <ErrorTextBlock text={part.text} />
     }
     // tracking 只加在正文上（思考 / 工具横条是 text-sm 的紧凑行，隔着 MessageContent 一起加会显得散）
     return <MessageResponse className="tracking-[0.02em]">{part.text}</MessageResponse>
