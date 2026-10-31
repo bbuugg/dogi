@@ -831,14 +831,11 @@ export function createConversationRunLoop(ctx: ConvCore) {
       scrollResetSeq: s.scrollResetSeq + 1,
       loading: false,
     }));
-    /**
-     * 这里原本有一段「把会话详情里的模型 / MCP / 浏览器偏好 / 思考强度搬进全局现场」
-     * 的恢复块（还要比对 `chatTarget` 引用，防止盖掉装载期间用户自己改的选择）。
-     *
-     * 现在不需要了：视图的现场从**会话清单项**派生（`scopedSettingsOf`），而
-     * `loadMessages` 收尾已经把刚拿到的详情校正进清单项 —— 派生出来自然就是最新的。
-     * 「搬运」这件事一旦存在，就总有人会漏掉某个分支、或者搬到错的会话上。
-     */
+    // 这里原本还有一段「把会话详情里的模型 / MCP / 浏览器偏好 / 思考强度搬进全局现场」
+    // 的恢复块（还得比对引用，防止盖掉装载期间用户自己改的选择）。现在不需要了：视图的
+    // 现场从**会话清单项**派生（`scopedSettingsOf`），`loadMessages` 收尾已经把详情校正
+    // 进清单项，派生出来自然最新 —— 「搬运」这件事一旦存在，就总会有人漏一个分支。
+    //
     // 本地没人订着这条会话、但服务端还挂着 run（刷新 / 断线重连 / 换端回来）：
     // 接回去回放现场继续看直播。接上了就到此为止 —— 收尾（拉权威历史 / 续队列）
     // 由 attachRun 的收场负责
@@ -849,11 +846,6 @@ export function createConversationRunLoop(ctx: ConvCore) {
     // 本会话没在跑但有排队消息：依次发出（刷新后也能续上；被停掉的那轮结束后同样接着跑）
     if (!get().runningConversations[conversationId]) pump(conversationId);
   };
-
-  /**
-   * 队列泵：当前会话没在跑且队列非空时，弹出第一条开新一轮（runRound 收尾时也会再调它，
-   * 形成「一条接一条」的链式执行）。切换走 / 正在跑 / 队列空都不动。
-   */
 
   const loadMessages = async (
     conversationId: string,
@@ -991,13 +983,13 @@ export function createConversationRunLoop(ctx: ConvCore) {
   };
 
   /**
-   * 这一轮收场：复位本地现场、拉服务端权威历史、把队列的下一条顶上来接着跑。
-   * `runRound` 与 `attachRun`（含断线重接循环）共用同一套收场语义。
+   * 队列泵：这条会话没在跑且队列非空时，弹出第一条开新一轮（`settleRound` 收尾时也会
+   * 再调它，形成「一条接一条」的链式执行）。正在跑 / 队列空都不动。
+   *
+   * `scope` 不传 = 活跃会话；分屏时非焦点标签的续跑带上自己的 id —— 队列是**那条会话
+   * 自己的事**，用户此刻在看哪块不该决定它跑不跑。
    */
-
   const pump = (scope?: string | null): void => {
-    // `scope` 不传 = 活跃会话；分屏时非焦点标签的「继续发送」带上自己的 id，
-    // 才不会去泵焦点会话的队列
     const conversationId = resolveConvId(scope);
     if (!conversationId) return;
     if (get().runningConversations[conversationId]) return;
@@ -1423,16 +1415,9 @@ export function createConversationRunLoop(ctx: ConvCore) {
   };
 
   /**
-   * 删消息（「仅删本条」与「本条及其后的全部」共用）：删服务端 → 回拉消息区。
-   * 调用方负责选好 id、做过守卫；这里只干删除 + 以服务端为准同步界面。
-   *
-   * `mode = 'from'` 走**一次**请求（`api.deleteMessagesFrom`）：早先是逐条 `deleteMessage`
-   * 循环，N 条消息 = N 次往返 + N 次整份会话落盘，长历史下要好几秒且界面毫无反应
-   * （用户报过「很慢、还能继续点别的消息」）。删除接口本来就回传会话列表，也不再单独拉一次。
-   *
-   * `deleting` 标记覆盖整个窗口（删除 + 回拉），消息区据此显示进度并暂时不收点击。
+   * 这一轮收场：复位本地现场、拉服务端权威历史、把队列的下一条顶上来接着跑。
+   * `runRound` 与 `attachRun`（含断线重接循环）共用同一套收场语义。
    */
-
   const settleRound = (conversationId: string, signal: AbortSignal): void => {
     writeSlice(conversationId, (s) => ({
       ...s,

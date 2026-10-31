@@ -7,6 +7,16 @@ import type { ConvRun } from "./context";
 export function createMessageOps(ctx: ConvRun) {
   const { set, get, api, writeSlice, loadMessages } = ctx;
 
+  /**
+   * 删消息（「仅删本条」与「本条及其后的全部」共用）：删服务端 → 回拉消息区。
+   * 调用方负责选好 id、做过守卫；这里只干删除 + 以服务端为准同步界面。
+   *
+   * `mode = 'from'` 走**一次**请求（`api.deleteMessagesFrom`）：早先是逐条 `deleteMessage`
+   * 循环，N 条消息 = N 次往返 + N 次整份会话落盘，长历史下要好几秒且界面毫无反应
+   * （用户报过「很慢、还能继续点别的消息」）。删除接口本来就回传会话列表，也不再单独拉一次。
+   *
+   * `deleting` 标记覆盖整个窗口（删除 + 回拉），消息区据此显示进度并暂时不收点击。
+   */
   const removeMessages = async (
     conversationId: string,
     messageId: string,
