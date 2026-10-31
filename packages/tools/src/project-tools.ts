@@ -41,10 +41,27 @@ export interface ProjectDirsResult {
 }
 
 /**
+ * 变更类工具的闸门依赖（项目工具 / 模型配置工具共用，见 `guardMutation`）。
+ *
+ * 拆出来是为了让 `model-tools.ts` 复用同一个实现 —— 两套工具的作用域都在单个工作区之外，
+ * 审批口径必须一致：`readonly` 一律拒绝、其余档一律弹审批。
+ */
+export interface MutationGuardDeps {
+  permissionMode: 'full' | 'confirm' | 'readonly'
+  /**
+   * 运行中实时读取权限档（优先于 `permissionMode`）。工具集一轮建一次，静态档会把权限
+   * 快照死在整轮里；传 getter 则闸门每次调用现取。**只影响 `readonly` 那一档的判定**
+   * ——项目工具恒弹审批（见 `guardMutation`），切到只读能立刻拒绝、切回不放松审批。
+   */
+  getPermissionMode?: () => 'full' | 'confirm' | 'readonly'
+  requestConfirm?: (req: AgentConfirmInput) => Promise<boolean>
+}
+
+/**
  * 工具组依赖:服务端(lib/server/projects.ts + state.ts 的 domain)注入实现,
  * 验证脚本注入 mock。签名全部结构化,不引任何具体类。
  */
-export interface ProjectToolsDeps {
+export interface ProjectToolsDeps extends MutationGuardDeps {
   projects: {
     createProject(input: ProjectCreateInput): Promise<AgentWorkspace>
     removeProject(id: string, input?: { deleteWorktree?: boolean }): Promise<AgentWorkspace[]>
@@ -77,14 +94,6 @@ export interface ProjectToolsDeps {
     listWorkspaces(): AgentWorkspace[]
     getWorkspace(id: string): AgentWorkspace | undefined
   }
-  permissionMode: 'full' | 'confirm' | 'readonly'
-  /**
-   * 运行中实时读取权限档（优先于 `permissionMode`）。工具集一轮建一次，静态档会把权限
-   * 快照死在整轮里；传 getter 则闸门每次调用现取。**只影响 `readonly` 那一档的判定**
-   * ——项目工具恒弹审批（见 `guardMutation`），切到只读能立刻拒绝、切回不放松审批。
-   */
-  getPermissionMode?: () => 'full' | 'confirm' | 'readonly'
-  requestConfirm?: (req: AgentConfirmInput) => Promise<boolean>
 }
 
 /** 「给某个项目建会话」的入参 / 出参(服务端实现见 lib/server/conversation-create.ts) */
@@ -268,9 +277,13 @@ ${indentBlock(executeBody.trim(), 8)}
 `
 }
 
-/** 变更类操作的统一闸门。返回 null = 放行;返回字符串 = 直接作为工具结果(回绝说明) */
-async function guardMutation(
-  deps: ProjectToolsDeps,
+/**
+ * 变更类操作的统一闸门。返回 null = 放行;返回字符串 = 直接作为工具结果(回绝说明)。
+ *
+ * 项目工具与模型配置工具（`model-tools.ts`）共用这一份 —— 作用域都在单个工作区之外。
+ */
+export async function guardMutation(
+  deps: MutationGuardDeps,
   args: { needsConfirm: boolean; denied: string; command: string; toolCallId: string; toolName: string }
 ): Promise<string | null> {
   if ((deps.getPermissionMode?.() ?? deps.permissionMode) === 'readonly') {

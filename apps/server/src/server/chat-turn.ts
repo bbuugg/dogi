@@ -538,8 +538,9 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
       if (event.usage) turnUsage = event.usage
       if (event.durationMs != null) turnDurationMs = event.durationMs
     }
-    // 内容折叠(聊天 / 助手共用,见 `agent-parts.ts`):tool-call-delta 不落盘、retry 清空
-    // 已累积的部分输出,其余按形状归位;帧本身照旧下发(前端要的就是它)。
+    // 内容折叠(聊天 / 助手共用,见 `agent-parts.ts`):tool-call-delta 不落盘、retry 按
+    // 整轮重来 / 断点续跑分别「全清」与「回滚到最后一次工具结果」,其余按形状归位;
+    // 帧本身照旧下发(前端要的就是它)。
     foldEventIntoParts(assistantParts, event)
     emit(run, { type: 'event', requestId, event })
   }

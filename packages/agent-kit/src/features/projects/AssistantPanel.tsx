@@ -19,9 +19,16 @@
  * 挂载只 `ensureAssistantSession`（有当前会话就复用），卸载**不**清 —— 收起 / 展开、
  * 切标签都保持同一段对话。
  *
- * 其余（消息渲染 / 审批卡 / 模型 pill）两种形态完全一致。
+ * 其余（消息渲染 / 消息操作行 / 审批卡 / 模型 pill）两种形态完全一致。
+ *
+ * ## 消息可以编辑 / 删除（与主会话同款）
+ *
+ * 助手历史只有前端一份（服务端每轮收 `history`、自己不存），所以「编辑并重发」就是
+ * 本地截断：把该条及其后的消息切掉，再用改后的文本发一轮（见 `resendAssistantMessage`）。
+ * 别再把这里换成 ACP 那套只读的 `CopyOnlyActions` —— 那是「历史在 agent 侧」的约束，
+ * 助手不成立。
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Check,
   ChevronDown,
@@ -40,9 +47,15 @@ import {
   saveAssistantTarget,
   type AssistantTarget
 } from '@fizz/agent-kit/shared/lib/assistant-target'
-import { ChatSurface, CopyOnlyActions } from '@fizz/agent-kit/features/chat/chat-surface'
+import { ChatSurface } from '@fizz/agent-kit/features/chat/chat-surface'
 import { ConfirmQueue } from '@fizz/agent-kit/features/chat/ConfirmCard'
-import { CHAT_PILL, PermissionPill } from '@fizz/agent-kit/features/chat/composer'
+import { PermissionPill } from '@fizz/agent-kit/features/chat/composer'
+import { EditMessageBar } from '@fizz/agent-kit/features/chat/EditMessageBar'
+import { MessageActionRow } from '@fizz/agent-kit/features/chat/message-parts'
+import { ModelPicker } from '@fizz/agent-kit/features/chat/ModelPicker'
+import { useAppContext } from '@fizz/agent-kit/shared/hooks/use-app-context'
+import { textOf } from '@fizz/agent-kit/shared/lib/parts'
+import type { AgentChatMessage } from '@fizz/contracts/agent-api'
 import { Button } from '@fizz/ui/button'
 import {
   DropdownMenu,
@@ -94,6 +107,8 @@ export function AssistantPanel({
   const deleteAssistantSession = useAgentStore((s) => s.deleteAssistantSession)
   const setAssistantDraft = useAgentStore((s) => s.setAssistantDraft)
   const sendAssistant = useAgentStore((s) => s.sendAssistant)
+  const resendAssistantMessage = useAgentStore((s) => s.resendAssistantMessage)
+  const deleteAssistantMessage = useAgentStore((s) => s.deleteAssistantMessage)
   const stopAssistant = useAgentStore((s) => s.stopAssistant)
   // 模型清单镜像(state-ws 快照,设置页增删模型后自动到)
   const modelConfigs = useAgentStore((s) => s.models)
@@ -135,25 +150,27 @@ export function AssistantPanel({
     saveAssistantTarget(target)
   }, [target])
 
+  /**
+   * 模型 pill 的清单：只留**至少带一个模型**的配置（一条都没有的选了也发不出去，
+   * 下拉里干脆不出现）。空判定留给 `ModelPicker`，这边不再自己算 targetValue / 标签。
+   */
   const modelOptions = useMemo(
     () => modelConfigs.filter((m) => m.models.length > 0),
     [modelConfigs]
   )
-  const targetValue =
-    target && modelOptions.some((o) => o.id === target.configId && o.models.some((model) => model.id === target.modelId))
-      ? `${target.configId}:${target.modelId}`
-      : ''
+  /** 模型项右侧那个上下文窗口数字的兜底值（服务端没配就是 null → 走 ModelPicker 默认） */
+  const defaultContextWindow = useAgentStore((s) => s.defaultContextWindow)
+  const loadDefaultContextWindow = useAgentStore((s) => s.loadDefaultContextWindow)
   /**
-   * 触发器上的短标签：与主会话那颗模型 pill（`ChatPanel` 的 `ModelSelect`）**同构** ——
-   * 面上只给模型名，提供商（配置名）挪进 title（见 `targetTitle`），超长靠 title 看全。
-   * 面板本来就窄，pill 还带 `max-w-48`（`CHAT_PILL`），「配置 · 模型」会被截掉尾巴。
+   * 助手面板没有 `ContextRing`，没人替它拉兜底窗口 —— 模型下拉里的窗口数字会一直按
+   * `DEFAULT_CONTEXT_WINDOW` 显示，与服务端 `FIZZ_CONTEXT_BUDGET` 对不上。这里补一次；
+   * store 内部有缓存，主会话已经拉过就不会再发请求。
    */
-  const targetLabel = targetValue && target ? target.modelId : '选择模型'
-  /** 悬停提示：`配置 · 模型`（与主会话 `targetLabel(app)` 那颗 title 同构） */
-  const targetTitle =
-    targetValue && target
-      ? `${modelOptions.find((o) => o.id === target.configId)?.name ?? target.configId} · ${target.modelId}`
-      : '未选时由服务端取第一份可用模型'
+  useEffect(() => {
+    void loadDefaultContextWindow()
+  }, [loadDefaultContextWindow])
+  /** 模型下拉里的齿轮 → 「设置 → AI 模型」；与主会话那颗走同一条通路 */
+  const { openSettingsTab } = useAppContext()
 
   /**
    * 切换器里的清单：按更新时间倒序。**空会话不列**（新建了还没说话的那些是噪音），
@@ -178,9 +195,84 @@ export function AssistantPanel({
   /** 「删除这段会话」的二次确认（与设置里删模型 / 删密钥同一个弹窗） */
   const [confirmDelete, setConfirmDelete] = useState(false)
 
+  /**
+   * 正在编辑重发的消息（null = 没在编辑）。与主会话同一套语义：原文灌进输入框、
+   * 记下重发起点，发送时**先截掉该条及其后的全部消息**再发
+   * （`resendAssistantMessage`，纯本地截断 —— 助手历史本来就只有前端一份）。
+   *
+   * 连 `sessionId` 一起记：消息 id 只在它那段会话里成立，切走之后拿它去截断
+   * 就是往另一段里删东西。下面按会话切换清掉。
+   */
+  const [editing, setEditing] = useState<{
+    id: string
+    text: string
+    sessionId: string
+  } | null>(null)
+  /** 输入框引用：点「编辑」把焦点还给输入框（与主会话一致） */
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+
+  // 换会话就退出编辑态（草稿刻意不动：用户可能已经改了几个字，清掉比留着更糟）
+  const sessionId = session?.sessionId ?? null
+  useEffect(() => {
+    setEditing(null)
+  }, [sessionId])
+
+  /**
+   * 只有「属于当前会话、且那条消息还在」的编辑态才算数：消息被删 / 被截断之后
+   * 残留的 id 拿去重发只会扑空。派生而不是靠 effect 清，少一次渲染。
+   */
+  const activeEditing =
+    editing &&
+    session &&
+    editing.sessionId === session.sessionId &&
+    session.messages.some((m) => m.id === editing.id)
+      ? editing
+      : null
+
+  /** 点消息上的「编辑并重发」：原文回填输入框 + 标记起点，聚焦让用户接着改 */
+  const startEdit = (message: AgentChatMessage): void => {
+    if (!session) return
+    const text = textOf(message)
+    if (!text) return
+    setAssistantDraft(text)
+    setEditing({ id: message.id, text, sessionId: session.sessionId })
+    requestAnimationFrame(() => textareaRef.current?.focus())
+  }
+
+  /** 退出编辑态：清标记 + 清掉输入框里那份草稿（与主会话 `cancelEdit` 同款） */
+  const cancelEdit = (): void => {
+    setEditing(null)
+    setAssistantDraft('')
+    requestAnimationFrame(() => textareaRef.current?.focus())
+  }
+
   const submit = (): void => {
     const text = draft.trim()
     if (!text || streaming) return
+    const resendTarget = activeEditing
+    if (resendTarget) {
+      /**
+       * 编辑重发：先摘编辑态再发（发出去的就是「改后的新消息」，输入框里不该还挂着条）。
+       * 被拒（这一轮还在跑 / 那条没了）时把编辑态还回去 —— 那几条消息没被删，
+       * 用户还停在「编辑它」的语境里（与 `ChatPanelInner` 的 `submit` 同一处理）。
+       */
+      setEditing(null)
+      void resendAssistantMessage(
+        resendTarget.id,
+        text,
+        scope,
+        target ?? undefined,
+        boundTerminalTabKey ?? null,
+        permissionMode
+      ).then(
+        (ok) => {
+          if (ok) setAssistantDraft('')
+          else setEditing(resendTarget)
+        },
+        () => setEditing(resendTarget)
+      )
+      return
+    }
     void sendAssistant(
       text,
       scope,
@@ -324,8 +416,32 @@ export function AssistantPanel({
               </div>
             </div>
           ),
-          // 助手历史在本地内存里、改不了，只留复制
-          renderActions: CopyOnlyActions
+          /**
+           * 操作行就是主会话那一颗（`MessageActionRow`）：助手历史只有前端一份
+           * （`slices/assistant.ts`），编辑 / 删除都是纯本地操作。以前这里挂的是 ACP
+           * 那套「历史在 agent 侧、改不了」的 `CopyOnlyActions`，把一条不成立的约束
+           * 一起继承了过来 —— 结果同一个消息列表，主会话能改、助手不能。
+           *
+           * 不接「从此签出」：助手没有会话分叉的语义（`onFork` 不传即不渲染）。
+           */
+          renderActions: ({ message, index, total }) => {
+            // 正在编辑的那条不挂：标识交给「输入框里的编辑条 + 这条的描边」，
+            // 操作行再杵着只会多一个能点的入口（再点一次「编辑」没意义，
+            // 「删除」正对着要重发的内容）
+            if (activeEditing?.id === message.id) return null
+            const text = textOf(message)
+            return (
+              <MessageActionRow
+                message={message}
+                deleteCount={total - index}
+                // 只有工具调用、没有正文的那条不给编辑（灌进输入框只会是一段空草稿）
+                onEdit={text ? () => startEdit(message) : undefined}
+                onDelete={(mode) => deleteAssistantMessage(message.id, mode)}
+              />
+            )
+          },
+          /** 编辑中的那条加描边压暗 —— 与输入框里那条「编辑消息」是一对标识 */
+          editingMessageId: activeEditing?.id ?? null
         }}
         composer={{
           value: draft,
@@ -338,65 +454,49 @@ export function AssistantPanel({
           // 折行的那半截就被裁掉了。Enter 发送 / Shift+Enter 换行是 Composer 的固定行为
           // （见其文件头注释），面板里不再用占位文案复述。
           placeholder: embedded ? '让助手执行 / 读取这个终端…' : '让助手创建 / 打开 / 删除项目…',
-            variant: 'panel',
-            // 窄面板：输入框初始收成一行高（内容变长仍会自己长高）
-            compact: true,
-            // 工具权限：与主会话同一颗 pill（`PermissionPill`，图标编码档位、档名进 tooltip）。
-            // 助手面板是「一句话就让 agent 动手」的入口，没有这一档就等于默认裸跑 ——
-            // 终端助手的 run_in_terminal / send_keys 会直接在你眼前那台终端里执行。
-            // 只用图标（`CHAT_ICON_PILL`，32px）：面板本来就窄，一颗带文字的 pill 会把
-            // 模型 pill 挤掉。
-            leading: <PermissionPill value={permissionMode} onChange={handlePermissionChange} />,
-            // 模型 pill：与主会话（ChatPanel 的 ModelSelect）同一颗皮（`CHAT_PILL`）——
-            // 无边框胶囊 + 前置 Sparkles + 不画右侧箭头。助手只有内置 Agent 的
-            // 「配置 × 模型」，没有 ACP 那层，所以一个下拉按配置分组铺开即可。
-            trailing: (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button
-                    type="button"
-                    aria-label="助手模型"
-                    title={targetTitle}
-                    className={CHAT_PILL}
-                  >
-                    <Sparkles className="size-3.5 shrink-0 text-muted-foreground" />
-                    <span className="truncate">{targetLabel}</span>
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent
-                  side="top"
-                  align="end"
-                  sideOffset={6}
-                  className="max-h-80 min-w-56 overflow-y-auto"
-                >
-                  {modelOptions.length === 0 ? (
-                    <div className="px-2 py-1.5 text-xs text-muted-foreground">还没有可用模型</div>
-                  ) : (
-                    modelOptions.map((config) => (
-                      <DropdownMenuGroup key={config.id}>
-                        {/* 组名用与主会话同款的小号灰字（避免和模型项混成一片） */}
-                        <DropdownMenuLabel className="px-2 text-xs font-normal text-muted-foreground">
-                          {config.name}
-                        </DropdownMenuLabel>
-                        {config.models.map((model) => {
-                          const modelId = model.id
-                          const value = `${config.id}:${modelId}`
-                          return (
-                            <DropdownMenuItem
-                              key={value}
-                              onSelect={() => setTarget({ configId: config.id, modelId })}
-                            >
-                              <span className="truncate">{modelId}</span>
-                              {targetValue === value && <Check className="ml-auto size-3.5" />}
-                            </DropdownMenuItem>
-                          )
-                        })}
-                      </DropdownMenuGroup>
-                    ))
-                  )}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            ),
+          /**
+           * 卡片内（`header` 槽）：编辑重发时那条「编辑消息」提示条 —— 与消息列表里
+           * 该条的描边压暗是一对标识，写明「重发会删掉本条及其后的消息」。
+           * 助手没有待发送队列 / 插话，这里只会有这一条。
+           */
+          header: activeEditing ? (
+            <EditMessageBar text={activeEditing.text} onCancel={cancelEdit} />
+          ) : undefined,
+          /** 编辑时把焦点还给输入框（`startEdit` / `cancelEdit` 用） */
+          textareaRef,
+          variant: 'panel',
+          // 窄面板：输入框初始收成一行高（内容变长仍会自己长高）
+          compact: true,
+          // 工具权限：与主会话同一颗 pill（`PermissionPill`，图标编码档位、档名进 tooltip）。
+          // 助手面板是「一句话就让 agent 动手」的入口，没有这一档就等于默认裸跑 ——
+          // 终端助手的 run_in_terminal / send_keys 会直接在你眼前那台终端里执行。
+          // 只用图标（`CHAT_ICON_PILL`，32px）：面板本来就窄，一颗带文字的 pill 会把
+          // 模型 pill 挤掉。
+          leading: <PermissionPill value={permissionMode} onChange={handlePermissionChange} />,
+          // 模型 pill：**就是主会话那一颗**（`ModelPicker`；`ModelSelect` 是它的会话版薄壳）。
+          // 以前这里手写过一份平铺下拉，结果两边分叉成两个功能 —— 二级菜单、上下文窗口、
+          // 设置齿轮、手机拍平、中英文案全少了一半。合并后这些只有一份实现。
+          // 助手不接 ACP（`showAcp={false}`），下拉里只有「AI 模型」一组。
+          trailing: (
+            <ModelPicker
+              models={modelOptions}
+              acpAgents={[]}
+              showAcp={false}
+              value={
+                target
+                  ? { backend: 'builtin', configId: target.configId, modelId: target.modelId }
+                  : null
+              }
+              onChange={(next) => {
+                // showAcp={false} 时只可能回调 builtin；防御一下别把半截目标写进偏好
+                if (next.backend !== 'builtin' || !next.configId || !next.modelId) return
+                setTarget({ configId: next.configId, modelId: next.modelId })
+              }}
+              defaultContextWindow={defaultContextWindow ?? undefined}
+              onOpenSettings={openSettingsTab}
+              emptyTitle="未选时由服务端取第一份可用模型（下一轮生效）"
+            />
+          ),
           above: (
             <>
               {/* 待答复的审批:与主会话同一张卡、同一个答复端点 */}

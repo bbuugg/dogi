@@ -27,6 +27,38 @@ import { type BrowserSettings } from "@fizz/contracts";
 
 export type { QueuedMessage };
 
+/**
+ * 一轮要用哪个模型 / 后端。`configId` = 内置模型配置 id 或 ACP agent id。
+ *
+ * 单独提出来是因为它有两个消费方：`ConversationSlice.chatTarget`（单份现场）与
+ * `ScopedSettings`（按会话派生）。两处形状必须完全一致，否则 composer 的 pill
+ * 在「焦点标签」与「非焦点标签」之间会显示成两种东西。
+ */
+export type ChatTarget = {
+  backend: AgentBackend;
+  configId?: string;
+  /** 内置 下：这份配置里具体用哪个上游模型（`AiModelConfig.models` 的一项） */
+  modelId?: string;
+};
+
+/**
+ * 某个会话「自己的现场」：模型 / 思考强度 / MCP / 浏览器偏好。
+ *
+ * 这四项在 store 上是**单份**的（`chatTarget` 等），语义是「焦点会话的现场」——
+ * `openConversation` 每次都按传入的会话重写它们。单标签下没问题（焦点即视图），
+ * 但主区域**分屏**时两个标签同时可见：非焦点那个的 composer 也会跟着焦点标签一起变
+ * （用户报的「点一下标签，两个标签的模型 pill 都同步了」）。
+ *
+ * 所以视图层不直接读那四个字段，走 `scopedSettingsOf` 按会话取。
+ */
+export interface ScopedSettings {
+  chatTarget: ChatTarget | null;
+  reasoningEffort: AiReasoningEffort | null;
+  mcpServerIds: string[];
+  /** 会话没设过时是 `null`（界面按 `defaultBrowserSettings` 显示），与字段本身语义一致 */
+  browserSettings: BrowserSettings | null;
+}
+
 // ---------------------------------------------------------------------------
 // 每会话一份的「对话现场」（slice）
 // ---------------------------------------------------------------------------
@@ -138,7 +170,12 @@ export interface ConvSlice {
    * 模型请求正在重试：显示「第 N 次重试」的**单条**提示（每次重试自替换，屏幕上只留最新一条）。
    * null = 当前没在重试。属于「通知」不是消息 part（不落盘，见 handleFrame）。
    */
-  retryNotice: { attempt: number; maxRetries: number | null } | null;
+  retryNotice: {
+    attempt: number;
+    maxRetries: number | null;
+    /** `true` = 断点续跑（已渲染的内容没被清空，只回滚了失败那一步） */
+    resume?: boolean;
+  } | null;
   /**
    * 连接断了但服务端那轮还在跑：正在自动重接（第几次）。null = 连接正常 / 没在重接。
    * 属于「通知」不是消息 part（不落盘，见 `attachRun` 的断线重接循环）。
@@ -215,6 +252,16 @@ export interface ConversationSlice {
   activeWorkspaceId: string | null;
   activeConversationId: string | null;
   /**
+   * ⚠️ `chatTarget` / `reasoningEffort` / `mcpServerIds` / `browserSettings` 这四项是
+   * **焦点会话的现场**（`openConversation` 每次按传入会话重写），不是全局偏好、也不是
+   * 「所有标签共用一份」。
+   *
+   * 主区域分屏时两个标签同时可见，非焦点那个必须按**自己的会话**读 —— 走
+   * `scopedSettingsOf(id)`，别直接读这四项：以前直接读，点一下标签两个 composer 的
+   * 模型 pill / MCP / 浏览器开关就一起变（用户报过）。
+   *
+   * ---
+   *
    * 本轮要用的模型 / 后端。打开会话时从它自己记住的配置恢复；`null` = 还没选
    * （界面显示「选择模型」，发送会被拦下并提示）。
    *
@@ -222,12 +269,7 @@ export interface ConversationSlice {
    * 「清单第一份」的自动预选**：配置 / agent 被删、模型下架时显示「选择模型」，
    * 让用户自己选，而不是替他挑一个从没选过的模型。
    */
-  chatTarget: {
-    backend: AgentBackend;
-    configId?: string;
-    /** 内置 下：这份配置里具体用哪个上游模型（`AiModelConfig.models` 的一项） */
-    modelId?: string;
-  } | null;
+  chatTarget: ChatTarget | null;
   /**
    * 当前会话的**思考强度**（内置 Agent 专用；持久化在会话上，刷新还在）。
    *
@@ -313,15 +355,34 @@ export interface ConversationSlice {
       modelId?: string;
     } | null,
   ) => void;
-  setChatTarget: (
-    target: {
-      backend: AgentBackend;
-      configId?: string;
-      modelId?: string;
-    } | null,
+  /**
+   * 取某个会话「自己的现场」（模型 / 思考强度 / MCP / 浏览器偏好）。
+   *
+   * `null`（新对话页）与当前焦点会话 → store 上那份（含「改了还没发送」的中间态）；
+   * 其余会话 → 从会话清单派生（它落盘的客观配置）。分屏时视图层必须走这里，
+   * 别直接读 `chatTarget` 那四项 —— 详见 `ConversationSlice` 顶部的警告。
+   */
+  scopedSettingsOf: (conversationId: string | null) => ScopedSettings;
+  /**
+   * 切换本轮的模型 / 后端。
+   *
+   * `scope`（第三个「作用域」参数全 store 统一）：
+   * - 不传 = 旧行为，作用于 `activeConversationId`（焦点会话），没有会话就写草稿态；
+   * - `null` = 明确「新对话页」，只写草稿态（`chatTarget`），不落任何会话；
+   * - 会话 id = 作用于**那个会话**（分屏时在非焦点标签改模型就走这条）：焦点会话仍
+   *   同步那份全局现场，非焦点会话只更新它自己（乐观改写清单 + 落盘）。
+   *
+   * 没有 `scope` 的话，分屏里在 B 标签选模型会把 A（焦点）会话的待发目标一起改掉。
+   */
+  setChatTarget: (target: ChatTarget | null, scope?: string | null) => void;
+  /**
+   * 改这个会话的思考强度（`null` = 跟随模型默认）；新任务页 = 待定选择。
+   * `scope` 语义同 `setChatTarget`。
+   */
+  setReasoningEffort: (
+    effort: AiReasoningEffort | null,
+    scope?: string | null,
   ) => void;
-  /** 改这个会话的思考强度（`null` = 跟随模型默认）；新任务页 = 待定选择 */
-  setReasoningEffort: (effort: AiReasoningEffort | null) => void;
   /**
    * 新任务页选中 ACP agent 时探一次它的档位（模式 / 思考档）。
    *
@@ -336,16 +397,21 @@ export interface ConversationSlice {
   /** 清掉草稿态（切回内置 agent / 建完会话后调） */
   clearDraftAcp: () => void;
   /**
-   * 设置当前会话允许使用的 MCP server 清单（全量覆盖，空 = 全不选）。
-   * 有活动会话立刻持久化；没有（新任务页）则留作待定选择，随会话创建落库。
+   * 设置允许使用的 MCP server 清单（全量覆盖，空 = 全不选）。
+   * 有会话立刻持久化；没有（新任务页）则留作待定选择，随会话创建落库。
+   * `scope` 语义同 `setChatTarget`。
    */
-  setMcpServerIds: (ids: string[]) => void;
+  setMcpServerIds: (ids: string[], scope?: string | null) => void;
   /**
-   * 设置**当前会话**的浏览器偏好（总开关 / 来源）。传入的是**部分字段**，与当前值合并后
-   * 整体落库（服务端的 target 契约是整体对象语义）。
-   * 有活动会话立刻持久化；没有（新任务页）则留作待定选择，随会话创建落库。
+   * 设置**某个会话**的浏览器偏好（总开关 / 来源）。传入的是**部分字段**，与该会话
+   * 当前值合并后整体落库（服务端的 target 契约是整体对象语义）。
+   * 有会话立刻持久化；没有（新任务页）则留作待定选择，随会话创建落库。
+   * `scope` 语义同 `setChatTarget`。
    */
-  setBrowserSettings: (patch: Partial<BrowserSettings>) => void;
+  setBrowserSettings: (
+    patch: Partial<BrowserSettings>,
+    scope?: string | null,
+  ) => void;
   setPermissionMode: (mode: AiPermissionMode) => void;
   /**
    * 设置**当前 ACP 会话**的权限答复策略（`confirm` = 逐次问；`allow` = 应用层自动放行）。
@@ -465,7 +531,15 @@ export interface ConversationSlice {
   ) => Promise<boolean>;
 
   // ---------- 发一轮 ----------
-  enqueueMessage: (text: string, files?: UploadFileRef[]) => void;
+  /**
+   * 塞进某会话的待发送队列。`scope` 语义同 `setChatTarget`（分屏下必须指明是哪个
+   * 会话的 composer 在排队，否则会排到焦点会话上）。
+   */
+  enqueueMessage: (
+    text: string,
+    files?: UploadFileRef[],
+    scope?: string | null,
+  ) => void;
   removeQueuedMessage: (id: string) => void;
   updateQueuedMessage: (id: string, text: string) => void;
   /** 拖拽排序：把 `id` 这一条挪到 `beforeId` 前面（`beforeId` 为空 = 挪到最后） */
@@ -525,6 +599,13 @@ export interface ConversationSlice {
     text: string,
     files?: UploadFileRef[],
     onStarted?: () => void,
+    /**
+     * 发到哪个会话。语义与 `setChatTarget` 的 `scope` 一致，但这里 `null` 表示
+     * **明确没有会话**（新对话页的 composer → 建一个新会话），不会回落焦点会话。
+     *
+     * 分屏下这是必须的：两个标签同时可见，用户在非焦点标签里发消息不能发到焦点会话上。
+     */
+    scope?: string | null,
   ) => Promise<boolean>;
   /**
    * 运行中插话：活跃会话在跑 → 递服务端收件箱（agent 下一个工具步骤边界注入）；
@@ -537,6 +618,7 @@ export interface ConversationSlice {
     text: string,
     files?: UploadFileRef[],
     onStarted?: () => void,
+    scope?: string | null,
   ) => Promise<boolean>;
   /** 撤回一条还没生效的插话（removed=false = 已消费；本地照移，等 user-injected 对账） */
   removeSteer: (messageId: string) => Promise<void>;
@@ -555,7 +637,8 @@ export interface ConversationSlice {
    * **以新一轮的普通消息发出去**（文本 + 附件一起）。会话进行中忽略（跑着时那颗钮禁用）。
    */
   sendSteer: (messageId: string) => void;
-  stop: () => Promise<void>;
+  /** 停当前会话这一轮（`scope` 语义同 `setChatTarget`；分屏时传本标签的会话） */
+  stop: (scope?: string | null) => Promise<void>;
   /**
    * 停止**指定会话**当前正在跑的那一轮（不依赖「谁是当前会话」）。
    *
@@ -570,16 +653,22 @@ export interface ConversationSlice {
    * `POST /api/chat/command/stop`；服务端杀进程树，工具结果收尾成「（已中止）」，
    * Agent 同一回合继续。**不动整轮**（那叫 `stop`）。
    */
-  stopCommand: (toolCallId: string) => Promise<void>;
+  stopCommand: (toolCallId: string, scope?: string | null) => Promise<void>;
 
   // ---------- 审批 / 提问 ----------
+  /**
+   * `scope` 只用于「把审批卡从哪个会话的现场撤掉」——分屏时在非焦点标签点审批，
+   * 卡片必须从那个会话消失，而不是从焦点会话消失。
+   */
   resolveConfirm: (
     id: string,
     approved: boolean,
     optionId?: string,
+    scope?: string | null,
   ) => Promise<void>;
   resolveFollowup: (
     toolCallId: string,
     answer: AskFollowupAnswer | null,
+    scope?: string | null,
   ) => Promise<void>;
 }

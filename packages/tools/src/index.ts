@@ -20,6 +20,9 @@
  *   它只服务没有 execute_command 的 subagent（父 agent 要看 diff 自己跑 git，那边有审批）。
  * - `project-tools.ts` —— 项目管理工具组（创建 / 列出 / 打开 / 删除项目与 worktree），
  *   服务能力经 deps 注入，普通会话与项目助手共用；
+ * - `model-tools.ts` —— 模型配置工具组（配置的列 / 增 / 改 / 删、从上游拉模型清单、
+ *   配置下模型条目的增 / 改 / 删）。**只挂给全局 AI 助手**，与 project-tools 共用
+ *   `guardMutation` 的审批口径；
  * - `playwright-browsers.ts` —— 打包态（Electron）下把 playwright 指到随包分发的
  *   chromium（`extraResources` 拷进来的 headless shell），dev / server / cli 不受影响。
  */
@@ -32,5 +35,6 @@ export * from './output-log'
 export * from './ansi'
 export * from './git-read'
 export * from './project-tools'
+export * from './model-tools'
 export * from './playwright-browsers'
 export * from './browser'

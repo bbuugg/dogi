@@ -28,6 +28,28 @@ export function errorTextBody(text: string): string {
 }
 
 /**
+ * 断点续跑的回滚点：只保留到**最后一个已落定的工具结果**，其后的一律丢掉。
+ *
+ * 为什么是这个位置：续跑的前提是「上一次尝试已经跑完若干步」，而步与步之间的唯一边界
+ * 就是工具结果（`onStepBoundary` 只在这之后被调用）。所以最后一个已落定的工具结果
+ * **之前**的内容模型都看得见（断点里就有），必须留着；**之后**的内容属于失败的那一步，
+ * 模型会重新生成，留着就会和新增量重复。
+ *
+ * 一个已落定的工具都没有时返回空数组：那种情况本来就不该有断点（第一步就失败了），
+ * 退回「清空重来」是最安全的。
+ */
+export function truncateToLastSettledTool(parts: AgentMessagePart[]): AgentMessagePart[] {
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const part = parts[i]
+    if (!part) continue
+    // tool-result 是「找不到对应 tool-call」时的兜底 part，它本身就是落定的结果
+    if (part.type === 'tool-result') return parts.slice(0, i + 1)
+    if (part.type === 'tool-call' && part.output !== undefined) return parts.slice(0, i + 1)
+  }
+  return []
+}
+
+/**
  * `liveOutput`（运行中命令的实时输出）的字符上限：超过只保留尾部。
  *
  * `yes` / `find /` / 长构建能把 stdout 刷到几十 MB，而实时输出是**渲染态**
@@ -261,9 +283,12 @@ export function applyEvent(parts: AgentMessagePart[], event: AgentStreamEvent): 
       next.push({ type: 'text', text: `${ERROR_TEXT_PREFIX}${event.message}` })
       return next
     case 'retry':
-      // 重试 = 从头再跑这一轮：丢掉这一次尝试已渲染的部分输出（避免正文重复）。
+      // 两种重试对渲染的要求不同：
+      // - 整轮重来：丢掉这一次尝试已渲染的全部输出（避免正文重复）；
+      // - 断点续跑（`resume`）：模型接着失败的那一步跑，已完成的步骤它看得见 —— 全清会
+      //   和上下文对不上，只回滚到最后一个已落定的工具结果。
       // 重试提示本身不是内容增量，由 handleFrame 路由到单独 state（见 conversation.ts）。
-      return []
+      return event.resume ? truncateToLastSettledTool(next) : []
     case 'finish':
       return next
     // context-compressed / context-compaction-* 是「通知」不是内容增量：不往 parts
@@ -471,6 +496,15 @@ export const TOOL_LABELS: Record<string, string> = {
   delete_task_trigger: '删除定时任务',
   set_task_trigger_enabled: '启停定时任务',
   create_plugin: '创建插件',
+  // 全局助手的模型配置工具：改的是「设置 → 模型」里那份全局配置（网关 / key / 模型清单）
+  list_model_configs: '列出模型配置',
+  fetch_upstream_models: '拉取模型清单',
+  create_model_config: '新建模型配置',
+  update_model_config: '修改模型配置',
+  delete_model_config: '删除模型配置',
+  add_model_entries: '添加模型',
+  update_model_entry: '修改模型条目',
+  remove_model_entry: '移除模型条目',
   // 子任务（subagent）派活：引擎的工具名就是 `agent-<subagentId>`，见
   // packages/agent/src/subagents.ts 的 SUBAGENT_SPECS。不用图标区分主次，
   // 一张卡 + 「子任务 · xxx」的标题已经够读。

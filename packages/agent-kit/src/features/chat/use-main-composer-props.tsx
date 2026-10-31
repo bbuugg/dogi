@@ -313,11 +313,16 @@ export function useMainComposerProps(
     above: (
       <>
         {/* 浏览器 / MCP 开关只在 内置（本地）链路生效：browser_* 工具与提示词里的浏览器
-            说明只在那边注入，ACP 走外部 agent，这套开关对它无效。
-            ⚠️ 但 ACP 下**不能整行不渲染** —— 这一行高 32px，少了它输入框卡片会往上跳，
-            在「开始新对话」页切「内置 ↔ 外部 Agent」时整块输入区上下抖。用同高占位顶住。 */}
+            说明只在那边注入，ACP 走外部 agent，它自带工具、也不读会话的 browserSettings /
+            MCP 勾选。所以 ACP 会话里这一排干脆**不渲染** —— 两颗点不动的灰图标只会让人
+            以为是自己没配好。
+            ⚠️ 只有「开始新对话」页（还没成会话）保留同高占位：那里能当场把模型从内置切到
+            外部 Agent（`ModelSelect` 的 ACP 组，有会话就换不了类型），少了这一行输入卡片
+            会在切换的瞬间往上跳 32px（用户反馈过）。已打开的会话不会再切后端，扒掉不抖。 */}
         {isAcp ? (
-          <ComposerToolbarPlaceholder mcp={app.mcpServers.length > 0} />
+          app.activeConversationId ? null : (
+            <ComposerToolbarPlaceholder mcp={app.mcpServers.length > 0} />
+          )
         ) : (
           <ComposerToolbar app={app}>
             {/* MCP 从 `trailing` 搬上来：它与浏览器同属「给这一轮装能力」 */}

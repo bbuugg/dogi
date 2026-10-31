@@ -137,14 +137,17 @@ export function filterCommands(commands: SlashCommand[], token: string): SlashCo
  *
  * 注册表就是下面这个数组：加进来浮层、补全、`resolveSlashDispatch*` 立刻认它。
  *
- * 两条命令（`/create-skill` / `/init`）的共同立场：**直接在磁盘上把文件建出来**，而不是往
- * 输入框里塞一段提示词让模型去建。理由：脚手架是确定性的动作（一个目录 + 一个 SKILL.md
- * / 一个 AGENTS.md），走模型要多烧一轮、还可能建到别的地方去；用户敲这个命令时想要的是
- * 文件此刻就在那儿。
+ * 两条命令的分工（**别再把它们并成一类**）：
  *
- * 落盘统一经服务端的 `/api/workspaces/:id/scaffold`（`lib/server/scaffold.ts`）——
- * 那里 `mkdir` 中间目录、且**已存在一律 409 绝不覆盖**（覆盖是破坏性的，该由用户在
- * 编辑器里明确做）。所以本文件里没有 fs / fetch，只有「调 store + 出提示」。
+ * - `/create-skill`：**确定性落盘**。一个目录 + 一个 SKILL.md，正文是模板就够用；
+ *   走服务端 `/api/workspaces/:id/scaffold`（`lib/server/scaffold.ts`）—— 那里
+ *   `mkdir` 中间目录、且**已存在一律 409 绝不覆盖**（覆盖是破坏性的，该由用户在
+ *   编辑器里明确做）。
+ * - `/init`：**交给模型**。AGENTS.md 的价值全在正文（每轮全文注入的硬约束），
+ *   一份「标题 + 空小节」的骨架等于让用户自己再写一遍 —— 早先就是这么做的，用户
+ *   拿到手发现是空模板。所以它发一条提示词，让模型读项目、自己写（见 `INIT_PROMPT`）。
+ *
+ * 本文件里没有 fs / fetch，只有「调 store / 发消息 + 出提示」。
  */
 export function builtinSlashCommands(ctx: SlashCommandContext): SlashCommand[] {
   /**
@@ -180,14 +183,17 @@ export function builtinSlashCommands(ctx: SlashCommandContext): SlashCommand[] {
     {
       // `/init` 是 AGENTS.md 生态的既有约定（Claude Code 与 opencode 的 `/init` 都是
       // 「为这个项目生成 AGENTS.md」），跟着它走的好处是从别的工具迁过来的人不用重学。
-      // 显示名仍然说清它到底建了什么 —— 命令名对齐生态，描述不误导。
+      //
+      // ⚠️ **不发模板**：早先走 `scaffoldFile({kind:'agents'})`，落一份「标题 + 四个空
+      // 小节」，用户敲完拿到的是还得自己填的骨架 —— 而这个文件的全部价值就在内容。
+      // 现在改成把 `INIT_PROMPT` 发给模型：它读一遍项目，写出一份**已经能生效**的文档。
       name: 'init',
-      displayName: '创建项目约束文档',
-      description: '在项目根新建 AGENTS.md（下一轮对话会被全文注入系统提示词）',
+      displayName: '生成项目约束文档',
+      description: '读一遍这个项目后生成 AGENTS.md（下一轮对话会被全文注入系统提示词）',
       noArgs: true,
       available: needsWorkspace,
       run: (c) => {
-        void createAndReport(c, { kind: 'agents' })
+        void runInit(c)
       }
     }
   ]
@@ -227,4 +233,59 @@ async function createAndReport(c: SlashCommandContext, input: FsScaffoldInput): 
     description: `${result.abs}\n${result.note}`,
     duration: 6000
   })
+}
+
+/**
+ * `/init` 发给模型的提示词。
+ *
+ * 这几条必须在提示词里说死，否则模型很容易交出一份「项目介绍」：
+ *
+ * 1. **先读再写**（README / 依赖清单 / 目录结构 / 抽读入口文件），不许按框架名猜；
+ * 2. **只写每轮都要在场的硬约束**，不写项目介绍、功能清单、目录树、安装教程 ——
+ *    这份文件每轮全文注入，写多了就是每轮多付一次 token（上限见 `project-doc.ts`
+ *    的 `MAX_PROJECT_DOC_CHARS`，超了会被截断）；
+ * 3. **已存在就改、不重写**：那可能已经是用户手写过的资产，整份覆盖等于毁数据
+ *    （与 scaffold 的「已存在 409」同一个立场）。
+ *
+ * 落点写死「项目根目录的 AGENTS.md」：`PROJECT_DOC_NAMES[0]` 就是它，模型建到子目录
+ * 或改名成 CLAUDE.md 都读不到（根文档只读工作区根）。
+ */
+const INIT_PROMPT = `读一遍这个项目，然后在**项目根目录**生成 AGENTS.md（与 README、依赖清单同级；不要建在子目录，不要改名成 CLAUDE.md）。
+
+先读，再动笔：
+- 读 README / 依赖清单（package.json、pyproject.toml、Cargo.toml、go.mod 之类）/ 顶层目录结构；
+- 跳过 node_modules、dist、build、.git、vendor 这类产物或第三方目录；
+- 技术栈、构建命令、目录职责只写你在文件里**看到**的；不确定就抽读几个入口文件确认，别按框架名猜。
+
+内容只写「每一轮对话都必须遵守」的硬约束，不要项目介绍、功能清单、目录树、安装教程。建议按这几节组织（用不上的删掉）：
+- 验证纪律：怎么算验证过了、哪些检查默认不跑
+- 架构：主要目录 / 模块各自的职责，新增代码该放哪
+- 硬约束：违反就会静默出错或破坏数据的规则（一条一行）
+- 环境速查：构建 / 测试命令、平台差异、已知的坑
+
+每条都要具体到能照做（写清命令、路径、写法）；没有依据的宁可不写。
+
+如果项目根已经有 AGENTS.md：先读它，在原内容上补充 / 修正，**不要整份重写**，已有的正确条目一律保留。
+如果根目录只有 CLAUDE.md（没有 AGENTS.md）：先读它，把里面的规则整理进新写的 AGENTS.md —— 两个文件同时存在时只读 AGENTS.md，留在 CLAUDE.md 里的东西会失效。
+
+写完告诉我：新增或改了哪些条目，以及哪些地方你还不确定、要我确认。`
+
+/**
+ * `/init` 的执行：发一条提示词，让模型自己读项目、写 AGENTS.md。
+ *
+ * 用 `app.send` 而不是把提示词塞进输入框：敲完命令就该开跑，不该再让用户按一次回车
+ * （Claude Code 的 `/init` 也是这个手感）。这一轮与普通对话一样进消息列表 —— 模型读了
+ * 什么、写了什么用户都看得见，本来也该可审。
+ *
+ * 正在跑的时候 `send` 会把这条塞进「待发送」队列（`enqueueMessage`），命令仍然成立：
+ * 上一轮结束就接着分析项目。真正发不出去（没会话 / 被本地守卫拦下）才提示。
+ */
+async function runInit(c: SlashCommandContext): Promise<void> {
+  if (!c.app.activeWorkspace?.path) {
+    // 正常走不到（`available` 已经拦过），兜住「命令表被别处复用」的情况
+    c.app.setError('先选一个有磁盘目录的项目（内置「任务」没有目录，写不了 AGENTS.md）')
+    return
+  }
+  const ok = await c.app.send(INIT_PROMPT)
+  if (!ok) c.app.setError('没能发出 /init：这一下被拦住了（压缩上下文中 / 没有可用会话），稍后再试')
 }

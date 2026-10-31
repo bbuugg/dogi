@@ -355,7 +355,7 @@ export function AiPreferencesTab({ app }: { app: AgentApp }) {
       <section className="space-y-2">
         <div className="text-sm font-medium">{tr('模型请求重试')}</div>
         <p className="text-xs leading-4 text-muted-foreground">
-          {tr('请求失败后的自动重试次数。已执行过工具的轮次不会重试。0 = 不限，默认 2。')}
+          {tr('请求失败后的自动重试次数。已跑完工具步骤的轮次会从断点继续，不会重跑已完成的工具。0 = 不限，默认 2。')}
         </p>
         <div className="flex items-center gap-2">
           <Input

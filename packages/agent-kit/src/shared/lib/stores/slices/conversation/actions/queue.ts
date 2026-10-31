@@ -19,8 +19,9 @@ export function createQueueActions(
 
   return {
     // ---------- 发一轮 ----------
-    enqueueMessage: (text, files) => {
-      const conversationId = get().activeConversationId;
+    enqueueMessage: (text, files, scope) => {
+      // 分屏时排队也要排到本标签的会话：`send` 会把本标签的会话 id 传进来
+      const conversationId = scope === undefined ? get().activeConversationId : scope;
       if (!conversationId) return;
       const item: QueuedMessage = {
         id: nextLocalId("q"),

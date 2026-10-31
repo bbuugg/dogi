@@ -16,13 +16,18 @@ export function createRunActions(
   const { set, get, api, readSlice, writeSlice, markRunning, runRound } = ctx;
 
   return {
-    send: async (text, files, onStarted) => {
+    send: async (text, files, onStarted, scope) => {
       const trimmed = text.trim();
       if (!trimmed && !(files && files.length > 0)) return false;
-      const conversationId = get().activeConversationId;
-      // 当前会话正在跑 → 入队等待；否则立即开新一轮
+      /**
+       * 发到哪条会话**不能只看活跃会话**：主区域分屏时两个标签同时可见，非焦点标签的
+       * 输入框也得发到它自己那条上（`scope` 由视图层（`agentAppFrom`）按标签传入）。
+       * `scope === null` 是明确「新对话页」→ 建新会话，别回落到某个焦点会话。
+       */
+      const conversationId = scope === undefined ? get().activeConversationId : scope;
+      // 这条会话正在跑 → 入队等待；否则立即开新一轮
       if (conversationId && get().runningConversations[conversationId]) {
-        get().enqueueMessage(trimmed, files);
+        get().enqueueMessage(trimmed, files, conversationId);
         // 入队也是「发出去了」：内容已经落进界面上看得见的「待发送」列表，没被吃掉
         onStarted?.();
         return true;
@@ -32,7 +37,7 @@ export function createRunActions(
        * 再加一层 —— 转圈卡住比不转更糟（按钮一直不可点 = 输入框废了），宁可多熄一次。
        */
       try {
-        return await runRound(trimmed, files, onStarted);
+        return await runRound(trimmed, files, onStarted, scope);
       } finally {
         if (get().creatingConversation) set({ creatingConversation: false });
       }
@@ -42,12 +47,13 @@ export function createRunActions(
      * 边界注入当前轮，**附件一起注入**）；409（刚好跑完了）或没在跑 → 回落普通发送
      * —— 空闲时插话语义上就是发消息，附件照带，零损失。其余错误（网络 / 400）原样上抛提示。
      */
-    steer: async (text, files, onStarted) => {
+    steer: async (text, files, onStarted, scope) => {
       const trimmed = text.trim();
       const sendable = files ?? [];
       // 只带附件不写字也放行（与 send / enqueueMessage 同一口径）
       if (!trimmed && sendable.length === 0) return false;
-      const conversationId = get().activeConversationId;
+      // 同上：分屏下插话也要落到本标签的会话，而不是焦点会话
+      const conversationId = scope === undefined ? get().activeConversationId : scope;
       if (conversationId && get().runningConversations[conversationId]) {
         const api = get().getApi();
         if (api) {
@@ -76,10 +82,10 @@ export function createRunActions(
         }
       }
       // 回落普通发送：附件照带（空闲插话 ≡ 发消息，图不能丢在这一步）
-      return runRound(trimmed, sendable, onStarted);
+      return runRound(trimmed, sendable, onStarted, scope);
     },
-    stop: async () => {
-      const conversationId = get().activeConversationId;
+    stop: async (scope) => {
+      const conversationId = scope === undefined ? get().activeConversationId : scope;
       if (!conversationId) return;
       await get().stopConversation(conversationId);
     },
@@ -107,8 +113,8 @@ export function createRunActions(
       markRunning(conversationId, false);
     },
 
-    stopCommand: async (toolCallId: string) => {
-      const conversationId = get().activeConversationId;
+    stopCommand: async (toolCallId: string, scope) => {
+      const conversationId = scope === undefined ? get().activeConversationId : scope;
       if (!conversationId) return;
       const current = readSlice(conversationId).request;
       // 没有在跑的轮 = 无从停（按钮本来也不该出现：没有 request.id）

@@ -148,8 +148,9 @@ export interface MessageListProps {
   /**
    * 模型请求正在重试：把「第 N 次重试」这条**单条**提示渲染在「正在思考…」的位置。
    * `attempt` 变化时整条重建，重放一遍入场动画；屏幕上始终只有一条。
+   * 带 `resume` 时是断点续跑（内容保留、接着失败那一步），文案也会区分。
    */
-  retryNotice?: { attempt: number; maxRetries: number | null } | null
+  retryNotice?: RetryNoticeView | null
   /**
    * 连接断了但服务端那轮还在跑：正在自动重接（第几次）。渲染在「正在思考…」的位置 ——
    * 用户看到的是「没新内容是因为连接断了」，而不是「卡住了」。与 `retryNotice` 同位，
@@ -462,13 +463,21 @@ function DefaultEmptyState() {
 }
 
 /**
+ * 「第 N 次重试」提示条的入参。
+ *
+ * `resume` = 断点续跑：这一次不是从头重来，而是接着失败的那一步。文案要区分开 ——
+ * 否则用户看着已经写好的正文还在、提示却说「重试」，会以为哪里重复了。
+ */
+type RetryNoticeView = { attempt: number; maxRetries: number | null; resume?: boolean }
+
+/**
  * 「第 N 次重试」提示条（单条自替换）。
  *
  * 调用方用 `key={attempt}` —— 次数变化时整条重建，从而**重放一遍入场动画**
  * （只在同一节点上改文本不会重新触发 CSS 动画）。因为 `retryNotice` 只有一份
  * （每次重试覆盖上一条），屏幕上任何时刻只有这一条。
  */
-function RetryRow({ notice }: { notice: { attempt: number; maxRetries: number | null } }) {
+function RetryRow({ notice }: { notice: RetryNoticeView }) {
   const tr = useT()
   return (
     <div
@@ -477,7 +486,11 @@ function RetryRow({ notice }: { notice: { attempt: number; maxRetries: number | 
       className="flex items-center gap-2 text-sm text-muted-foreground animate-in fade-in slide-in-from-bottom-1 duration-300"
     >
       <RotateCw className="size-3.5 shrink-0 animate-spin" />
-      <span>{tr('第 {attempt} 次重试', { attempt: notice.attempt })}</span>
+      <span>
+        {notice.resume
+          ? tr('第 {attempt} 次重试（接着上次的进度）', { attempt: notice.attempt })
+          : tr('第 {attempt} 次重试', { attempt: notice.attempt })}
+      </span>
     </div>
   )
 }
@@ -487,14 +500,14 @@ function RetryRow({ notice }: { notice: { attempt: number; maxRetries: number | 
  *
  * - 断线重接中：连接断了（页面切后台 / 电脑休眠 / 网络切换最常见），服务端那轮还在跑。
  *   这条必须盖过其余两种 —— 不然用户看到「正在思考」转圈，以为模型在憋一个长回答。
- * - 模型重试中：第 N 次重试（重试 = 从头再跑，已渲染的部分被清掉了）。
+ * - 模型重试中：第 N 次重试（整轮重来时已渲染的部分被清掉；断点续跑时保留，接着上次的进度）。
  * - 其余：普通「正在思考…」。
  */
 function StreamingStatusNotice({
   retryNotice,
   reconnectNotice
 }: {
-  retryNotice: { attempt: number; maxRetries: number | null } | null
+  retryNotice: RetryNoticeView | null
   reconnectNotice: { attempt: number } | null
 }) {
   const tr = useT()

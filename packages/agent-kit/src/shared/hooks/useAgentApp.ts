@@ -330,8 +330,9 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
     /** 写工作区文件：返回 null = 成功，字符串 = 错误原因 */
     writeWorkspaceFile: s.writeWorkspaceFile,
     /**
-     * 脚手架：新建一份模板文件（技能 SKILL.md / AGENTS.md），斜线命令 `/skill` 与 `/agents`
-     * 走它。成功返回落点 + 提示语，失败返回人话错误（调用方直接显示）。
+     * 脚手架：新建一份模板文件（技能 SKILL.md / AGENTS.md 空骨架），斜线命令
+     * `/create-skill` 走它（`/init` 改由模型生成，不走这里）。
+     * 成功返回落点 + 提示语，失败返回人话错误（调用方直接显示）。
      */
     scaffoldWorkspaceFile: s.scaffoldWorkspaceFile,
     /** git 状态（分支 / ahead-behind / 暂存·未暂存·未跟踪）；出错抛错 */

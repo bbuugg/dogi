@@ -189,8 +189,12 @@ export interface RunAgentOptions {
   /**
    * 模型请求失败后的自动重试次数（**0 = 不限制**，一直重试）。缺省 = `DEFAULT_MAX_RETRIES`。
    *
-   * 只对**可重试的这一次请求**生效（网络中断 / 上游空响应，见 ./retry），且失败的那一次
-   * 尝试若**已经执行过工具**就不再自动重试（重试 = 从头再跑一轮，会重复文件写入 / 命令等副作用）。
+   * 只对**可重试的这一次请求**生效（网络中断 / 上游空响应，见 ./retry）。重来方式看有没有
+   * 断点：
+   * - 已经跑完若干步（工具执行过、走到了步边界）→ **断点续跑**：从失败的那一步接着发请求，
+   *   已完成的工具不会重跑，所以这种情况也照样重试；
+   * - 没有断点（第一步就失败）→ 整轮重来，但因为会重复文件写入 / 命令等副作用，**执行过
+   *   工具的尝试不重试**。
    */
   maxRetries?: number
   /**
@@ -295,6 +299,31 @@ function attemptFailure(message: string): Error {
   const err = new Error(message)
   ;(err as Error & { isRetryable?: boolean }).isRetryable = true
   return err
+}
+
+/**
+ * 一次尝试发给引擎的消息数组（AI SDK 的 `ModelMessage[]`）。
+ *
+ * 单独起个名字是为了让「断点续跑」的缓存有准确的类型：它存的就是边界那一刻的**完整**
+ * 消息数组（历史 + 本轮已完成步骤的 assistant / tool 消息），下次尝试原样发出去。
+ */
+type EngineMessages = Parameters<typeof runEngine>[0]['messages']
+
+/** 累加两段用量（断点续跑：失败那几段白烧的 token 也要算进 finish 帧） */
+function mergeRawUsage(a: RawUsage | null, b: RawUsage | null): RawUsage | null {
+  if (!a) return b
+  if (!b) return a
+  return {
+    inputTokens: a.inputTokens + b.inputTokens,
+    outputTokens: a.outputTokens + b.outputTokens,
+    totalTokens: a.totalTokens + b.totalTokens,
+    ...(a.reasoningTokens !== undefined || b.reasoningTokens !== undefined
+      ? { reasoningTokens: (a.reasoningTokens ?? 0) + (b.reasoningTokens ?? 0) }
+      : {}),
+    ...(a.cachedInputTokens !== undefined || b.cachedInputTokens !== undefined
+      ? { cachedInputTokens: (a.cachedInputTokens ?? 0) + (b.cachedInputTokens ?? 0) }
+      : {})
+  }
 }
 
 /** 模型上报的原始 token 用量（各家字段名不同，统一到这里） */
@@ -683,8 +712,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
   /**
    * 这一轮是否**已经真实执行过工具**（发出过 tool-call）。
    *
-   * ⚠️ 已执行过工具的尝试**不再自动重试**：重试 = 从头再跑一轮，会重复文件写入 / 命令
-   * 等有副作用的操作。与桌面端文案「只重试请求本身，不重复已执行过的工具」一致。
+   * 它决定「重来」能不能做：**整轮重来**会把工具再执行一遍（重复文件写入 / 命令）；有断点
+   * 时改走断点续跑就没这个问题。与桌面端文案「只重试请求本身，不重复已执行过的工具」一致。
    */
   let toolExecuted = false
   /**
@@ -693,6 +722,27 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
    * 打穿（parts 被清空重建，边界 index 全部失效）。
    */
   let steered = false
+  /**
+   * **断点续跑**的起点：上一次尝试在最后一步边界留下的完整消息（含已完成的工具调用与
+   * 原样结果）。非 null = 下一次尝试从这里接着发请求 —— 不重跑已完成的步骤、不会重复
+   * 文件写入 / 命令，也就没有「整轮重来」的副作用，因此**执行过工具也可以重试**。
+   *
+   * 只在「还有下一步」时被 `onStepBoundary` 写入，所以第一步就失败的尝试它是 null，
+   * 那时仍然退回整轮重来（也是唯一能走的路）。
+   */
+  let resumeMessages: EngineMessages | null = null
+  /** 续跑起点之前已完成的步数：从总步数预算里扣掉，续跑不会把 `MAX_STEPS` 翻倍 */
+  let resumeSteps = 0
+  /**
+   * 跨尝试累加的用量。续跑前那些失败的段落**token 已经烧掉了**，不累加的话 finish 帧
+   * 报出来的 token 只算最后一段（用户看到的数会比实际少一大截）。
+   */
+  let carriedUsage: RawUsage | null = null
+  /**
+   * 整轮**第一个字**的时刻（TPS 的生成窗口起点）。跨尝试保留：续跑会让 token 累加，
+   * 若时间窗口只算最后一段，算出来的 TPS 会虚高几倍。
+   */
+  let turnFirstOutputAt: number | null = null
 
   /** 攒着的入参增量（null = 没有）。攒够阈值才下发，见 INPUT_DELTA_FLUSH_* */
   let pendingDelta: { toolCallId: string; toolName?: string; text: string } | null = null
@@ -891,9 +941,10 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
   let forceCompact = false
   let overflowRecovered = false
 
-  // 重试循环：每一次「尝试」都是完整的一轮（建 Agent → 压缩 → 建流 → 消费流）。
-  // 只有可重试的这一次请求（网络中断 / 上游空响应 / context overflow）、且未到次数上限、
-  // 且没执行过工具时才重来。
+  // 重试循环：每一次「尝试」要么是完整的一轮（建 Agent → 压缩 → 建流 → 消费流），要么是
+  // **断点续跑**（上一次已经跑完若干步 → 从那份消息接着发，跳过压缩）。
+  // 重来条件：可重试的这一次请求（网络中断 / 上游空响应 / context overflow）、未到次数上限，
+  // 并且 —— 要么有断点（续跑不重跑工具），要么压根没执行过工具（整轮重来才不会重复副作用）。
   for (;;) {
     /**
      * 首字时刻（TPS 的生成窗口起点）、模型上报的原始用量、本轮上下文估算。
@@ -942,46 +993,58 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
       // 工具调用关掉的模型也不挂子任务 —— 派活本身就是一个工具，下发了也用不了。
       const contextWindow = opts.contextWindow ?? defaultContextWindowFromEnv()
       /**
-       * 上下文压缩只有一层（pi 的 compaction）：`compactHistory` 在 history 层做
-       * 「摘要 + 保留近期原文」。它必须作用在 `toModelMessages` 之前 —— 保留起点要锚
-       * **消息 id**（ModelMessage 的 index 不稳定）。
+       * 本次尝试的**起点**：有断点就接着上一次失败的那一步，没断点才按老路走。
        *
-       * ⚠️ 别再往这里加「清旧工具结果」「按缓存冷热决定清不清」那一类层：它们会改动
-       * 请求前缀，而上游前缀缓存一断就按全价重读整段历史。前缀保持一致就够了。
+       * 续跑**不重做轮前压缩**：那份 `messages` 本身就是上一次轮前 / 轮中压缩过的结果，
+       * 再压一遍只会把刚写好的摘要再摘要一次。唯一的例外是 context overflow 恢复
+       * （`forceCompact`）—— 那条路明确要求重新压，调用处已经把断点清掉了。
        */
-      const compacted = await compactHistory(opts.history, {
-        ...(opts.conversationId ? { conversationId: opts.conversationId } : {}),
-        ...(opts.autoSummarySeed ? { seed: opts.autoSummarySeed } : {}),
-        ...(opts.onAutoSummary ? { onAutoSummary: opts.onAutoSummary } : {}),
-        ...(opts.onContextCompactionStart
-          ? { onSummaryStart: opts.onContextCompactionStart }
-          : {}),
-        ...(opts.onContextCompactionDelta
-          ? { onSummaryDelta: opts.onContextCompactionDelta }
-          : {}),
-        contextWindow,
-        baseTokens,
-        ...(forceCompact ? { force: true } : {}),
-        model: effectiveModel,
-        signal: runSignal
-      })
-      if (compacted.compressed) {
-        opts.onContextCompressed?.({
-          ...compacted.compressed,
-          ...(compacted.summary ? { summary: compacted.summary } : {})
+      let messages: EngineMessages
+      if (resumeMessages) {
+        messages = resumeMessages
+      } else {
+        /**
+         * 上下文压缩只有一层（pi 的 compaction）：`compactHistory` 在 history 层做
+         * 「摘要 + 保留近期原文」。它必须作用在 `toModelMessages` 之前 —— 保留起点要锚
+         * **消息 id**（ModelMessage 的 index 不稳定）。
+         *
+         * ⚠️ 别再往这里加「清旧工具结果」「按缓存冷热决定清不清」那一类层：它们会改动
+         * 请求前缀，而上游前缀缓存一断就按全价重读整段历史。前缀保持一致就够了。
+         */
+        const compacted = await compactHistory(opts.history, {
+          ...(opts.conversationId ? { conversationId: opts.conversationId } : {}),
+          ...(opts.autoSummarySeed ? { seed: opts.autoSummarySeed } : {}),
+          ...(opts.onAutoSummary ? { onAutoSummary: opts.onAutoSummary } : {}),
+          ...(opts.onContextCompactionStart
+            ? { onSummaryStart: opts.onContextCompactionStart }
+            : {}),
+          ...(opts.onContextCompactionDelta
+            ? { onSummaryDelta: opts.onContextCompactionDelta }
+            : {}),
+          contextWindow,
+          baseTokens,
+          ...(forceCompact ? { force: true } : {}),
+          model: effectiveModel,
+          signal: runSignal
         })
-        // 首轮 / 轮前压缩：把圆环从上一轮的峰值直接拉到压缩后的真实占用。
-        emitEvent({
-          type: 'context-usage',
-          used: compacted.compressed.afterTokens,
-          size: contextWindow,
-          base: baseTokens
+        if (compacted.compressed) {
+          opts.onContextCompressed?.({
+            ...compacted.compressed,
+            ...(compacted.summary ? { summary: compacted.summary } : {})
+          })
+          // 首轮 / 轮前压缩：把圆环从上一轮的峰值直接拉到压缩后的真实占用。
+          emitEvent({
+            type: 'context-usage',
+            used: compacted.compressed.afterTokens,
+            size: contextWindow,
+            base: baseTokens
+          })
+        }
+        messages = await toModelMessages(compacted.history, {
+          resolveFileUrl: opts.resolveFileUrl,
+          allowImages: modelSettings.imageInput
         })
       }
-      const messages = await toModelMessages(compacted.history, {
-        resolveFileUrl: opts.resolveFileUrl,
-        allowImages: modelSettings.imageInput
-      })
       /**
        * 兜底值（估算）：一轮里**连一个 usage 都没收到**（立刻中止 / 上游直接失败）时，
        * 圆环至少还有个数。真正显示的值在收尾时用上游 usage 覆盖。
@@ -1032,13 +1095,17 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
       const engineTools = { ...toolsForModel, ...delegationTools } as EngineInput['tools']
       /** 上一次边界时 messages 的长度：只用来估「这一步新增的那部分」 */
       let boundaryCount = messages.length
+      /** 进入本次尝试时整轮已完成的步数（续跑时非 0）：checkpoint 的基数，见那里 */
+      const stepsAtAttemptStart = resumeSteps
 
       const engine = runEngine({
         model: resolveModel(effectiveModel) as unknown as EngineInput['model'],
         system: setupForModel.instructions,
         messages,
         tools: engineTools,
-        maxSteps: opts.maxSteps ?? MAX_STEPS,
+        // 续跑会新建一个引擎，步数预算要扣掉已经跑完的：否则每续跑一次都是一份完整的
+        // `MAX_STEPS`，一个反复失败的轮次能把步数上限放大很多倍
+        maxSteps: Math.max(1, (opts.maxSteps ?? MAX_STEPS) - resumeSteps),
         abortSignal: runSignal,
         toolCallConcurrency: resolveToolCallConcurrency(opts.toolCallConcurrency),
         ...(maxOutputTokens !== undefined ||
@@ -1063,8 +1130,25 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
          * ⚠️ 不再需要 `isFinal` 判断 —— `prepareStep` 只在「还有下一步」时被调用，
          * 天然不会出现「最后一步之后再压一次」。
          */
-        onStepBoundary: async ({ messages: current }) => {
+        onStepBoundary: async ({ messages: current, stepNumber }) => {
           let next = current
+          /**
+           * 记下断点：这一步已经跑完（`current` 里含它的 assistant 消息与工具结果），
+           * 下一次请求万一失败，下次尝试就从这个**完整**的消息数组接着发 —— 已完成的部分
+           * 不重跑，也就没有「整轮重来」的重复副作用。
+           *
+           * 存的是返回给引擎的 `next`（可能被轮中压缩 / 插话改过），不是入参 `current`：
+           * 续跑要接的是**实际发出去的那份上下文**。
+           */
+          const checkpoint = (value: EngineMessages): EngineMessages | undefined => {
+            // 存一份浅拷贝：引擎会把返回的数组接着用于下一步，直接存引用的话后续步骤可能
+            // 就地往里追加，快照就不再是「边界那一刻」的消息了
+            resumeMessages = [...value]
+            // 续跑会新建引擎，`stepNumber` 是从 0 重新数的：必须加上进入本次尝试时的基数，
+            // 否则每续跑一次步数预算就重置一次
+            resumeSteps = stepsAtAttemptStart + stepNumber
+            return value === current ? undefined : value
+          }
           /**
            * 显示与判据用**同一个数**：`真值 + 本步新增的估算`，没有真值才全量估算。
            * 两条腿互相兜底 —— 估算漏了某种 part 形状时真实值兜住，真实值过期时
@@ -1135,7 +1219,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
           boundaryCount = next.length
 
           const steer = (await opts.pollSteer?.()) ?? null
-          if (!steer) return next === current ? undefined : next
+          if (!steer) return checkpoint(next)
           steered = true
           // 先广播再注入：服务端据此记下「parts 到此为止」的切片边界。
           opts.onEvent?.({ type: 'user-injected', message: steer })
@@ -1197,7 +1281,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
             { role: 'user', content: steerContent } as unknown as EngineInput['messages'][number]
           ]
           boundaryCount = next.length
-          return next
+          // 插话后的上下文也记下来（`steered` 会让这一轮不再自动重试，这里是防御性的）
+          return checkpoint(next)
         }
       })
       /**
@@ -1302,6 +1387,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         // 首字（正文 / 思考 / 工具参数都算）到达即开始计生成窗口
         if (firstOutputAt === null && event.type !== 'error') {
           firstOutputAt = Date.now()
+          // 整轮的第一个字（跨尝试保留）：续跑时 token 是累加的，生成窗口也得从整轮起点算，
+          // 否则 TPS = 累计 token / 最后一段时长，会虚高好几倍
+          turnFirstOutputAt ??= firstOutputAt
         }
         emitEvent(event)
       }
@@ -1326,6 +1414,14 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
        * 有流内错误时**别再拼一条**「上游返回空响应」—— 那正是提示重复的来源。
        * 中止不算 —— 那是用户主动停。
        */
+      /**
+       * 上游已上报的用量：**失败的尝试也要收下**。下面马上就要 throw，`finished` 出了 try
+       * 就取不到了，而断点续跑要靠这份 usage 累加（失败那几段白烧的 token 也得显示）。
+       */
+      if (!rawUsage) {
+        rawUsage = normalizeUsage(finished.totalUsage)
+        if (rawUsage) finishChunks = Math.max(finishChunks, 1)
+      }
       if (
         !runSignal.aborted &&
         (attemptError !== null || (firstOutputAt === null && finished.finishReason === 'other'))
@@ -1334,10 +1430,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
           attemptError ?? '上游返回空响应（finishReason "other"，整轮没有任何内容）'
         )
       }
-      if (!rawUsage) {
-        rawUsage = normalizeUsage(finished.totalUsage)
-        if (rawUsage) finishChunks = Math.max(finishChunks, 1)
-      }
+      // 续跑前那几段白烧的 token 一并计入（finish 帧只报最后一段的话，用户看到的数会少一截）
+      rawUsage = mergeRawUsage(carriedUsage, rawUsage)
       if (!lastStepUsage) {
         const stepUsage = normalizeUsage(finished.lastStepUsage)
         if (stepUsage) lastStepUsage = stepUsage
@@ -1361,7 +1455,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
       // 看门狗中止：不是用户主动停止，必须明确告诉用户原因，不能走 aborted 静默收场。
       if (watchdogFired) {
         const usage = rawUsage
-          ? buildTurnUsage(rawUsage, startedAt, firstOutputAt, contextTokens, stats.subagents)
+          ? buildTurnUsage(rawUsage, startedAt, turnFirstOutputAt, contextTokens, stats.subagents)
           : undefined
         emitEvent({ type: 'error', message: watchdogFired })
         emitEvent({ type: 'finish', finishReason: 'error', ...finishTiming(usage) })
@@ -1371,21 +1465,23 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
       // 没 abort 就说明 fullStream 是自然流尽的，走下面的正常返回。
       if (runSignal.aborted) {
         const usage = rawUsage
-          ? buildTurnUsage(rawUsage, startedAt, firstOutputAt, contextTokens, stats.subagents)
+          ? buildTurnUsage(rawUsage, startedAt, turnFirstOutputAt, contextTokens, stats.subagents)
           : undefined
         emitEvent({ type: 'finish', finishReason: 'aborted', ...finishTiming(usage) })
         return finish('aborted', usage)
       }
       const usage = rawUsage
-        ? buildTurnUsage(rawUsage, startedAt, firstOutputAt, contextTokens, stats.subagents)
+        ? buildTurnUsage(rawUsage, startedAt, turnFirstOutputAt, contextTokens, stats.subagents)
         : undefined
       emitEvent({ type: 'finish', finishReason: 'done', ...finishTiming(usage) })
       return finish('done', usage)
     } catch (err) {
+      // 失败尝试的用量先并进来：下面算 usage、以及「续跑时累加白烧的 token」都以它为准
+      rawUsage = mergeRawUsage(carriedUsage, rawUsage)
       const message = describeError(err)
       // 异常 / 中止时也要把已经产出的 token 补推出去（见上面 rawUsage 的注释）
       const usage = rawUsage
-        ? buildTurnUsage(rawUsage, startedAt, firstOutputAt, contextTokens, stats.subagents)
+        ? buildTurnUsage(rawUsage, startedAt, turnFirstOutputAt, contextTokens, stats.subagents)
         : undefined
       if (watchdogFired) {
         emitEvent({ type: 'error', message: watchdogFired })
@@ -1407,19 +1503,38 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
       if (!overflowRecovered && isContextOverflowError(err) && !toolExecuted) {
         overflowRecovered = true
         forceCompact = true
+        // 溢出说明「续跑起点」本身也塞不进窗口：清掉断点，从头压一遍再发
+        resumeMessages = null
+        resumeSteps = 0
+        carriedUsage = rawUsage
         emitEvent({ type: 'retry', attempt: retries + 1, maxRetries: null })
         continue
       }
-      // 可重试的这一次请求（网络中断 / 上游空响应）：没执行过工具、也没到次数上限
-      // → 丢掉这一次尝试、退避后重来。发一条 retry 事件：前端据此清掉这一次尝试的
-      // 部分输出、显示「第 N 次重试」。
-      if (isRetryableAttemptError(err) && !toolExecuted && !steered && retries < maxRetries) {
+      /**
+       * 可重试的这一次请求（网络中断 / 上游空响应）→ 退避后重来。重来的方式有两种：
+       *
+       * - **断点续跑**（`resumeMessages` 非空）：上一次尝试已经跑完若干步，那些步骤的
+       *   assistant 消息与工具结果都在断点里，接着**失败的那一步**重新发请求即可。已完成
+       *   的工具不会重跑，所以「执行过工具」不再是否决项 —— 这正是它存在的意义。
+       * - **整轮重来**（没有断点，通常是第一步就失败）：老路，前端把这次尝试的输出清掉。
+       *
+       * 两种都发同一条 `retry` 事件，靠 `resume` 区分前端要不要清空已渲染的内容。
+       */
+      const canResume = resumeMessages !== null
+      if (
+        isRetryableAttemptError(err) &&
+        !steered &&
+        (canResume || !toolExecuted) &&
+        retries < maxRetries
+      ) {
         retries += 1
+        carriedUsage = rawUsage
         emitEvent({
           type: 'retry',
           attempt: retries,
           // Infinity 无法 JSON 序列化：不限制时用 null 表示
-          maxRetries: Number.isFinite(maxRetries) ? maxRetries : null
+          maxRetries: Number.isFinite(maxRetries) ? maxRetries : null,
+          ...(canResume ? { resume: true } : {})
         })
         const waited = await sleepWithSignal(retryDelayMs(retries), runSignal)
         // 退避期间用户点了停止：按中止收场，不再重试

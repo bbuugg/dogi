@@ -35,7 +35,7 @@ export function excerptOf(parts: AgentChatMessage['parts'], max = 120): string |
  * - tool-call-delta:只喂流式渲染,不进落盘形状(落盘以完整 tool-call 的 input 为准);
  * - subagent-start / subagent-event / subagent-end:派活卡上的**子任务过程记录**,
  *   子 run 的事件递归折叠进 `part.delegation.parts`(与主消息同一套形状,所以**会落盘**);
- * - retry:从头再跑这一轮,丢掉失败尝试已累积的部分输出(避免正文重复);
+ * - retry:整轮重来丢掉失败尝试已累积的输出;断点续跑(`resume`)只回滚到最后一个工具结果;
  * - finish / context-usage:不产生 part(finish 的 usage 由调用方自行采集)。
  */
 export function foldEventIntoParts(parts: AgentMessagePart[], event: AgentStreamEvent): void {
@@ -125,8 +125,36 @@ export function foldEventIntoParts(parts: AgentMessagePart[], event: AgentStream
   } else if (event.type === 'error') {
     parts.push(errorPart(event.message))
   } else if (event.type === 'retry') {
-    // 重试 = 从头再跑这一轮:丢掉失败尝试已累积的部分输出。
-    // 不落成 part,只把这一帧下发给前端(它据此显示「第 N 次重试」并清空已渲染的部分)。
-    parts.length = 0
+    // 重试有两种,对已累积内容的影响不同:
+    // - 整轮重来:丢掉失败尝试已累积的全部输出(避免正文重复);
+    // - 断点续跑(`resume`):模型接着失败那一步跑,已完成的步骤它看得见 —— 全清会让落盘
+    //   内容比上下文少一截,只回滚到最后一个已落定的工具结果(它之后属于失败的那一步)。
+    // 两种都不落成 part,只把这一帧下发给前端(它据此显示「第 N 次重试」并按同样规则回滚)。
+    if (event.resume) truncateToLastSettledTool(parts)
+    else parts.length = 0
   }
+}
+
+/**
+ * 回滚到最后一个**已落定**的工具结果(含),其后的一律丢掉。
+ *
+ * 断点续跑的边界就是工具结果:失败那一步可能已经吐了半截正文 / 半个工具调用参数,
+ * 这些模型会重新生成,留着就会和新的增量重复。一个已落定的工具都没有时清空 —— 那种
+ * 情况本来就没有断点,退回「整轮重来」是安全的。
+ */
+function truncateToLastSettledTool(parts: AgentMessagePart[]): void {
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const part = parts[i]
+    if (!part) continue
+    // tool-result 是「找不到对应 tool-call」时的兜底 part，它本身就是落定的结果
+    if (part.type === 'tool-result') {
+      parts.length = i + 1
+      return
+    }
+    if (part.type === 'tool-call' && part.output !== undefined) {
+      parts.length = i + 1
+      return
+    }
+  }
+  parts.length = 0
 }

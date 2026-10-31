@@ -15,7 +15,7 @@ import { loadLastTarget } from "@fizz/agent-kit/shared/lib/last-target";
 import { errorMessage } from "@fizz/agent-kit/shared/lib/stores/shared";
 import type { AcpProbeResult } from "@fizz/acp";
 import { emptySlice, SLICE_KEEP } from "../state";
-import type { ConvSlice } from "../types";
+import type { ConvSlice, ScopedSettings } from "../types";
 import type { ConvDeps } from "./context";
 
 export function createConversationCore(deps: ConvDeps) {
@@ -114,6 +114,43 @@ export function createConversationCore(deps: ConvDeps) {
       ...(conversation.modelId ? { modelId: conversation.modelId } : {}),
     };
     return isTargetAlive(target) ? target : null;
+  };
+
+  /**
+   * 某个会话「自己的现场」：模型 / 思考强度 / MCP / 浏览器偏好。
+   *
+   * ## 为什么需要
+   *
+   * 这四项在 store 上是**单份**的，语义是「焦点会话的现场」——`openConversation` 每开
+   * 一个会话就按那个会话重写它们。单标签时没问题（焦点即视图），但主区域**分屏**时两个
+   * 标签同时可见：非焦点那个的 composer 读的也是这份，于是点一下标签，两个标签的模型
+   * pill（以及 MCP / 浏览器开关 / 思考强度）就一起变（用户报的 bug）。
+   *
+   * ## 规则
+   *
+   * - `null`（新对话页）/ 当前焦点会话 → store 里那份，含「改了还没发送」的中间态；
+   * - 其余会话 → 从会话清单派生（它落盘的客观配置，也是下次打开它时会恢复的东西）。
+   *
+   * 焦点会话仍走全局那份是刻意的：`setChatTarget` 等写的就是它，两边同一份数据，
+   * 不会出现「下拉里选了 B、pill 还显示 A」。
+   */
+  const scopedSettingsOf = (conversationId: string | null): ScopedSettings => {
+    const s = get();
+    if (!conversationId || conversationId === s.activeConversationId) {
+      return {
+        chatTarget: s.chatTarget,
+        reasoningEffort: s.reasoningEffort,
+        mcpServerIds: s.mcpServerIds,
+        browserSettings: s.browserSettings,
+      };
+    }
+    const conv = s.conversations.find((c) => c.id === conversationId);
+    return {
+      chatTarget: targetFromConversation(conv),
+      reasoningEffort: conv?.reasoningEffort ?? null,
+      mcpServerIds: conv?.mcpServerIds ?? [],
+      browserSettings: conv?.browserSettings ?? null,
+    };
   };
 
   /**
@@ -326,8 +363,10 @@ export function createConversationCore(deps: ConvDeps) {
   /**
    * 把模型选择持久化到会话（fire-and-forget：失败不打扰，刷新时以服务端为准）。
    * 同时同步本地列表项 —— 会话摘要里带着 backend / configId / modelId，打开会话时要用来恢复。
+   *
+   * **清单先改、请求后发**（乐观）：分屏时非焦点标签的 pill 与「这一轮用哪个模型」都读
+   * 清单里这条（`scopedSettingsOf` 派生），等往返回来再改会有一瞬按旧模型发送。
    */
-
   const persistTarget = (
     conversationId: string,
     target: {
@@ -338,6 +377,21 @@ export function createConversationCore(deps: ConvDeps) {
   ): void => {
     const api = get().getApi();
     if (!api) return;
+    const applyLocal = (): void => {
+      set((state) => ({
+        conversations: state.conversations.map((c) =>
+          c.id === conversationId
+            ? {
+                ...c,
+                backend: target?.backend,
+                configId: target?.configId,
+                modelId: target?.modelId,
+              }
+            : c,
+        ),
+      }));
+    };
+    applyLocal();
     void api
       .setConversationTarget(
         conversationId,
@@ -349,20 +403,7 @@ export function createConversationCore(deps: ConvDeps) {
             }
           : { backend: null, configId: null, modelId: null },
       )
-      .then(() => {
-        set((state) => ({
-          conversations: state.conversations.map((c) =>
-            c.id === conversationId
-              ? {
-                  ...c,
-                  backend: target?.backend,
-                  configId: target?.configId,
-                  modelId: target?.modelId,
-                }
-              : c,
-          ),
-        }));
-      })
+      .then(applyLocal)
       .catch(() => undefined);
   };
 
@@ -374,22 +415,24 @@ export function createConversationCore(deps: ConvDeps) {
   ): void => {
     const api = get().getApi();
     if (!api) return;
+    const applyLocal = (): void => {
+      set((state) => ({
+        conversations: state.conversations.map((c) =>
+          c.id === conversationId
+            ? {
+                ...c,
+                ...(effort
+                  ? { reasoningEffort: effort }
+                  : { reasoningEffort: undefined }),
+              }
+            : c,
+        ),
+      }));
+    };
+    applyLocal();
     void api
       .setConversationTarget(conversationId, { reasoningEffort: effort })
-      .then(() => {
-        set((state) => ({
-          conversations: state.conversations.map((c) =>
-            c.id === conversationId
-              ? {
-                  ...c,
-                  ...(effort
-                    ? { reasoningEffort: effort }
-                    : { reasoningEffort: undefined }),
-                }
-              : c,
-          ),
-        }));
-      })
+      .then(applyLocal)
       .catch(() => undefined);
   };
 
@@ -402,15 +445,17 @@ export function createConversationCore(deps: ConvDeps) {
   const persistMcp = (conversationId: string, ids: string[]): void => {
     const api = get().getApi();
     if (!api) return;
+    const applyLocal = (): void => {
+      set((state) => ({
+        conversations: state.conversations.map((c) =>
+          c.id === conversationId ? { ...c, mcpServerIds: ids } : c,
+        ),
+      }));
+    };
+    applyLocal();
     void api
       .setConversationTarget(conversationId, { mcpServerIds: ids })
-      .then(() => {
-        set((state) => ({
-          conversations: state.conversations.map((c) =>
-            c.id === conversationId ? { ...c, mcpServerIds: ids } : c,
-          ),
-        }));
-      })
+      .then(applyLocal)
       .catch(() => undefined);
   };
 
@@ -428,15 +473,17 @@ export function createConversationCore(deps: ConvDeps) {
   ): void => {
     const api = get().getApi();
     if (!api) return;
+    const applyLocal = (): void => {
+      set((state) => ({
+        conversations: state.conversations.map((c) =>
+          c.id === conversationId ? { ...c, browserSettings: settings } : c,
+        ),
+      }));
+    };
+    applyLocal();
     void api
       .setConversationTarget(conversationId, { browserSettings: settings })
-      .then(() => {
-        set((state) => ({
-          conversations: state.conversations.map((c) =>
-            c.id === conversationId ? { ...c, browserSettings: settings } : c,
-          ),
-        }));
-      })
+      .then(applyLocal)
       .catch(() => undefined);
   };
 
@@ -588,6 +635,7 @@ export function createConversationCore(deps: ConvDeps) {
     catalogOf,
     isTargetAlive,
     targetFromConversation,
+    scopedSettingsOf,
     preferredTarget,
     draftAcpCache,
     DRAFT_ACP_FAIL_TTL_MS,

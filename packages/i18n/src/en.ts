@@ -545,7 +545,7 @@ export const EN: Record<string, string> = {
   '分钟': 'min',
   '（不超时）': ' (no timeout)',
   '模型请求重试': 'Model request retries',
-  '请求失败后的自动重试次数。已执行过工具的轮次不会重试。0 = 不限，默认 2。': 'Automatic retries after a failed request. Turns that already executed tools are not retried. 0 = unlimited, default 2.',
+  '请求失败后的自动重试次数。已跑完工具步骤的轮次会从断点继续，不会重跑已完成的工具。0 = 不限，默认 2。': 'Automatic retries after a failed request. Turns that already finished tool steps resume from the breakpoint instead of re-running those tools. 0 = unlimited, default 2.',
   '次': '',
   '（不限制）': ' (unlimited)',
 
@@ -873,6 +873,7 @@ export const EN: Record<string, string> = {
   '正在删除消息…': 'Deleting message…',
   '还没有消息': 'No messages yet',
   '第 {attempt} 次重试': 'Retry attempt {attempt}',
+  '第 {attempt} 次重试（接着上次的进度）': 'Retry attempt {attempt} (resuming from where it stopped)',
   '连接中断，正在重连（第 {attempt} 次）…': 'Connection lost; reconnecting (attempt {attempt})…',
   '服务端这一轮还在跑，接上就继续': 'The server is still running this turn; it will continue once reconnected',
   '（本轮没有返回内容）': '(No content returned this turn)',

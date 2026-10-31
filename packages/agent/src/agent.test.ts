@@ -9,8 +9,11 @@
  *    对话框里两句 `⚠️ ` 各挂一颗「重新加载」。
  * 2. 吐了半截正文就报错，却被当成跑完了：多步续写时「下一步请求」撞上限流 / 断网
  *    （`concurrency reached` 这类）会留下半截回复 + 一句 `⚠️ `，收尾却报 `done`，
- *    于是既不重试、内容也不完整。现在按失败收尾：没执行过工具就自动重试（`retry`
- *    事件让前端清掉半截），执行过工具则只标失败、不重跑（避免重复副作用）。
+ *    于是既不重试、内容也不完整。现在按失败收尾，然后看有没有断点：
+ *    - 有断点（工具跑完了、走到了步边界）→ 断点续跑：从失败那一步接着发，`retry` 事件
+ *      带 `resume`，前端只回滚最后一步的半截输出，已完成的步骤不重跑；
+ *    - 没断点且执行过工具 → 只标失败、不重跑（整轮重来会重复副作用）；
+ *    - 没断点也没工具 → 整轮重来，`retry` 不带 `resume`，前端清空重跑。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AgentStreamEvent, AiModelConfig } from '@fizz/contracts/types'
@@ -128,7 +131,10 @@ describe('runAgent 的失败提示', () => {
     expect(errors.every((e) => e.message === MID_STREAM_ERROR)).toBe(true)
   })
 
-  it('已经执行过工具 + 尾部流内 error：不重试（避免重复副作用），但这一轮仍标成失败', async () => {
+  it('执行过工具但**没有断点**（同一步内就失败）：不重试，避免重复副作用', async () => {
+    // 真实 AI SDK 里工具执行完、发下一步请求之前一定会调 `prepareStep`，断点就在那里。
+    // 这条用例模拟的是「同一步内工具结果之后立刻断流」：没有走到边界，也就没有断点可用，
+    // 只能整轮重来 —— 而整轮重来会把工具再执行一遍，所以宁可不重试。
     streamText.mockImplementation(() =>
       fakeStream([
         { type: 'tool-call', toolCallId: 't1', toolName: 'echo', input: {} },
@@ -141,7 +147,6 @@ describe('runAgent 的失败提示', () => {
     const events: AgentStreamEvent[] = []
     const result = await runAgent(baseOptions((event) => events.push(event)))
 
-    // 执行过工具就不能重跑（会重复写入 / 命令），只标失败让用户自己决定
     expect(streamText).toHaveBeenCalledTimes(1)
     expect(events.some((e) => e.type === 'retry')).toBe(false)
     expect(result.finishReason).toBe('error')
@@ -149,5 +154,75 @@ describe('runAgent 的失败提示', () => {
 
     // 流里已经下发过那条错误了，收尾不许再补一条
     expect(errorEvents(events)).toHaveLength(1)
+  })
+
+  it('执行过工具但有断点：断点续跑 —— 下一次请求带着已完成的工具结果，retry 标 resume', async () => {
+    /** 断点里那份消息：工具执行完、下一步请求之前，AI SDK 传给 `prepareStep` 的就是它 */
+    const withToolResult = [
+      { role: 'user', content: '读一下文件' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool-call', toolCallId: 't1', toolName: 'echo', input: { path: 'a.ts' } }
+        ]
+      },
+      {
+        role: 'tool',
+        content: [
+          {
+            type: 'tool-result',
+            toolCallId: 't1',
+            toolName: 'echo',
+            output: { type: 'text', value: 'ok' }
+          }
+        ]
+      }
+    ]
+    const hasToolMessage = (messages: readonly { role: string }[]): boolean =>
+      messages.some((m) => m.role === 'tool')
+
+    streamText.mockImplementation(
+      (opts: {
+        messages: readonly { role: string }[]
+        prepareStep?: (args: { messages: unknown[]; stepNumber: number }) => Promise<unknown>
+      }) => {
+        // 第 2 次调用 = 续跑：起点应当已经是断点那份（带着 tool 消息）
+        if (hasToolMessage(opts.messages)) {
+          return fakeStream([
+            { type: 'text-delta', text: '继续写' },
+            {
+              type: 'finish',
+              finishReason: 'stop',
+              totalUsage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }
+            }
+          ])
+        }
+        return {
+          fullStream: (async function* () {
+            yield { type: 'tool-call', toolCallId: 't1', toolName: 'echo', input: { path: 'a.ts' } }
+            yield { type: 'tool-result', toolCallId: 't1', toolName: 'echo', output: 'ok' }
+            // 工具跑完 → 引擎调 prepareStep（断点就是它返回的 messages）→ 下一步请求失败
+            await opts.prepareStep?.({ messages: withToolResult, stepNumber: 1 })
+            yield { type: 'error', error: new Error(MID_STREAM_ERROR) }
+          })()
+        }
+      }
+    )
+
+    const events: AgentStreamEvent[] = []
+    const result = await runAgent(baseOptions((event) => events.push(event)))
+
+    // 一次续跑就接着跑完了：没有整轮重来，也没有重复执行工具
+    expect(streamText).toHaveBeenCalledTimes(2)
+    expect(events.find((e) => e.type === 'retry')).toMatchObject({ attempt: 1, resume: true })
+    const resumed = streamText.mock.calls[1]?.[0] as { messages: { role: string }[] } | undefined
+    expect(hasToolMessage(resumed?.messages ?? [])).toBe(true)
+    expect(result.finishReason).toBe('done')
+    // 续跑那一段的正文照常下发（前端保留前半段、接着往下写）
+    const streamed = events
+      .filter((e): e is Extract<AgentStreamEvent, { type: 'text-delta' }> => e.type === 'text-delta')
+      .map((e) => e.delta)
+      .join('')
+    expect(streamed).toContain('继续写')
   })
 })

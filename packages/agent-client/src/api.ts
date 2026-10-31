@@ -1496,8 +1496,9 @@ export function createApi(
         body: JSON.stringify({ path, content }),
       }),
     /**
-     * 脚手架：给工作区新建一份模板文件（技能 SKILL.md / AGENTS.md）。
-     * 斜线命令 `/create-skill <名字>` 与 `/init` 走这条。
+     * 脚手架：给工作区新建一份模板文件（技能 SKILL.md / AGENTS.md 空骨架）。
+     * 斜线命令 `/create-skill <名字>` 走这条；`/init` 不走 —— 那份文档由模型读项目
+     * 后自己写，服务端只给空模板的话用户拿到的是空骨架。
      *
      * 与 `writeWorkspaceFile` 的分工：那条路**不 mkdir**、也不管覆盖，是「按已知路径
      * 写已知内容」；这条由服务端出正文、会建中间目录，且**已存在一律 409**

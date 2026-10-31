@@ -318,8 +318,8 @@ export function runEngine(opts: AgentEngineOptions): AgentEngine {
      * 内部又暗打 3 次，真实请求数是两层**相乘**（并发满时越重试越堵）。
      *
      * 重试权统一收在 `runAgent` 的外层循环（`RunAgentOptions.maxRetries`）：那里会发
-     * `retry` 事件、按退避等待、并遵守「已执行过工具的尝试不重试」。设置页的数字因此
-     * 是唯一权威，日志里也只剩一套重试。
+     * `retry` 事件、按退避等待，并决定这次是**断点续跑**（有步边界）还是整轮重来。
+     * 设置页的数字因此是唯一权威，日志里也只剩一套重试。
      *
      * 只在这一处关：`context.ts` 的压缩摘要与 `subagents.ts` 的子 run 是**独立请求**，
      * 没有外层循环接手重试，留着 AI SDK 的默认重试更划算。

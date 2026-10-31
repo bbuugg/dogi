@@ -13,7 +13,11 @@ import type {
 } from "@fizz/contracts/agent-api";
 import type { QueuedMessage } from "@fizz/contracts/types";
 import { assistantSliceId, buildUserParts } from "@fizz/contracts/agent-api";
-import { applyEvent, textOf } from "@fizz/agent-kit/shared/lib/parts";
+import {
+  applyEvent,
+  textOf,
+  truncateToLastSettledTool,
+} from "@fizz/agent-kit/shared/lib/parts";
 import { fileRefsOfParts } from "@fizz/agent-kit/shared/lib/attachments";
 import { createFrameBatcher } from "@fizz/agent-kit/shared/lib/frame-batch";
 import {
@@ -459,13 +463,25 @@ export function createConversationRunLoop(ctx: ConvCore) {
       return;
     }
     if (event.type === "retry") {
-      // 重试 = 从头再跑这一轮：清掉这一次尝试已渲染的部分输出，并显示单条「第 N 次重试」。
+      // 重试有两种，对已渲染内容的处理不同：
+      // - 整轮重来：清掉这次尝试的输出（模型从头生成，留着就会正文重复）；
+      // - 断点续跑（`resume`）：模型接着失败的那一步跑，已完成的步骤它看得见 —— 全清会
+      //   和上下文对不上，只回滚到最后一个已落定的工具结果。
       // 每次重试直接覆盖上一条（`retryNotice` 只有一份，屏幕上永远只留最新一次）。
       writeSlice(conversationId, (s) => ({
         ...s,
-        retryNotice: { attempt: event.attempt, maxRetries: event.maxRetries },
+        retryNotice: {
+          attempt: event.attempt,
+          maxRetries: event.maxRetries,
+          ...(event.resume ? { resume: true } : {}),
+        },
         messages: s.messages.map((m) =>
-          m.id === assistantId ? { ...m, parts: [] } : m,
+          m.id === assistantId
+            ? {
+                ...m,
+                parts: event.resume ? truncateToLastSettledTool(m.parts) : [],
+              }
+            : m,
         ),
       }));
       return;

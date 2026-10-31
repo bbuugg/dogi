@@ -195,6 +195,31 @@ export interface AssistantSlice {
   /** 停掉当前会话正在跑的那一轮 */
   stopAssistant(): void
   /**
+   * 编辑并重发：把该条及其后的全部消息截掉，再用改后的文本发一轮。
+   *
+   * 与主会话 `resendMessage` 同一套语义，但**不用请求服务端删历史** —— 助手历史本来
+   * 就只有前端一份（服务端每轮收 `history`、自己不存），截断 = 本地数组切片。
+   *
+   * 返回 `false` = 这一下没发出去（没有会话 / 那条不见了 / 正在回复中），此时
+   * **一个字都没删**：先截再发会撞上 `sendAssistant` 的「跑着不发」守卫，历史已经
+   * 删了却没发出去就是白丢一段。面板据此把编辑态还回去。
+   */
+  resendAssistantMessage(
+    messageId: string,
+    text: string,
+    scope: 'project' | 'terminal',
+    target?: AssistantTarget,
+    terminalTabKey?: string | null,
+    permissionMode?: AiPermissionMode
+  ): Promise<boolean>
+  /**
+   * 删掉一条历史消息（`single` = 只删本条，`from` = 本条及其后全部）。
+   *
+   * 纯本地操作（本地切片 + 存档），没有服务端对账。正在回复中删到最后那条流式占位时，
+   * 后续帧折叠不到目标就自然丢弃（`handleFrame` 按 id `map`），不会把它写回来。
+   */
+  deleteAssistantMessage(messageId: string, mode: 'single' | 'from'): void
+  /**
    * 运行中切换这一轮的权限档（面板那颗 pill 切档时调）。把该 run 的活档改掉，
    * 闸门下一次工具调用立刻按新档裁决（不必等下一轮）。没有在跑的轮 = 空操作。
    */
@@ -528,6 +553,40 @@ export const createAssistantSlice: StateCreator<AgentStore, [], [], AssistantSli
     stopAssistant: () => {
       const activeId = get().assistantActiveId
       if (activeId) stopSession(activeId)
+    },
+
+    resendAssistantMessage: async (messageId, text, scope, target, terminalTabKey, permissionMode) => {
+      const key = get().assistantActiveId
+      if (!key) return false
+      const current = get().assistantConversations[key]
+      // 跑着不发：截断放在这里做，一旦放行就是「先删后发」——所以守卫必须在切片之前
+      if (!current || current.streaming) return false
+      const index = current.messages.findIndex((m) => m.id === messageId)
+      if (index < 0) return false
+      /**
+       * 先截断再发：`sendAssistant` 每轮把**当前** messages 当 `history` 上送，
+       * 截断后那份自然就是「从这条之前重来」，不需要额外的重置参数。
+       */
+      writeSession(key, (s) => ({ ...s, messages: s.messages.slice(0, index) }))
+      await get().sendAssistant(text, scope, target, terminalTabKey, permissionMode)
+      return true
+    },
+
+    deleteAssistantMessage: (messageId, mode) => {
+      const activeId = get().assistantActiveId
+      if (!activeId) return
+      writeSession(activeId, (s) => {
+        const index = s.messages.findIndex((m) => m.id === messageId)
+        if (index < 0) return s
+        return {
+          ...s,
+          messages:
+            mode === 'single'
+              ? s.messages.filter((m) => m.id !== messageId)
+              : s.messages.slice(0, index),
+          updatedAt: Date.now()
+        }
+      })
     },
 
     setAssistantPermissionMode: (mode) => {

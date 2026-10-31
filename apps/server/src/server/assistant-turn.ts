@@ -11,8 +11,9 @@
  *
  * ## 工具集按 `scope` 二选一（两组互斥）
  *
- * - `project`（缺省）：`buildProjectTools`（经 `setup` 覆盖装配 —— 不建文件工具，
- *   因为跨项目场景下文件工具的 root 语义不清晰）；
+ * - `project`（缺省）：`buildProjectTools` + `buildModelTools`（经 `setup` 覆盖装配 ——
+ *   不建文件工具，因为跨项目场景下文件工具的 root 语义不清晰）。模型配置工具也只在这
+ *   一支里：它改的是全局设置（网关 / key / 模型清单），不属于任何单个工作区；
  * - `terminal`：只挂客户端带上来的终端工具。
  *
  * 审批走共用的 `createConfirmGate`；run 挂进共享的 run 注册表（`chat-run.ts`），
@@ -24,8 +25,9 @@ import type { AssistantSendInput } from '@fizz/contracts/agent-api'
 import { resolveContextWindow } from '@fizz/contracts/types'
 import type { AgentChatMessage, AgentStreamEvent, AiPermissionMode, TurnUsage } from '@fizz/contracts/types'
 import { defaultContextWindowFromEnv, runAgent, type RunAgentResult } from '@fizz/agent'
-import { buildProjectTools } from '@fizz/tools'
+import { buildModelTools, buildProjectTools } from '@fizz/tools'
 import { domain, markDirty } from './state'
+import { probeModelsFromUpstream } from './model-probe'
 import { refreshPluginModels } from './plugin-models'
 import { createConfirmGate, DEFAULT_CONFIRM_TIMEOUT_MS } from './confirm-gate'
 import { buildClientToolset, createClientToolGate } from './client-tool-gate'
@@ -55,7 +57,7 @@ export function buildAssistantInstructions(): string {
   const workspaces = domain.listWorkspaces()
   const now = new Date().toLocaleString('zh-CN', { hour12: false })
   const lines = [
-    '你是 Fizz 的项目管理助手,负责帮用户管理 Fizz 里的项目(工作区):查看清单、登记已有目录、新建目录、从 Git 克隆、打开项目、给项目建会话、创建 / 删除 worktree、删除项目、查看 / 创建 / 修改 / 删除 / 启停定时任务、给项目写插件。',
+    '你是 Fizz 的项目管理助手,负责帮用户管理 Fizz 里的项目(工作区):查看清单、登记已有目录、新建目录、从 Git 克隆、打开项目、给项目建会话、创建 / 删除 worktree、删除项目、查看 / 创建 / 修改 / 删除 / 启停定时任务、给项目写插件,以及管理全局的模型配置(列 / 增 / 改 / 删网关与模型)。',
     `默认项目根目录:${getDefaultProjectsRoot()}。建议用户把项目放这里(根内创建免审批);用户明确要放别处时照做(根外创建会弹审批卡)。`,
     `当前时间:${now}(需要算 at 这一类一次性触发时刻时以它为准)。`,
     workspaces.length
@@ -72,6 +74,9 @@ export function buildAssistantInstructions(): string {
     '- list_task_triggers 查看已有定时任务(含 id / 排程 / 启用态 / 下次触发),按项目过滤;要改 / 删 / 启停某条前先用它拿 id;',
     '- update_task_trigger / delete_task_trigger / set_task_trigger_enabled 分别改内容、删除、启用停用:update 只传要改的字段(其余保持原样;给 cron 或 at 之一即把触发方式换成那种);',
     '- create_plugin 给项目写插件:你只给工具名 / 描述 / 行为脚本(execute 的函数体,必须以 return 给出一段文字),服务端套模板生成合法插件并当场加载一遍;插件下一轮对话生效,只给 Agent 加一个无参数工具;',
+    '- 模型配置(每份 = 一个网关:服务商类型 + Base URL + API key)也能管:list_model_configs 看现状(拿 id);fetch_upstream_models 从上游拉可选模型 id;create_model_config / update_model_config / delete_model_config 管配置本身;add_model_entries / update_model_entry / remove_model_entry 管配置下的模型条目(增 / 改 / 删);',
+    '- 拉模型优先给 fetch_upstream_models 传 id(复用已存配置的地址与密钥);只有本地网关(ollama / vllm)或用户在对话里刚给出 key 时才裸探;apiKey 只在用户明确提供时写进配置,不要编造、也不要在回复里回显;',
+    '- 改模型配置等于改 agent 自己用的大脑:把 toolCall 关掉、把模型删光、把配置删掉都会让会话发不出去;动手前先一句话讲清影响,删配置 / 删模型 / 换 key 前先用 list_model_configs 确认目标是哪一个;所有改动下一轮对话生效(这一轮仍用原模型);',
     '- 定时任务的创建 / 修改 / 删除 / 启停与写插件都会弹审批卡,且产出或改动的是「以后会自动执行」的东西 —— 动手前先用一句话向用户讲清你要做什么;改 / 删定时任务前先 list 出来确认是哪一条;',
     '- 根目录外的创建、删除、worktree 变更都会弹审批卡等用户点头;',
     '- remove_project 缺省只移除登记、不删磁盘文件;deleteFiles=true 只对 worktree 项目生效;删之前必须向用户复述一次要删什么;',
@@ -278,6 +283,28 @@ export async function startAssistantTurn(input: AssistantSendInput): Promise<Sta
         })
       : {}
 
+  /**
+   * 模型配置工具（列 / 增 / 改 / 删配置、拉上游模型、增改删配置下的模型）：
+   * 与项目工具同批装配 —— 同样只挂 `project` 作用域，因为改的是**全局设置**，
+   * 不是某个工作区里的文件。审批口径也同一份 `guardMutation`（`readonly` 拒绝、
+   * 其余档弹卡），所以 `permissionMode` / `getPermissionMode` 直接透传。
+   */
+  const modelTools =
+    scope === 'project'
+      ? buildModelTools({
+          models: {
+            list: () => domain.listModels(),
+            save: (input) => domain.saveModel(input),
+            remove: (id) => domain.deleteModel(id),
+            // 与设置页的探针路由同源：空 key 复用已存密钥，解密只在服务端
+            probe: (input) => probeModelsFromUpstream(input)
+          },
+          permissionMode,
+          getPermissionMode: () => run.permissionMode,
+          requestConfirm: gate.requestConfirm
+        })
+      : {}
+
   const onEvent = (event: AgentStreamEvent): void => {
     if (event.type === 'finish' && event.usage) turnUsage = event.usage
     foldEventIntoParts(assistantParts, event)
@@ -303,7 +330,7 @@ export async function startAssistantTurn(input: AssistantSendInput): Promise<Sta
           ? buildTerminalAssistantInstructions() + terminalHint
           : buildAssistantInstructions(),
       // 工具集**按作用域二选一**,不再合并 —— 两组能力互斥(见 scope 的说明)
-      tools: scope === 'terminal' ? clientTools : projectTools
+      tools: scope === 'terminal' ? clientTools : { ...projectTools, ...modelTools }
     },
     contextWindow: resolveContextWindow(
       modelConfig.models,
