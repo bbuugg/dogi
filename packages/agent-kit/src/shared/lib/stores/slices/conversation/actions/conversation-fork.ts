@@ -13,7 +13,8 @@ export function createConversationForkActions(
   ConversationSlice,
   "forkConversation" | "convertAcpConversation"
 > {
-  const { set, get, api, readSlice, preferredTarget, peekActiveRun } = ctx;
+  const { set, get, api, readSlice, resolveConvId, preferredTarget, peekActiveRun } =
+    ctx;
 
   return {
     /**
@@ -23,8 +24,7 @@ export function createConversationForkActions(
      * 失败（运行中 409 / ACP / 消息不存在）只提示。
      */
     forkConversation: async (upToMessageId, opts, scope) => {
-      const conversationId =
-        scope === undefined ? get().activeConversationId : scope;
+      const conversationId = resolveConvId(scope);
       const api = get().getApi();
       if (!api || !conversationId) return;
       try {

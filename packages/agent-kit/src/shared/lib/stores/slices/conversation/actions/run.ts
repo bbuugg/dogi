@@ -13,7 +13,8 @@ export function createRunActions(
   ConversationSlice,
   "send" | "steer" | "stop" | "stopConversation" | "stopCommand"
 > {
-  const { set, get, api, readSlice, writeSlice, markRunning, runRound } = ctx;
+  const { set, get, api, readSlice, writeSlice, markRunning, runRound, resolveConvId } =
+    ctx;
 
   return {
     send: async (text, files, onStarted, scope) => {
@@ -24,7 +25,7 @@ export function createRunActions(
        * 输入框也得发到它自己那条上（`scope` 由视图层（`agentAppFrom`）按标签传入）。
        * `scope === null` 是明确「新对话页」→ 建新会话，别回落到某个焦点会话。
        */
-      const conversationId = scope === undefined ? get().activeConversationId : scope;
+      const conversationId = resolveConvId(scope);
       // 这条会话正在跑 → 入队等待；否则立即开新一轮
       if (conversationId && get().runningConversations[conversationId]) {
         get().enqueueMessage(trimmed, files, conversationId);
@@ -53,7 +54,7 @@ export function createRunActions(
       // 只带附件不写字也放行（与 send / enqueueMessage 同一口径）
       if (!trimmed && sendable.length === 0) return false;
       // 同上：分屏下插话也要落到本标签的会话，而不是焦点会话
-      const conversationId = scope === undefined ? get().activeConversationId : scope;
+      const conversationId = resolveConvId(scope);
       if (conversationId && get().runningConversations[conversationId]) {
         const api = get().getApi();
         if (api) {
@@ -85,7 +86,7 @@ export function createRunActions(
       return runRound(trimmed, sendable, onStarted, scope);
     },
     stop: async (scope) => {
-      const conversationId = scope === undefined ? get().activeConversationId : scope;
+      const conversationId = resolveConvId(scope);
       if (!conversationId) return;
       await get().stopConversation(conversationId);
     },
@@ -114,7 +115,7 @@ export function createRunActions(
     },
 
     stopCommand: async (toolCallId: string, scope) => {
-      const conversationId = scope === undefined ? get().activeConversationId : scope;
+      const conversationId = resolveConvId(scope);
       if (!conversationId) return;
       const current = readSlice(conversationId).request;
       // 没有在跑的轮 = 无从停（按钮本来也不该出现：没有 request.id）

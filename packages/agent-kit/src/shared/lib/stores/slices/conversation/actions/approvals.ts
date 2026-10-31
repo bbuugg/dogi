@@ -12,7 +12,7 @@ export function createApprovalsActions(
   ConversationSlice,
   "resolveConfirm" | "resolveFollowup"
 > {
-  const { get, api, readSlice, writeSlice } = ctx;
+  const { get, api, readSlice, writeSlice, resolveConvId } = ctx;
 
   return {
     // ---------- 审批 / 提问 ----------
@@ -21,7 +21,7 @@ export function createApprovalsActions(
        * 乐观撤掉**本会话**的卡片。分屏时审批卡可能出现在非焦点标签上（每个标签都渲染
        * 自己那条会话的 `pendingConfirms`），按活跃会话撤会撤空、卡片留在屏幕上不消失。
        */
-      const conversationId = scope === undefined ? get().activeConversationId : scope;
+      const conversationId = resolveConvId(scope);
       if (conversationId) {
         writeSlice(conversationId, (s) => ({
           ...s,
@@ -43,7 +43,7 @@ export function createApprovalsActions(
     },
     resolveFollowup: async (toolCallId, answer, scope) => {
       // 与审批同一立场：按本标签的会话取题、撤卡（分屏时非焦点标签也会渲染提问卡）
-      const conversationId = scope === undefined ? get().activeConversationId : scope;
+      const conversationId = resolveConvId(scope);
       const req = conversationId
         ? readSlice(conversationId).followupRequests[toolCallId]
         : undefined;

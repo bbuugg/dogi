@@ -21,6 +21,27 @@ import type { ConvDeps } from "./context";
 export function createConversationCore(deps: ConvDeps) {
   const { set, get, api } = deps;
 
+  /**
+   * 把动作的 `scope` 解析成真正的会话 id。**每一个会话级动作都从这里取 id**。
+   *
+   * - `undefined` → 活跃会话（旧行为，UI 焦点）；
+   * - `null` → 「没有会话」（新对话页 → 建新会话，明确不回落焦点会话）；
+   * - 有值 → 就是那条（分屏时视图层传自己标签的 id）。
+   *
+   * ## 为什么要收口成一个函数
+   *
+   * 「按活跃会话走」这个隐含默认值曾经散在 20 多个 action 里，分屏（两个标签同时可见）
+   * 一上线就集体变成 bug：在非焦点标签发消息 / 换模型 / 删消息全作用到焦点会话上。
+   * 现在默认值的解析只在这里——`scripts/check-conversation-scope.mjs` 会拦住
+   * `actions/` 里任何一处裸读 `activeConversationId`，新写的动作没法再漏。
+   */
+  const resolveConvId = (scope: string | null | undefined): string | null =>
+    scope === undefined ? get().activeConversationId : scope;
+
+  /** 这条会话是不是**焦点**会话（唯一需要拿「焦点」做判断的地方：全局那份镜像归谁） */
+  const isFocus = (conversationId: string | null): boolean =>
+    !!conversationId && conversationId === get().activeConversationId;
+
   const readSlice = (conversationId: string | null): ConvSlice =>
     (conversationId && get().slices[conversationId]) || emptySlice();
 
@@ -136,7 +157,7 @@ export function createConversationCore(deps: ConvDeps) {
    */
   const scopedSettingsOf = (conversationId: string | null): ScopedSettings => {
     const s = get();
-    if (!conversationId || conversationId === s.activeConversationId) {
+    if (!conversationId || isFocus(conversationId)) {
       return {
         chatTarget: s.chatTarget,
         reasoningEffort: s.reasoningEffort,
@@ -491,8 +512,9 @@ export function createConversationCore(deps: ConvDeps) {
 
   const saveCollabSettings = async (
     settings: CollabSettings,
+    scope?: string | null,
   ): Promise<boolean> => {
-    const conversationId = get().activeConversationId;
+    const conversationId = resolveConvId(scope);
     const api = get().getApi();
     if (!conversationId || !api) return false;
     try {
@@ -511,8 +533,11 @@ export function createConversationCore(deps: ConvDeps) {
     }
   };
 
-  const cancelCollabTask = async (taskId: string): Promise<boolean> => {
-    const conversationId = get().activeConversationId;
+  const cancelCollabTask = async (
+    taskId: string,
+    scope?: string | null,
+  ): Promise<boolean> => {
+    const conversationId = resolveConvId(scope);
     const api = get().getApi();
     if (!conversationId || !api) return false;
     try {
@@ -641,6 +666,8 @@ export function createConversationCore(deps: ConvDeps) {
    */
 
   return {
+    resolveConvId,
+    isFocus,
     readSlice,
     writeSlice,
     dropSlice,

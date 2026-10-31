@@ -246,8 +246,13 @@ export function MessageList({
          * 但那是「清空后逐帧重建」，内容先塌后长 —— 用 spring 跟随就是一段「列表像在
          * 重新加载、从顶部往下滚」的动画（用户实测反馈过）。回放期间瞬时贴底，
          * 视角一直落在底部，等 `replay-end` 之后再恢复流式的平滑跟随。
+         *
+         * ⚠️ `loading` 一起判：刷新 / 切会话的装载窗口里 slice 可能已经带着上一轮的
+         * `streaming`（刷新时那轮还在生成），骨架换成整份历史那一下高度暴增，用 spring
+         * 就是「从顶部平滑滚到底部」。另外 `Conversation` 自己还有一段装载期窗口兜底
+         * （见那边的 `settling`），两条一起才盖得住分阶段长高。
          */
-        smoothResize={streaming && !replaying}
+        smoothResize={streaming && !replaying && !loading}
       >
         {/* 面板一窄，目录那列横杠就贴着面板右缘，而**用户消息是右对齐的**（ai-elements 的
             `ml-auto`）、操作行也靠在消息右缘 —— 不让开位置，横杠正好压在用户消息下面那排

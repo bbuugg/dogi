@@ -29,22 +29,14 @@ import { createAssistantSlice, type AssistantSlice } from '@fizz/agent-kit/share
 import { createTransferSlice, type TransferSlice } from '@fizz/agent-kit/shared/lib/stores/slices/transfer'
 
 /**
- * 最近一次上下文压缩的通知（只有摘要一种 —— 清旧工具结果那一层已删除）。
- */
-export interface ContextNotice {
-  /** 整段上下文的压前 / 压后 token */
-  beforeTokens: number
-  afterTokens: number
-  at: number
-  /** 摘要了多少轮 / 保留了多少轮原文 */
-  summarizedTurns?: number
-  keptTurns?: number
-}
-
-/**
  * 真正全局的杂项。放 core 而不是某个 slice：error 会被所有 slice 写、busy 由
- * refresh 和 loadMessages 共用、contextNotice 跟着 SSE 帧走但与单个会话无关
- * （它是「发生了什么」的提示，不是待办）。
+ * refresh 和 loadMessages 共用。
+ *
+ * ⚠️ **只放「与哪条会话无关」的东西**。`contextNotice` / `contextCompressing` /
+ * `compressContextNow` 曾经在这里，但它们是**某一条会话**的属性 —— 分屏时 A 会话压缩
+ * 上下文，B 标签跟着闪提示、圆环跟着转。现在它们住在 `ConvSlice`（每会话一份），
+ * 见 `slices/conversation/actions/context.ts`。判断标准：如果换个标签看它就该变，它
+ * 就不属于这里。
  */
 export interface CoreSlice {
   error: string | null
@@ -52,8 +44,6 @@ export interface CoreSlice {
   clearError: () => void
   busy: boolean
   setBusy: (busy: boolean) => void
-  contextNotice: ContextNotice | null
-  setContextNotice: (notice: ContextNotice | null) => void
   /**
    * **兜底**上下文窗口（token）：只在这个模型没单独配窗口时当圆环的分母。
    * 服务端解析（环境变量 `FIZZ_CONTEXT_BUDGET` > 默认 200k），前端拉一次缓存；
@@ -62,8 +52,6 @@ export interface CoreSlice {
   defaultContextWindow: number | null
   /** 拉一次兜底窗口（已缓存时不重复拉）；失败静默 —— 圆环按默认值展示 */
   loadDefaultContextWindow: () => Promise<void>
-  /** 手动压缩进行中：输入框禁发（按钮 + Enter 都拦），圆环转圈 */
-  contextCompressing: boolean
   /**
    * 「发送即建会话」正在创建（只由 `runRound` 在 `newConversation` 期间置位）。
    *
@@ -74,16 +62,7 @@ export interface CoreSlice {
    * 的 `done`），**不要**拖到 `streamChat` 返回。
    */
   creatingConversation: boolean
-  /**
-   * 手动压缩当前会话：服务端摘要落检查点（原始消息不动）。
-   * 成功后顺手更新本地会话的 contextSummary（WS 全量推送还没到，先自己改，体验即时）。
-   * 返回给调用方（popover）决定 toast 什么。
-   */
-  compressContextNow: () => Promise<{ ok: boolean; reason?: string }>
-}
-
-/** contextNotice 的自动消失：8 秒后清掉。它是「发生了什么」的提示，不该一直挂着 */
-let contextNoticeTimer: ReturnType<typeof setTimeout> | null = null
+  }
 
 const createCoreSlice: StateCreator<AgentStore, [], [], CoreSlice> = (set, get) => ({
   error: null,
@@ -97,13 +76,6 @@ const createCoreSlice: StateCreator<AgentStore, [], [], CoreSlice> = (set, get) 
   setBusy: (busy) => {
     set({ busy })
   },
-  contextNotice: null,
-  setContextNotice: (notice) => {
-    set({ contextNotice: notice })
-    if (contextNoticeTimer) clearTimeout(contextNoticeTimer)
-    if (!notice) return
-    contextNoticeTimer = setTimeout(() => set({ contextNotice: null }), 8000)
-  },
   defaultContextWindow: null,
   loadDefaultContextWindow: async () => {
     if (get().defaultContextWindow !== null) return
@@ -116,45 +88,7 @@ const createCoreSlice: StateCreator<AgentStore, [], [], CoreSlice> = (set, get) 
       // 纯展示信息：拿不到就按默认窗口展示，不值得弹错打扰
     }
   },
-  contextCompressing: false,
-  creatingConversation: false,
-  compressContextNow: async () => {
-    const conversationId = get().activeConversationId
-    if (!conversationId) return { ok: false, reason: '没有打开的会话' }
-    if (get().contextCompressing) return { ok: false, reason: '压缩正在进行中' }
-    const api = get().getApi()
-    if (!api) return { ok: false, reason: '还没有连接到服务端' }
-    set({ contextCompressing: true })
-    try {
-      /**
-       * 压缩过程与自动压缩共用同一套 SSE 事件：`handleFrame` 收到
-       * `context-compaction-*` 后会在会话末尾渲染同一个折叠块（没有 assistantId =
-       * 不绑定到某条助手消息；见 `MessageList` 的 trailing compaction）。
-       */
-      const res = await api.compressContext(conversationId, (event) => {
-        get().handleFrame(conversationId, '', { type: 'event', requestId: '', event })
-      })
-      if (res.ok && res.summary) {
-        // 本地先同步检查点（即时反馈）；WS 的标脏推送随后会带同一份真值
-        const summary = res.summary
-        set((state) => ({
-          conversations: state.conversations.map((c) =>
-            c.id === conversationId ? { ...c, contextSummary: summary } : c
-          )
-        }))
-        return { ok: true }
-      }
-      // 没有可压缩的部分：把可能已经冒出来的流式块收掉
-      get().handleFrame(conversationId, '', { type: 'end', requestId: '' })
-      return { ok: false, reason: res.reason ?? '压缩未执行' }
-    } catch (err) {
-      // 摘要失败 / 中止：不留下半份流式文档（检查点也不会落）
-      get().handleFrame(conversationId, '', { type: 'end', requestId: '' })
-      return { ok: false, reason: err instanceof Error ? err.message : String(err) }
-    } finally {
-      set({ contextCompressing: false })
-    }
-  }
+  creatingConversation: false
 })
 
 export type AgentStore = CoreSlice &

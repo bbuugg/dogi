@@ -19,6 +19,12 @@ import { agentAppFrom } from './useAgentApp'
 
 const VIEW = 'conv-b'
 
+/** 这个视图那条会话的运行时现场（只放这次要断言的两个字段） */
+const SLICE_B = {
+  contextNotice: { beforeTokens: 1000, afterTokens: 250, at: 1 },
+  contextCompressing: true
+}
+
 /** 这个视图的现场（非焦点会话 → 按它自己那条会话派生出来的那份） */
 const SCOPED = {
   chatTarget: {
@@ -35,7 +41,7 @@ function makeStore() {
   const calls: Array<{ fn: string; args: unknown[] }> = []
   const overrides: Record<string, unknown> = {
     // 投影时会就地查表 / 迭代的几个集合：给空的真数组，别让 stub 顶上去
-    slices: {},
+    slices: { [VIEW]: SLICE_B },
     conversations: [],
     workspaces: [],
     models: [],
@@ -111,6 +117,31 @@ describe('agentAppFrom：写动作带上本视图的 id', () => {
     expect(argsOf('stop')[0]).toBe(VIEW)
     // steer(text, files, onStarted, scope)
     expect(argsOf('steer')[3]).toBe(VIEW)
+  })
+
+  it('上下文压缩的状态读本视图那条会话，压缩动作也落到它上面', () => {
+    const { store, argsOf } = makeStore()
+    const app = agentAppFrom(store, VIEW)
+
+    // 以前这两个是 CoreSlice 上的全局字段：分屏时 A 压缩，B 跟着闪 / 转
+    expect(app.contextNotice).toEqual(SLICE_B.contextNotice)
+    expect(app.contextCompressing).toBe(true)
+
+    app.compressContextNow()
+    expect(argsOf('compressContextNow')[0]).toBe(VIEW)
+  })
+
+  it('权限档 / 协作配置也带视图 id', () => {
+    const { store, argsOf } = makeStore()
+    const app = agentAppFrom(store, VIEW)
+
+    app.setPermissionMode('full')
+    app.setAcpPermissionMode('allow')
+    app.cancelCollabTask('task-1')
+
+    expect(argsOf('setPermissionMode')[1]).toBe(VIEW)
+    expect(argsOf('setAcpPermissionMode')[1]).toBe(VIEW)
+    expect(argsOf('cancelCollabTask')[1]).toBe(VIEW)
   })
 
   it('队列 / 消息 / 签出 / 队列泵都带视图 id', () => {

@@ -34,7 +34,23 @@ import { applyCollabEvent } from "../collab";
 import type { ConvCore } from "./context";
 
 export function createConversationRunLoop(ctx: ConvCore) {
-  const { set, get, api, readSlice, writeSlice, targetFromConversation, markRunning, persistTarget, syncQueueToServer, guardTarget, waitConversationsLoaded } = ctx;
+  const {
+    set,
+    get,
+    api,
+    readSlice,
+    writeSlice,
+    targetFromConversation,
+    markRunning,
+    persistTarget,
+    syncQueueToServer,
+    guardTarget,
+    waitConversationsLoaded,
+    // 「这条会话是不是焦点」只从这两个助手取，别在这里裸读 activeConversationId
+    // （`scripts/check-conversation-scope.mjs` 会拦）
+    resolveConvId,
+    isFocus,
+  } = ctx;
 
   const attachRun = async (
     conversationId: string,
@@ -453,13 +469,17 @@ export function createConversationRunLoop(ctx: ConvCore) {
           updatedAt: Date.now(),
         },
       }));
-      get().setContextNotice({
-        beforeTokens: event.beforeTokens,
-        afterTokens: event.afterTokens,
-        at: Date.now(),
-        summarizedTurns: event.summarizedTurns,
-        keptTurns: event.keptTurns,
-      });
+      // 提示条落在**这一轮所属的会话**上：分屏时别的标签不该跟着闪
+      get().setContextNotice(
+        {
+          beforeTokens: event.beforeTokens,
+          afterTokens: event.afterTokens,
+          at: Date.now(),
+          summarizedTurns: event.summarizedTurns,
+          keptTurns: event.keptTurns,
+        },
+        conversationId,
+      );
       return;
     }
     if (event.type === "retry") {
@@ -686,7 +706,7 @@ export function createConversationRunLoop(ctx: ConvCore) {
       if (api) {
         try {
           const { collab } = await api.getCollabState(conversationId);
-          if (get().activeConversationId === conversationId) {
+          if (isFocus(conversationId)) {
             writeSlice(conversationId, (s) => ({
               ...s,
               collab: { state: collab, liveText: {}, liveParts: {} },
@@ -700,10 +720,7 @@ export function createConversationRunLoop(ctx: ConvCore) {
     // acp 会话：消息在 agent 侧，用 session/load 回放重建视图（不落盘，刷新后重放）
     const convMeta = get().conversations.find((c) => c.id === conversationId);
     let resumedActive = false;
-    if (
-      convMeta?.backend === "acp" &&
-      get().activeConversationId === conversationId
-    ) {
+    if (convMeta?.backend === "acp" && isFocus(conversationId)) {
       /**
        * ⚠️ 先看这一轮是不是还在跑。
        *
@@ -731,7 +748,7 @@ export function createConversationRunLoop(ctx: ConvCore) {
                 cwd ?? "",
               );
               if (
-                get().activeConversationId === conversationId &&
+                isFocus(conversationId) &&
                 readSlice(conversationId).messages.length === 0
               ) {
                 writeSlice(conversationId, (s) => ({
@@ -763,7 +780,7 @@ export function createConversationRunLoop(ctx: ConvCore) {
       convMeta?.backend === "acp" &&
       convMeta.acpSessionId &&
       convMeta.configId &&
-      get().activeConversationId === conversationId
+      isFocus(conversationId)
     ) {
       const cwd = get().workspaces.find(
         (w) => w.id === convMeta.workspaceId,
@@ -783,7 +800,7 @@ export function createConversationRunLoop(ctx: ConvCore) {
           // 回放期间用户可能已经发出了新一轮（本地已有消息）或切走了会话：都不覆盖
           if (
             replayed.length > 0 &&
-            get().activeConversationId === conversationId &&
+            isFocus(conversationId) &&
             readSlice(conversationId).messages.length === 0
           ) {
             // 回放出来的消息与复位落底同一次写入（同 loadMessages 的 resetScroll，别拆两帧）
@@ -825,10 +842,7 @@ export function createConversationRunLoop(ctx: ConvCore) {
      * - 装载期间用户没自己改过选择（chatTarget 引用变了就不再覆盖）。
      * 校验不过（配置 / agent 被删、模型下架）就恢复成 null → 界面显示「选择模型」。
      */
-    if (
-      get().activeConversationId === conversationId &&
-      get().chatTarget === targetBefore
-    ) {
+    if (isFocus(conversationId) && get().chatTarget === targetBefore) {
       const stored =
         fetched ?? get().conversations.find((c) => c.id === conversationId);
       set({
@@ -849,7 +863,7 @@ export function createConversationRunLoop(ctx: ConvCore) {
       if (attached) return;
     }
     // 本会话没在跑但有排队消息：依次发出（刷新后也能续上；被停掉的那轮结束后同样接着跑）
-    if (!get().runningConversations[conversationId]) pump();
+    if (!get().runningConversations[conversationId]) pump(conversationId);
   };
 
   /**
@@ -976,9 +990,9 @@ export function createConversationRunLoop(ctx: ConvCore) {
    */
 
   const pump = (scope?: string | null): void => {
-    // `scope` 不传 = 活跃会话（内部调用都只在自己那条是活跃时才泵，见 settleRound）；
-    // 分屏时非焦点标签的「继续发送」带上自己的 id，才不会去泵焦点会话的队列
-    const conversationId = scope === undefined ? get().activeConversationId : scope;
+    // `scope` 不传 = 活跃会话；分屏时非焦点标签的「继续发送」带上自己的 id，
+    // 才不会去泵焦点会话的队列
+    const conversationId = resolveConvId(scope);
     if (!conversationId) return;
     if (get().runningConversations[conversationId]) return;
     const queue = readSlice(conversationId).queuedMessages;
@@ -1069,9 +1083,7 @@ export function createConversationRunLoop(ctx: ConvCore) {
      * 非焦点会话按它自己的清单项派生（见 `scopedSettingsOf`）。必须在建会话之前算 ——
      * 草稿页要靠它拿到 `chatTarget` 去建会话。
      */
-    const scoped = get().scopedSettingsOf(
-      scope === undefined ? get().activeConversationId : scope,
-    );
+    const scoped = get().scopedSettingsOf(resolveConvId(scope));
 
     /**
      * 发之前先确认目标还成立（见 `guardTarget`）。校验必须放在建会话之前，否则会留下
@@ -1079,7 +1091,7 @@ export function createConversationRunLoop(ctx: ConvCore) {
      */
     if (!guardTarget(scoped.chatTarget)) return false;
 
-    let conversationId = scope === undefined ? get().activeConversationId : scope;
+    let conversationId = resolveConvId(scope);
     if (!conversationId) {
       // 「开始新对话」页发送即建会话：会话类型在创建时就按当前选中的目标定死 ——
       // 选的是 ACP agent（或其模型）就是 acp 会话（agent 从此绑定、acpSessionId 后续回填），
@@ -1365,14 +1377,16 @@ export function createConversationRunLoop(ctx: ConvCore) {
         )?.backend;
         if (convBackend !== "acp") void loadMessages(conversationId);
       }
-      // 自然收尾（没被中止、也没失败）：把队列里的下一条顶上来接着跑；
-      // 用户点了停止（aborted）则保留队列，等他之后手动再发时一并续上
-      if (
-        !controller.signal.aborted &&
-        !failed &&
-        get().activeConversationId === conversationId
-      ) {
-        pump();
+      /**
+       * 自然收尾（没被中止、也没失败）：把**这条会话**队列里的下一条顶上来接着跑；
+       * 用户点了停止（aborted）则保留队列，等他之后手动再发时一并续上。
+       *
+       * **不看焦点**：以前这里要求「必须还是活跃会话」，分屏时在 B 标签排了三条、切回 A
+       * 看别的东西，B 的第一轮跑完队列就停在那儿不动了 —— 队列是「我自己会接着跑」的
+       * 承诺，与用户此刻看哪块无关。`pump(conversationId)` 会把下一轮也发到 B 上。
+       */
+      if (!controller.signal.aborted && !failed) {
+        pump(conversationId);
       } else if (
         failed &&
         readSlice(conversationId).queuedMessages.length > 0
@@ -1426,9 +1440,9 @@ export function createConversationRunLoop(ctx: ConvCore) {
       (c) => c.id === conversationId,
     )?.backend;
     if (convBackend !== "acp") void loadMessages(conversationId);
-    // 自然收尾（没被中止）：把队列里的下一条顶上来接着跑；用户点了停止则保留队列
-    if (!signal.aborted && get().activeConversationId === conversationId)
-      pump();
+    // 自然收尾（没被中止）：把队列里的下一条顶上来接着跑；用户点了停止则保留队列。
+    // 同样不看焦点 —— 后台标签的队列自己跑完（见 settleRound 里的说明）
+    if (!signal.aborted) pump(conversationId);
   };
 
   /**

@@ -182,6 +182,16 @@ export interface ConvSlice {
    */
   reconnectNotice: { attempt: number } | null;
   /**
+   * 最近一次上下文压缩的通知（圆环上的展开详情 + 8 秒自动消失的提示条）。
+   *
+   * **每会话一份**：分屏时 A 标签这一轮压缩了上下文，B 标签不该跟着闪「上下文已压缩」。
+   * 以前它是 store 上的全局字段（`CoreSlice.contextNotice`）—— 那是「焦点会话的现场」
+   * 冒充全局的最后一处，与模型 pill 那个 bug 同一个根因。
+   */
+  contextNotice: ContextNotice | null;
+  /** 手动压缩进行中（本会话）：输入框禁发、圆环转圈 */
+  contextCompressing: boolean;
+  /**
    * 有一轮在客户端看是「断线失败」的，但服务端很可能在断线期间把它跑完并落盘了
    * （run 的生命周期不挂在客户端连接上）。这里记下 `baseCount` = **这一轮开跑前**
    * 本地有多少条消息，作为对账基准：之后拉服务端权威历史，比它长且末位是助手消息
@@ -222,6 +232,22 @@ export interface CollabClientState {
    * 任务到终态时清空，交给快照里的 `parts`。
    */
   liveParts: Record<string, AgentMessagePart[]>;
+}
+
+/**
+ * 最近一次上下文压缩的通知（只有摘要一种 —— 清旧工具结果那一层已删除）。
+ *
+ * 形状与 SSE 帧 `context-compressed` 一一对应；住在 `ConvSlice`（每会话一份），
+ * 视图层通过 `app.contextNotice` 读自己那条。
+ */
+export interface ContextNotice {
+  /** 整段上下文的压前 / 压后 token */
+  beforeTokens: number;
+  afterTokens: number;
+  at: number;
+  /** 摘要了多少轮 / 保留了多少轮原文 */
+  summarizedTurns?: number;
+  keptTurns?: number;
 }
 
 /**
@@ -412,12 +438,13 @@ export interface ConversationSlice {
     patch: Partial<BrowserSettings>,
     scope?: string | null,
   ) => void;
-  setPermissionMode: (mode: AiPermissionMode) => void;
+  setPermissionMode: (mode: AiPermissionMode, scope?: string | null) => void;
   /**
-   * 设置**当前 ACP 会话**的权限答复策略（`confirm` = 逐次问；`allow` = 应用层自动放行）。
-   * 按会话持久化到 `config.json`；没有活动会话时什么都不做（新任务页没有会话可绑）。
+   * 设置**某条 ACP 会话**的权限答复策略（`confirm` = 逐次问；`allow` = 应用层自动放行）。
+   * 按会话持久化到 `config.json`；没有会话时什么都不做（新任务页没有会话可绑）。
+   * `scope` 语义同 `setChatTarget`。
    */
-  setAcpPermissionMode: (mode: AcpPermissionMode) => void;
+  setAcpPermissionMode: (mode: AcpPermissionMode, scope?: string | null) => void;
   setConfirmTimeoutMin: (minutes: number) => void;
   setMaxRetries: (value: number) => void;
   setToolCallConcurrency: (value: number) => void;
@@ -433,10 +460,31 @@ export interface ConversationSlice {
     assistantId: string,
     frame: ChatStreamFrame,
   ) => void;
+  /**
+   * 记一条「这一轮的上下文被压过了」的提示（8 秒后自动消失，见 `actions/context.ts`）。
+   * `scope` 语义同 `setChatTarget`：分屏时只落在触发压缩的那个标签上。
+   */
+  setContextNotice: (notice: ContextNotice | null, scope?: string | null) => void;
+  /**
+   * 手动压缩**某条会话**的上下文：服务端摘要落检查点（原始消息不动）。
+   *
+   * `scope` 语义同 `setChatTarget`；不传 = 活跃会话（旧行为）。
+   * 成功后顺手更新本地会话的 contextSummary（WS 全量推送还没到，先自己改，体验即时）。
+   * 返回给调用方（popover）决定 toast 什么。
+   */
+  compressContextNow: (
+    scope?: string | null,
+  ) => Promise<{ ok: boolean; reason?: string }>;
   /** 覆盖协作配置（画布拖拽 / 增删 Agent）；成功后就地更新会话清单里的那份 */
-  saveCollabSettings: (settings: CollabSettings) => Promise<boolean>;
-  /** 取消当前协作轮里某个正在跑的子任务 */
-  cancelCollabTask: (taskId: string) => Promise<boolean>;
+  saveCollabSettings: (
+    settings: CollabSettings,
+    scope?: string | null,
+  ) => Promise<boolean>;
+  /** 取消**某条协作会话**里某个正在跑的子任务 */
+  cancelCollabTask: (
+    taskId: string,
+    scope?: string | null,
+  ) => Promise<boolean>;
   attachRun: (conversationId: string) => Promise<boolean>;
   /**
    * 重接一条进行中的对话：用户点消息区「连接中断」条上的按钮、或页面从后台回来时调。
@@ -668,11 +716,11 @@ export interface ConversationSlice {
   /** 停当前会话这一轮（`scope` 语义同 `setChatTarget`；分屏时传本标签的会话） */
   stop: (scope?: string | null) => Promise<void>;
   /**
-   * 停止**指定会话**当前正在跑的那一轮（不依赖「谁是当前会话」）。
+   * 停止**指定会话**当前正在跑的那一轮（必传 id，不依赖「谁是当前会话」）。
    *
-   * 与 `stop` 的分工：`stop` 只认 `activeConversationId`，用于「当前会话」的停止按钮；
-   * 而批量关标签这类场景关掉的多半**不是**活动标签，用 `stop` 会停错会话 —— 那里必须用这个
-   * id 版。关标签守卫（`ConversationTab`）就是拿它先停会话再放行关闭。
+   * 与 `stop` 的分工：`stop` 收 `scope`（不传 = 活跃会话），用于「当前会话」的停止按钮；
+   * 而批量关标签这类场景关掉的多半**不是**活动标签，那里必须用这个 id 版把 id 明确写出来。
+   * 关标签守卫（`ConversationTab`）就是拿它先停会话再放行关闭。
    */
   stopConversation: (conversationId: string) => Promise<void>;
   /**

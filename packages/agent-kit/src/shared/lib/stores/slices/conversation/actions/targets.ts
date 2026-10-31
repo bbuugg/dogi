@@ -27,7 +27,7 @@ export function createTargetsActions(
   ConversationSlice,
   "setReasoningEffort" | "setChatTarget" | "setDraftAcpMode" | "setDraftAcpThought" | "clearDraftAcp" | "setMcpServerIds" | "setBrowserSettings"
 > {
-  const { set, get, probeDraftAcp, scopedSettingsOf, persistTarget, persistReasoningEffort, persistMcp, persistBrowserSettings } = ctx;
+  const { set, get, probeDraftAcp, scopedSettingsOf, resolveConvId, isFocus, persistTarget, persistReasoningEffort, persistMcp, persistBrowserSettings } = ctx;
 
   /**
    * 这次写的是哪个会话，以及要不要同时改 store 上那份全局现场。
@@ -38,12 +38,9 @@ export function createTargetsActions(
   const resolveScope = (
     scope?: string | null,
   ): { conversationId: string | null; focus: boolean } => {
-    const activeConversationId = get().activeConversationId;
-    const conversationId = scope === undefined ? activeConversationId : scope;
-    return {
-      conversationId,
-      focus: !conversationId || conversationId === activeConversationId,
-    };
+    const conversationId = resolveConvId(scope);
+    // 草稿页（没有会话）也算「焦点」：那时全场只有它一块视图
+    return { conversationId, focus: !conversationId || isFocus(conversationId) };
   };
 
   /** 浏览器偏好的合并基线：草稿页 / 焦点会话用全局那份，其余按该会话落盘的配置 */

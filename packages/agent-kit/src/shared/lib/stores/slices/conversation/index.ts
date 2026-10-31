@@ -24,6 +24,7 @@ import { createConversationForkActions } from "./actions/conversation-fork";
 import { createQueueActions } from "./actions/queue";
 import { createRunActions } from "./actions/run";
 import { createApprovalsActions } from "./actions/approvals";
+import { createContextActions } from "./actions/context";
 import {
   loadActiveWorkspaceId,
   loadConfirmTimeout,
@@ -111,5 +112,6 @@ export const createConversationSlice: StateCreator<
     ...createQueueActions(ctx),
     ...createRunActions(ctx),
     ...createApprovalsActions(ctx),
+    ...createContextActions(ctx),
   };
 };

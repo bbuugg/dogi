@@ -38,6 +38,8 @@ export const emptySlice = (): ConvSlice => ({
   pendingSteers: [],
   retryNotice: null,
   reconnectNotice: null,
+  contextNotice: null,
+  contextCompressing: false,
   droppedRound: null,
   loadGen: 0,
   scrollResetSeq: 0,

@@ -27,18 +27,21 @@ export function createSettingsActions(
   | "setMaxSteps"
   | "setToolIntent"
 > {
-  const { set, get, api, readSlice } = ctx;
+  const { set, get, api, readSlice, resolveConvId } = ctx;
 
   return {
-    setPermissionMode: (mode) => {
+    setPermissionMode: (mode, scope) => {
       savePermissionMode(mode);
       set({ permissionMode: mode });
       /**
        * 运行中的轮也要立刻改活档：工具集一轮建一次，闸门靠 `getPermissionMode` 现取 ——
        * 服务端那次 POST 改的就是这一轮 run 上的字段，改完**下一次工具调用**就按新档裁决，
        * 不必等下一轮。没有在跑的轮就什么都不做（下一轮自然带上新档）。
+       *
+       * 改的是**本标签那条会话**正在跑的轮：分屏时两个标签各跑各的，按活跃会话改会把
+       * 另一个标签的权限档悄悄换掉。
        */
-      const conversationId = get().activeConversationId;
+      const conversationId = resolveConvId(scope);
       if (!conversationId) return;
       const requestId = readSlice(conversationId).request?.id;
       const api = get().getApi();
@@ -46,8 +49,8 @@ export function createSettingsActions(
       // 幂等：run 已结束 = 空成功，静默即可（不值得为它弹错误）
       void api.setChatPermission(requestId, mode).catch(() => undefined);
     },
-    setAcpPermissionMode: (mode) => {
-      const conversationId = get().activeConversationId;
+    setAcpPermissionMode: (mode, scope) => {
+      const conversationId = resolveConvId(scope);
       if (!conversationId) return;
       // 乐观更新会话列表（权限 pill 读的是会话对象），失败回滚；服务端标脏后推权威快照
       const prev = get().conversations.find(

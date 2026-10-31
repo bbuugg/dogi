@@ -110,7 +110,8 @@ npm run dev:web        # 另开终端：vite（5173，/api 已代理到 7801，�
 npm run build:server   # 只构建服务端
 npm run build:web      # 只构建网页（改完前端要重跑，server 同源托管 dist）
 npm run typecheck      # 全量类型检查（提交前必跑）
-npm run check:boundaries  # 包边界检查，必须 0 违规
+npm run check:boundaries  # 包边界 + 会话作用域检查，必须 0 违规
+npm run check:scope    # 只跑会话作用域检查（store 里不许「读焦点当默认目标」）
 npx vitest run         # 单测全量（无独立 npm script；单文件在后面接路径）
 ```
 

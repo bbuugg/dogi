@@ -19,6 +19,11 @@
  * 5. **用户自己往上滚时立刻退出跟随**（见 `attachScroll` 里的 wheel / touch 监听）——
  *    库自带的「上滚即停」在我们这套样式 + 流式场景下两条判定同时失效，只靠它会一直
  *    被拽回底部。
+ * 6. **装载期一律瞬时贴底**（`settling`）：刷新 / 切会话 / 回放重建时内容不是一次到位的
+ *    （骨架 → 历史 → 代码高亮 / 图片撑开 → 回放逐帧），第 1 条的同步落底只压住了第一帧，
+ *    之后每一次长高都会被库的 spring 接管 —— 观感就是「刷新后从顶部一路平滑滚到底」。
+ *    从 resetKey 变化（含挂载）起算一小段窗口，窗口内把 resize 强制成瞬时；窗口在内容
+ *    高度稳定后（或到硬上限）结束，流式追更的平滑跟随不受影响。
  */
 import { Button } from "@fizz/ui/button";
 import { cn } from "@fizz/agent-kit/shared/lib/utils";
@@ -32,6 +37,7 @@ import {
   useEffect,
   useLayoutEffect,
   useRef,
+  useState,
 } from "react";
 
 /**
@@ -48,6 +54,23 @@ const AT_BOTTOM_THRESHOLD_PX = 70;
  * 下一帧任何内容尺寸变化都会**瞬时**把他吸到底部（用户实测的「还没到底就跳」）。
  */
 const AT_BOTTOM_EPSILON_PX = 2;
+
+/**
+ * 装载期的「静默」判定：内容高度多久不再变化就算装载结束（毫秒）。
+ *
+ * 装载完成之后常跟着一波**二次长高**（代码高亮、图片按真实尺寸撑开、折叠块展开），
+ * 间隔通常在 200ms 内；窗口取短了会漏掉后半段，又变成自己往下滚。
+ */
+const SETTLE_QUIET_MS = 280;
+
+/**
+ * 装载期硬上限（毫秒）。
+ *
+ * 流式输出时内容每帧都在长高，静默计时会被一直往后推 —— 没有上限的话「刷新时这轮正在
+ * 生成」会整轮退化成逐帧瞬时贴底，丢掉「消息向上流动」的平滑观感。上限保证它最多
+ * 只覆盖装载那一小段，随后一定交还给 spring。
+ */
+const SETTLE_MAX_MS = 1600;
 
 type ConversationContextValue = {
   isAtBottom: boolean;
@@ -89,6 +112,9 @@ export type ConversationProps = ComponentProps<"div"> & {
    * 后按真实尺寸撑开，于是装载完成后内容还会二次长高 —— 用 spring 跟随就是一段
    * 「没人操作却自己往下滚」的动画（用户明确反馈过）。这类场景瞬时到底即可。
    *
+   * 注意它**只在装载期结束后**才真正生效（见下面的 `settling`）：装载窗口里即便
+   * 正在流式输出也强制瞬时，否则刷新后内容分阶段长高会被 spring 一路带着滚下来。
+   *
    * 默认 `false`（瞬时）。流式那一路由调用方传 `streaming` 打开。
    */
   smoothResize?: boolean;
@@ -102,6 +128,15 @@ export const Conversation = ({
   style,
   ...props
 }: ConversationProps) => {
+  /**
+   * 「装载期」标志：true 时内容怎么长高都瞬时贴底（见文件头第 6 条）。
+   *
+   * 初值 true —— 挂载本身就是一次装载，不能赌第一帧的 ResizeObserver 还没跑。
+   * `resetKey` 每次变化都会把窗口重新拉开（切换会话 / 装载完成 / 回放重建 / 自己发消息），
+   * 随后在「内容高度稳定」或到硬上限时结束。
+   */
+  const [settling, setSettling] = useState(true);
+
   const { scrollRef, contentRef, isAtBottom, scrollToBottom, stopScroll } =
     useStickToBottom({
       // 首屏 / 初次挂载直接落底（不要从顶部动画下来）
@@ -110,8 +145,11 @@ export const Conversation = ({
        * 内容变高时的跟随方式。`undefined` 会让库回到自己的默认值（spring 平滑动画，
        * 见库内 mergeAnimations），"instant" 则瞬时贴底 —— 图片加载这类「没人操作却
        * 长高」的场景必须瞬时，否则就是一段自己往下滚的动画（见 smoothResize 注释）。
+       *
+       * `settling` 期间一律瞬时：库是在每次 RO 回调里现读这个 options，
+       * 所以它跟着 React 重渲染生效即可，不需要额外通知库。
        */
-      resize: smoothResize ? undefined : "instant",
+      resize: smoothResize && !settling ? undefined : "instant",
     });
 
   /**
@@ -319,6 +357,66 @@ export const Conversation = ({
     ro.observe(content);
     return () => ro.disconnect();
   }, [contentRef, stopScroll]);
+
+  /**
+   * 装载期窗口：`resetKey` 每次变化（含挂载）重新拉开，内容高度静默
+   * `SETTLE_QUIET_MS` 之后结束，最长不超过 `SETTLE_MAX_MS`（见文件头第 6 条）。
+   *
+   * 必须是 layout effect：`setSettling(true)` 要在本帧 paint 之前生效，让紧随其后的
+   * ResizeObserver 回调读到的 `resize` 已经是 "instant" —— 换成普通 effect 会晚一帧，
+   * 而那一帧正是装载内容长高、库要发起 spring 的那一帧。
+   *
+   * 顺序上也刻意排在下面「同步落底」那条之前：窗口先拉开，落底再执行，两者同一批
+   * layout effect 里完成，中间不留可被 RO 插队的空隙。
+   */
+  useLayoutEffect(() => {
+    const content = contentRef.current;
+    setSettling(true);
+    if (!content) {
+      // 内容节点还没挂上（不该发生）：别把窗口卡死在装载期，交还给流式跟随
+      setSettling(false);
+      return;
+    }
+
+    let lastHeight = -1;
+    let quietTimer: number | undefined;
+    let maxTimer: number | undefined;
+    let done = false;
+    let ro: ResizeObserver | undefined;
+
+    const stop = (): void => {
+      if (done) return;
+      done = true;
+      if (maxTimer !== undefined) window.clearTimeout(maxTimer);
+      if (quietTimer !== undefined) window.clearTimeout(quietTimer);
+      ro?.disconnect();
+      setSettling(false);
+    };
+
+    /** 每长高一次就重新计时 —— 装载是分批的，只有「静默」才算装完 */
+    const arm = (): void => {
+      if (done) return;
+      if (quietTimer !== undefined) window.clearTimeout(quietTimer);
+      quietTimer = window.setTimeout(stop, SETTLE_QUIET_MS);
+    };
+
+    ro = new ResizeObserver(([entry]) => {
+      const height = entry.contentRect.height;
+      if (height === lastHeight) return;
+      lastHeight = height;
+      arm();
+    });
+    ro.observe(content);
+    arm();
+    maxTimer = window.setTimeout(stop, SETTLE_MAX_MS);
+
+    return () => {
+      done = true;
+      ro?.disconnect();
+      if (maxTimer !== undefined) window.clearTimeout(maxTimer);
+      if (quietTimer !== undefined) window.clearTimeout(quietTimer);
+    };
+  }, [resetKey, contentRef]);
 
   // 切换会话 / 消息装载完成：本帧 paint 之前瞬时落底（不要平滑动画）
   useLayoutEffect(() => {

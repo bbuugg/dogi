@@ -15,13 +15,22 @@ export function createQueueActions(
   ConversationSlice,
   "enqueueMessage" | "removeQueuedMessage" | "updateQueuedMessage" | "moveQueuedMessage" | "moveQueuedMessageBy" | "sendQueuedMessage" | "sendSteer" | "clearQueuedMessages" | "removeSteer" | "moveSteer" | "moveSteerBy"
 > {
-  const { get, api, readSlice, writeSlice, syncSteerOrder, patchQueue, runRound } = ctx;
+  const {
+    get,
+    api,
+    readSlice,
+    writeSlice,
+    syncSteerOrder,
+    patchQueue,
+    runRound,
+    resolveConvId,
+  } = ctx;
 
   return {
     // ---------- 发一轮 ----------
     enqueueMessage: (text, files, scope) => {
       // 分屏时排队也要排到本标签的会话：`send` 会把本标签的会话 id 传进来
-      const conversationId = scope === undefined ? get().activeConversationId : scope;
+      const conversationId = resolveConvId(scope);
       if (!conversationId) return;
       const item: QueuedMessage = {
         id: nextLocalId("q"),
@@ -35,7 +44,7 @@ export function createQueueActions(
       ]);
     },
     removeQueuedMessage: (id, scope) => {
-      const conversationId = scope === undefined ? get().activeConversationId : scope;
+      const conversationId = resolveConvId(scope);
       if (!conversationId) return;
       patchQueue(
         conversationId,
@@ -43,7 +52,7 @@ export function createQueueActions(
       );
     },
     updateQueuedMessage: (id, text, scope) => {
-      const conversationId = scope === undefined ? get().activeConversationId : scope;
+      const conversationId = resolveConvId(scope);
       if (!conversationId) return;
       patchQueue(
         conversationId,
@@ -60,7 +69,7 @@ export function createQueueActions(
      * 插。下标一律由这里从**最新的**队列里算。
      */
     moveQueuedMessage: (id, beforeId, scope) => {
-      const conversationId = scope === undefined ? get().activeConversationId : scope;
+      const conversationId = resolveConvId(scope);
       if (!conversationId || id === beforeId) return;
       const queue = readSlice(conversationId).queuedMessages;
       const from = queue.findIndex((m) => m.id === id);
@@ -80,7 +89,7 @@ export function createQueueActions(
      * 得拿后一条反过来调它（`move(next.id, id)`），读起来反直觉。下标照样由这里从最新队列算。
      */
     moveQueuedMessageBy: (id, delta, scope) => {
-      const conversationId = scope === undefined ? get().activeConversationId : scope;
+      const conversationId = resolveConvId(scope);
       if (!conversationId) return;
       const queue = readSlice(conversationId).queuedMessages;
       const from = queue.findIndex((m) => m.id === id);
@@ -93,7 +102,7 @@ export function createQueueActions(
       patchQueue(conversationId, next);
     },
     sendQueuedMessage: (id, scope) => {
-      const conversationId = scope === undefined ? get().activeConversationId : scope;
+      const conversationId = resolveConvId(scope);
       if (!conversationId || get().runningConversations[conversationId]) return;
       const queue = readSlice(conversationId).queuedMessages;
       const item = queue.find((m) => m.id === id);
@@ -126,7 +135,7 @@ export function createQueueActions(
      * 有意义的动作就是把它当新消息发出去。剩下的遗留条目会在 `runRound` 里转入待发送队列。
      */
     sendSteer: (messageId, scope) => {
-      const conversationId = scope === undefined ? get().activeConversationId : scope;
+      const conversationId = resolveConvId(scope);
       if (!conversationId || get().runningConversations[conversationId]) return;
       const item = readSlice(conversationId).pendingSteers.find(
         (m) => m.id === messageId,
@@ -153,13 +162,13 @@ export function createQueueActions(
     },
     /** 清空待发送队列（一并解除失败暂停的标记；服务端那份同步覆盖为空） */
     clearQueuedMessages: (scope) => {
-      const conversationId = scope === undefined ? get().activeConversationId : scope;
+      const conversationId = resolveConvId(scope);
       if (!conversationId) return;
       writeSlice(conversationId, (s) => ({ ...s, queuePausedReason: null }));
       patchQueue(conversationId, []);
     },
     removeSteer: async (messageId, scope) => {
-      const conversationId = scope === undefined ? get().activeConversationId : scope;
+      const conversationId = resolveConvId(scope);
       const api = get().getApi();
       if (!api || !conversationId) return;
       try {
@@ -180,7 +189,7 @@ export function createQueueActions(
      * 的 `hover` 会连续触发，组件闭包里攥着的数组那时可能是旧的，让它自己算等于按错基准插。
      */
     moveSteer: (messageId, beforeId, scope) => {
-      const conversationId = scope === undefined ? get().activeConversationId : scope;
+      const conversationId = resolveConvId(scope);
       if (!conversationId) return;
       const list = readSlice(conversationId).pendingSteers;
       const from = list.findIndex((m) => m.id === messageId);
@@ -198,7 +207,7 @@ export function createQueueActions(
      * （-1 = 往前提一位 = 更早生效）。越界（已是第一条 / 最后一条）不动。
      */
     moveSteerBy: (messageId, delta, scope) => {
-      const conversationId = scope === undefined ? get().activeConversationId : scope;
+      const conversationId = resolveConvId(scope);
       if (!conversationId) return;
       const list = readSlice(conversationId).pendingSteers;
       const from = list.findIndex((m) => m.id === messageId);

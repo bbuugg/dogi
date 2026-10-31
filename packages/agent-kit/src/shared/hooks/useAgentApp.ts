@@ -39,9 +39,12 @@ import type {
   ChatTarget,
 } from "@fizz/agent-kit/shared/lib/stores/slices/conversation";
 import type {
+  AcpPermissionMode,
+  AiPermissionMode,
   AiReasoningEffort,
   AskFollowupAnswer,
   BrowserSettings,
+  CollabSettings,
   UploadFileRef,
 } from "@fizz/contracts";
 export type { QueuedMessage };
@@ -79,11 +82,14 @@ export type { QueuedMessage };
  * - 现场字段走 `scopedSettingsOf(conversationId)`（焦点会话 = 全局那份，其余按会话派生）；
  * - 写动作（send / steer / stop / 4 个 setter / 审批 / 追问）都把 `conversationId` 传下去。
  *
- * 已经作用域化的：`send` / `steer` / `stop` / `stopCommand` / 待发队列与插话的全部增删改
- * （`sendQueuedMessage` / `sendSteer` / `moveSteer` …）/ 队列泵 `pump` / 消息的删除与编辑重发 /
- * 审批与追问的答复 / 会话分叉 `forkConversation` / 四个现场 setter。
+ * 现在**所有**会话级动作都收 `scope?: string | null`（`undefined` = 活跃会话，`null` =
+ * 没有会话，有值 = 那条），这里逐个把 `conversationId` 传下去：`send` / `steer` / `stop` /
+ * `stopCommand` / 队列与插话的全部增删改 / 队列泵 `pump` / 消息的删除与编辑重发 /
+ * 审批与追问的答复 / 会话分叉 `forkConversation` / 权限档 / 上下文压缩 / 协作配置 /
+ * 四个现场 setter。`scripts/check-conversation-scope.mjs` 保证 store 里不再出现
+ * 「读焦点当默认目标」的写法（新增动作漏传 scope 会在那里红）。
  *
- * 剩下几个本来就收 `id` 参数的（`clearConversation` / `reloadConversation` /
+ * 少数几个本来就收 `id` 参数的（`clearConversation` / `reloadConversation` /
  * `convertAcpConversation` / `deleteConversation`），作用域由调用方传的 id 决定，
  * 这里原样透传 —— 传 `app.activeConversationId` 就是本标签那条。
  */
@@ -204,9 +210,11 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
     /** 协作会话的运行态（任务 / 消息 / Agent 状态 + 实时文本）；普通会话 = null */
     collab: activeSlice?.collab ?? null,
     /** 覆盖协作配置（画布拖拽 / 增删 Agent） */
-    saveCollabSettings: s.saveCollabSettings,
+    saveCollabSettings: (settings: CollabSettings) =>
+      s.saveCollabSettings(settings, conversationId),
     /** 取消协作会话里某个正在跑的子任务 */
-    cancelCollabTask: s.cancelCollabTask,
+    cancelCollabTask: (taskId: string) =>
+      s.cancelCollabTask(taskId, conversationId),
     /**
      * 会话切换后历史还没拉回来的装载中标记（消息区此时显示装载中而不是旧列表）。
      *
@@ -252,18 +260,20 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
     /**
      * 最近一次上下文压缩的通知（带自动消失）。上下文圆环的详情里展示；
      * 为 null 时显示「最近没有发生过上下文压缩」。
+     *
+     * **本标签那条会话的**：分屏时 A 压缩了上下文，B 不该跟着弹。
      */
-    contextNotice: s.contextNotice,
+    contextNotice: activeSlice?.contextNotice ?? null,
     /** 兜底上下文窗口（模型没单独配窗口时的圆环分母）；null = 还没拉到 */
     defaultContextWindow: s.defaultContextWindow,
     /** 拉一次兜底窗口（已缓存时是 no-op；圆环挂载时调） */
     loadDefaultContextWindow: s.loadDefaultContextWindow,
-    /** 手动压缩进行中：输入框禁发，圆环转圈 */
-    contextCompressing: s.contextCompressing,
+    /** 手动压缩进行中（本标签这条会话）：输入框禁发，圆环转圈 */
+    contextCompressing: activeSlice?.contextCompressing ?? false,
     /** 「发送即建会话」正在创建：输入框的发送钮转圈（见 store 的同名字段） */
     creatingConversation: s.creatingConversation,
-    /** 手动压缩当前会话（落摘要检查点；返回给调用方决定 toast） */
-    compressContextNow: s.compressContextNow,
+    /** 手动压缩本标签的会话（落摘要检查点；返回给调用方决定 toast） */
+    compressContextNow: () => s.compressContextNow(conversationId),
     error: s.error,
     /** 全局错误条：未知斜线命令这类「一次性的提示」也走这里（与 store 其他错误同路） */
     setError: s.setError,
@@ -430,10 +440,12 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
     copyWorkspaceFile: s.copyWorkspaceFile,
     /** 移动 / 重命名工作区里的文件或目录；成功返回新路径 */
     moveWorkspaceFile: s.moveWorkspaceFile,
-    /** 切换权限模式（confirm = 破坏性操作先问一句） */
-    setPermissionMode: s.setPermissionMode,
-    /** 当前 ACP 会话的权限答复策略（confirm = 逐次问；allow = 应用层自动放行） */
-    setAcpPermissionMode: s.setAcpPermissionMode,
+    /** 切换权限模式（confirm = 破坏性操作先问一句）；活档改的是本标签那条会话的轮 */
+    setPermissionMode: (mode: AiPermissionMode) =>
+      s.setPermissionMode(mode, conversationId),
+    /** 本标签 ACP 会话的权限答复策略（confirm = 逐次问；allow = 应用层自动放行） */
+    setAcpPermissionMode: (mode: AcpPermissionMode) =>
+      s.setAcpPermissionMode(mode, conversationId),
     /** confirm 审批超时（分钟；0 = 不超时）与设置动作 */
     confirmTimeoutMin: s.confirmTimeoutMin,
     setConfirmTimeoutMin: s.setConfirmTimeoutMin,

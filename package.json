@@ -10,7 +10,8 @@
   ],
   "scripts": {
     "lint": "oxlint packages apps",
-    "check:boundaries": "node scripts/check-boundaries.mjs",
+    "check:boundaries": "node scripts/check-boundaries.mjs && node scripts/check-conversation-scope.mjs",
+    "check:scope": "node scripts/check-conversation-scope.mjs",
     "version:set": "node scripts/version.mjs",
     "ui:add": "shadcn add -c packages/ui",
     "copy:monaco": "node scripts/copy-monaco.cjs",
