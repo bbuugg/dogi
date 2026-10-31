@@ -43,6 +43,7 @@
 import { useState, type ReactNode } from 'react'
 import { Brain, ChevronRight, Square, Wrench } from 'lucide-react'
 import { Button } from '@fizz/ui/button'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@fizz/ui/tooltip'
 import { ShimmerLabel } from '@fizz/agent-kit/shared/ai-elements/shimmer-label'
 import { WorkBars } from '@fizz/agent-kit/shared/ai-elements/work-bars'
 import { ReasoningPreview } from '@fizz/agent-kit/shared/ai-elements/reasoning'
@@ -246,16 +247,20 @@ export function TurnStepGroup({
             它是真正的 <button>，塞不进内容触发器 —— `<button>` 套 `<button>` 是非法 HTML，
             点停止还会被触发器当成开合热区吞掉一次，所以整行拆成两个平级触发器，按钮夹在中间。 */}
         {onStop && !open ? (
-          <Button
-            size="icon-xs"
-            variant="outline"
-            aria-label={tr('停止')}
-            title={tr('停止')}
-            className="shrink-0"
-            onClick={onStop}
-          >
-            <Square className="size-3" />
-          </Button>
+          <Tooltip delayDuration={100}>
+            <TooltipTrigger asChild>
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                aria-label={tr('停止')}
+                className="shrink-0"
+                onClick={onStop}
+              >
+                <Square className="size-3 text-destructive" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{tr('停止')}</TooltipContent>
+          </Tooltip>
         ) : null}
         {/* 箭头单独成一个 Trigger：收起时贴在停止钮右侧，展开时直接跟到预览后面
             （停止钮那时不渲染），仍然是开合热区（Radix 一个 Collapsible 可以挂多个

@@ -459,17 +459,20 @@ export const ToolHeader = ({
       {trigger}
       <div className="flex h-5 shrink-0 items-center gap-2">
         {onStop ? (
-          <Button
-            size="sm"
-            variant="outline"
-            aria-label={stopLabel ?? tr("停止")}
-            title={stopLabel ?? tr("停止")}
-            className="h-6 shrink-0 gap-1 px-2 text-xs"
-            onClick={onStop}
-          >
-            <Square className="size-3" />
-            {stopLabel ?? tr("停止")}
-          </Button>
+          <Tooltip delayDuration={100}>
+            <TooltipTrigger asChild>
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                aria-label={stopLabel ?? tr("停止")}
+                className="shrink-0"
+                onClick={onStop}
+              >
+                <Square className="size-3 text-destructive" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{stopLabel ?? tr("停止")}</TooltipContent>
+          </Tooltip>
         ) : null}
         {/* 箭头（第二个 Trigger）：平时隐形、悬停整行才浮出来（规则见 REVEAL_ON_HOVER_ARROW），
             触屏常显；**不按状态隐藏** —— 运行中也要能展开，看实时输出 / 半截入参。
