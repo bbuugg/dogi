@@ -98,7 +98,8 @@ import { useT } from '@fizz/agent-kit/shared/lib/language'
 
 export function ConversationTab({
   conversationId,
-  hostTabKey
+  hostTabKey,
+  active = true
 }: {
   conversationId: string | null
   /**
@@ -111,6 +112,14 @@ export function ConversationTab({
    * 所以它叫 `tabKey`）。
    */
   hostTabKey: string
+  /**
+   * 这个标签是不是它所在组**当前显示的那一个**（`PanelContentLayer` 的 `owner.active`）。
+   *
+   * 标签内容一律常挂载，非活动标签只是 `hidden` 藏在原地 —— 所以「是不是这个面板在屏幕上」
+   * 不能只看侧栏停在哪个标签（见下面 `gitVisible`）。缺省 `true`：单独渲染这个标签时
+   * 按「正被看着」处理。
+   */
+  active?: boolean
 }) {
   // 订阅语言：顶栏 / 侧栏标签 / 确认框的文案都在渲染期用 `t()` 现算
   const tr = useT()
@@ -225,6 +234,15 @@ export function ConversationTab({
 
   const panel = panelOf(key)
   const sideTab = panel?.sideTab ?? null
+  /**
+   * 「侧栏停在源代码管理这一页」**且**「这个会话标签正被看着」。
+   *
+   * ⚠️ 那个 `active` 不能省：标签内容一律常挂载，切走的会话只是被 `hidden` 藏起来，
+   * 它的面板照样在渲染、照样挂 window 键盘监听。少了 `active`，切过别的会话之后按推送
+   * 快捷键会同时打到后台那几个面板上（它们服务的是别的工作区，可能根本不是仓库），
+   * 表现出来就是「当前仓库明明有远端，却弹出『管理远端』」。
+   */
+  const gitVisible = active && sideTab === 'git'
   /** 刷新守卫读的「面板里挂着几条终端」（见上面守卫的注释）—— 每次渲染刷一次 ref */
   guardRef.current.terminals = panel?.terminals.length ?? 0
 
@@ -400,7 +418,7 @@ export function ConversationTab({
           <GitPanel
             app={app}
             workspaceId={workspaceId}
-            visible={sideTab === 'git'}
+            visible={gitVisible}
             // 面板刷完把改动数 + 当前分支回报到**本会话**的面板上
             onChanges={(info) =>
               patchPanelOf(key, (base) => ({

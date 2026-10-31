@@ -7,11 +7,14 @@
  * 面板自己那一行头部**不写标题**（标签条上已有「源码管理」）：左边是分支下拉与
  * 分离头指针 / ↑↓ / 上游，右边是刷新 / 树状切换 / 更多。拉取、推送（含「推送到…」挑远端）、
  * 贮藏当前更改、新建分支、管理远端（增 / 改地址 / 删）都在「更多」里 ——
- * 没有远端时点推送 / 拉取会直接开管理远端。
+ * 没有远端时点推送 / 拉取会直接开管理远端；**工作区还不是仓库时推送一律只回一句话**
+ * （见 `push-policy.ts`：非仓库 / 状态还没到都不许把「管理远端」弹出来）。
  *
  * 快捷键：提交输入框里 Ctrl / ⌘ + Enter 提交（刻意排除了 shift，见提交输入框）；推送是
  * **面板级**快捷键（默认 Ctrl / ⌘ + Shift + Enter，可在「设置 → 快捷键」里改）—— 面板可见时
- * 挂在 window 上监听，不再要求先点提交框（见 push 之后那个 effect）。
+ * 挂在 window 上监听，不再要求先点提交框（见 push 之后那个 effect）。「可见」= 这个会话
+ * 标签正被看着**且**侧栏停在这个面板上：后台标签的面板同样常挂载，只按侧栏判断会让
+ * 别的会话的面板一起收到同一次按键（它们各自的状态还可能来自别的工作区）。
  *
  * 只做 git 允许的事：不做 force push、不做丢改动的 reset；检出 / 提交失败时把 git 的
  * 原话（「本地改动会被覆盖」这类）直接讲出来，而不是替用户决定要不要覆盖。
@@ -116,6 +119,7 @@ import {
   type RollbackKind,
   type RollbackTarget
 } from '@fizz/agent-kit/features/git/rollback-policy'
+import { pushBlockedMessage, pushGate } from '@fizz/agent-kit/features/git/push-policy'
 import { parseUnifiedDiff, type DiffHunk } from '@fizz/agent-kit/shared/lib/diff'
 import {
   allChangeTreeDirPaths,
@@ -198,9 +202,17 @@ export function GitPanel({
   onChanges
 }: {
   app: AgentApp
-  /** 这个面板固定服务的工作区（按会话各挂一套：面板常驻，工作区不会中途变化） */
+  /** 这个面板固定服务的工作区（按会话各挂一套，标签切换时不变） */
   workspaceId: string
-  /** 当前会话是否正在显示这个面板（隐藏时不去跑 git，变可见时刷新一次） */
+  /**
+   * 这个面板此刻是否**真露在外面**：侧栏停在这一页**且**它所属的会话标签正被看着。
+   *
+   * ⚠️ 两个条件都必要。面板与标签内容一律**常挂载**（收起只裁宽度 / `hidden`），后台标签
+   * 的面板照样在渲染、照样挂 window 键盘监听 —— 只按侧栏判断的话，切过别的会话之后按
+   * 推送快捷键会**同时**触发后台那几个面板（各自服务别的工作区，其中可能不是仓库）。
+   *
+   * 隐藏时不跑 git（不起轮询、不刷新），变可见时刷新一次。
+   */
   visible: boolean
   /** 每次刷新完状态回报改动数量（给入口图标的 badge 用）；null = 不是仓库。
    *  同时回报当前分支（切分支 / 检出后，让会话名下的分支显示跟着变）。 */
@@ -338,6 +350,33 @@ export function GitPanel({
     setUnstagedOpen(true)
     void refreshRef.current()
   }, [visible])
+
+  /**
+   * 面板换了工作区 → 旧状态**立刻作废**。
+   *
+   * 挂载时这块面板服务的是哪个工作区不是恒定的：会话清单还没落地时调用方拿的是全局
+   * `activeWorkspaceId`，等清单回来才换成会话自己的；草稿标签的工作区也会随用户切项目变。
+   * 上面的「变可见才刷」只看 `visible` 的翻面，`workspaceId` 换了而面板一直开着就**不会**
+   * 重拉 —— 于是 `status` 还是上一个工作区的（远端清单、`isRepo` 全是旧的），推送判据会
+   * 按别人的仓库去推。这里清空，等下一次变可见 / 外部触发点重拉。
+   */
+  const visibleRef = useRef(visible)
+  visibleRef.current = visible
+  /** 上一次渲染服务的工作区；**与初值相同 = 挂载那一拍**，跳过（免得开头多打一次 gitStatus） */
+  const prevWorkspaceRef = useRef(workspaceId)
+  useEffect(() => {
+    if (prevWorkspaceRef.current === workspaceId) return
+    prevWorkspaceRef.current = workspaceId
+    setStatus(null)
+    setBranches(null)
+    setCommits([])
+    setLoadError(null)
+    setLoading(true)
+    // 换工作区时面板一直是开着的话，「变可见」那条 effect 不会再跑，这里补一次
+    if (visibleRef.current) void refreshRef.current()
+    // 只在**工作区**变化时跑：`visible` 走上面的翻面 effect（进依赖会把刷新打两遍）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId])
 
   // -------------------------------------------------------------------------
   // 外部触发点
@@ -714,12 +753,23 @@ export function GitPanel({
    * 推送当前分支。
    *
    * `remote` 给定时推到那个远端（「推送到…」子菜单挑的）；不给就按上游走 —— 没有上游时
-   * 服务端会 `--set-upstream origin`。两种入口共用这一份，快捷键也是。
+   * 服务端会 `--set-upstream <远端>`（首选 `origin`，没有就退到现有那个远端）。
+   * 两种入口共用这一份，**快捷键也是**。
+   *
+   * ⚠️ 判据全在 `push-policy.ts`（纯函数、有单测），这里只把它翻译成界面动作：
+   * 只有「是仓库、但不是没配远端」这种才开「管理远端」；**不是仓库 / 状态还没到**一律
+   * 只回一句话 —— 以前这里只判 `remotes.length === 0`，非仓库的 `remotes` 也是空数组，
+   * 于是快捷键会弹出一个填了地址也 set 不上的「管理远端」。
    */
   async function push(remote?: string): Promise<void> {
-    // 没有远端就别发这一趟注定失败的请求了，直接把「管理远端」打开
-    if (status?.remotes.length === 0) {
+    const gate = pushGate(status, remote)
+    if (gate === 'no-remote') {
       openRemoteDialog()
+      return
+    }
+    const blocked = pushBlockedMessage(gate)
+    if (blocked) {
+      gitToastError(blocked)
       return
     }
     await run(() => app.gitAction(workspaceId, { action: 'push', remote }), undefined, 'push')

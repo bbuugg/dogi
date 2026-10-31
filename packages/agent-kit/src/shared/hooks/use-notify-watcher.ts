@@ -9,39 +9,24 @@
  * 历史数据不会伪装成新事件。
  *
  * 所以这里**没有新增任何连接、轮询**：都走那条已有的状态 WS。
+ *
+ * 内容组装（哪类事件要通知、正文取什么、用户是不是正看着这一屏）全在
+ * `shared/lib/conversation-notify.ts`（纯函数、有单测）。这里**只做接线**：
+ * 收事件 → 交给它 → `notify` 发出去。判据留在闭包里就会漏（审批 / 提问曾各漏一条
+ * `alreadyInView`，用户盯着确认卡还被右上角弹一条）。
  */
 import { useEffect } from 'react'
-import type {
-  AgentConfirmRequest,
-  AskFollowupRequest,
-  ServerEvent
-} from '@fizz/contracts/types'
 import {
   initStateClient,
   subscribeServerEvent
 } from '@fizz/agent-kit/shared/lib/state-ws'
+import {
+  conversationNotify,
+  isConversationNotifyEvent
+} from '@fizz/agent-kit/shared/lib/conversation-notify'
 import { initConversationActivity } from '@fizz/agent-kit/shared/lib/conversation-activity'
-import { notify, truncateText } from '@fizz/agent-kit/shared/lib/notify'
+import { notify } from '@fizz/agent-kit/shared/lib/notify'
 import { useAppContext } from '@fizz/agent-kit/shared/hooks/use-app-context'
-
-/** 审批请求 → 通知正文：优先给待执行的命令（最需要用户看的），退而给工具名 */
-function confirmBody(req: AgentConfirmRequest): string {
-  const command = req.command?.trim()
-  if (command) return truncateText(command, 60)
-  return req.toolName || '需要确认'
-}
-
-/** 提问 → 通知正文：第一题的问题文本，没有就退回表单标题 */
-function questionBody(req: AskFollowupRequest): string {
-  return truncateText(req.questions?.[0]?.question ?? req.title, 60)
-}
-
-/** 收尾 → 通知正文：出错给原因、被停给一句话、正常跑完给助手正文摘要 */
-function finishedBody(event: Extract<ServerEvent, { type: 'conversation:finished' }>): string {
-  if (event.finishReason === 'error') return event.error ? `出错：${event.error}` : '这一轮出错了'
-  if (event.finishReason === 'aborted') return '已停止'
-  return event.excerpt ?? ''
-}
 
 /**
  * 挂上对话的系统通知监听。**不需要返回值**，挂一次即可。
@@ -77,46 +62,10 @@ export function useNotifyWatcher(): void {
     initStateClient()
     initConversationActivity()
     return subscribeServerEvent((event) => {
-      // 容器型项目的「文件变了」不属于会话活动（没有 conversationId / title），
-      // 由预览面板自己订阅，这里直接跳过；后台任务清单变化同理（会话内的面板自己收）
-      if (event.type === 'container:files-changed' || event.type === 'backgroundTasks:changed') return
-      const id = event.conversationId
-      const title = truncateText(event.title, 40)
-
-      if (event.type === 'conversation:confirm') {
-        notify({
-          title,
-          body: `等待你确认：${confirmBody(event.confirm)}`,
-          tag: `conv:${id}:confirm`,
-          onClick: () => openConversation(id)
-        })
-        return
-      }
-      if (event.type === 'conversation:followup') {
-        notify({
-          title,
-          body: `AI 有一个问题待回答：${questionBody(event.followup)}`,
-          tag: `conv:${id}:followup`,
-          onClick: () => openConversation(id)
-        })
-        return
-      }
-      if (event.type === 'conversation:finished') {
-        notify({
-          title,
-          body: finishedBody(event),
-          // 同一会话连续跑多轮时顶掉上一轮，不堆叠
-          tag: `conv:${id}`,
-          /**
-           * 用户就停在这个会话里看着它跑完：结果已经在眼前，右上角不必再飘一条。
-           * 「停在这个会话里」= 在对话视图 + 当前会话就是它（原来比的是 URL）。
-           * 只是「前台」这一半 —— 窗口在后台时 `notify` 会忽略它、照发系统通知
-           * （人都看不到那一屏了，不叫回来才是丢事件）。
-           */
-          alreadyInView: activeConversationId === id,
-          onClick: () => openConversation(id)
-        })
-      }
+      // 只认「审批 / 提问 / 跑完」三类；其余（预览文件变化、后台任务清单、各种 *-resolved）跳过
+      if (!isConversationNotifyEvent(event)) return
+      const { conversationId, options } = conversationNotify(event, activeConversationId)
+      notify({ ...options, onClick: () => openConversation(conversationId) })
     })
   }, [openConversation, activeConversationId])
 }

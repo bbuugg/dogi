@@ -465,14 +465,21 @@ export async function POST(
         'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'
       ])
       const hasUpstream = upstream.ok && upstream.stdout.trim().length > 0
-      // 目标远端：显式指定优先，否则按上游的第一个远端；都没有就退回 origin
-      const target = chosen || (hasUpstream ? '' : 'origin')
-      if (!hasUpstream && !remotes.includes(target)) {
+      /**
+       * 目标远端：显式指定 > 上游 > `origin` > **现有的第一个远端**。
+       *
+       * ⚠️ 以前这里第三档写死 `origin`：远端叫 `upstream` / `github` 的仓库（`git clone -o`、
+       * 或手动 `remote add` 加的）明明配了远端，推送却回「这个仓库还没有 origin 远端」，
+       * 把人指去再配一个 —— 面板状态里有远端、所以前台不会走「管理远端」，看起来就是
+       * 「明明有远端却让我设置远端」。远端一个都没有时才是真该去配。
+       */
+      if (!hasUpstream && !chosen && remotes.length === 0) {
         return jsonError(
           400,
-          `这个仓库还没有 ${target} 远端：在面板右上角「更多」→「管理远端」里配一个就行（终端里 git remote add ${target} <url> 也可以）`
+          '这个仓库还没有配置任何远端：在面板右上角「更多」→「管理远端」里加一个就行（终端里 git remote add origin <url> 也可以）'
         )
       }
+      const target = chosen || (hasUpstream ? '' : remotes.includes('origin') ? 'origin' : remotes[0])
       const args = hasUpstream
         ? chosen
           ? ['push', chosen, branch]

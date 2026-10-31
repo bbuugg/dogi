@@ -140,6 +140,12 @@ export function PanelTabContent({ tabKey, active }: { tabKey: string; active: bo
         // 守卫表按**标签 key** 索引（关闭 / 刷新都问它），而「新对话」占位标签的 key 是
         // `__new__`、会话 id 为空 —— 只传 conversationId 的话，草稿标签就登记不上守卫。
         hostTabKey={tabKey}
+        /*
+         * 「这个标签正被看着」（本组当前显示的那一个）。标签内容一律常挂载，后台标签只是
+         * `hidden` 藏在原地 —— 会话自己的侧栏面板靠它判断「真露在外面」，否则后台标签的
+         * 面板会照挂 window 键盘监听（推送快捷键一按，几个会话的面板一起响）。
+         */
+        active={active}
       />
     )
   }
