@@ -285,7 +285,8 @@ function isRetryableAttemptError(err: unknown): boolean {
  * 一次尝试「整体失败」时抛出的错误：`message` 是给用户看的那一句，另标一个可重试位。
  *
  * 为什么自己造一条而不是复用 `isEmptyStreamOutputError` 的文案匹配：流内已经报过错时，
- * 文案是上游原文（`Failed after 3 attempts. Last error: …`），既不含 `finishReason "other"`
+ * 文案是上游原文（形如 `AI_APICallError: concurrency reached, current: 11, limit: 10`），
+ * 既不含 `finishReason "other"`
  * 也不带 `isRetryable` —— 但性质与「静默空响应」完全一样：**同一条请求重发通常就有内容**。
  * 把这件事标在位上是同一个判定的两种写法，比匹配文案稳（文案一改就静默失效）。
  * `isRetryableNetworkError` 认这个位（APICallError 也用它）。
@@ -1253,7 +1254,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         pendingChunk = streamIterator.next()
         /**
          * 流内 `error` = **这次请求失败了**（引擎把上游 / AI SDK 的 error part 原样转出来，
-         * 典型是 AI SDK 自己重试到顶的 `Failed after 3 attempts. Last error: …`）。
+         * 典型是上游限流 / 断网，如 `AI_APICallError: concurrency reached, current: 11, limit: 10`）。
+         * 主循环已关掉 AI SDK 自己的重试（`engine.ts` 的 `maxRetries: 0`），所以这里是
+         * **第一次**失败的原话，不会再包一层 `Failed after 3 attempts. Last error: …`。
          *
          * ⚠️ 一个内容都没产出的尝试里**不能当场把它下发**：这种尝试收尾时 `finishReason`
          * 会停在 `other`、首字时刻仍是 null，于是还会合成一条「上游返回空响应」——

@@ -310,6 +310,21 @@ export function runEngine(opts: AgentEngineOptions): AgentEngine {
     system: opts.system,
     messages: opts.messages,
     tools,
+    /**
+     * 关掉 AI SDK 自己的重试（它默认 `maxRetries = 2`，即单条请求内部再打 3 次）。
+     *
+     * 两套计数器互不相干，而用户只看得见设置页那一个 —— 设成 20，界面里照样会冒出一句
+     * 写死次数的 `Failed after 3 attempts. Last error: …`；更糟的是外层每重试一次、
+     * 内部又暗打 3 次，真实请求数是两层**相乘**（并发满时越重试越堵）。
+     *
+     * 重试权统一收在 `runAgent` 的外层循环（`RunAgentOptions.maxRetries`）：那里会发
+     * `retry` 事件、按退避等待、并遵守「已执行过工具的尝试不重试」。设置页的数字因此
+     * 是唯一权威，日志里也只剩一套重试。
+     *
+     * 只在这一处关：`context.ts` 的压缩摘要与 `subagents.ts` 的子 run 是**独立请求**，
+     * 没有外层循环接手重试，留着 AI SDK 的默认重试更划算。
+     */
+    maxRetries: 0,
     stopWhen: stepCountIs(Math.max(1, opts.maxSteps)),
     ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
     ...(opts.modelSettings
