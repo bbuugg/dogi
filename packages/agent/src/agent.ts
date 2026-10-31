@@ -281,6 +281,21 @@ function isRetryableAttemptError(err: unknown): boolean {
   return isRetryableNetworkError(err) || isEmptyStreamOutputError(err)
 }
 
+/**
+ * 一次尝试「整体失败」时抛出的错误：`message` 是给用户看的那一句，另标一个可重试位。
+ *
+ * 为什么自己造一条而不是复用 `isEmptyStreamOutputError` 的文案匹配：流内已经报过错时，
+ * 文案是上游原文（`Failed after 3 attempts. Last error: …`），既不含 `finishReason "other"`
+ * 也不带 `isRetryable` —— 但性质与「静默空响应」完全一样：**同一条请求重发通常就有内容**。
+ * 把这件事标在位上是同一个判定的两种写法，比匹配文案稳（文案一改就静默失效）。
+ * `isRetryableNetworkError` 认这个位（APICallError 也用它）。
+ */
+function attemptFailure(message: string): Error {
+  const err = new Error(message)
+  ;(err as Error & { isRetryable?: boolean }).isRetryable = true
+  return err
+}
+
 /** 模型上报的原始 token 用量（各家字段名不同，统一到这里） */
 export type RawUsage = {
   inputTokens: number
@@ -885,6 +900,15 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
      * token 补推出去 —— 路由侧只在 finish 事件带 usage 时才落盘（见 chat/route.ts 的 onEvent）。
      */
     let firstOutputAt: number | null = null
+    /**
+     * 这一次尝试里**流内已经报过分**的错误文案（引擎把上游 / AI SDK 的 error part 转成的
+     * `error` 事件）。null = 没报过。
+     *
+     * 只在「一个内容都没产出」时攒着、不当场下发 —— 那种尝试收尾时还会合成一条
+     * 「上游返回空响应」，两条 `⚠️ ` 各挂一颗「重新加载」，同一个故障被说了两遍。
+     * 见流循环里的 error 分支与收尾处的失败判定。
+     */
+    let attemptError: string | null = null
     let rawUsage: RawUsage | null = null
     /**
      * **最后一次请求**的 usage（不是整轮累计）。
@@ -1222,12 +1246,23 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         if (!chunkResult || chunkResult.done) break
         const event = chunkResult.value
         pendingChunk = streamIterator.next()
-        // 流内 error 事件：可重试的请求错误抛出去走重试，其余照旧下发
-        if (event.type === 'error') {
-          const rawError = (event as { raw?: unknown }).raw
-          if (isRetryableAttemptError(rawError)) {
-            throw rawError instanceof Error ? rawError : new Error(event.message)
-          }
+        /**
+         * 流内 `error` = **这次请求失败了**（引擎把上游 / AI SDK 的 error part 原样转出来，
+         * 典型是 AI SDK 自己重试到顶的 `Failed after 3 attempts. Last error: …`）。
+         *
+         * ⚠️ 一个内容都没产出的尝试里**不能当场把它下发**：这种尝试收尾时 `finishReason`
+         * 会停在 `other`、首字时刻仍是 null，于是还会合成一条「上游返回空响应」——
+         * 两条 `⚠️ ` 各挂一颗「重新加载」，同一个故障被说了两遍。
+         * 所以先攒进 `attemptError`，收尾时按一次失败统一处理（文案优先用上游原文）。
+         *
+         * 已经产出过内容的**不接管**：那时正确的语义是「有正文 + 一段错误提示」，
+         * 吞掉它反而让用户看不见后半截为什么停了（照旧下发，见下面 `emitEvent`）。
+         */
+        if (event.type === 'error' && firstOutputAt === null) {
+          attemptError = event.message
+          // 已攒着的工具入参增量要冲出去（`emitEvent` 平时负责这步，这里绕过了它）
+          flushDelta()
+          continue
         }
         if (event.type === 'tool-call') {
           toolExecuted = true
@@ -1266,12 +1301,24 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
       // 收尾：流跑完 / 被中止都会 resolve（引擎在 finally 里收尾，不会悬挂）
       const finished = await engine.done
       /**
-       * 上游「空响应」：finishReason 归到 `other` 且整轮一个内容事件都没产出。
-       * 同一条请求重发通常就有内容，所以抛出去交给重试路径（`isEmptyStreamOutputError`
-       * 按这条文案识别）。中止不算 —— 那是用户主动停。
+       * 这次尝试的收尾失败：**一个内容都没产出**才算（有正文就不算失败，见上面的
+       * `firstOutputAt`）。两种形状走同一条路：
+       *
+       * - 流里已经报过错（`attemptError`）—— 典型是 AI SDK 自己的 3 次重试全失败；
+       * - 上游静默回了个空响应（`finishReason` 归到 `other`，首字时刻仍为 null）。
+       *
+       * 抛出去交给统一的收场（`catch` 里的重试判定 + 只报一条错误）。文案优先用上游原文：
+       * 有流内错误时**别再拼一条**「上游返回空响应」—— 那正是提示重复的来源。
+       * 中止不算 —— 那是用户主动停。
        */
-      if (!runSignal.aborted && finished.finishReason === 'other' && firstOutputAt === null) {
-        throw new Error('上游返回空响应（finishReason "other"，整轮没有任何内容）')
+      if (
+        !runSignal.aborted &&
+        firstOutputAt === null &&
+        (attemptError !== null || finished.finishReason === 'other')
+      ) {
+        throw attemptFailure(
+          attemptError ?? '上游返回空响应（finishReason "other"，整轮没有任何内容）'
+        )
       }
       if (!rawUsage) {
         rawUsage = normalizeUsage(finished.totalUsage)
