@@ -44,12 +44,12 @@ export type ChatTarget = {
 /**
  * 某个会话「自己的现场」：模型 / 思考强度 / MCP / 浏览器偏好。
  *
- * 这四项在 store 上是**单份**的（`chatTarget` 等），语义是「焦点会话的现场」——
- * `openConversation` 每次都按传入的会话重写它们。单标签下没问题（焦点即视图），
- * 但主区域**分屏**时两个标签同时可见：非焦点那个的 composer 也会跟着焦点标签一起变
- * （用户报的「点一下标签，两个标签的模型 pill 都同步了」）。
+ * ⚠️ 它**不是 store 上的一块状态**，而是从会话清单里那条**当场派生**的视图
+ * （`scopedSettingsOf`）：`persist*` 一律「先乐观改清单项、再发请求」，所以「刚改完
+ * 还没发出去」的中间态本来就在清单里，派生出来就是最新的。
  *
- * 所以视图层不直接读那四个字段，走 `scopedSettingsOf` 按会话取。
+ * 视图层一律走 `scopedSettingsOf(conversationId)`：分屏时两个标签各取各的，谁也不会
+ * 因为「谁是焦点」看到对方的值。
  */
 export interface ScopedSettings {
   chatTarget: ChatTarget | null;
@@ -278,47 +278,19 @@ export interface ConversationSlice {
   activeWorkspaceId: string | null;
   activeConversationId: string | null;
   /**
-   * ⚠️ `chatTarget` / `reasoningEffort` / `mcpServerIds` / `browserSettings` 这四项是
-   * **焦点会话的现场**（`openConversation` 每次按传入会话重写），不是全局偏好、也不是
-   * 「所有标签共用一份」。
+   * 「开始新对话」页那一份**待定选择**（模型 / 思考强度 / MCP / 浏览器偏好）。
    *
-   * 主区域分屏时两个标签同时可见，非焦点那个必须按**自己的会话**读 —— 走
-   * `scopedSettingsOf(id)`，别直接读这四项：以前直接读，点一下标签两个 composer 的
-   * 模型 pill / MCP / 浏览器开关就一起变（用户报过）。
+   * 草稿页还没有会话，这四项只活在内存里；发出第一条消息时 `newConversation` 把它们
+   * 随会话一起落库、并并进会话清单项，之后每次读取都从清单派生（见 `scopedSettingsOf`），
+   * 这份草稿不再参与。
    *
-   * ---
-   *
-   * 本轮要用的模型 / 后端。打开会话时从它自己记住的配置恢复；`null` = 还没选
-   * （界面显示「选择模型」，发送会被拦下并提示）。
-   *
-   * 持久化到会话目录的 `config.json`（见 setChatTarget / persistTarget）。刻意**不做
-   * 「清单第一份」的自动预选**：配置 / agent 被删、模型下架时显示「选择模型」，
-   * 让用户自己选，而不是替他挑一个从没选过的模型。
+   * ⚠️ 这**不是**「焦点会话的现场」。历史上这四项是 store 上的四个裸字段，语义就是
+   * 「焦点会话的现场」—— `openConversation` 每开一个会话都按那个会话重写一遍。单标签
+   * 时看不出问题（焦点即视图），分屏时就一起变：点一下标签，两个 composer 的模型 pill、
+   * MCP、浏览器开关跟着同步（用户报过）。现在会话的现场只有一份真源（会话清单项），
+   * 全局只留草稿页这一份 —— 读到它时请明确「这是草稿」。
    */
-  chatTarget: ChatTarget | null;
-  /**
-   * 当前会话的**思考强度**（内置 Agent 专用；持久化在会话上，刷新还在）。
-   *
-   * `null` = 跟随模型默认。与 MCP 一样，没有活动会话时是一份**待定选择**，
-   * 随会话创建一起落库。ACP 会话不读它（那边用 `acpThoughtLevel`）。
-   */
-  reasoningEffort: AiReasoningEffort | null;
-  /**
-   * 当前会话**允许使用的 MCP server id 清单**（持久化在会话上，刷新还在）。
-   *
-   * 刻意**不挂在 `chatTarget` 下**：那东西语义是「用哪个模型 / agent」，MCP 是正交的
-   * 另一根轴 —— 模型怎么选都照样可以给这个会话配 MCP 工具。
-   *
-   * 没有活动会话时（新任务页）这是一份**待定选择**：随会话创建一起落库。
-   */
-  mcpServerIds: string[];
-  /**
-   * 当前会话的**浏览器偏好**（总开关 + 来源，持久化在会话上，刷新还在）。
-   *
-   * `null` = 这个会话没单独设过 → 界面按全局默认（`defaultBrowserSettings`）显示，
-   * 与 MCP 一样，没有活动会话时是一份**待定选择**，随会话创建一起落库。
-   */
-  browserSettings: BrowserSettings | null;
+  draftSettings: ScopedSettings;
   /**
    * 「开始新对话」页选中的 ACP agent 的**档位快照**（还没有会话，所以不能挂在会话上）。
    *
@@ -384,19 +356,20 @@ export interface ConversationSlice {
   /**
    * 取某个会话「自己的现场」（模型 / 思考强度 / MCP / 浏览器偏好）。
    *
-   * `null`（新对话页）与当前焦点会话 → store 上那份（含「改了还没发送」的中间态）；
-   * 其余会话 → 从会话清单派生（它落盘的客观配置）。分屏时视图层必须走这里，
-   * 别直接读 `chatTarget` 那四项 —— 详见 `ConversationSlice` 顶部的警告。
+   * - `null`（新对话页）→ `draftSettings`（还没有会话，那份待定选择只活在内存里）；
+   * - 会话 → 从**会话清单项**派生（`persist*` 先乐观改清单，中间态因此也读得到）；
+   *   清单里还没有它（刚建出来、清单没刷到）时退回 `draftSettings` —— 那正是建它用的选择。
+   *
+   * 分屏时视图层必须走这里。别指望有一份「当前会话的现场」可读：那样的字段已经不存在了。
    */
   scopedSettingsOf: (conversationId: string | null) => ScopedSettings;
   /**
    * 切换本轮的模型 / 后端。
    *
    * `scope`（第三个「作用域」参数全 store 统一）：
-   * - 不传 = 旧行为，作用于 `activeConversationId`（焦点会话），没有会话就写草稿态；
-   * - `null` = 明确「新对话页」，只写草稿态（`chatTarget`），不落任何会话；
-   * - 会话 id = 作用于**那个会话**（分屏时在非焦点标签改模型就走这条）：焦点会话仍
-   *   同步那份全局现场，非焦点会话只更新它自己（乐观改写清单 + 落盘）。
+   * - 不传 = 旧行为，作用于 `activeConversationId`，没有会话就写草稿态；
+   * - `null` = 明确「新对话页」，只写 `draftSettings`，不落任何会话；
+   * - 会话 id = 作用于**那个会话**（乐观改写它的清单项 + 落盘）。
    *
    * 没有 `scope` 的话，分屏里在 B 标签选模型会把 A（焦点）会话的待发目标一起改掉。
    */
@@ -424,14 +397,14 @@ export interface ConversationSlice {
   clearDraftAcp: () => void;
   /**
    * 设置允许使用的 MCP server 清单（全量覆盖，空 = 全不选）。
-   * 有会话立刻持久化；没有（新任务页）则留作待定选择，随会话创建落库。
+   * 有会话立刻持久化；没有（新任务页）则写进 `draftSettings`，随会话创建落库。
    * `scope` 语义同 `setChatTarget`。
    */
   setMcpServerIds: (ids: string[], scope?: string | null) => void;
   /**
    * 设置**某个会话**的浏览器偏好（总开关 / 来源）。传入的是**部分字段**，与该会话
    * 当前值合并后整体落库（服务端的 target 契约是整体对象语义）。
-   * 有会话立刻持久化；没有（新任务页）则留作待定选择，随会话创建落库。
+   * 有会话立刻持久化；没有（新任务页）则写进 `draftSettings`，随会话创建落库。
    * `scope` 语义同 `setChatTarget`。
    */
   setBrowserSettings: (

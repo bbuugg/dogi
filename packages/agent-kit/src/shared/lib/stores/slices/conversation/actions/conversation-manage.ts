@@ -65,13 +65,13 @@ export function createConversationManageActions(
       }
       try {
         const clean = title?.trim();
-        // 新任务页上选好的 MCP 是**待定选择**：跟着会话一起落库，否则用户白选。
+        // 草稿页（新任务页）上选好的 MCP / 浏览器偏好 / 思考强度都是**待定选择**：
+        // 跟着会话一起落库，否则用户白选。
         // `target` 里已显式带了 mcpServerIds 时以它为准（调用方更清楚）。
-        const mcpServerIds = target?.mcpServerIds ?? get().mcpServerIds;
-        // 新任务页上设好的浏览器偏好也是**待定选择**：跟着会话一起落库
-        const browserSettings = get().browserSettings;
-        // 思考强度同理（内置会话才有意义；ACP 服务端会忽略）
-        const reasoningEffort = get().reasoningEffort;
+        const draftSettings = get().draftSettings;
+        const mcpServerIds = target?.mcpServerIds ?? draftSettings.mcpServerIds;
+        const browserSettings = draftSettings.browserSettings;
+        const reasoningEffort = draftSettings.reasoningEffort;
         const created = await api.createConversation({
           // 缺省 = 服务端建临时工作区（见 api.createConversation 的注释）
           ...(wid ? { workspaceId: wid } : {}),
@@ -81,7 +81,26 @@ export function createConversationManageActions(
           ...(browserSettings ? { browserSettings } : {}),
           ...(reasoningEffort ? { reasoningEffort } : {}),
         });
-        set((state) => ({ conversations: [created, ...state.conversations] }));
+        /**
+         * 并进清单时要**带上刚下发的选择**（模型 / 思考强度 / MCP / 浏览器偏好）。
+         *
+         * 视图的现场是从清单项派生的（`scopedSettingsOf`），清单项缺这几项就等于「刚建
+         * 好的会话没选模型」—— 第一轮会被 `guardTarget` 拦成「请先在输入框上方选择模型」。
+         * 服务端返回的 `created` 一般带着它们，但那是另一端的实现细节；这里按**我刚发出去
+         * 的那份**补齐，不赌它回显。
+         */
+        const createdWithSettings = {
+          ...created,
+          ...(target?.backend ? { backend: target.backend } : {}),
+          ...(target?.configId ? { configId: target.configId } : {}),
+          ...(target?.modelId ? { modelId: target.modelId } : {}),
+          ...(reasoningEffort ? { reasoningEffort } : {}),
+          ...(mcpServerIds.length ? { mcpServerIds } : {}),
+          ...(browserSettings ? { browserSettings } : {}),
+        };
+        set((state) => ({
+          conversations: [createdWithSettings, ...state.conversations],
+        }));
         // 没选项目：服务端刚建了个临时工作区 —— 清单不刷新的话顶栏 / 侧栏认不出它
         if (!wid) set({ workspaces: await api.listWorkspaces() });
         set({
@@ -91,16 +110,6 @@ export function createConversationManageActions(
         // 新会话也是「当前现场」，下次启动回到它
         saveActiveWorkspaceId(created.workspaceId);
         saveActiveConversationId(created.id);
-        // 创建时就定了后端 / 模型：本地 chatTarget 同步上，第一轮就按它发
-        if (target?.backend) {
-          set({
-            chatTarget: {
-              backend: target.backend,
-              ...(target.configId ? { configId: target.configId } : {}),
-              ...(target.modelId ? { modelId: target.modelId } : {}),
-            },
-          });
-        }
         /**
          * 新任务页选好的 ACP 档位：会话一建好就下发。agent 侧 `session/new` 给的默认档
          * 未必是用户选的那个，而这一轮马上就要发 —— 等下一轮再补就是「第一轮按错的档跑」。

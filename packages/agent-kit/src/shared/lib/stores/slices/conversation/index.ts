@@ -25,6 +25,7 @@ import { createQueueActions } from "./actions/queue";
 import { createRunActions } from "./actions/run";
 import { createApprovalsActions } from "./actions/approvals";
 import { createContextActions } from "./actions/context";
+import { emptyDraftSettings } from "./state";
 import {
   loadActiveWorkspaceId,
   loadConfirmTimeout,
@@ -51,6 +52,7 @@ export {
   NO_QUEUE,
   NO_STEERS,
   NO_FOLLOWUPS,
+  emptyDraftSettings,
 } from "./state";
 
 export const createConversationSlice: StateCreator<
@@ -70,10 +72,8 @@ export const createConversationSlice: StateCreator<
     slices: {},
     activeWorkspaceId: loadActiveWorkspaceId(),
     activeConversationId: null,
-    chatTarget: null,
-    mcpServerIds: [],
-    browserSettings: null,
-    reasoningEffort: null,
+    // 会话的现场只有一份真源（清单项），全局只留「新对话页」这一份草稿
+    draftSettings: emptyDraftSettings(),
     draftAcp: null,
     runningConversations: {},
     blankIntent: false,
@@ -90,8 +90,8 @@ export const createConversationSlice: StateCreator<
     pruneSlices: ctx.pruneSlices,
     markRunning: ctx.markRunning,
     persistTarget: ctx.persistTarget,
-    // 视图层按会话读「现场」（模型 / 思考强度 / MCP / 浏览器偏好）：分屏时非焦点标签
-    // 不能读 `chatTarget` 那四项，那是焦点会话的（见 types.ts 顶部的警告）
+    // 视图层按会话读「现场」（模型 / 思考强度 / MCP / 浏览器偏好）：从清单项派生，
+    // 分屏时各读各的（见 types.ts 顶部的说明）
     scopedSettingsOf: ctx.scopedSettingsOf,
     probeDraftAcp: ctx.probeDraftAcp,
     loadMessages: ctx.loadMessages,

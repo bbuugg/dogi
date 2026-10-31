@@ -8,7 +8,7 @@ import type {
   AskFollowupRequest,
 } from "@fizz/contracts/agent-api";
 import type { QueuedMessage } from "@fizz/contracts/types";
-import type { ConvSlice } from "./types";
+import type { ConvSlice, ScopedSettings } from "./types";
 
 /**
  * 这一轮的 live 助手消息：原占位本身，或运行中插话拆分出的后继
@@ -45,6 +45,19 @@ export const emptySlice = (): ConvSlice => ({
   scrollResetSeq: 0,
   touchedAt: Date.now(),
   collab: null,
+});
+
+/**
+ * 草稿页（「开始新对话」）的空白现场：还没选模型 / 没选 MCP / 没设浏览器偏好。
+ *
+ * 只在两处用：store 的初值、`clearAllLocalState`（登出 / 断线清一切本地现场）。
+ * 打开草稿页时由 `openConversation(null)` 按「上次用过的模型」重新铺一遍。
+ */
+export const emptyDraftSettings = (): ScopedSettings => ({
+  chatTarget: null,
+  reasoningEffort: null,
+  mcpServerIds: [],
+  browserSettings: null,
 });
 
 /** slice 淘汰上限：在跑的必留，其余按 touchedAt 留最新的这几个 */

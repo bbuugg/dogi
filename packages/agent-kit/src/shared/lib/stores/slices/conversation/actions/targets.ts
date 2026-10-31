@@ -2,24 +2,26 @@
  * action 层：targets。叶子层 —— action 之间只通过 `get().xxx()` 互相调用，
  * 内部助手一律从 ctx 拿，internals 不会反过来依赖它。
  *
- * ## 为什么每个 setter 都带 `scope`
+ * ## 这四项只有一份真源：会话清单项
  *
- * 模型 / 思考强度 / MCP / 浏览器偏好这四项在 store 上是**单份**的（焦点会话的现场）。
- * 单标签时"焦点即视图"没问题，但主区域分屏时两个标签同时可见 —— 不带作用域的写会把
- * 非焦点标签的操作记到焦点会话上（用户报的「点一下标签两个 composer 的模型同步」）。
+ * 模型 / 思考强度 / MCP / 浏览器偏好都落在会话清单那条上（`persist*` 一律「先乐观改
+ * 清单项、再发请求」），`scopedSettingsOf` 只是把清单项拆成 composer 要的形状。全局只
+ * 剩草稿页（还没有会话时）那一份 `draftSettings`。
  *
  * `scope` 约定（全 store 统一）：
  * - 不传 → 旧行为，作用于 `activeConversationId`；
- * - `null` → 明确"新对话页"，只写草稿态，不落任何会话；
- * - 会话 id → 作用于那个会话：焦点会话仍同步全局那份（保持"下拉即所见"），非焦点
- *   会话只改它自己的清单项 + 落盘。
+ * - `null` → 明确「新对话页」，只写 `draftSettings`，不落任何会话；
+ * - 会话 id → 作用于那个会话（乐观改写它的清单项 + 落盘）。
+ *
+ * 写错的代价是用户报过的那个 bug：分屏时在 B 标签选模型，A（焦点）会话的待发目标
+ * 被一起改掉，两个 composer 的 pill 同步变。
  */
 import {
   DEFAULT_BROWSER_SETTINGS,
   type BrowserSettings,
 } from "@fizz/contracts";
 import type { ConvInternals } from "../internals/context";
-import type { ConversationSlice } from "../types";
+import type { ConversationSlice, ScopedSettings } from "../types";
 
 export function createTargetsActions(
   ctx: ConvInternals,
@@ -29,52 +31,52 @@ export function createTargetsActions(
 > {
   const { set, get, probeDraftAcp, scopedSettingsOf, resolveConvId, isFocus, persistTarget, persistReasoningEffort, persistMcp, persistBrowserSettings } = ctx;
 
-  /**
-   * 这次写的是哪个会话，以及要不要同时改 store 上那份全局现场。
-   *
-   * `focus = false`（只可能出现在非焦点会话）时**绝不能** `set({ chatTarget })`：
-   * 那份全局现场属于焦点标签，改了就等于把 A 标签刚选的东西挪到 B 上。
-   */
-  const resolveScope = (
-    scope?: string | null,
-  ): { conversationId: string | null; focus: boolean } => {
-    const conversationId = resolveConvId(scope);
-    // 草稿页（没有会话）也算「焦点」：那时全场只有它一块视图
-    return { conversationId, focus: !conversationId || isFocus(conversationId) };
+  /** 写草稿页那份待定选择（只在还没有会话时用） */
+  const writeDraft = (patch: Partial<ScopedSettings>): void => {
+    set((state) => ({ draftSettings: { ...state.draftSettings, ...patch } }));
   };
 
-  /** 浏览器偏好的合并基线：草稿页 / 焦点会话用全局那份，其余按该会话落盘的配置 */
-  const browserBase = (
-    focus: boolean,
-    conversationId: string | null,
-  ): BrowserSettings =>
-    (focus
-      ? get().browserSettings
-      : conversationId
-        ? scopedSettingsOf(conversationId).browserSettings
-        : null) ??
+  /**
+   * 浏览器偏好的合并基线：草稿页用草稿里那份，会话用该会话落盘的配置。
+   *
+   * 调用方只给要改的那一项（如只翻总开关），这里补上其余字段再整体落库 ——
+   * 服务端的 target 契约是整体对象语义，缺字段会被当成"清空"。
+   */
+  const browserBase = (conversationId: string | null): BrowserSettings =>
+    (conversationId
+      ? scopedSettingsOf(conversationId).browserSettings
+      : get().draftSettings.browserSettings) ??
     get().defaultBrowserSettings ??
     DEFAULT_BROWSER_SETTINGS;
 
   return {
     setReasoningEffort: (effort, scope) => {
-      const { conversationId, focus } = resolveScope(scope);
-      if (focus) set({ reasoningEffort: effort });
-      if (conversationId) persistReasoningEffort(conversationId, effort);
+      const conversationId = resolveConvId(scope);
+      if (!conversationId) {
+        writeDraft({ reasoningEffort: effort });
+        return;
+      }
+      persistReasoningEffort(conversationId, effort);
     },
     setChatTarget: (target, scope) => {
-      const { conversationId, focus } = resolveScope(scope);
-      if (focus) set({ chatTarget: target });
-      if (conversationId) {
-        // persist* 会先乐观改清单：非焦点标签的下拉 / pill 立刻生效，不用等往返
+      const conversationId = resolveConvId(scope);
+      if (!conversationId) {
+        writeDraft({ chatTarget: target });
+      } else {
+        // persist* 会先乐观改清单：下拉 / pill 立刻生效，不用等往返
         persistTarget(conversationId, target);
-        // 已有会话就到这儿 —— 下面那段是"新对话页"才需要的草稿态处理
-        if (!focus) return;
+        /**
+         * 已有会话一般就到这儿 —— 下面那段是草稿页才需要的 ACP 档位（pill 要有数据）。
+         *
+         * 焦点会话例外：它和草稿页共用 composer 上那块 ACP 档位（非焦点标签读自己会话
+         * 上的 `acpModes`，不碰 `draftAcp`），所以焦点会话改 agent 时照样探一次。
+         */
+        if (!isFocus(conversationId)) return;
       }
       /**
-       * 新任务页（还没有会话）：切到 ACP 就顺手探一次档位（pill 要有数据），
-       * 切回内置 agent 就把草稿清掉。已有会话时不探 —— 会话自己带着
-       * `acpModes` / `acpThoughtLevel`，再探一次纯属白起一个进程。
+       * 新任务页（还没有会话）：切到 ACP 就顺手探一次档位，切回内置 agent 就把草稿清掉。
+       * 已有会话时不探 —— 会话自己带着 `acpModes` / `acpThoughtLevel`，再探一次纯属白起
+       * 一个进程。
        *
        * 只换**同一个 agent 的模型**（`acp:<id>:<model>`）不重探：档位是 agent 级的，
        * 与挑哪个模型无关；重探还会把槽位里已经选好的模式 / 思考档清空（用户挑完
@@ -108,19 +110,24 @@ export function createTargetsActions(
       if (get().draftAcp) set({ draftAcp: null });
     },
     setMcpServerIds: (ids, scope) => {
-      const { conversationId, focus } = resolveScope(scope);
-      if (focus) set({ mcpServerIds: ids });
-      if (conversationId) persistMcp(conversationId, ids);
+      const conversationId = resolveConvId(scope);
+      if (!conversationId) {
+        writeDraft({ mcpServerIds: ids });
+        return;
+      }
+      persistMcp(conversationId, ids);
     },
     setBrowserSettings: (patch, scope) => {
-      // 与当前值合并：调用方只给要改的那一项（如只翻总开关），再整体落库
-      const { conversationId, focus } = resolveScope(scope);
+      const conversationId = resolveConvId(scope);
       const next: BrowserSettings = {
-        ...browserBase(focus, conversationId),
+        ...browserBase(conversationId),
         ...patch,
       };
-      if (focus) set({ browserSettings: next });
-      if (conversationId) persistBrowserSettings(conversationId, next);
+      if (!conversationId) {
+        writeDraft({ browserSettings: next });
+        return;
+      }
+      persistBrowserSettings(conversationId, next);
     },
   };
 }

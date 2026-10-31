@@ -40,7 +40,6 @@ export function createConversationRunLoop(ctx: ConvCore) {
     api,
     readSlice,
     writeSlice,
-    targetFromConversation,
     markRunning,
     persistTarget,
     syncQueueToServer,
@@ -665,8 +664,6 @@ export function createConversationRunLoop(ctx: ConvCore) {
    */
 
   const loadConversation = async (conversationId: string): Promise<void> => {
-    // 用户在装载期间自己改过选择时，收尾的恢复块不能再拿服务端那份盖回去（比对引用即可）
-    const targetBefore = get().chatTarget;
     // 拉服务端落盘的权威历史（内置）；acp 服务端历史恒为空，这里只是走个过场
     // resetScroll：首次装载，消息写入与复位落底同帧（见 loadMessages 的 opts 注释）
     const fetched = await loadMessages(conversationId, {
@@ -835,26 +832,13 @@ export function createConversationRunLoop(ctx: ConvCore) {
       loading: false,
     }));
     /**
-     * 恢复这个会话记住的模型。以 loadMessages 刚拿到的**会话详情**为准（比列表快照新，
-     * 不会因为「切换模型的落盘还没回来」而回退成旧值）；拉失败时退回列表里那份。
-     * 两个前提缺一不可：
-     * - 还是当前打开的会话（等清单的窗口里用户可能已经切走）；
-     * - 装载期间用户没自己改过选择（chatTarget 引用变了就不再覆盖）。
-     * 校验不过（配置 / agent 被删、模型下架）就恢复成 null → 界面显示「选择模型」。
+     * 这里原本有一段「把会话详情里的模型 / MCP / 浏览器偏好 / 思考强度搬进全局现场」
+     * 的恢复块（还要比对 `chatTarget` 引用，防止盖掉装载期间用户自己改的选择）。
+     *
+     * 现在不需要了：视图的现场从**会话清单项**派生（`scopedSettingsOf`），而
+     * `loadMessages` 收尾已经把刚拿到的详情校正进清单项 —— 派生出来自然就是最新的。
+     * 「搬运」这件事一旦存在，就总有人会漏掉某个分支、或者搬到错的会话上。
      */
-    if (isFocus(conversationId) && get().chatTarget === targetBefore) {
-      const stored =
-        fetched ?? get().conversations.find((c) => c.id === conversationId);
-      set({
-        chatTarget: targetFromConversation(stored ?? undefined),
-        // 同理恢复这个会话选中的 MCP（没存过 = 全不选）
-        mcpServerIds: stored?.mcpServerIds ?? [],
-        // 浏览器偏好同理：以服务端那份为准（别的端可能改过；没存过 = null）
-        browserSettings: stored?.browserSettings ?? null,
-        // 思考强度同理
-        reasoningEffort: stored?.reasoningEffort ?? null,
-      });
-    }
     // 本地没人订着这条会话、但服务端还挂着 run（刷新 / 断线重连 / 换端回来）：
     // 接回去回放现场继续看直播。接上了就到此为止 —— 收尾（拉权威历史 / 续队列）
     // 由 attachRun 的收场负责
@@ -921,8 +905,30 @@ export function createConversationRunLoop(ctx: ConvCore) {
             ? s.scrollResetSeq + 1
             : s.scrollResetSeq,
         }));
+        /**
+         * 顺手把**会话设置**（模型 / 思考强度 / MCP / 浏览器偏好）按这份详情校正进清单项。
+         *
+         * 视图的现场是从清单项派生的（`scopedSettingsOf`），清单项不跟着校就等于「别的端
+         * 改过模型，这边还显示旧的」。放在代次判断里：刚开新一轮时清单已经由 `persistTarget`
+         * 写过，这份快照比它旧，不能拿它盖回去。
+         */
+        set((state) => ({
+          conversations: state.conversations.map((c) =>
+            c.id === conversationId
+              ? {
+                  ...c,
+                  backend: conversation.backend,
+                  configId: conversation.configId,
+                  modelId: conversation.modelId,
+                  reasoningEffort: conversation.reasoningEffort,
+                  mcpServerIds: conversation.mcpServerIds,
+                  browserSettings: conversation.browserSettings,
+                }
+              : c,
+          ),
+        }));
       }
-      // 把服务端那份（含它记住的模型）回给调用方：打开会话时用它恢复，比列表快照新
+      // 把服务端那份回给调用方：打开会话时用它判断 kind / 是否需要回放，比列表快照新
       return conversation;
     } catch (err) {
       // 打开会话这条装载链路：失败归到消息列表的错误态（带重试），不污染底部通用错误条
@@ -1079,9 +1085,22 @@ export function createConversationRunLoop(ctx: ConvCore) {
     if (!trimmed && !(files && files.length > 0)) return false;
 
     /**
-     * 这一轮的现场（模型 / 思考强度）取**本会话**那份：焦点会话就是 store 里全局那份，
-     * 非焦点会话按它自己的清单项派生（见 `scopedSettingsOf`）。必须在建会话之前算 ——
-     * 草稿页要靠它拿到 `chatTarget` 去建会话。
+     * 会话的现场（模型 / 思考强度 / MCP）**只有**清单项这一份来源（`scopedSettingsOf`）。
+     * 清单还没到时派生不出它自己的选择、会退回草稿那份 —— 那就会带着「上一个新对话页选
+     * 的模型」开跑。窗口极窄（刷新后深链秒发），但正是我们在治的那类串台，所以先等一趟
+     * （已到就是同步放行，不产生额外往返）。
+     */
+    if (
+      resolveConvId(scope) &&
+      !get().conversationsLoaded &&
+      get().getApi()
+    ) {
+      await waitConversationsLoaded();
+    }
+
+    /**
+     * 这一轮的现场（模型 / 思考强度）取**本会话**那份：从会话清单项派生。必须在建会话
+     * 之前算 —— 草稿页要靠它拿到 `chatTarget` 去建会话。
      */
     const scoped = get().scopedSettingsOf(resolveConvId(scope));
 

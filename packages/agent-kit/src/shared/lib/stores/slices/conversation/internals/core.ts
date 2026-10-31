@@ -140,37 +140,34 @@ export function createConversationCore(deps: ConvDeps) {
   /**
    * 某个会话「自己的现场」：模型 / 思考强度 / MCP / 浏览器偏好。
    *
-   * ## 为什么需要
+   * ## 为什么是「派生」，而不是「一份状态」
    *
-   * 这四项在 store 上是**单份**的，语义是「焦点会话的现场」——`openConversation` 每开
-   * 一个会话就按那个会话重写它们。单标签时没问题（焦点即视图），但主区域**分屏**时两个
-   * 标签同时可见：非焦点那个的 composer 读的也是这份，于是点一下标签，两个标签的模型
-   * pill（以及 MCP / 浏览器开关 / 思考强度）就一起变（用户报的 bug）。
+   * 这四项以前是 store 上的四个裸字段，语义是「焦点会话的现场」——`openConversation`
+   * 每开一个会话都按那个会话重写一遍。单标签时没问题（焦点即视图），主区域**分屏**时
+   * 两个标签同时可见：非焦点那个的 composer 读的也是这份，于是点一下标签，两个标签的
+   * 模型 pill（以及 MCP / 浏览器开关 / 思考强度）就一起变（用户报的 bug）。
+   *
+   * 现在**没有那份状态了**：会话的现场就是**会话清单项**上的字段 —— `persist*` 一律
+   * 「先乐观改清单项、再发请求」，「刚改完还没落地」的中间态因此本来就在清单里，这里
+   * 只是把它拆成 composer 要的形状。要写就写清单（`persistTarget` 等），没有第二份。
    *
    * ## 规则
    *
-   * - `null`（新对话页）/ 当前焦点会话 → store 里那份，含「改了还没发送」的中间态；
-   * - 其余会话 → 从会话清单派生（它落盘的客观配置，也是下次打开它时会恢复的东西）。
-   *
-   * 焦点会话仍走全局那份是刻意的：`setChatTarget` 等写的就是它，两边同一份数据，
-   * 不会出现「下拉里选了 B、pill 还显示 A」。
+   * - `null`（新对话页）→ `draftSettings`：还没有会话，那份待定选择只活在内存里；
+   * - 会话 → 清单项派生；清单里还没有它（刚建出来、清单没刷到）时同样退回草稿 ——
+   *   那份选择正是建它用的，第一轮不能因为「清单慢半拍」变成「请先选择模型」。
    */
   const scopedSettingsOf = (conversationId: string | null): ScopedSettings => {
     const s = get();
-    if (!conversationId || isFocus(conversationId)) {
-      return {
-        chatTarget: s.chatTarget,
-        reasoningEffort: s.reasoningEffort,
-        mcpServerIds: s.mcpServerIds,
-        browserSettings: s.browserSettings,
-      };
-    }
-    const conv = s.conversations.find((c) => c.id === conversationId);
+    const conv = conversationId
+      ? s.conversations.find((c) => c.id === conversationId)
+      : undefined;
+    if (!conv) return { ...s.draftSettings };
     return {
       chatTarget: targetFromConversation(conv),
-      reasoningEffort: conv?.reasoningEffort ?? null,
-      mcpServerIds: conv?.mcpServerIds ?? [],
-      browserSettings: conv?.browserSettings ?? null,
+      reasoningEffort: conv.reasoningEffort ?? null,
+      mcpServerIds: conv.mcpServerIds ?? [],
+      browserSettings: conv.browserSettings ?? null,
     };
   };
 
@@ -614,20 +611,37 @@ export function createConversationCore(deps: ConvDeps) {
   /**
    * 校验「这一轮要用的目标」还成立。
    *
-   * `target` 由调用方按会话给出（分屏时非焦点标签用的是它自己会话上的配置，见
-   * `scopedSettingsOf`）—— 不传会用全局那份，那是焦点会话的目标，校验它等于校验错的会话。
+   * `target` **必须**由调用方按会话给出（`scopedSettingsOf(id).chatTarget`）：store 上
+   * 已经没有「当前会话的目标」可退，默认值一旦还留在那儿，分屏时校验的就是焦点会话的
+   * 目标 —— 校验错的那条，然后带着错的目标发出去。
    */
   const guardTarget = (
     target: {
       backend: AgentBackend;
       configId?: string;
       modelId?: string;
-    } | null = get().chatTarget,
+    } | null,
   ): boolean => {
     if (isTargetAlive(target)) return true;
-    // 悬空的目标顺手清掉（本来就是 null 时不必 set）。只清全局那份 —— 非焦点会话的
-    // 死目标由它自己的清单项表示，`targetFromConversation` 已经返回 null
-    if (target && get().chatTarget === target) set({ chatTarget: null });
+    /**
+     * 悬空的目标顺手清掉，免得它一直挂在草稿页上。
+     *
+     * 只清草稿那份，且只在**确实是同一个目标**时清（按字段比，不按引用比：
+     * `scopedSettingsOf` 每次都返回新对象，引用永远不相等）。会话的死目标不用清 ——
+     * 视图读的是派生值，`targetFromConversation` 对它本来就返回 null。
+     */
+    const draft = get().draftSettings.chatTarget;
+    if (
+      target &&
+      draft &&
+      draft.backend === target.backend &&
+      draft.configId === target.configId &&
+      draft.modelId === target.modelId
+    ) {
+      set((state) => ({
+        draftSettings: { ...state.draftSettings, chatTarget: null },
+      }));
+    }
     get().setError("请先在输入框上方选择模型（原来的配置或模型可能已被删除）");
     return false;
   };

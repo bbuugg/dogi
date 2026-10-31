@@ -13,7 +13,7 @@ export function createConversationForkActions(
   ConversationSlice,
   "forkConversation" | "convertAcpConversation"
 > {
-  const { set, get, api, readSlice, resolveConvId, preferredTarget, peekActiveRun } =
+  const { set, get, api, readSlice, resolveConvId, preferredTarget, peekActiveRun, persistTarget } =
     ctx;
 
   return {
@@ -152,8 +152,13 @@ export function createConversationForkActions(
         if (get().activeWorkspaceId !== targetWorkspaceId)
           get().selectWorkspace(targetWorkspaceId);
         await get().openConversation(created.id);
-        // 见方法头注释：把模型选择摆回内置那一档（没有上次用过的内置模型就留 null）
-        set({ chatTarget: preferredTarget() });
+        /**
+         * 见方法头注释：把模型选择摆回内置那一档（没有上次用过的内置模型就留 null）。
+         *
+         * 写到**这条新会话自己**上（清单项），而不是写一份全局「当前会话的模型」——
+         * 后者在分屏时会把别的标签的 composer 一起改掉（用户报过的那个 bug）。
+         */
+        persistTarget(created.id, preferredTarget());
         return true;
       } catch (err) {
         get().setError(errorMessage(err));

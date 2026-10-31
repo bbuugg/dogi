@@ -13,7 +13,7 @@ export function createConversationOpenActions(
   ConversationSlice,
   "openConversation" | "retryLoadMessages" | "reloadAcpSession" | "reloadConversation"
 > {
-  const { set, get, api, readSlice, writeSlice, pruneSlices, targetFromConversation, preferredTarget, fetchQueue, attachRun, loadConversation, loadMessages, peekActiveRun, pump } = ctx;
+  const { set, get, api, readSlice, writeSlice, pruneSlices, preferredTarget, fetchQueue, attachRun, loadConversation, loadMessages, peekActiveRun, pump } = ctx;
 
   return {
     openConversation: (conversationId) => {
@@ -51,31 +51,30 @@ export function createConversationOpenActions(
       if (!conversationId) {
         // 回到「开始新对话」页：预选清单第一份**有可用模型**的配置（具体的配置 + 模型，
         // 下拉里显示真实名字）—— 不继承上一个会话的选择，也不存在「默认」概念。
-        // 各会话的现场都留在各自的 slice 里，切回来原样还在 —— 不清任何东西。
+        // 各会话的现场都留在会话清单项上，切回来原样还在 —— 不清任何东西。
         // MCP 待定选择照样清空：新会话建出来时会带上，残留会让新会话凭空多出几个 MCP。
-        // 浏览器偏好同理：清成「未设」（null）= 按全局默认显示
-        // ACP 草稿档位一并清掉：那是上一个新任务页的临时选择，留着会让下一个新会话凭空带上
+        // 浏览器偏好同理：清成「未设」（null）= 按全局默认显示。
+        // ACP 草稿档位一并清掉：那是上一个新任务页的临时选择，留着会让下一个新会话凭空带上。
         set({
-          chatTarget: preferredTarget(),
-          mcpServerIds: [],
-          browserSettings: null,
-          reasoningEffort: null,
+          draftSettings: {
+            chatTarget: preferredTarget(),
+            mcpServerIds: [],
+            browserSettings: null,
+            reasoningEffort: null,
+          },
           draftAcp: null,
         });
         return;
       }
-      // 恢复这个会话记住的模型（配置 / 模型被删就是 null → 界面显示「选择模型」，
-      // 不继承别的会话的选择）。列表可能还没刷到最新，装载收尾会用会话详情再校正一次。
+      /**
+       * 这个会话的现场（模型 / MCP / 浏览器偏好 / 思考强度）**不用搬到哪儿去**：
+       * 视图读的是 `scopedSettingsOf(conversationId)`，直接从会话清单项派生。
+       *
+       * 以前这里得把这四项抄进 store 上的全局字段（顺带在装载收尾时按会话详情再校正
+       * 一次）。分屏时那等于「打开 B 就把 A 的 composer 改成 B 的设置」—— 用户报的
+       * 「点一下标签两个标签模型同步」正是它。
+       */
       const stored = get().conversations.find((c) => c.id === conversationId);
-      set({
-        chatTarget: targetFromConversation(stored),
-        // MCP 选择也按会话各自记（没存过 = 全不选）
-        mcpServerIds: stored?.mcpServerIds ?? [],
-        // 浏览器偏好也按会话各自记（没存过 = null → 界面按全局默认显示）
-        browserSettings: stored?.browserSettings ?? null,
-        // 思考强度同理（没存过 = null → 跟随模型默认）
-        reasoningEffort: stored?.reasoningEffort ?? null,
-      });
       /**
        * 定时任务跑出来的会话（`unseen`）：**点开即算看过**。
        *
@@ -127,7 +126,7 @@ export function createConversationOpenActions(
           !existing.loading &&
           !existing.streaming
         ) {
-          pump();
+          pump(conversationId);
         }
         pruneSlices(conversationId);
         return;
@@ -154,13 +153,15 @@ export function createConversationOpenActions(
        *
        * 身份守卫：这一个来回里用户可能已经改了队列（加 / 删 / 拖），那份改动不能被
        * 这趟晚到的应答盖掉。判据是「slice 里躺的还是我刚铺上的那个数组」（引用相等）
-       * —— 只有 patchQueue 才会换掉这个引用。用户切走 / slice 被淘汰时引用也变了，
-       * 同样不会覆盖（那时更不该覆盖）。
+       * —— 只有 patchQueue 才会换掉这个引用。slice 被淘汰时引用也变了，同样不会覆盖。
+       *
+       * 刻意**不再判「还是不是焦点会话」**：队列是这条会话自己的事，晚到的应答盖掉它
+       * 只跟「这段时间里队列有没有人动过」有关，跟用户此刻在看哪块无关（分屏时它多半
+       * 已经不是焦点了 —— 那样这份远端顺序就永远补不上）。
        */
       void (async () => {
         const remote = await fetchQueue(conversationId);
         if (!remote) return;
-        if (get().activeConversationId !== conversationId) return;
         if (readSlice(conversationId).queuedMessages !== cached) return;
         // 只写切片 + 缓存，不回写服务端（这份数据本来就来自它）
         writeSlice(conversationId, (s) => ({ ...s, queuedMessages: remote }));

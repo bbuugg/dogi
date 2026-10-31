@@ -79,7 +79,7 @@ export type { QueuedMessage };
  * 的（用户报的「点一下标签两个 composer 的模型 pill 一起变」）。
  *
  * 所以这里统一把会话 id 作为**作用域**传给写动作与现场字段：
- * - 现场字段走 `scopedSettingsOf(conversationId)`（焦点会话 = 全局那份，其余按会话派生）；
+ * - 现场字段走 `scopedSettingsOf(conversationId)`（从会话清单项派生，焦点标签也不例外）；
  * - 写动作（send / steer / stop / 4 个 setter / 审批 / 追问）都把 `conversationId` 传下去。
  *
  * 现在**所有**会话级动作都收 `scope?: string | null`（`undefined` = 活跃会话，`null` =
@@ -98,7 +98,9 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
   const activeSlice = conversationId ? s.slices[conversationId] : undefined;
   /**
    * 这个视图所属会话的「现场」：模型 / 思考强度 / MCP / 浏览器偏好。
-   * 焦点会话（或新对话页）就是 store 里那份；非焦点标签按自己的会话派生。
+   *
+   * 从**会话清单项**派生（`null` = 新对话页读草稿）。store 上没有「当前会话的现场」
+   * 那份共享状态可读 —— 有它的时候，分屏两个标签就会互相污染。
    */
   const scoped = s.scopedSettingsOf(conversationId);
 

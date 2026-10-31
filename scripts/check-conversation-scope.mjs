@@ -30,20 +30,32 @@
  * **写**焦点（`set({ activeConversationId })`、`activeConversationId: null` 这类）不查：
  * 切会话总得有人设它，那不是「把焦点当默认目标」。
  *
- * 另外挡一记回退：`agent-store.ts`（全局 slice）里不许再声明 `contextNotice` /
- * `contextCompressing` / `compressContextNow` —— 这三个是**某一条会话**的属性，
- * 放回全局就是分屏串台（见 `slices/conversation/actions/context.ts`）。
+ * 另外挡两记回退（都是同一类 bug 的变种）：
+ *
+ * - `agent-store.ts`（全局 slice）里不许再声明 `contextNotice` / `contextCompressing` /
+ *   `compressContextNow`，也不许把 `chatTarget` / `reasoningEffort` / `mcpServerIds` /
+ *   `browserSettings` / `draftSettings` 搬回去 —— 它们要么是**某一条会话**的属性，
+ *   要么是**草稿页**那一份，放回全局就是分屏串台（见 `slices/conversation/actions/
+ *   context.ts`、`actions/targets.ts`）；
+ * - 视图层（hooks / features）不许直接碰 `draftSettings`：真源在会话清单项上，读它得走
+ *   `scopedSettingsOf(conversationId)`。
  *
  * ## 用法
  *   node scripts/check-conversation-scope.mjs    # 有违规退出码 1
  */
-import { readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(here, '..')
 const storeRoot = resolve(repoRoot, 'packages/agent-kit/src/shared/lib/stores')
+
+/** 视图层：只允许经 agentApp / scopedSettingsOf 读会话现场 */
+const UI_ROOTS = [
+  resolve(repoRoot, 'packages/agent-kit/src/shared/hooks'),
+  resolve(repoRoot, 'packages/agent-kit/src/features'),
+]
 
 /**
  * 允许出现 `activeConversationId` 的文件（相对 `storeRoot`），每条都要说清理由。
@@ -74,6 +86,26 @@ const GLOBAL_BANNED = [
   ['contextNotice', '上下文压缩提示是每会话的：slices/conversation/actions/context.ts'],
   ['contextCompressing', '压缩进行中是每会话的：slices/conversation/actions/context.ts'],
   ['compressContextNow', '压缩动作要带会话：slices/conversation/actions/context.ts'],
+  [
+    'chatTarget',
+    '会话的模型在清单项上、草稿在 draftSettings 里：slices/conversation/actions/targets.ts',
+  ],
+  [
+    'reasoningEffort',
+    '思考强度是每会话的：slices/conversation/actions/targets.ts',
+  ],
+  [
+    'mcpServerIds',
+    'MCP 选择是每会话的：slices/conversation/actions/targets.ts',
+  ],
+  [
+    'browserSettings',
+    '浏览器偏好是每会话的：slices/conversation/actions/targets.ts',
+  ],
+  [
+    'draftSettings',
+    '草稿现场属于 ConversationSlice（视图层走 scopedSettingsOf），不是全局 slice 的字段',
+  ],
 ]
 
 /** 去掉行内注释与单行块注释，免得文档里的字段名被当成代码 */
@@ -84,11 +116,14 @@ function codeOf(line) {
   return line.replace(/\/\*.*?\*\//g, '').replace(/\/\/.*$/, '')
 }
 
-function walk(dir, out = []) {
+function walk(dir, out = [], exts = ['.ts']) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const full = resolve(dir, entry.name)
-    if (entry.isDirectory()) walk(full, out)
-    else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts'))
+    if (entry.isDirectory()) walk(full, out, exts)
+    else if (
+      exts.some((ext) => entry.name.endsWith(ext)) &&
+      !entry.name.includes('.test.')
+    )
       out.push(full)
   }
   return out
@@ -131,8 +166,38 @@ for (const file of walk(storeRoot)) {
   })
 }
 
+/**
+ * 视图层不许直接碰 `draftSettings`。
+ *
+ * 它是**草稿页**那一份（还没有会话时的待定选择），谁在 UI 里读它，等于又在拿「一份共享
+ * 的现场」当当前会话用 —— 分屏时另一个标签就会跟着变。要读会话的现场，走
+ * `app.chatTarget`（内部已经是 `scopedSettingsOf(本视图 id)`）。
+ */
+for (const root of UI_ROOTS) {
+  if (!existsSync(root)) continue
+  for (const file of walk(root, [], ['.ts', '.tsx'])) {
+    const rel = relative(repoRoot, file).split('\\').join('/')
+    readFileSync(file, 'utf8')
+      .split(/\r?\n/)
+      .forEach((line, index) => {
+        const code = codeOf(line)
+        if (!code || code.includes('scope-ok')) return
+        if (!/\bdraftSettings\b/.test(code)) return
+        problems.push({
+          at: `${rel}:${index + 1}`,
+          text: line.trim(),
+          hint:
+            '草稿现场是 store 内部的：视图层读 `app.chatTarget` 等（里面就是 ' +
+            '`scopedSettingsOf(conversationId)`），别直接读 draftSettings。',
+        })
+      })
+  }
+}
+
 if (problems.length === 0) {
-  console.log('✓ 会话作用域：store 里没有按活跃会话走的动作')
+  console.log(
+    '✓ 会话作用域：store 里没有按活跃会话走的动作，视图层也没有直接读共享现场',
+  )
   process.exit(0)
 }
 
