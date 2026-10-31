@@ -909,6 +909,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
      * 见流循环里的 error 分支与收尾处的失败判定。
      */
     let attemptError: string | null = null
+    /**
+     * 这条错误是不是**已经下发给前端**了。有产出时不攒着、当场下发，收尾处就不能再说一遍
+     * （重试用尽时的终态分支用它去重）。
+     */
+    let errorSent = false
     let rawUsage: RawUsage | null = null
     /**
      * **最后一次请求**的 usage（不是整轮累计）。
@@ -1255,14 +1260,19 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
          * 两条 `⚠️ ` 各挂一颗「重新加载」，同一个故障被说了两遍。
          * 所以先攒进 `attemptError`，收尾时按一次失败统一处理（文案优先用上游原文）。
          *
-         * 已经产出过内容的**不接管**：那时正确的语义是「有正文 + 一段错误提示」，
-         * 吞掉它反而让用户看不见后半截为什么停了（照旧下发，见下面 `emitEvent`）。
+         * 已经产出过内容的**当场下发**（让用户知道后半截为什么停了），但同样记进
+         * `attemptError`：这一轮其实**没跑完**（典型是模型要多步续写时，下一步请求撞上
+         * 并发上限 / 断网，AI SDK 自己重试到顶）。收尾必须按失败处理，不能报成
+         * `done` —— 否则半截回复被当成完整回答落盘，只剩一句不知所以的 `⚠️ `。
          */
-        if (event.type === 'error' && firstOutputAt === null) {
+        if (event.type === 'error') {
           attemptError = event.message
-          // 已攒着的工具入参增量要冲出去（`emitEvent` 平时负责这步，这里绕过了它）
-          flushDelta()
-          continue
+          if (firstOutputAt === null) {
+            // 已攒着的工具入参增量要冲出去（`emitEvent` 平时负责这步，这里绕过了它）
+            flushDelta()
+            continue
+          }
+          errorSent = true
         }
         if (event.type === 'tool-call') {
           toolExecuted = true
@@ -1301,11 +1311,13 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
       // 收尾：流跑完 / 被中止都会 resolve（引擎在 finally 里收尾，不会悬挂）
       const finished = await engine.done
       /**
-       * 这次尝试的收尾失败：**一个内容都没产出**才算（有正文就不算失败，见上面的
-       * `firstOutputAt`）。两种形状走同一条路：
+       * 这次尝试的收尾失败。两种形状走同一条路：
        *
-       * - 流里已经报过错（`attemptError`）—— 典型是 AI SDK 自己的 3 次重试全失败；
-       * - 上游静默回了个空响应（`finishReason` 归到 `other`，首字时刻仍为 null）。
+       * - 流里已经报过错（`attemptError`）—— 典型是 AI SDK 自己的 3 次重试全失败。
+       *   **产出过内容也算失败**：多步续写时「下一步请求」撞上限流 / 断网，正文只吐了半截，
+       *   报成 `done` 会把半截回复当成完整回答落盘（用户看到「说一半就没了」还查不出原因）。
+       * - 上游静默回了个空响应（`finishReason` 归到 `other`，首字时刻仍为 null）。这条
+       *   必须带「无产出」限定：有工具调用的轮次最后一步也常归到 `other`。
        *
        * 抛出去交给统一的收场（`catch` 里的重试判定 + 只报一条错误）。文案优先用上游原文：
        * 有流内错误时**别再拼一条**「上游返回空响应」—— 那正是提示重复的来源。
@@ -1313,8 +1325,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
        */
       if (
         !runSignal.aborted &&
-        firstOutputAt === null &&
-        (attemptError !== null || finished.finishReason === 'other')
+        (attemptError !== null || (firstOutputAt === null && finished.finishReason === 'other'))
       ) {
         throw attemptFailure(
           attemptError ?? '上游返回空响应（finishReason "other"，整轮没有任何内容）'
@@ -1415,7 +1426,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         }
         continue
       }
-      emitEvent({ type: 'error', message })
+      // 有产出的那次尝试里，这条错误已经随流下发过（见流循环的 error 分支）—— 别再补一条
+      if (!errorSent) emitEvent({ type: 'error', message })
       emitEvent({ type: 'finish', finishReason: 'error', ...finishTiming(usage) })
       return finish('error', usage, message)
     }
