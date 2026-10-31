@@ -258,6 +258,12 @@ export function MessageList({
         /* 没有 conversationId（容器工作台）就不挂手势：那儿没有「重拉这条会话」的语义 */
         onRefresh={conversationId ? refreshConversation : undefined}
         /*
+         * 本轮还在生成时**禁止上拉刷新**（不只是点了弹提示）：手势监听与指示器都不挂，
+         * 但容器仍保留 `overscroll-y-contain`，避免退回浏览器自己的整页下拉刷新。
+         * 等 `streaming` 落回 false 再挂回来。
+         */
+        refreshEnabled={!streaming}
+        /*
          * 只有「本轮正在流式输出」才用平滑跟随（消息向上流动的观感）；
          * 其余内容长高（图片加载完成、历史刷新…）一律瞬时贴底，不要自己滚。
          *

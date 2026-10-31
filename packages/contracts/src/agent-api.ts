@@ -55,8 +55,26 @@ import type { BrowserRuntime, BrowserSettings } from "./browser";
 /** 所有接口都挂在这个前缀下（反代好配） */
 export const API_PREFIX = "/api";
 
+/** `POST /api/auth/password` 的请求体 */
+export interface ChangePasswordInput {
+  /** 当前密码；服务端还没设置过密码时可以为空 */
+  currentPassword: string;
+  /** 新密码（不能为空） */
+  newPassword: string;
+}
+
+/** `POST /api/auth/password` 的成功应答 */
+export interface ChangePasswordResult {
+  ok: true;
+}
+
 export const API_ROUTES = {
   health: "/api/health",
+  /**
+   * 修改登录密码（单用户）：POST /api/auth/password，body `ChangePasswordInput`。
+   * 需要已登录（桌面端进程内直连天然满足）；服务端校验旧密码后只保存新密码的哈希。
+   */
+  authPassword: "/api/auth/password",
   models: "/api/models",
   /**
    * 向模型上游要一份「可选模型清单」（设置页 →「从上游拉取」）：

@@ -16,10 +16,18 @@
  *   静默只检查、**下载必须用户点**（产品约定）。
  */
 import { useEffect, useState, type ReactNode } from 'react'
-import { Activity, Bell, Check, Copy, ExternalLink, Globe, Languages, Mic, Sun } from 'lucide-react'
+import { Activity, Bell, Copy, ExternalLink, Globe, Languages, Mic, Sun } from 'lucide-react'
 import { Button } from '@fizz/ui/button'
 import { Input } from '@fizz/ui/input'
 import { Switch } from '@fizz/ui/switch'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from '@fizz/ui/dialog'
 import { IconTip } from '@fizz/agent-kit/shared/components/IconTip'
 import { getAgentHost, type RemoteAccessState } from '@fizz/agent-client/host'
 import type { AgentApp } from '@fizz/agent-kit/shared/hooks/useAgentApp'
@@ -343,7 +351,7 @@ export function GeneralTab({ app }: { app: AgentApp }) {
         )}
       </section>
 
-      <RemoteAccessSection />
+      <RemoteAccessSection app={app} />
 
       {/* 软件更新（desktop 打包版专属）：宿主没实现 appUpdate 时自己整块不渲染 */}
       <AppUpdateSection />
@@ -360,22 +368,21 @@ export function GeneralTab({ app }: { app: AgentApp }) {
  * ⚠️ hooks 全部无条件调用，「没实现就不渲染」放在 hooks **之后** return，
  * 不然条件 return 会让 hooks 顺序在两次渲染之间漂（React 直接报错）。
  */
-function RemoteAccessSection() {
+function RemoteAccessSection({ app }: { app: AgentApp }) {
   const tr = useT()
   const host = getAgentHost()
   const save = host.saveRemoteAccess?.bind(host) ?? null
   const initial = host.loadRemoteAccess?.() ?? null
   const [state, setState] = useState<RemoteAccessState | null>(initial)
-  /** 端口 / 用户名 / 密码都是**草稿**：改完点应用（或拨开关）才落到主进程 */
+  /** 端口是**草稿**：改完点应用（或拨开关）才落到主进程 */
   const [portDraft, setPortDraft] = useState<string>(() => String(initial?.port ?? 7801))
-  const [userDraft, setUserDraft] = useState<string>(() => initial?.username ?? '')
-  const [passDraft, setPassDraft] = useState<string>(() => initial?.password ?? '')
   const [busy, setBusy] = useState(false)
-
-  /** 两栏都非空才算改得完整（主进程对空串按「没改」处理，这里先拦一道，给出明确提示） */
-  const credsReady = userDraft.trim() !== '' && passDraft !== ''
-  const credsDirty =
-    state !== null && (userDraft.trim() !== state.username || passDraft !== state.password)
+  /** 修改密码弹窗：旧密码 + 新密码 + 确认；只保存新密码的哈希 */
+  const [passwordOpen, setPasswordOpen] = useState(false)
+  const [currentDraft, setCurrentDraft] = useState('')
+  const [newDraft, setNewDraft] = useState('')
+  const [confirmDraft, setConfirmDraft] = useState('')
+  const [passwordBusy, setPasswordBusy] = useState(false)
 
   /** 图标按钮：把一段文本复制到剪贴板（`label` 同时用于提示与无障碍名） */
   const copyButton = (text: string, label: string): ReactNode => (
@@ -435,25 +442,45 @@ function RemoteAccessSection() {
     </div>
   )
 
-  /**
-   * 落一次改动。`withCreds` 表示把凭据草稿一起推过去 —— 主进程会**重启监听**才生效
-   * （服务端只在启动时读 `FIZZ_AUTH_*`，见 agent-host 的 remote-access.ts）。
-   */
-  const apply = async (enabled: boolean, withCreds = false): Promise<void> => {
+  /** 改密码：校验旧密码后由服务端写入新哈希，不用重启监听（登录接口每次请求现读） */
+  const submitPassword = async (): Promise<void> => {
+    const api = app.api
+    if (!api) {
+      toast.error(tr('服务端未连接'))
+      return
+    }
+    if (!newDraft) {
+      toast.error(tr('新密码不能为空'))
+      return
+    }
+    if (newDraft !== confirmDraft) {
+      toast.error(tr('两次输入的新密码不一致'))
+      return
+    }
+    setPasswordBusy(true)
+    try {
+      await api.changePassword({ currentPassword: currentDraft, newPassword: newDraft })
+      toast.success(tr('密码已更新'))
+      setPasswordOpen(false)
+      setCurrentDraft('')
+      setNewDraft('')
+      setConfirmDraft('')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : tr('修改密码失败'))
+    } finally {
+      setPasswordBusy(false)
+    }
+  }
+
+  /** 落一次改动。主进程会**重启监听**才生效（服务端只在启动时读 `FIZZ_AUTH_*`） */
+  const apply = async (enabled: boolean): Promise<void> => {
     setBusy(true)
     try {
       // 端口以输入框为准（空 / 非法值回落到当前配置）
       const port = Number(portDraft) > 0 ? Math.trunc(Number(portDraft)) : (state?.port ?? 7801)
-      const next = await save({
-        enabled,
-        port,
-        ...(withCreds && credsReady ? { username: userDraft.trim(), password: passDraft } : {})
-      })
+      const next = await save({ enabled, port })
       setState(next)
-      // 主进程可能补了默认值 / 现场生成了密码：以回传的状态为准把草稿对齐
       setPortDraft(String(next.port))
-      if (next.username) setUserDraft(next.username)
-      if (next.password) setPassDraft(next.password)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : tr('远程访问设置失败'))
     } finally {
@@ -507,49 +534,14 @@ function RemoteAccessSection() {
             */}
             {addressRow(`http://127.0.0.1:${state.port}`, true)}
           </div>
-          {/* 登录凭据可改：改完点下面的对勾应用（主进程按新凭据重启监听，已连接的页面要重登） */}
           <div className="flex items-center gap-2">
-            <span className="shrink-0 text-muted-foreground">{tr('用户名')}</span>
-            <Input
-              value={userDraft}
-              onChange={(e) => setUserDraft(e.target.value)}
-              className="h-7 min-w-0 flex-1"
-              disabled={busy}
-              aria-label={tr('登录用户名')}
-            />
-            {copyButton(userDraft, tr('用户名'))}
+            <span className="min-w-0 flex-1 text-muted-foreground">
+              {tr('首次用浏览器打开登录页时设置密码（只保存哈希），之后用这个密码登录。')}
+            </span>
+            <Button size="xs" variant="outline" onClick={() => setPasswordOpen(true)}>
+              {tr('修改密码')}
+            </Button>
           </div>
-          <div className="flex items-center gap-2">
-            <span className="shrink-0 text-muted-foreground">{tr('密码')}</span>
-            <Input
-              value={passDraft}
-              onChange={(e) => setPassDraft(e.target.value)}
-              className="h-7 min-w-0 flex-1 font-mono"
-              disabled={busy}
-              aria-label={tr('登录密码')}
-            />
-            {copyButton(passDraft, tr('密码'))}
-          </div>
-          {credsDirty && (
-            <div className="flex items-center gap-2">
-              <span className="min-w-0 flex-1 text-muted-foreground">
-                {credsReady
-                  ? tr('凭据改过了：点右边应用（会重启监听，已连接的页面需要重新登录）')
-                  : tr('用户名和密码都不能为空')}
-              </span>
-              <IconTip label={tr('应用新凭据（重启监听）')}>
-                <Button
-                  size="icon-xs"
-                  variant="outline"
-                  aria-label={tr('应用新凭据')}
-                  disabled={busy || !credsReady}
-                  onClick={() => void apply(true, true)}
-                >
-                  <Check />
-                </Button>
-              </IconTip>
-            </div>
-          )}
           {!state.webServed && (
             <div className="text-muted-foreground">
               {tr('没找到 web 产物')}（<code>apps/web/dist</code>）：{tr('浏览器打开只有接口、没有界面。先在仓库根跑一次')} <code>npm run build:web</code> {tr('再开关一次这里。')}
@@ -558,6 +550,61 @@ function RemoteAccessSection() {
           {state.error && <div className="text-destructive">{state.error}</div>}
         </div>
       )}
+
+      <Dialog open={passwordOpen} onOpenChange={setPasswordOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{tr('修改远程访问密码')}</DialogTitle>
+            <DialogDescription>{tr('先输入当前密码，再设置新密码。新密码只保存哈希。')}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <label htmlFor="current-password" className="text-sm font-medium">
+                {tr('当前密码')}
+              </label>
+              <Input
+                id="current-password"
+                type="password"
+                autoComplete="current-password"
+                value={currentDraft}
+                onChange={(e) => setCurrentDraft(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label htmlFor="new-password" className="text-sm font-medium">
+                {tr('新密码')}
+              </label>
+              <Input
+                id="new-password"
+                type="password"
+                autoComplete="new-password"
+                value={newDraft}
+                onChange={(e) => setNewDraft(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label htmlFor="confirm-password" className="text-sm font-medium">
+                {tr('确认新密码')}
+              </label>
+              <Input
+                id="confirm-password"
+                type="password"
+                autoComplete="new-password"
+                value={confirmDraft}
+                onChange={(e) => setConfirmDraft(e.target.value)}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPasswordOpen(false)} disabled={passwordBusy}>
+              {tr('取消')}
+            </Button>
+            <Button onClick={() => void submitPassword()} disabled={passwordBusy}>
+              {passwordBusy ? tr('保存中…') : tr('保存')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </section>
   )
 }

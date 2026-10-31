@@ -229,3 +229,6 @@ export function createApp(options: CreateAppOptions = {}): Hono {
 }
 
 export const SERVER_INFO = { name: NAME, version: VERSION }
+
+/** 供宿主（桌面端远程访问）注入密码哈希的持久化方式，见 `lib/auth-password.ts` */
+export { setPasswordPersister } from './lib/auth-password'

@@ -8,17 +8,50 @@
  * - `lib/server/ws.ts`（WS 分流）→ `attachWebSockets(server)`，一模一样。
  */
 import { createServer } from 'node:http'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { networkInterfaces } from 'node:os'
 import { getRequestListener } from '@hono/node-server'
 import { resolveDataDir } from '@fizz/workspace'
 import { createApp, SERVER_INFO } from './app'
 import { authEnabled } from './lib/auth-jwt'
+import { createEnvFilePersister, setPasswordPersister } from './lib/auth-password'
 import { captchaEnabled } from './lib/captcha'
 import { attachWebSockets } from './server/ws'
 import { installShutdownHandlers } from './server/shutdown'
 import { killAllTerminalSessions } from './server/terminal/pty'
 import { startBackgroundServices } from './server/background'
 import { ENV_FILE, TOKEN } from './server/state'
+
+/**
+ * 首次登录设置的密码哈希落盘：
+ * - 有 `.env`：写回 `FIZZ_AUTH_PASS=`（本地 / 源码部署）；
+ * - 没有 `.env`（Docker 纯环境变量）：写到数据目录的 `auth-password`，启动时再补回环境变量。
+ *
+ * 两条路都只保存哈希；`FIZZ_AUTH_PASS` 仍是运行时唯一读取的变量。
+ */
+const DATA_AUTH_FILE = join(resolveDataDir(), 'auth-password')
+// 有 `.env` 时以它为准（清空 `FIZZ_AUTH_PASS` 就能重置密码）；只有纯环境变量部署才读数据目录
+if (!process.env.FIZZ_AUTH_PASS && !ENV_FILE) {
+  try {
+    const saved = readFileSync(DATA_AUTH_FILE, 'utf8').trim()
+    if (saved) process.env.FIZZ_AUTH_PASS = saved
+  } catch {
+    // 还没设置过密码：保持空串（首次登录时设置）
+  }
+}
+const envPersister = ENV_FILE ? createEnvFilePersister(ENV_FILE.file) : null
+setPasswordPersister((hash) => {
+  if (envPersister) {
+    try {
+      envPersister(hash)
+      return
+    } catch (err) {
+      console.warn('[auth] 写回 .env 失败，改存数据目录：', err)
+    }
+  }
+  writeFileSync(DATA_AUTH_FILE, `${hash}\n`, { encoding: 'utf8', mode: 0o600 })
+})
 
 /** 端口与监听地址：都有环境变量开关（部署时给固定值） */
 const PORT = Number(process.env.FIZZ_PORT ?? 7801)
@@ -75,14 +108,17 @@ server.listen(PORT, HOST, () => {
   if (extUrl) console.log(`  对外：${extUrl}  （浏览器打开即可使用）`)
   console.log(`  数据：${resolveDataDir()}`)
   if (authEnabled()) {
-    console.log('  鉴权：已启用（用户名/密码换 JWT，见 FIZZ_AUTH_* / FIZZ_JWT_SECRET）')
+    console.log('  鉴权：已启用（单用户密码换 JWT，只保存哈希）')
+    if (!process.env.FIZZ_AUTH_PASS) {
+      console.log('  密码：尚未设置 —— 首次登录时输入的密码将成为新密码')
+    }
     console.log(
       captchaEnabled()
         ? '  验证码：已启用（进程内滑块，FIZZ_AUTH_CAPTCHA=0 可关）'
         : '  验证码：已关闭（FIZZ_AUTH_CAPTCHA）'
     )
   } else {
-    console.log('  ⚠️ 鉴权：未启用（未配置 FIZZ_AUTH_USER / FIZZ_AUTH_PASS / FIZZ_JWT_SECRET，全部放行）')
+    console.log('  ⚠️ 鉴权：未启用（未配置 FIZZ_JWT_SECRET，全部放行）')
   }
   // 容器内 bridge 回传节点事件用的固定 token（不是登录用的 JWT，别混淆）
   console.log(`  容器回调 token：${TOKEN}`)

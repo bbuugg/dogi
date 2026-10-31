@@ -148,25 +148,19 @@ export interface RemoteAccessState {
   urls: string[]
   /** `urls` 的第一条（旧字段，兼容既有调用点）；没有对外网卡时是 null */
   url: string | null
-  /** 登录凭据：web 端连接页填这两个（启用时生成并固定，重启不变） */
-  username: string
-  password: string
   /** 是否同时托管了 web 产物（false = 只有 API，浏览器打开没有界面） */
   webServed: boolean
   error?: string
 }
 
 /**
- * `setRemoteAccess` 的入参（与 `@fizz/agent-ui` 的 `RemoteAccessInput` **同构**）。
+ * `setRemoteAccess` 的入参（与 `@fizz/agent-client` 的 `RemoteAccessInput` **同构**）。
  *
- * `username` / `password` 不传 = 保持现有值（纯开关监听时用）；传了就按新凭据**重启监听**
- * —— 服务端在启动时读环境变量，不重启不生效。
+ * 密码不在这里传：首次从浏览器登录时设置，哈希由主进程持久化。
  */
 export interface RemoteAccessInput {
   enabled: boolean
   port: number
-  username?: string
-  password?: string
 }
 
 /** 系统通知的内容（与根应用 notify.ts 的 SystemNotice 同构） */

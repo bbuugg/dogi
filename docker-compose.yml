@@ -5,14 +5,14 @@
 #   docker compose down               # 停掉（数据卷保留）
 #
 # 配置写在同目录的 .env 里（compose 会自动读，见 .env.example）：
-#   FIZZ_AUTH_USER / _PASS / _JWT_SECRET
-#                        一起配置才启用登录鉴权（web / cli 用它登录换 JWT）
+#   FIZZ_AUTH_PASS / _JWT_SECRET
+#                        单用户登录；配了 _JWT_SECRET 就启用，_PASS 留空则在首次登录时设置
 #   FIZZ_PORT        选填，宿主机端口，默认 7801
 #   FIZZ_WORKSPACE   选填，宿主机上给 agent 操作的目录，默认 ./workspace
 #   FIZZ_SECRET_KEY  选填，加密 API key 的主密钥（32 字节 base64）
 #
 # 浏览器端连接方式（页面首次打开是登录页）：
-#   用户名 / 密码填 FIZZ_AUTH_USER / FIZZ_AUTH_PASS，登录后自动换 JWT。
+#   第一次输入什么密码，它就成为密码（只保存哈希，落在 /data 卷里），之后用它换 JWT。
 
 services:
   fizz:
@@ -34,8 +34,7 @@ services:
       FIZZ_DATA_DIR: /data
       FIZZ_WEB_DIR: /app/apps/web/dist
 
-      # 三个一起配置才启用登录鉴权（用户名密码换 JWT）；都不配 = 开发态全放行
-      FIZZ_AUTH_USER: ${FIZZ_AUTH_USER:-}
+      # 配了 JWT 密钥就启用登录；密码留空 = 首次登录时设置（只保存哈希）
       FIZZ_AUTH_PASS: ${FIZZ_AUTH_PASS:-}
       FIZZ_JWT_SECRET: ${FIZZ_JWT_SECRET:-}
       # 留空则用数据卷里的 /data/secret.key；填了必须是 32 字节 base64

@@ -6,7 +6,7 @@
  * 不会出现「一处签的 token 另一处验不过」的坑。
  *
  * 设计要点（对应需求）：
- * - 登录成功后签发 JWT，payload 里带 `sub`（用户名）与过期时间；
+ * - 登录成功后签发 JWT，payload 里带 `sub`（单用户固定 `fizz`）与过期时间；
  * - 校验只验签名与有效期。曾经的「IP 绑定」已移除：IP 随网络漂移（DHCP / 手机网络 / 双栈切换）
  *   会造成无谓掉线，而同网攻击者本来就同 IP —— 防泄露交给短有效期 + 会话管理（见 auth-jwt 历史）。
  * - 所有 HTTP 接口由 Hono 的鉴权中间件统一拦（除登录接口本身），所有 WS 由各自的 upgrade
@@ -53,13 +53,14 @@ function signingSecret(): string {
   return jwtSecret() || DEV_SECRET
 }
 
-/** 是否启用用户名/密码鉴权：凭据齐全 **且** 有可用密钥才算启用 */
+/**
+ * 是否启用登录：只看有没有 JWT 密钥。
+ *
+ * `FIZZ_AUTH_PASS` 为空 / 不存在都是「还没有密码」的合法状态：登录接口会把首次输入的
+ * 密码哈希后写入。完全不配 `FIZZ_JWT_SECRET` = 开发态，不做鉴权、全部放行。
+ */
 export function authEnabled(): boolean {
-  return !!(
-    process.env.FIZZ_AUTH_USER &&
-    process.env.FIZZ_AUTH_PASS &&
-    jwtSecret()
-  )
+  return !!jwtSecret()
 }
 
 /** token 有效期（秒），可用 `FIZZ_TOKEN_TTL` 覆盖（单位分钟，默认 30） */
@@ -73,12 +74,12 @@ export interface JwtClaims {
   exp: number
 }
 
-/** 签发 JWT（HS256），payload 带用户名 */
-export async function signJwt(username: string): Promise<string> {
+/** 签发 JWT（HS256）。单用户系统，`sub` 固定为 `fizz`。 */
+export async function signJwt(): Promise<string> {
   const secret = signingSecret()
   const header = { alg: 'HS256', typ: 'JWT' }
   const now = Math.floor(Date.now() / 1000)
-  const payload = { sub: username, iat: now, exp: now + tokenTtlSec() }
+  const payload = { sub: 'fizz', iat: now, exp: now + tokenTtlSec() }
   const data = `${b64url(JSON.stringify(header))}.${b64url(JSON.stringify(payload))}`
   const key = await crypto.subtle.importKey(
     'raw',

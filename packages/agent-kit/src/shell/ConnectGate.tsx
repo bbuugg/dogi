@@ -1,5 +1,6 @@
 /**
- * 连接页（登录）：表单只填用户名 + 密码，**点「登录」之后才拉验证码、才弹滑块**。
+ * 连接页（登录）：单用户，表单只填密码，**点「登录」之后才拉验证码、才弹滑块**。
+ * 服务端还没有密码时（`FIZZ_AUTH_PASS` 为空），这次输入的密码就是新密码。
  *
  * 验证码是**本仓库内置**的滑块（服务端 `apps/server/src/lib/captcha`，前端
  * `agent-kit/shared/components/captcha`），不再加载任何外部 SDK 或请求第三方域名 ——
@@ -66,7 +67,7 @@ export function ConnectGate({
    */
   canvas?: 'sidebar' | 'background'
 }) {
-  // 用户名 / 密码**不存 React state**，而是提交时从表单 DOM 里读。原因：浏览器刷新后自动填充
+  // 密码**不存 React state**，而是提交时从表单 DOM 里读。原因：浏览器刷新后自动填充
   // 是直接改 input.value 的，不保证触发 React 的 onChange；受控写法会让「屏幕上有字、state 里是空串」，
   // 登录按钮就永久置灰，而且 disabled 的提交按钮还会让回车也触发不了提交。
   // 验证码弹窗要提交时也得再读一次表单，所以这里留住 form 的引用。
@@ -109,15 +110,11 @@ export function ConnectGate({
    */
   const captcha = useCaptcha()
 
-  /** 从表单 DOM 读凭据（自动填充也能读到） */
-  const readCredentials = (): { username: string; password: string } | null => {
+  /** 从表单 DOM 读密码（自动填充也能读到） */
+  const readPassword = (): string | null => {
     const form = formRef.current
     if (!form) return null
-    const data = new FormData(form)
-    return {
-      username: String(data.get('username') ?? '').trim(),
-      password: String(data.get('password') ?? '')
-    }
+    return String(new FormData(form).get('password') ?? '')
   }
 
   /** 真正发登录请求。凭据每次都重新从表单读 */
@@ -129,9 +126,9 @@ export function ConnectGate({
      * 而地址错了（打到页面自己的 origin）是「登录页根本上不去」这种硬故障。
      */
     const base = currentServerBase()
-    const credentials = readCredentials()
-    if (!credentials || !credentials.username || !credentials.password) {
-      setLocalError('请输入用户名和密码')
+    const password = readPassword()
+    if (password === null || !password) {
+      setLocalError('请输入密码')
       return
     }
     busyRef.current = true
@@ -143,8 +140,7 @@ export function ConnectGate({
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          username: credentials.username,
-          password: credentials.password,
+          password,
           captchaPass: captchaPass || undefined
         })
       })
@@ -176,9 +172,9 @@ export function ConnectGate({
   const submit = (event: React.FormEvent<HTMLFormElement>): void => {
     event.preventDefault()
     if (busyRef.current) return
-    const credentials = readCredentials()
-    if (!credentials || !credentials.username || !credentials.password) {
-      setLocalError('请输入用户名和密码')
+    const password = readPassword()
+    if (password === null || !password) {
+      setLocalError('请输入密码')
       return
     }
     void (async () => {
@@ -246,19 +242,6 @@ export function ConnectGate({
             onChange={() => localError && setLocalError(null)}
           >
             <div className="space-y-1.5">
-              <label htmlFor="username" className="text-sm font-medium">
-                {t('用户名')}
-              </label>
-              <Input
-                id="username"
-                name="username"
-                placeholder={t('输入用户名')}
-                autoComplete="username"
-                autoFocus
-              />
-            </div>
-
-            <div className="space-y-1.5">
               <label htmlFor="password" className="text-sm font-medium">
                 {t('密码')}
               </label>
@@ -270,6 +253,7 @@ export function ConnectGate({
                   placeholder={t('输入密码')}
                   className="pr-10"
                   autoComplete="current-password"
+                  autoFocus
                 />
                 <Button
                   type="button"

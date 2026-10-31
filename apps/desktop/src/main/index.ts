@@ -26,7 +26,6 @@ import {
 } from 'electron'
 import {
   backendManager,
-  generateRemotePassword,
   getRemoteAccessInfo,
   killAllPtySessions,
   openExternalUrl,
@@ -178,15 +177,15 @@ interface WindowPrefs {
    * 远程访问（desktop 专属）：把进程内后端暴露到一个真实端口，浏览器里的 web 端
    * 直接连它。**真值由主进程持有**（服务器就跑在这里），与 closeToTray 同一套路。
    *
-   * 凭据（username / password）启用时生成并固定 —— 每次都换的话 web 端就得重新登录，
-   * 固定下来才能「扫一次码 / 抄一次，以后一直用」。
+   * 只存密码**哈希**（scrypt）；首次从浏览器登录时输入密码，之后一直用它。
+   * 没有用户名——这是单用户系统。
    */
-  remoteAccess: { enabled: boolean; port: number; username: string; password: string }
+  remoteAccess: { enabled: boolean; port: number; passwordHash?: string }
   /** 会话浮窗是否置顶（默认 true）；图钉改的就是这份，新开的浮窗沿用 */
   conversationAlwaysOnTop: boolean
 }
 
-const DEFAULT_REMOTE_ACCESS = { enabled: false, port: 7801, username: 'fizz', password: '' }
+const DEFAULT_REMOTE_ACCESS = { enabled: false, port: 7801 }
 
 let windowPrefs: WindowPrefs = {
   closeToTray: true,
@@ -218,8 +217,9 @@ function loadWindowPrefs(): WindowPrefs {
       remoteAccess: {
         enabled: ra?.enabled === true,
         port: Number(ra?.port) > 0 ? Math.trunc(Number(ra?.port)) : DEFAULT_REMOTE_ACCESS.port,
-        username: ra?.username || DEFAULT_REMOTE_ACCESS.username,
-        password: ra?.password || ''
+        ...(typeof ra?.passwordHash === 'string' && ra.passwordHash
+          ? { passwordHash: ra.passwordHash }
+          : {})
       }
     }
   } catch {
@@ -251,34 +251,34 @@ function remoteAccessState(): RemoteAccessState {
     // 全列出来：多网卡机器上「哪一块能连」只有用户自己知道（见 remote-access.ts 的 listUrls）
     urls: info.urls,
     url: info.url,
-    username: info.username,
-    password: info.password,
     webServed: info.webServed,
     ...(info.error ? { error: info.error } : {})
   }
 }
 
 /**
- * 开 / 关端口监听（或改端口 / 凭据后重启）并落盘。密码为空时现场生成一个（首次启用）。
+ * 开 / 关端口监听（或改端口后重启）并落盘。
  *
- * ⚠️ 凭据是**启动时**写进 `process.env.FIZZ_AUTH_*` 的（见 agent-host 的
+ * 密码不在这里设置：`FIZZ_AUTH_PASS` 存的是哈希，为空时第一次从浏览器登录
+ * 输入的密码即成为新密码，哈希由 `persistPasswordHash` 回调写回 `window-prefs.json`。
+ *
+ * ⚠️ 鉴权参数是**启动时**写进 `process.env.FIZZ_AUTH_*` 的（见 agent-host 的
  * `remote-access.ts`），所以改完必须 `startRemoteAccess` 重启一遍才生效 —— 它内部
- * 先 `stopRemoteAccess`，顺带把旧凭据撤掉。`input` 里没带的字段一律保持现状。
+ * 先 `stopRemoteAccess`，顺带把旧值撤掉。
  */
 async function applyRemoteAccess(input: RemoteAccessInput): Promise<RemoteAccessState> {
   const cfg = windowPrefs.remoteAccess
   cfg.enabled = input.enabled !== false
   if (Number(input.port) > 0) cfg.port = Math.trunc(Number(input.port))
-  // 空串按「没改」处理：界面上清空输入框不该把用户名 / 密码搞成空
-  if (input.username) cfg.username = input.username
-  if (input.password) cfg.password = input.password
-  if (cfg.enabled && !cfg.password) cfg.password = generateRemotePassword()
   saveWindowPrefs()
   if (cfg.enabled) {
     await startRemoteAccess({
       port: cfg.port,
-      username: cfg.username,
-      password: cfg.password,
+      passwordHash: cfg.passwordHash,
+      persistPasswordHash: (hash) => {
+        cfg.passwordHash = hash
+        saveWindowPrefs()
+      },
       // dev 下从仓库根起步能找到 apps/web/dist；其余候选见 remote-access.ts
       webDirHint: join(process.cwd(), 'apps/web/dist'),
       // 手机版（build:mobile:hosted 的产物）：手机浏览器打开这个端口时会被 302 到 /m/
@@ -1114,6 +1114,8 @@ void app.whenReady().then(() => {
   installApplicationMenu()
   // 窗口偏好要在建窗口 / 注册 IPC 之前读出来，close 拦截才有正确的行为
   windowPrefs = loadWindowPrefs()
+  // 顺手重写一次：把旧版本 `remoteAccess` 里的明文 username / password 字段清掉
+  saveWindowPrefs()
   // 上次的主题模式先设上：托盘菜单（原生 UI）从一开始就跟随应用主题，
   // 渲染端 useTheme 挂载后会再推一次当前值（幂等）
   nativeTheme.themeSource = windowPrefs.theme ?? 'system'

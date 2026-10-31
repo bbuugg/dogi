@@ -73,7 +73,7 @@
 
 ### 安全
 
-- **登录鉴权**：用户名 + 密码换服务端签发的 JWT（默认 30 分钟），HTTP 走 `Authorization: Bearer`，WS 走 `?token=`。三项配置齐全才启用；不配就是开发态全放行。
+- **登录鉴权**：单用户密码（只存 scrypt 哈希）换服务端签发的 JWT（默认 30 分钟），HTTP 走 `Authorization: Bearer`，WS 走 `?token=`。配了 `FIZZ_JWT_SECRET` 才启用；不配就是开发态全放行。
 - **滑块验证码**：鉴权启用时默认开启，进程内现画拼图，答案只留内存，校验轨迹耗时。零外部依赖。
 - **登录限流**：按 IP 滑动窗口（默认 60 秒 10 次），超限返回 429 + `Retry-After`。
 - **密钥加密落盘**：API Key / 主机凭据用 AES-256-GCM（`SecretBox`）加密，主密钥来自 `FIZZ_SECRET_KEY` 或数据目录的 `secret.key`。
@@ -96,7 +96,7 @@
 
 ### 登录
 
-部署完第一次打开就是登录页：用户名 + 密码换服务端签发的令牌。没配鉴权（或桌面端直连本机 server）时跳过这一页，直接进工作台。
+部署完第一次打开就是登录页：第一次输入的密码会成为新密码，换取服务端签发的令牌。没配鉴权（或桌面端直连本机 server）时跳过这一页，直接进工作台。
 
 ![登录页](screenshots/pc_login.png)
 
@@ -146,13 +146,13 @@
 ### 方式一：Docker（推荐，跑工作台本体）
 
 ```bash
-cp .env.example .env          # 至少填上鉴权三项
+cp .env.example .env          # 至少填上 FIZZ_JWT_SECRET
 docker compose up -d --build  # 首次启动或改过代码后
 docker compose logs -f        # 启动日志里有访问地址与鉴权状态
 docker compose down           # 停止（数据卷保留）
 ```
 
-浏览器打开 `http://<服务器IP>:7801`，输入 `.env` 里的用户名密码登录。
+浏览器打开 `http://<服务器IP>:7801`。第一次登录时输入什么密码，它就会成为你的密码（只保存哈希）。
 
 容器里已装好 Git，第一次提交前给容器一个提交身份（写进持久化的 `/data`，重建不丢）：
 
@@ -161,7 +161,7 @@ docker compose exec fizz git config --global user.email "you@example.com"
 docker compose exec fizz git config --global user.name  "你的名字"
 ```
 
-> **鉴权三项必须一起配**：`FIZZ_AUTH_USER` / `FIZZ_AUTH_PASS` / `FIZZ_JWT_SECRET`，缺任何一项都等于「谁都能直接用」。
+> **鉴权**：单用户，没有用户名。至少要配 `FIZZ_JWT_SECRET` 才会启用登录；`FIZZ_AUTH_PASS` 留空即可，首次登录时输入的密码会哈希后写回 `.env`。
 
 ### 方式二：本地直接运行
 
@@ -272,9 +272,8 @@ base64 -w0 fizz-release.keystore    # Windows: certutil -encode fizz-release.key
 
 | 变量 | 说明 | 默认 |
 | --- | --- | --- |
-| `FIZZ_AUTH_USER` | 登录用户名（三项齐全才启用鉴权） | 不设置则免登录 |
-| `FIZZ_AUTH_PASS` | 登录密码 | 同上 |
-| `FIZZ_JWT_SECRET` | JWT 签名密钥，`openssl rand -base64 32` 生成 | 同上 |
+| `FIZZ_AUTH_PASS` | 登录密码的 **scrypt 哈希**；留空 = 首次登录时设置密码 | 空 |
+| `FIZZ_JWT_SECRET` | JWT 签名密钥，`openssl rand -base64 32` 生成；配了才启用登录 | 不设置则免登录 |
 | `FIZZ_TOKEN_TTL` | 登录令牌有效期（分钟） | `30` |
 | `FIZZ_AUTH_CAPTCHA` | 滑块验证码，鉴权启用时默认开；`0` 关闭 | 开 |
 | `FIZZ_RATE_LIMIT` | 登录限流；`0` 关闭 | 开 |
@@ -283,6 +282,8 @@ base64 -w0 fizz-release.keystore    # Windows: certutil -encode fizz-release.key
 | `FIZZ_CAPTCHA_*` | 验证码尺寸、容差、有效期、签发限流等细项 | 见 `.env.example` |
 
 > 登录令牌**不绑定 IP**（IP 会随网络漂移造成无谓掉线），改为短有效期 + 服务端校验签名，换网络不用重新登录。
+>
+> **修改密码**：桌面端「设置 → 通用 → 远程访问」里有「修改密码」（先用旧密码验证）；独立部署没有 UI 入口，忘记密码时把 `.env` 里的 `FIZZ_AUTH_PASS` 清空后重启（Docker 纯环境变量部署则删掉数据目录的 `auth-password`），下次登录输入什么就是新密码。
 
 ### 服务与路径
 
@@ -391,7 +392,7 @@ sudo chown -R $(id -u):$(id -g) /srv/my-project
 | **安卓端** | 只是客户端，必须连一个 server（地址登录时填） |
 | **公网访问** | 需单独启用 `FIZZ_PUBLIC_HTTP_PORT`，DNS 泛解析到本机，自备反代在 443 终结 TLS 并透传 `Host` 与 WebSocket 升级 |
 
-**鉴权是单账号模型**：一个用户名 + 一个密码，适合个人或小团队共用一台机器，不提供多用户与权限隔离。对外暴露时请务必配上鉴权，并在前面加一层 HTTPS 反代。
+**鉴权是单用户模型**：只有一个密码，适合个人或小团队共用一台机器，不提供多用户与权限隔离。对外暴露时请务必配上鉴权，并在前面加一层 HTTPS 反代。
 
 ---
 

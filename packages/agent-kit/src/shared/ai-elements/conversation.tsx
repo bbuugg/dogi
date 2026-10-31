@@ -132,6 +132,12 @@ export type ConversationProps = ComponentProps<"div"> & {
    * 「一条消息都没有」很可能是**没加载成功**，那种状态下原来根本没有按钮可点。
    */
   onRefresh?: () => Promise<unknown> | unknown;
+  /**
+   * 是否允许触发上拉刷新（默认 `true`）。传给 `false` 时手势监听、指示器都不挂，
+   * 但容器仍保留 `overscroll-y-contain` —— 会话进行中要禁止的是「重拉会话」这个动作，
+   * 不能让页面退回浏览器自己的整页下拉刷新。
+   */
+  refreshEnabled?: boolean;
 };
 
 export const Conversation = ({
@@ -139,6 +145,7 @@ export const Conversation = ({
   resetKey,
   smoothResize = false,
   onRefresh,
+  refreshEnabled = true,
   children,
   style,
   ...props
@@ -168,18 +175,20 @@ export const Conversation = ({
     });
 
   /**
-   * 上拉刷新（见 `pull-to-refresh.tsx`）：只有传了 `onRefresh` 才挂监听与指示器。
+   * 上拉刷新（见 `pull-to-refresh.tsx`）：只有传了 `onRefresh`、且 `refreshEnabled`
+   * 才挂监听与指示器。
    *
    * 解构而不是拿整个对象：`attachPull` 是 `useCallback` 的稳定引用（只随 `enabled` 变），
    * 而对象本身每次渲染都是新的 —— 把对象放进 `attachScroll` 的依赖会让 ref 回调每帧
    * 重建、监听被反复摘挂。
    */
+  const pullEnabled = !!onRefresh && refreshEnabled;
   const {
     attach: attachPull,
     phase: pullPhase,
     distance: pullDistance,
   } = usePullToRefresh({
-    enabled: !!onRefresh,
+    enabled: pullEnabled,
     onRefresh: onRefresh ?? (() => undefined),
   });
   /** 上拉监听的卸载函数（与 `attachScroll` 同生命周期，节点换了要摘掉） */
@@ -552,7 +561,7 @@ export const Conversation = ({
          * 指示器放在**内容之后**：`sticky bottom-0` 要贴在滚动区底边，就必须是流里的
          * 最后一个节点（放前面会变成贴在顶边 —— 那是下拉刷新的形状）。
          */}
-        {onRefresh ? (
+        {pullEnabled ? (
           <PullToRefreshIndicator phase={pullPhase} distance={pullDistance} />
         ) : null}
       </div>

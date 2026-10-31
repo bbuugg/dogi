@@ -477,17 +477,12 @@ export interface AgentHost {
 export type ThemeMode = 'light' | 'dark' | 'system'
 
 /**
- * `AgentHost.saveRemoteAccess` 的入参：这一次要落到哪个配置上。
- *
- * `username` / `password` **不传 = 保持现有值**（界面只在「纯开关监听」时不传）；
- * 传了就按新凭据**重启监听** —— 服务端是启动时读环境变量的（见 agent-host 的
- * `remote-access.ts`），不重启不会生效。
+ * `AgentHost.saveRemoteAccess` 的入参。密码不在这里设置：首次从浏览器登录时
+ * 输入的密码即成为新密码，服务端只保存哈希。
  */
 export interface RemoteAccessInput {
   enabled: boolean
   port: number
-  username?: string
-  password?: string
 }
 
 /**
@@ -505,9 +500,6 @@ export interface RemoteAccessState {
   urls: string[]
   /** `urls` 的第一条（旧字段，兼容既有调用点）；没有对外网卡时是 null */
   url: string | null
-  /** 登录凭据：web 端连接页填这两个（启用时生成并固定，重启不变） */
-  username: string
-  password: string
   /** 是否同时托管了 web 产物（false = 只有 API，浏览器打开没有界面） */
   webServed: boolean
   error?: string

@@ -8,8 +8,7 @@
 #
 #   docker build -t fizz-server .
 #   docker run -d --name fizz -p 7801:7801 \
-#     -e FIZZ_AUTH_USER=admin -e FIZZ_AUTH_PASS=换成强口令 \
-#     -e FIZZ_JWT_SECRET=换成随机串 \
+#     -e FIZZ_AUTH_PASS= -e FIZZ_JWT_SECRET=换成随机串 \
 #     -e FIZZ_HOST=0.0.0.0 \
 #     -v fizz-data:/data \
 #     -v /srv/my-project:/workspace \

@@ -507,6 +507,13 @@ export function createApi(
     /** 连通性 + 配置概览；用于连接校验与顶栏状态 */
     health: () => request<HealthInfo>(API_ROUTES.health),
 
+    /** 修改登录密码（校验旧密码，服务端只保存新密码的哈希） */
+    changePassword: (input: { currentPassword: string; newPassword: string }) =>
+      request<{ ok: true }>(API_ROUTES.authPassword, {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+
     // ---------- 客户端偏好（服务端权威的一份） ----------
 
     /**

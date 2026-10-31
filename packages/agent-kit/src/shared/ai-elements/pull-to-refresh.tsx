@@ -212,6 +212,22 @@ export function usePullToRefresh({
   const onRefreshRef = useRef(onRefresh)
   onRefreshRef.current = onRefresh
 
+  /**
+   * 被临时关掉（会话进行中）时把现场清干净：监听已摘，但 React state 还在 ——
+   * 若用户正拉到 `armed` 或 `refreshing` 时被关掉，等重新启用会突然露出旧指示器。
+   */
+  useEffect(() => {
+    if (enabled) return
+    busyRef.current = false
+    distanceRef.current = 0
+    gestureRef.current.startY = null
+    gestureRef.current.fromBottom = false
+    gestureRef.current.dead = false
+    gestureRef.current.settled = false
+    setPhase('idle')
+    setDistance(0)
+  }, [enabled])
+
   useEffect(() => {
     aliveRef.current = true
     return () => {

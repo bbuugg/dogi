@@ -32,7 +32,6 @@ export {
   startRemoteAccess,
   stopRemoteAccess,
   getRemoteAccessInfo,
-  generateRemotePassword,
   type RemoteAccessInfo
 } from './remote-access'
 export * from './channels'

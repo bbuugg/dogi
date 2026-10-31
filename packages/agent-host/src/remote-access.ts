@@ -9,10 +9,12 @@
  *
  * ## 鉴权
  *
- * 暴露出去就不再「零 token」。启用时由调用方给一套凭据，这里写进
- * `process.env.FIZZ_AUTH_USER / _PASS / _JWT_SECRET` —— `authEnabled()` 与
- * `verifyWsToken` 都是**调用时**读环境变量（见 server 的 `lib/auth-jwt.ts`），
- * 所以不改 server 一行代码，登录接口 / JWT 中间件 / WS 鉴权就一并生效。
+ * 暴露出去就不再「零 token」。启用时这里写进 `process.env.FIZZ_AUTH_PASS / _JWT_SECRET` ——
+ * `authEnabled()` 与 `verifyWsToken` 都是**调用时**读环境变量（见 server 的
+ * `lib/auth-jwt.ts`），所以不改 server 一行代码，登录接口 / JWT 中间件 / WS 鉴权就一并生效。
+ *
+ * `FIZZ_AUTH_PASS` 存的是**密码哈希**（scrypt），不是明文；为空表示还没设置密码，
+ * 第一次从浏览器登录时输入的密码会被哈希后持久化（回调由桌面主进程提供）。
  *
  * ⚠️ 只影响**这个新起的 app 实例**：进程内的 `app.fetch()`（`auth: false`，
  * 根本没装中间件）不受影响；内部 WS 的 loopback server 也由 manager 显式
@@ -47,8 +49,6 @@ export interface RemoteAccessInfo {
   urls: string[]
   /** `urls` 的第一条（保留旧字段，兼容既有调用点）；没有对外网卡时是 null */
   url: string | null
-  username: string
-  password: string
   /** 是否找到了 web 产物并开始同源托管（没有就只能当纯 API 用） */
   webServed: boolean
   /**
@@ -61,6 +61,8 @@ export interface RemoteAccessInfo {
 
 let server: Server | null = null
 let info: RemoteAccessInfo | null = null
+/** 启动时注入的持久化撤销函数（server 模块是动态加载的，stop 时不一定还拿得到） */
+let clearPasswordPersister: (() => void) | null = null
 
 /**
  * 找 web 产物目录（`index.html` 存在才算）。桌面主进程会用 `process.cwd()` 提示，
@@ -153,17 +155,12 @@ function listUrls(port: number): string[] {
     .map((ip) => `http://${ip}:${port}`)
 }
 
-/** 随机密码：去掉易混字符（0/O、1/l/I），8 位够局域网用了 */
-export function generateRemotePassword(): string {
-  const alphabet = '23456789abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ'
-  const bytes = randomBytes(8)
-  return [...bytes].map((b) => alphabet[b % alphabet.length]!).join('')
-}
-
 export async function startRemoteAccess(opts: {
   port: number
-  username: string
-  password: string
+  /** 已保存的密码哈希；空 / 缺省 = 首次登录时设置新密码 */
+  passwordHash?: string
+  /** 首次登录设置密码后，把哈希交给宿主落盘（桌面端写 window-prefs.json） */
+  persistPasswordHash?: (hash: string) => void
   /** web 产物目录提示（打包形态由主进程传 `process.resourcesPath` 下的路径） */
   webDirHint?: string
   /** 手机版产物目录提示（同上；缺省时按 resolveMobileDir 的候选列表找） */
@@ -175,8 +172,6 @@ export async function startRemoteAccess(opts: {
     port: opts.port,
     urls: [],
     url: null,
-    username: opts.username,
-    password: opts.password,
     webServed: false,
     mobileServed: false
   }
@@ -186,16 +181,18 @@ export async function startRemoteAccess(opts: {
     if (webDir) process.env.FIZZ_WEB_DIR = webDir
     const mobileDir = resolveMobileDir(opts.mobileDirHint)
     if (mobileDir) process.env.FIZZ_MOBILE_DIR = mobileDir
-    // 打开鉴权（调用时读环境变量，见上「鉴权」一节）
-    process.env.FIZZ_AUTH_USER = opts.username
-    process.env.FIZZ_AUTH_PASS = opts.password
+    // 打开鉴权（调用时读环境变量，见上「鉴权」一节）。密码只存哈希。
+    process.env.FIZZ_AUTH_PASS = opts.passwordHash ?? ''
     process.env.FIZZ_JWT_SECRET = randomBytes(32).toString('base64url')
 
     // app.ts / state.ts 已被 manager 加载过（globalThis 单例），这里直接复用缓存模块
-    const [{ createApp }, { attachWebSockets }] = await Promise.all([
+    const [{ createApp, setPasswordPersister }, { attachWebSockets }] = await Promise.all([
       import('@fizz/server'),
       import('@fizz/server/ws')
     ])
+    // 首次登录写入的哈希交给桌面主进程持久化（重启后仍能校验）
+    setPasswordPersister((hash) => opts.persistPasswordHash?.(hash))
+    clearPasswordPersister = () => setPasswordPersister(null)
     const app = createApp({ auth: true, staticWeb: !!(webDir || mobileDir) })
     next.webServed = !!webDir
     next.mobileServed = !!mobileDir
@@ -239,8 +236,9 @@ export function stopRemoteAccess(): void {
   server?.close()
   server = null
   if (info) info = { ...info, running: false, urls: [], url: null }
+  clearPasswordPersister?.()
+  clearPasswordPersister = null
   // 鉴权随关闭一并撤掉：进程内路径本就不走它，留着只会让下一次启用前状态含糊
-  delete process.env.FIZZ_AUTH_USER
   delete process.env.FIZZ_AUTH_PASS
   delete process.env.FIZZ_JWT_SECRET
   // 手机版目录同理（server 的 app.ts 在 createApp 时**调用时**读取它）
@@ -254,8 +252,6 @@ export function getRemoteAccessInfo(): RemoteAccessInfo {
       port: 0,
       urls: [],
       url: null,
-      username: 'fizz',
-      password: '',
       webServed: false,
       mobileServed: false
     }
