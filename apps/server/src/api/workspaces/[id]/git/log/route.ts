@@ -3,8 +3,9 @@
  * GET /api/workspaces/:id/git/log?limit=30
  */
 import { domain } from '@/lib/server/state'
+import { workspaceRepoRoot } from '@/lib/workspace-repo'
 import { jsonError } from '@/app/api/_lib/auth'
-import { gitPanel, repoRoot, type GitLogResult } from '@fizz/git'
+import { gitPanel, type GitLogResult } from '@fizz/git'
 
 export async function GET(
   request: Request,
@@ -13,7 +14,7 @@ export async function GET(
   const { id } = await params
   const workspace = domain.getWorkspace(id)
   if (!workspace) return jsonError(404, '工作区不存在')
-  const root = await repoRoot(workspace.path)
+  const root = await workspaceRepoRoot(workspace)
   if (!root) return jsonError(400, '这个工作区不是 git 仓库（也可能这台机器上没装 git）')
 
   const url = new URL(request.url)

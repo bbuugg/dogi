@@ -6,11 +6,11 @@
  * porcelain v2 解析器 —— 不用 simple-git 的 status()，原因见 git-panel.ts 头注释第 4 条。
  */
 import { domain } from '@/lib/server/state'
+import { workspaceRepoRoot } from '@/lib/workspace-repo'
 import { jsonError } from '@/app/api/_lib/auth'
 import {
   git,
   gitPanel,
-  repoRoot,
   unquotePath,
   workspacePrefix,
   type GitChange,
@@ -110,6 +110,23 @@ function parseStatus(
 
 // ---------- 路由 ----------
 
+/** 「这个工作区不是仓库」的空状态（两处出口共用，字段与 `GitStatusResult` 一一对应） */
+function emptyStatus(): GitStatusResult {
+  return {
+    isRepo: false,
+    root: null,
+    branch: null,
+    detached: false,
+    upstream: null,
+    ahead: 0,
+    behind: 0,
+    changes: [],
+    truncated: false,
+    remotes: [],
+    stashes: []
+  }
+}
+
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -117,25 +134,24 @@ export async function GET(
   const { id } = await params
   const workspace = domain.getWorkspace(id)
   if (!workspace) return jsonError(404, '工作区不存在')
-  const root = await repoRoot(workspace.path)
-  if (!root) {
-    const empty: GitStatusResult = {
-      isRepo: false,
-      root: null,
-      branch: null,
-      detached: false,
-      upstream: null,
-      ahead: 0,
-      behind: 0,
-      changes: [],
-      truncated: false,
-      remotes: [],
-      stashes: []
-    }
-    return Response.json(empty)
-  }
-  const [res, remotes, stashRes, prefix] = await Promise.all([
-    git(root, ['status', '--porcelain=v2', '--branch', '--untracked-files=all']),
+  // 临时工作区只认自己的仓库（否则会拿外层主目录仓库当自己的，status 要扫整个主目录
+  // 才回来 —— 面板就一直停在「读取仓库状态…」）。判据与理由在 workspace-repo.ts
+  const root = await workspaceRepoRoot(workspace)
+  if (!root) return Response.json(emptyStatus())
+  /**
+   * 工作区是仓库**子目录**时的改动列表：`-- <prefix>` 把 status 限制在子树里。
+   *
+   * 不加这一条的话，git 会先扫整个仓库再按 `prefix` 过滤（下面的 filter）—— 用户在
+   * 大仓库里登记一个子目录当项目，光打开面板就要扫全仓。带 pathspec 之后 git 只走
+   * 那棵子树，结果与「扫全仓 + 过滤」等价，`--branch` 的分支 / ahead-behind 不受影响。
+   *
+   * ⚠️ `prefix` 必须先拿到（不能和 status 并行）：它是 pathspec 的一部分。
+   */
+  const prefix = await workspacePrefix(workspace.path)
+  const statusArgs = ['status', '--porcelain=v2', '--branch', '--untracked-files=all']
+  if (prefix) statusArgs.push('--', prefix)
+  const [res, remotes, stashRes] = await Promise.all([
+    git(root, statusArgs),
     // remote -v 的解析交给 simple-git（getRemotes(true) 同时给出 fetch / push 地址）
     gitPanel(root).getRemotes(true).then((list) =>
       list.map((r) => ({ name: r.name, url: r.refs.fetch ?? r.refs.push ?? '' }))
@@ -147,8 +163,7 @@ export async function GET(
       ok: false,
       stdout: '',
       stderr: ''
-    })),
-    workspacePrefix(workspace.path)
+    }))
   ])
   if (!res.ok) return jsonError(500, res.stderr || 'git status 失败')
   const parsed = parseStatus(res.stdout)

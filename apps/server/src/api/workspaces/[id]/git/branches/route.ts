@@ -7,8 +7,9 @@
  * 无脑带上会让「点一下就等一下」。修剪只挂在用户手动点刷新时（见 GitPanel 的刷新按钮）。
  */
 import { domain } from '@/lib/server/state'
+import { workspaceRepoRoot } from '@/lib/workspace-repo'
 import { jsonError } from '@/app/api/_lib/auth'
-import { git, pruneRemoteRefs, repoRoot, type GitBranchesResult } from '@fizz/git'
+import { git, pruneRemoteRefs, type GitBranchesResult } from '@fizz/git'
 
 export async function GET(
   request: Request,
@@ -17,7 +18,7 @@ export async function GET(
   const { id } = await params
   const workspace = domain.getWorkspace(id)
   if (!workspace) return jsonError(404, '工作区不存在')
-  const root = await repoRoot(workspace.path)
+  const root = await workspaceRepoRoot(workspace)
   if (!root) return jsonError(400, '这个工作区不是 git 仓库（也可能这台机器上没装 git）')
 
   // 只在手动刷新时修剪远端跟踪分支：远端已删的分支不该继续挂在列表里

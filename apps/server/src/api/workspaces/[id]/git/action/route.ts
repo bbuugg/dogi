@@ -15,10 +15,10 @@ import {
   COMMIT_IDENTITY,
   commitAll,
   git,
-  repoRoot,
   type GitActionInput,
   type GitRun
 } from '@fizz/git'
+import { workspaceRepoRoot } from '@/lib/workspace-repo'
 import { domain } from '@/lib/server/state'
 import { jsonError, parseJsonBody } from '@/app/api/_lib/auth'
 
@@ -75,7 +75,9 @@ export async function POST(
   // 初始化是唯一「还不是仓库也要能跑」的动作
   if (body.action === 'init' || body.action === 'init-commit') {
     if (!workspace.path) return jsonError(400, '这个工作区没有目录，无法初始化 git 仓库')
-    if (body.action === 'init-commit' && (await repoRoot(workspace.path))) {
+    // 用 workspaceRepoRoot 而不是 repoRoot：临时工作区落在别人仓库的子目录里时，
+    // 「已经是仓库了」这个判断会让它永远 init 不了（见 lib/workspace-repo.ts）
+    if (body.action === 'init-commit' && (await workspaceRepoRoot(workspace))) {
       return jsonError(400, '这个工作区已经是 git 仓库了')
     }
     const res = await git(workspace.path, ['init'])
@@ -115,7 +117,7 @@ export async function POST(
     return Response.json({ output })
   }
 
-  const root = await repoRoot(workspace.path)
+  const root = await workspaceRepoRoot(workspace)
   if (!root) return jsonError(400, '这个工作区不是 git 仓库（也可能这台机器上没装 git）')
 
   switch (body.action) {

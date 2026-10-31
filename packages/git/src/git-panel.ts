@@ -34,6 +34,7 @@
  */
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
 import { simpleGit, type SimpleGit } from 'simple-git'
 import type { GitCommitDiffResult, GitCommitFileStat } from './types'
 
@@ -136,6 +137,26 @@ export async function repoRoot(dir: string): Promise<string | null> {
   const res = await git(dir, ['rev-parse', '--show-toplevel'])
   const root = unquotePath(res.stdout.trim())
   return res.ok && root ? root : null
+}
+
+/**
+ * 两个路径是不是**同一个目录**（归一化后比较）。
+ *
+ * 归一三件事：相对路径按 cwd 解析（`cwd` 是进程级常量，不会变）、分隔符统一成 `/`、
+ * 去掉末尾斜杠；Windows 额外做大小写折叠（NTFS 不敏感），其它平台保持敏感
+ * （`/home/A` 与 `/home/a` 确实是两个目录）。
+ *
+ * ⚠️ 别改成 `startsWith` —— `/home/a` 会把 `/home/ab` 判成子目录。要用「相对路径是否为空」
+ * 之类的语义就另写函数，这里只回答「同不同一个目录」。
+ *
+ * 用在 status 路由判断 `repoRoot()` 返回的根**是不是工作区自己**（见该路由注释）。
+ */
+export function samePath(a: string, b: string): boolean {
+  const norm = (p: string): string =>
+    resolve(p).replace(/[\\/]+$/, '').replace(/\\/g, '/')
+  const x = norm(a)
+  const y = norm(b)
+  return process.platform === 'win32' ? x.toLowerCase() === y.toLowerCase() : x === y
 }
 
 /** 工作区相对仓库根的前缀（工作区指向仓库子目录时用来过滤改动列表） */

@@ -10,8 +10,9 @@
  * `@fizz/git` 里（白名单形状），这里只负责转成 400。
  */
 import { domain } from '@/lib/server/state'
+import { workspaceRepoRoot } from '@/lib/workspace-repo'
 import { jsonError } from '@/app/api/_lib/auth'
-import { commitShow, isSafeRev, repoRoot, type GitCommitDiffResult } from '@fizz/git'
+import { commitShow, isSafeRev, type GitCommitDiffResult } from '@fizz/git'
 
 /** 单次提交 diff 的字符上限（与 `git/diff` 同口径：超长就截断，不让一次点击把内存吃满） */
 const MAX_DIFF_CHARS = 400_000
@@ -23,7 +24,7 @@ export async function GET(
   const { id } = await params
   const workspace = domain.getWorkspace(id)
   if (!workspace) return jsonError(404, '工作区不存在')
-  const root = await repoRoot(workspace.path)
+  const root = await workspaceRepoRoot(workspace)
   if (!root) return jsonError(400, '这个工作区不是 git 仓库（也可能这台机器上没装 git）')
 
   const rev = (new URL(request.url).searchParams.get('hash') ?? '').trim()

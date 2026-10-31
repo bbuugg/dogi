@@ -28,6 +28,7 @@ export const ASK_FOLLOWUP_HINT = [
   '需要用户做决定或补充信息时，用 ask_followup_question 工具向他提问：一次可以问一道或多道结构化选择题，',
   '每道题 single 单选 / multiSelect 多选，选项 2-4 个（可以是纯文本，也可以带说明对象）。',
   '非「是/否」型题目的选项里用户可以选「其他」并自行输入，回答会带 other 字段（此时 selected 可能为空）。',
+  '这个「其他」项由界面自动追加：options 里不要自己写「其他 / 其它 / Other」类的兜底项，写了会被丢弃。',
   '用户不作答（跳过）时按最合理的方式继续，不要反复追问同一个问题。'
 ].join('\n')
 
@@ -120,7 +121,8 @@ export function buildAskFollowupTool(
                 .min(1)
                 .describe(
                   'The available choices for this question. 2-4 options. Each option can be a string or an ' +
-                    'object with "label" and optional "description".'
+                    'object with "label" and optional "description". Do NOT add an "Other" / "其他" catch-all ' +
+                    'option: the UI appends one automatically and duplicates are dropped.'
                 ),
               multiSelect: z
                 .boolean()

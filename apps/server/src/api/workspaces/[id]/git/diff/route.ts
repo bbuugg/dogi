@@ -5,8 +5,9 @@
 import { promises as fs } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { domain } from '@/lib/server/state'
+import { workspaceRepoRoot } from '@/lib/workspace-repo'
 import { jsonError } from '@/app/api/_lib/auth'
-import { git, repoRoot, type GitDiffResult } from '@fizz/git'
+import { git, type GitDiffResult } from '@fizz/git'
 
 const MAX_DIFF_CHARS = 400_000
 const MAX_UNTRACKED_BYTES = 1024 * 1024
@@ -49,7 +50,7 @@ export async function GET(
   const { id } = await params
   const workspace = domain.getWorkspace(id)
   if (!workspace) return jsonError(404, '工作区不存在')
-  const root = await repoRoot(workspace.path)
+  const root = await workspaceRepoRoot(workspace)
   if (!root) return jsonError(400, '这个工作区不是 git 仓库（也可能这台机器上没装 git）')
 
   const url = new URL(request.url)

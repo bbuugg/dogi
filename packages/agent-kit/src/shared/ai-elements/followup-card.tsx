@@ -4,7 +4,9 @@
  * 三种状态：
  * - **待回答**：一张真卡片 —— 标题（可选）+ 题目 + 底部「提交 / 跳过」；
  *   非「是/否」型题目在选项末尾追加一项「其他」，选中后展开输入框，允许用户不选预设项
- *   而是自己写内容（答案经 `other` 字段回传给模型）。
+ *   而是自己写内容（答案经 `other` 字段回传给模型）。这一项**恒由界面追加**：模型自己写的
+ *   「其他」「其他（请说明）」在归一化时就被剔除了（理由见 `ask-followup.ts` 的
+ *   `NormalizedQuestion.otherRequested`）。
  *   **多题时一题一屏、底部左右切换**（不再把题目竖着摞成一条长卡，见 `FollowupForm` 文件头）；
  * - **已回答**：收成一条**与工具调用卡同构**的折叠条（图标 / 标题 / 状态徽章 / 箭头），
  *   看每题选了什么，不给对话流留大卡片；
@@ -33,6 +35,10 @@ import {
 import { useConversationOptional } from '@fizz/agent-kit/shared/ai-elements/conversation'
 import { cn } from '@fizz/agent-kit/shared/lib/utils'
 import {
+  // 哨兵 label 与「要不要补这一项」的判据都在 ask-followup：那两件事与归一化去重
+  // 是同一个问题的两面（同题不能有两个「其他」），分开写一定会漂
+  OTHER_OPTION_LABEL as OTHER_LABEL,
+  needsOtherOption,
   normalizeFollowup,
   getResumedFollowup,
   markFollowupResumed,
@@ -117,21 +123,14 @@ export function AskFollowupCard({
   )
 }
 
-/** 「其他」自由输入的哨兵 label：选中它就展开一个输入框，让用户不选预设项也能自己写。 */
+/**
+ * 「其他」自由输入的哨兵 label（从 `ask-followup.ts` 导入）。
+ *
+ * 它同时是勾选状态的键、渲染 key，以及「当前题要不要展开那个输入框」的判据
+ * （`otherSelected`）—— 所以同题只能有一个，且必须由界面加。模型自己写的「其他」类项
+ * 在归一化时已经剔除（否则写着「其他（请说明）」的那道题点了不出现输入框）。
+ */
 import { useT } from '@fizz/agent-kit/shared/lib/language'
-const OTHER_LABEL = '其他'
-
-/** 是/否 型问题（正好两个「是 / 否」类选项）不加「其他」——这两类问题的语义封闭，
- *  开放输入反而让答案变模糊。只对真正的「单选 / 多选」题开放自定义输入。 */
-function isYesNoQuestion(q: NormalizedQuestion): boolean {
-  if (q.options.length !== 2) return false
-  const YES = new Set(['是', '是的', '对', '好', 'yes', 'y', 'true', 'ok'])
-  const NO = new Set(['否', '不是', '不对', '不行', 'no', 'n', 'false'])
-  const norm = (s: string): string => s.trim().toLowerCase()
-  const a = norm(q.options[0].label)
-  const b = norm(q.options[1].label)
-  return (YES.has(a) && NO.has(b)) || (NO.has(a) && YES.has(b))
-}
 
 /**
  * 待回答的表单。
@@ -276,10 +275,12 @@ function FollowupForm({
     })
   }
 
-  // 是/否题不加「其他」；其余（单选 / 多选）在末尾追加一项
-  const shownOptions = isYesNoQuestion(current)
-    ? current.options
-    : [...current.options, { label: OTHER_LABEL, description: tr('自己输入') }]
+  // 是/否题不加「其他」（模型明确要过则是/否题除外，判据在 needsOtherOption 里）；
+  // 模型自己写的「其他」类项已经在归一化时剔除，所以这里加上去的那一个恒是唯一的哨兵，
+  // `otherSelected` 也就只可能对应它
+  const shownOptions = needsOtherOption(current)
+    ? [...current.options, { label: OTHER_LABEL, description: tr('自己输入') }]
+    : current.options
   const otherSelected = (selected[current.id] ?? []).includes(OTHER_LABEL)
 
   return (
@@ -345,7 +346,7 @@ function FollowupForm({
           <span className="min-w-0 grow break-words text-sm text-foreground">{current.question}</span>
         </div>
         <div className="flex grow flex-col gap-0.5 pl-0.5">
-          {shownOptions.map((opt) => {
+          {shownOptions.map((opt, i) => {
             const checked = (selected[current.id] ?? []).includes(opt.label)
             const Icon = current.multiSelect
               ? checked
@@ -355,8 +356,13 @@ function FollowupForm({
                 ? CircleCheck
                 : Circle
             return (
+              /*
+               * key 里带上序号：label 在归一化时已经去过重（见 `normalizeFollowup`），
+               * 这里再兜一层 —— 万一还有别处的数据绕过了归一化，也只是渲染顺序稳定，
+               * 不会让 React 报「two children with the same key」。
+               */
               <button
-                key={opt.label}
+                key={`${opt.label}-${i}`}
                 type="button"
                 onClick={() => toggle(current, opt.label)}
                 className={cn(
