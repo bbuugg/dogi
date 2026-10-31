@@ -2,6 +2,7 @@ import {
   Ellipsis,
   Files,
   GitBranch,
+  Globe,
   MonitorPlay,
   PanelRightClose,
   PanelRightOpen,
@@ -18,7 +19,7 @@ import { cn } from '@fizz/agent-kit/shared/lib/utils'
 import { useT } from '@fizz/agent-kit/shared/lib/language'
 
 /**
- * 手机顶栏的「更多」菜单（`sm:hidden`）：把文件 / 源码 / 面板三颗开关收成一颗。
+ * 手机顶栏的「更多」菜单（`sm:hidden`）：把文件 / 源码 / 预览 / 浏览器 / 面板几颗开关收成一颗。
  *
  * 桌面（`sm` 以上）仍然在顶栏平铺这几颗按钮 —— 手机上顶栏一行要放标题 + 快捷功能 +
  * 终端（分裂两颗），再平铺三颗开关就把标题挤到只剩两三个字。菜单项的文案跟着当前
@@ -29,9 +30,11 @@ export function MobilePanelMenu({
   gitChangeCount,
   canExpandPanel,
   showPreview,
+  showBrowser,
   onToggleFiles,
   onToggleGit,
   onTogglePreview,
+  onToggleBrowser,
   onTogglePanel,
 }: {
   sideTab: string | null
@@ -41,9 +44,12 @@ export function MobilePanelMenu({
   canExpandPanel: boolean
   /** 容器型项目才有预览这一项 */
   showPreview: boolean
+  /** 真实会话才有浏览器画面（草稿标签连不到 `agent-browser` 会话） */
+  showBrowser: boolean
   onToggleFiles: () => void
   onToggleGit: () => void
   onTogglePreview: () => void
+  onToggleBrowser: () => void
   onTogglePanel: () => void
 }) {
   const tr = useT()
@@ -77,6 +83,12 @@ export function MobilePanelMenu({
           <DropdownMenuItem onSelect={onTogglePreview}>
             <MonitorPlay className="size-3.5 shrink-0" />
             {sideTab === 'preview' ? tr('收起预览') : tr('预览（容器页面）')}
+          </DropdownMenuItem>
+        )}
+        {showBrowser && (
+          <DropdownMenuItem onSelect={onToggleBrowser}>
+            <Globe className="size-3.5 shrink-0" />
+            {sideTab === 'browser' ? tr('收起浏览器') : tr('浏览器画面')}
           </DropdownMenuItem>
         )}
         {canExpandPanel && (

@@ -77,7 +77,11 @@ import {
   normalizeLanguage,
   type AppLanguage,
   normalizeContainerPublicSettings,
-  type ContainerPublicSettings
+  type ContainerPublicSettings,
+  normalizePrefs,
+  normalizePrefsPatch,
+  type PrefsSnapshot,
+  type PrefsPatch
 } from '@fizz/contracts'
 import type { PluginSettings } from '@fizz/plugin'
 import type {
@@ -2500,27 +2504,6 @@ export class AgentDomain {
     return this.store.snapshot().subagentSettings
   }
 
-  // ---------- 浏览器偏好（**全局默认**：新会话的默认值） ----------
-
-  /** 读全局默认浏览器偏好；老数据 / 手改坏的都在 store.load 时归一化成默认值（关 + auto） */
-  getBrowserSettings(): BrowserSettings {
-    return this.store.snapshot().browserSettings
-  }
-
-  /**
-   * 存全局默认浏览器偏好。`patch` 里缺的字段 = **保留**；
-   * 归一化在落盘前再走一遍，挡掉非法 channel。
-   *
-   * ⚠️ 会话级偏好不在这里（见 `setConversationTarget` 的 `browserSettings`）—— 这个方法
-   * 改的是**新会话的默认值**，不影响任何已有会话。
-   */
-  saveBrowserSettings(patch: Partial<BrowserSettings>): BrowserSettings {
-    this.store.mutate((d) => {
-      d.browserSettings = normalizeBrowserSettings({ ...d.browserSettings, ...patch })
-    })
-    return this.store.snapshot().browserSettings
-  }
-
   // ---------- 系统监控偏好（总开关） ----------
 
   /** 读系统监控偏好；老数据 / 手改坏的都在 store.load 时归一化成默认值（开） */
@@ -2557,6 +2540,27 @@ export class AgentDomain {
       d.language = normalizeLanguage(language)
     })
     return this.store.snapshot().language
+  }
+
+  // ---------- 客户端偏好（跨端一致的全局一份） ----------
+
+  /** 读客户端偏好：老数据 / 手改坏的都在 store.load 时归一化过 */
+  getPrefs(): PrefsSnapshot {
+    return this.store.snapshot().prefs
+  }
+
+  /**
+   * 存客户端偏好：`patch` 里缺的 key = **保留**（前端只提交改过的 key）。
+   *
+   * 归一化走两遍：`normalizePrefsPatch` 先把「不认识的 key / 非法值」丢掉（不让手滑传的
+   * `NaN` 把用户原来的 5 冲成默认 2），再 `normalizePrefs` 补全成完整一份落盘。
+   */
+  savePrefs(patch: unknown): PrefsSnapshot {
+    const clean: PrefsPatch = normalizePrefsPatch(patch)
+    this.store.mutate((d) => {
+      d.prefs = normalizePrefs({ ...d.prefs, ...clean })
+    })
+    return this.store.snapshot().prefs
   }
 
   // ---------- 容器型项目：公网访问域名 ----------

@@ -47,6 +47,7 @@ import type {
   CollabSettings,
   UploadFileRef,
 } from "@fizz/contracts";
+import { DEFAULT_BROWSER_SETTINGS } from "@fizz/contracts";
 export type { QueuedMessage };
 
 /**
@@ -176,21 +177,16 @@ export function agentAppFrom(s: AgentStore, conversationId: string | null) {
     /** 子任务（subagent）偏好：设置页「子任务」开关的状态源 */
     subagentSettings: s.subagentSettings,
     /**
-     * 浏览器偏好（总开关 + 来源）：**这个视图的会话**那一份，未设过时回落到全局默认。
+     * 浏览器偏好（总开关）：**这个视图的会话**那一份，未设过时用常量默认（关）。
      * 输入框上方 ComposerToolbar 的状态源（会话级 —— 分屏时两个标签各一份）。
+     *
+     * 没有「全局默认」那一层了：新建会话 / 新建定时任务要预填的一律是
+     * `DEFAULT_BROWSER_SETTINGS`，别拿当前会话这份去预填。
      */
     browserSettings:
-      (scoped.browserSettings ?? s.defaultBrowserSettings),
-    /**
-     * **全局默认**的浏览器偏好（`CoreData.browserSettings`）。
-     *
-     * 与上面那份分开：上面是「当前会话」的（跟着会话走），这份是「新建会话 / 新建定时任务」
-     * 该预填什么。别拿上一份去预填表单 —— 用户正在聊的那个会话开着浏览器，不该让
-     * 一条无人值守的定时任务默认也开着。
-     */
-    defaultBrowserSettings: s.defaultBrowserSettings,
-    /** 本机探测到的可用浏览器来源（工具条据此标「未检测到」） */
-    browserDetected: s.browserDetected,
+      (scoped.browserSettings ?? DEFAULT_BROWSER_SETTINGS),
+    /** 内置浏览器装好了没有（没装时工具条不渲染那颗开关） */
+    browserInstalled: s.browserInstalled,
     /**
      * 系统监控偏好（总开关）：设置页「系统监控」开关的状态源，也是状态栏是否渲染
      * 监控条的依据（见 `app-shell.tsx`）。`null` = 还没拉过 → 按「开」处理，免得首帧闪。

@@ -7,6 +7,10 @@
  * 文件里放。
  */
 import { useSyncExternalStore } from 'react'
+import {
+  removePref,
+  writePref
+} from '@fizz/agent-kit/shared/lib/prefs-sync'
 
 const listeners = new Set<() => void>()
 
@@ -29,12 +33,9 @@ function createBoolPref(key: string, defaultValue: boolean) {
     }
   }
   const set = (enabled: boolean): void => {
-    try {
-      if (enabled === defaultValue) localStorage.removeItem(key)
-      else localStorage.setItem(key, enabled ? '1' : '0')
-    } catch {
-      // 存不进去也不致命：本次会话内仍然生效
-    }
+    // 写盘即广播 + 同步到服务端（`PREF_KEYS` 里的 key 会自动上行），见 prefs-sync
+    if (enabled === defaultValue) removePref(key)
+    else writePref(key, enabled ? '1' : '0')
     for (const listener of listeners) listener()
   }
   const use = (): boolean => useSyncExternalStore(subscribe, get, () => defaultValue)
@@ -107,12 +108,8 @@ function createNumberPref<T extends number>(key: string, allowed: readonly T[], 
     }
   }
   const set = (value: T): void => {
-    try {
-      if (value === defaultValue) localStorage.removeItem(key)
-      else localStorage.setItem(key, String(value))
-    } catch {
-      // 存不进去也不致命：本次会话内仍然生效
-    }
+    if (value === defaultValue) removePref(key)
+    else writePref(key, String(value))
     for (const listener of listeners) listener()
   }
   const use = (): T => useSyncExternalStore(subscribe, get, () => defaultValue)

@@ -113,12 +113,25 @@ export function configureBrowser(opts: {
 }
 
 /**
- * 确保某会话的浏览器已拉起：**面板手动导航**与 **Agent 工具集**共用同一份会话。
+ * 正在拉起中的会话：`sessionId → start()` 的 promise。
+ *
+ * 面板（WS 连上自动启动）与 Agent 工具可能**同时**来 ensure，而 `BrowserSession.start`
+ * 的守卫是 `if (this.browser) return`，浏览器启动完之前它还没被赋值 —— 两次并发会各
+ * launch 一个 Chromium，后起的覆盖前一个，白烧一份内存与端口。这里按 id 去重。
+ */
+const startingSessions = new Map<string, Promise<BrowserSession>>()
+
+/**
+ * 确保某会话的浏览器已拉起：**面板**与 **Agent 工具集**共用同一份会话。
  * 已存在且存活则原样返回；失效先关掉重建；不存在则新建并 `start`
  * （channel 走 `resolveBrowserChannel`，与 `buildBrowserToolSet` 的 `ensureSession` 一致）。
  *
- * 故意**不在 WS 连上时自动拉起**——隐藏的 parked 面板也会挂 `BrowserPane`，
- * 那样会为每个后台会话白白起一个 Playwright；改成「用户第一次发控制消息（输网址 / 点按钮）时才建」。
+ * 谁触发：面板 WS 带 `autostart=1` 连上时（用户点开浏览器标签 ≙ 要用它）、面板发来的
+ * 第一条控制消息、以及 Agent 的 `browser_*`。
+ *
+ * ⚠️ 自动启动那条只能由**正被看着的面板**带（渲染端只在会话标签是当前标签时才带）：
+ * 标签内容一律常挂载，后台标签也挂着 `BrowserPane`，无条件自动拉起等于刷新一次页面就
+ * 给每个开过浏览器标签的会话白起一个 Playwright。
  */
 export async function ensureBrowserSession(
   sessionId: string,
@@ -130,7 +143,23 @@ export async function ensureBrowserSession(
     session = undefined
   }
   if (!session) session = browserSessions.create(sessionId, createBrowserSessionHandlers())
-  if (!session.isAlive()) await session.start(resolveBrowserChannel(), mode)
+  if (!session.isAlive()) {
+    const inflight = startingSessions.get(sessionId)
+    if (inflight) return inflight
+    const target = session
+    const launching = target.start(resolveBrowserChannel(), mode).then(
+      () => {
+        startingSessions.delete(sessionId)
+        return target
+      },
+      (err: unknown) => {
+        startingSessions.delete(sessionId)
+        throw err
+      }
+    )
+    startingSessions.set(sessionId, launching)
+    return launching
+  }
   return session
 }
 

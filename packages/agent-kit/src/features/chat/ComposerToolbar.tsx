@@ -5,24 +5,25 @@
  * 「这一轮用什么」的紧凑 pill（工作区 / 权限 / 模型 / 上下文）分开：
  *
  * - **浏览器**：内置的 `browser_*` 工具集（连同系统提示词里那段浏览器说明）。它原本是
- *   设置页「通用 → 浏览器」里的一个开关，挪到这里是为了「想用浏览器时随手就能开」，
- *   不必再钻进设置；设置页那一节已随之移除，**来源偏好**也一并搬到了这颗按钮的下拉里
- *   （否则移除设置就等于把选择来源的能力也删了）。**开关与渠道收进同一个下拉**（见
- *   `BrowserToggle`）：两颗并排时「当前是开着还是关着、用哪个渠道」要靠两个位置的视觉去拼，
- *   且渠道那颗在关闭时还占位，整排 pill 的宽度会随开关跳。触发器**只放一枚地球图标**
- *   （开关状态由图标颜色表达、渠道名进 tooltip 与下拉），与旁边的 MCP 那颗同宽同高。
+ *   设置页「通用 → 浏览器」里的一个开关，挪到这里是为了「想用浏览器时随手就能开」。
+ *   现在**只有一颗开关**：单击开、再点关（来源统一走 Playwright 自带的 headless shell，
+ *   见 `BrowserPicker`）。
+ *   浏览器**没装**（headless shell 没下载）时这颗**不出现** —— 装了才有的能力，按钮先
+ *   摆出来只会让人点了在下一轮拿到 `Executable doesn't exist`。装 / 卸在设置 → 浏览器。
  * - **MCP**：按会话挑要用哪几个 MCP server（原先挂在 `trailing` 里紧挨模型选择器，
  *   那是「用什么」的 pill，与浏览器分家；同属能力装配，挪到这里与浏览器并排）。
  *
+ * **一颗都不剩时整条不渲染**：空容器仍占一行高度，输入框上方会多出一道空行；
+ * 而且用户既然既没装浏览器、也没配 MCP，这条横条就没有任何信息量。
+ *
  * 位置对齐由 `ChatComposer` 的 `above` 壳保证（与输入框、消息列同一宽度）。
  *
- * ⚠️ 开关与来源都是**按会话**的（存在会话自己身上，`AgentConversation.browserSettings`）：
+ * ⚠️ 开关是**按会话**的（存在会话自己身上，`AgentConversation.browserSettings`）：
  * 每个会话可以各不相同，新建会话以全局默认值为初值。改完**下一轮对话**生效。
  *
  * 与外部 `playwright-mcp` 的同名冲突**不用手动处理**：装配时若这个会话挂了带同名工具的
  * MCP，内置的 `browser_*` 会自动让位（见 `apps/server/src/server/chat-turn.ts`）。
  */
-import { DEFAULT_BROWSER_SETTINGS } from '@fizz/contracts'
 import { BrowserPicker } from '@fizz/agent-kit/features/chat/BrowserPicker'
 import type { AgentApp } from '@fizz/agent-kit/shared/hooks/useAgentApp'
 import { Globe, Wrench } from 'lucide-react'
@@ -34,12 +35,18 @@ import type { ReactNode } from 'react'
  * 浏览器与 MCP 都是「给这一轮装能力」，语义同族，所以并排放在这里（MCP 原先挂在输入框
  * 右侧 `trailing` 那排 pill 里，紧挨模型选择器 —— 那是「这一轮用什么」的紧凑 pill，
  * 而「挑哪几个 MCP server」是**能力装配**，混进去既挤又与浏览器分家）。
- * `children` 留给后续同类开关（`ChatPanel` 把 `McpSelect` 从原处搬过来放这儿）。
+ *
+ * `children` 目前唯一来源是 `McpSelect`；**加新的同类开关时，`hidden` 的判据要跟着补**
+ * （这里靠 `app.mcpServers.length` 判断 MCP 那颗会不会出现）。
  */
 export function ComposerToolbar({ app, children }: { app: AgentApp; children?: ReactNode }) {
+  // 没装就不渲染那颗开关（`/api/browser/runtime` 的 `installed`，见 store 的 refresh）
+  const browser = app.browserInstalled
+  const mcp = app.mcpServers.length > 0
+  if (!browser && !mcp) return null
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      <BrowserToggle app={app} />
+      {browser && <BrowserToggle app={app} />}
       {children}
     </div>
   )
@@ -57,19 +64,32 @@ export function ComposerToolbar({ app, children }: { app: AgentApp; children?: R
  * `use-main-composer-props` 的 `above`）：有会话就换不了类型，不会抖，摆两颗灰图标只会
  * 让人以为是自己没配好。
  *
+ * ⚠️ `browser` / `mcp` 必须与真的 `ComposerToolbar` 用**同一套判据**（浏览器没装 /
+ * 没配 MCP 时真工具条少一颗或整条不渲染），否则切回内置 agent 时高度对不上，照样抖。
+ * 两颗都为 false 时占位自己也返回 null。
+ *
  * 尺寸必须与 `CHAT_ICON_PILL` 对齐（`size-8`），否则占位高度和真工具条差几像素；
  * 这里不复用 `CHAT_ICON_PILL` 是因为它带 hover 变色，灰占位被 hover 染色会像「能点」。
  */
-export function ComposerToolbarPlaceholder({ mcp = true }: { mcp?: boolean }) {
+export function ComposerToolbarPlaceholder({
+  browser = true,
+  mcp = true
+}: {
+  browser?: boolean
+  mcp?: boolean
+}) {
+  if (!browser && !mcp) return null
   return (
     <div
       className="flex flex-wrap items-center gap-1.5"
       title="外部 Agent 自带工具，浏览器 / MCP 开关对它不生效"
       aria-hidden
     >
-      <span className="flex size-8 shrink-0 cursor-not-allowed items-center justify-center text-muted-foreground/40">
-        <Globe className="size-3.5 shrink-0" />
-      </span>
+      {browser && (
+        <span className="flex size-8 shrink-0 cursor-not-allowed items-center justify-center text-muted-foreground/40">
+          <Globe className="size-3.5 shrink-0" />
+        </span>
+      )}
       {/* 与 `McpSelect` 同一条规矩：一个 server 都没配时那颗本来就不出现，占位也跟着不画，
           宽度才和切回内置 agent 时一致 */}
       {mcp && (
@@ -82,18 +102,17 @@ export function ComposerToolbarPlaceholder({ mcp = true }: { mcp?: boolean }) {
 }
 
 /**
- * 浏览器开关 + 开启后的来源下拉（**按会话**，见文件头）。
+ * 浏览器开关（**按会话**，见文件头）。
  *
  * 长相与全部交互在 `BrowserPicker`（定时任务表单也用同一颗 —— 浏览器工具跑在服务端，
- * 无人值守的任务一样能用）。这里只负责把 `app` 里的「这个会话的偏好 + 各来源探测
- * 结果」灌进去，并把改动落回会话。
+ * 无人值守的任务一样能用）。这里只负责把 `app` 里「这个会话的偏好」灌进去，
+ * 并把改动落回会话。
  */
 function BrowserToggle({ app }: { app: AgentApp }) {
   return (
     <BrowserPicker
-      // `null`（这个会话没设过）= 用全局默认，与界面显示一致
-      value={app.browserSettings ?? DEFAULT_BROWSER_SETTINGS}
-      detected={app.browserDetected}
+      // 会话没设过时 `agentAppFrom` 已经兜成常量默认（关 + bundled），这里不会有 null
+      value={app.browserSettings}
       // 乐观更新 + fire-and-forget 持久化到会话，与 MCP 的 `setMcpServerIds` 同一套
       onChange={app.saveBrowserSettings}
     />

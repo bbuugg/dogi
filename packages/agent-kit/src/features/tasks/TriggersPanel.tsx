@@ -42,7 +42,6 @@ import {
   Timer,
   TriangleAlert
 } from 'lucide-react'
-import { BROWSER_CHANNEL_LABELS, DEFAULT_BROWSER_SETTINGS } from '@fizz/contracts'
 import type { TaskTrigger } from '@fizz/contracts/types'
 import { Button } from '@fizz/ui/button'
 import { Switch } from '@fizz/ui/switch'
@@ -521,7 +520,7 @@ export function TriggersPanel() {
                 <dd className="min-w-0">
                   {selected.template.browserSettings
                     ? selected.template.browserSettings.enabled
-                      ? `开启（${BROWSER_CHANNEL_LABELS[selected.template.browserSettings.channel]}）`
+                      ? '开启'
                       : '关闭'
                     : // 存量任务没有这个字段 = 触发时按**全局默认**走（不是「关闭」）
                       '跟随全局默认'}
@@ -631,10 +630,8 @@ export function TriggersPanel() {
         acpAgents={app.acpAgents}
         mcpServers={app.mcpServers}
         defaultPermissionMode={app.permissionMode}
-        // 用**全局默认**（不是当前会话那份）：用户在某个开着浏览器的会话里点进来时，
-        // 不该让新建的定时任务默认也开着
-        defaultBrowserSettings={app.defaultBrowserSettings ?? DEFAULT_BROWSER_SETTINGS}
-        browserDetected={app.browserDetected}
+        // 没装就不显示那颗开关（与聊天工具条同一条判据）
+        browserInstalled={app.browserInstalled}
         // 模型下拉与会话详情同一颗：窗口兜底值、设置齿轮都从同一处来
         // （`defaultContextWindow` 是 `number | null`，转 undefined 走组件内的默认兜底）
         defaultContextWindow={app.defaultContextWindow ?? undefined}

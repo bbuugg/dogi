@@ -919,9 +919,12 @@ export const desktopHost: AgentHost = {
    * 浏览器画面：连**进程内后端**的内部 WS 端口，sessionId 由 conversationId 推出
    * （与后端引擎、Agent 工具是同一个会话）。desktop 必须实现这条，否则 UI 退回浏览器
    * 实现、`file://` 下拼不出地址，面板永远连不上。
+   * `autostart` 透传成查询参数（面板正被看着时由调用方带），服务端据此连上就拉起浏览器。
    */
-  openBrowserSocket: (conversationId) =>
-    openBridgeWorkbench(`/api/browser?sessionId=${encodeURIComponent(agentBrowserSessionId(conversationId))}`),
+  openBrowserSocket: (conversationId, opts) =>
+    openBridgeWorkbench(
+      `/api/browser?sessionId=${encodeURIComponent(agentBrowserSessionId(conversationId))}${opts?.autostart ? '&autostart=1' : ''}`
+    ),
   /**
    * 接口调试中继：走 IPC 桥打服务端的 `/api/api-client/ws/:connId`（与 web 端同一条路径）。
    * 远端目标由服务端中继连接，desktop 在这里只负责把浏览端与中继的帧转过去。

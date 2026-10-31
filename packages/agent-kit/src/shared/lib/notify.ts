@@ -34,12 +34,15 @@
  * 关了就都不发（设置里说成「已关闭」）。后台那条通道另需浏览器授权，
  * 授权只能由用户在真实手势里点出来（见 `requestNotifyPermission`）。
  *
- * ⚠️ 偏好存 `localStorage`（key 沿用 `fizz.web.*` 约定，见 AGENTS.md），
- * 只跟着这个浏览器走，不跨端同步 —— 和权限档 / 侧栏折叠一个待遇。
+ * 偏好走 `prefs-sync`：`localStorage` 是首帧缓存，真源在服务端 `CoreData.prefs`
+ * （`fizz.web.notify` 在 `PREF_KEYS` 里）—— 桌面上关了通知，手机上也不该再弹。
+ * 注意**系统授权不在这一层**：那是每台设备各问一次的，设置成开但没授权的端会自己
+ * 退到应用内 toast（见下面 `notify` 的分流）。
  */
 import { useSyncExternalStore } from 'react'
 import { toast } from 'sonner'
 import { getAgentHost } from '@fizz/agent-client/host'
+import { readPref, subscribePrefs, writePref } from './prefs-sync'
 import {
   cachedNativePermission,
   ensureNativeAppStateTracking,
@@ -60,16 +63,24 @@ const STORAGE_KEY = 'fizz.web.notify'
 
 const listeners = new Set<() => void>()
 
-/** SSR 上没有 localStorage，兜底 true（客户端首帧再校正） */
-let enabled = readInitial()
-
-function readInitial(): boolean {
-  try {
-    return localStorage.getItem(STORAGE_KEY) !== '0'
-  } catch {
-    return true
-  }
+/** 读盘口径与旧实现一致：`!== '0'` 即开（没存过 = 开）；SSR 上 `readPref` 返回 null 也落在开 */
+function readEnabled(): boolean {
+  return readPref(STORAGE_KEY) !== '0'
 }
+
+/** 模块级缓存：`useSyncExternalStore` 要求 `getSnapshot` 返回同一个值 */
+let enabled = readEnabled()
+
+/*
+ * 订阅变更：本地总线（别的窗口，desktop 的设置页是独立渲染进程）**和**服务端下行
+ * （`state-ws` 推来的快照，见 `agent-store.ts`）。模块级单例，不需要退订。
+ */
+subscribePrefs(STORAGE_KEY, () => {
+  const next = readEnabled()
+  if (next === enabled) return
+  enabled = next
+  for (const listener of listeners) listener()
+})
 
 function getEnabled(): boolean {
   return enabled
@@ -87,15 +98,16 @@ export function loadNotifyEnabled(): boolean {
   return enabled
 }
 
-/** 写偏好并通知订阅者；存不进去也不致命（本次会话内仍生效，与 sidebar-collapsed 一致） */
+/**
+ * 写偏好并通知订阅者。
+ *
+ * `writePref` 会先写本地（首帧 / 离线可用）再合并上行到 `POST /api/prefs`；同窗口写盘
+ * 不触发 `storage`，所以这里的 `enabled` 与订阅者得自己更新一次。
+ */
 export function saveNotifyEnabled(next: boolean): void {
   if (next === enabled) return
   enabled = next
-  try {
-    localStorage.setItem(STORAGE_KEY, next ? '1' : '0')
-  } catch {
-    // 隐私模式 / 超额：只保留本次会话
-  }
+  writePref(STORAGE_KEY, next ? '1' : '0')
   for (const listener of listeners) listener()
 }
 

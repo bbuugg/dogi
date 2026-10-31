@@ -11,6 +11,7 @@
  * 与 `lib/terminal-prefs.ts` / `lib/panel-width.ts` 同一套 `useSyncExternalStore` 写法。
  */
 import { useSyncExternalStore } from 'react'
+import { writePref } from '@fizz/agent-kit/shared/lib/prefs-sync'
 
 const WRAP_KEY = 'fizz.web.editorWordWrap'
 const LINE_NUMBERS_KEY = 'fizz.web.editorLineNumbers'
@@ -35,11 +36,8 @@ export function getWordWrap(): WordWrap {
 
 export function setWordWrap(value: WordWrap): void {
   const next: WordWrap = value === 'off' ? 'off' : 'on'
-  try {
-    localStorage.setItem(WRAP_KEY, next)
-  } catch {
-    // 存不进去也不致命：本次会话内仍然生效
-  }
+  // 写盘即广播 + 同步到服务端（见 prefs-sync）
+  writePref(WRAP_KEY, next)
   notify()
 }
 
@@ -53,11 +51,7 @@ export function getLineNumbers(): boolean {
 }
 
 export function setLineNumbers(value: boolean): void {
-  try {
-    localStorage.setItem(LINE_NUMBERS_KEY, value ? '1' : '0')
-  } catch {
-    // 同上
-  }
+  writePref(LINE_NUMBERS_KEY, value ? '1' : '0')
   notify()
 }
 

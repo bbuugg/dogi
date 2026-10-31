@@ -6,6 +6,7 @@
  */
 import type { AiPermissionMode } from '@fizz/contracts/types'
 import { t } from '@fizz/i18n'
+import { readPref, subscribePrefs, writePref } from '@fizz/agent-kit/shared/lib/prefs-sync'
 
 /** 命令执行权限：存本地（跟着浏览器走），默认 confirm —— 网页端不该默认裸跑命令 */
 const PERMISSION_KEY = 'fizz.web.permissionMode'
@@ -13,17 +14,30 @@ const PERMISSION_KEY = 'fizz.web.permissionMode'
 /** 读权限档：full / confirm（默认）/ readonly；存坏了回落 confirm */
 export function loadPermissionMode(): AiPermissionMode {
   // ⚠️ SSR 上没有 localStorage：store 在模块层创建时就会调这里（conversation slice 的
-  // 初始 state），这里一裸读，整页 SSR 就是 unhandledRejection —— 同类 loader 的守卫
-  // 见 lib/stores/slices/conversation.ts 的 lsGet / lsSet。
-  if (typeof localStorage === 'undefined') return 'confirm'
-  const raw = localStorage.getItem(PERMISSION_KEY)
+  // 初始 state），这里一裸读，整页 SSR 就是 unhandledRejection —— 守卫收在 prefs-sync。
+  const raw = readPref(PERMISSION_KEY)
   return raw === 'full' || raw === 'readonly' ? raw : 'confirm'
 }
 
 export function savePermissionMode(mode: AiPermissionMode): void {
-  // 与 load 同守卫：目前只在浏览器事件里被调，留着这道墙防同坑复发
-  if (typeof localStorage === 'undefined') return
-  localStorage.setItem(PERMISSION_KEY, mode)
+  // 写盘即广播：别的窗口（desktop 的设置窗口）会收到 storage 事件，见 prefs-sync
+  writePref(PERMISSION_KEY, mode)
+}
+
+/**
+ * 订阅「**别的窗口**改了权限档」。
+ *
+ * 桌面端的设置页是独立窗口（独立渲染进程 = 另一份 store 单例），在那边改完只写了
+ * localStorage —— 主窗口的 store 不重读就会一直按旧档跑，现象与「重试次数改了要重启」
+ * 是同一个（详见 `conversation/storage.ts` 的 `watchConversationPrefs`）。
+ *
+ * 只覆盖跨窗口那一半：同窗口写 localStorage 不触发 `storage` 事件，那半由
+ * `setPermissionMode` 自己 `set({ permissionMode })`。
+ */
+export function watchPermissionMode(
+  onChange: (mode: AiPermissionMode) => void
+): () => void {
+  return subscribePrefs(PERMISSION_KEY, () => onChange(loadPermissionMode()))
 }
 
 export interface PermissionOption {

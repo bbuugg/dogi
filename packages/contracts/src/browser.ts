@@ -9,24 +9,15 @@
  * 后端用它路由事件。推导规则与视口预设共用同一份，两边各写一份迟早会漂。
  */
 
-/** 浏览器来源偏好：auto = 自带 → Edge → Chrome 依次尝试 */
+/**
+ * 浏览器来源。
+ *
+ * 现在**一律是 `bundled`**（Playwright 自带的 headless shell）：界面上已经没有来源选择，
+ * `normalizeBrowserSettings` 会把所有值收敛到它。其余三值是历史数据里可能出现的值，
+ * 保留在类型里只为让 `resolveBrowserChannel` / `launchAttempts` 的兜底分支能编译 ——
+ * 新代码不要再往这里加来源。
+ */
 export type BrowserChannel = 'auto' | 'bundled' | 'msedge' | 'chrome'
-
-/** 全部来源偏好（归一化与设置页选项都从这里派生，别手抄） */
-export const BROWSER_CHANNELS: readonly BrowserChannel[] = [
-  'auto',
-  'bundled',
-  'msedge',
-  'chrome'
-]
-
-/** 浏览器开关下拉里的来源名称；`bundled` 的长度是刻意的（那正是用户最容易选错的一个） */
-export const BROWSER_CHANNEL_LABELS: Record<BrowserChannel, string> = {
-  auto: '自动',
-  bundled: 'Playwright 自带 Chromium',
-  msedge: 'Microsoft Edge',
-  chrome: 'Google Chrome'
-}
 
 /**
  * 浏览器偏好：**按会话**一份（落 `AgentConversation.browserSettings`，随会话目录持久化）。
@@ -52,32 +43,42 @@ export interface BrowserSettings {
   channel: BrowserChannel
 }
 
-export const DEFAULT_BROWSER_SETTINGS: BrowserSettings = { enabled: false, channel: 'auto' }
+export const DEFAULT_BROWSER_SETTINGS: BrowserSettings = { enabled: false, channel: 'bundled' }
 
-/** 收敛：手改坏的数据文件 / 老版本缺字段都不该让读接口抛错 */
+/**
+ * 收敛：手改坏的数据文件 / 老版本缺字段都不该让读接口抛错。
+ *
+ * `channel` **恒为 `bundled`**：来源选项已经从界面上撤掉（内置浏览器与 `web_fetch`
+ * 的 browser 引擎共用同一份 headless shell，选别的只会让两边行为不一致）。存量会话里
+ * 写着 `auto` / `msedge` / `chrome` 的一律收敛 —— 不收敛的话，老会话会继续按旧来源跑，
+ * 而界面上已经没有入口能改回来。
+ */
 export function normalizeBrowserSettings(value: unknown): BrowserSettings {
   const raw = value as Partial<BrowserSettings> | undefined
   return {
     enabled:
       typeof raw?.enabled === 'boolean' ? raw.enabled : DEFAULT_BROWSER_SETTINGS.enabled,
-    channel: BROWSER_CHANNELS.includes(raw?.channel as BrowserChannel)
-      ? (raw!.channel as BrowserChannel)
-      : DEFAULT_BROWSER_SETTINGS.channel
+    channel: 'bundled'
   }
 }
 
 /**
- * 某个具体来源在一台机器上是否可用（服务端 `detectBrowsers()` 的返回形状）。
+ * 自带浏览器运行时的安装状态（设置页「浏览器」一节）。
  *
- * 只回答「装没装」，不代表能不能跑起来（缺系统库、缺依赖仍会在 launch 时失败）——
- * 设置页据此把没装的项标注出来，**不要**据此禁用整个功能。
+ * `installed` 是**唯一的「装没装」判据**：输入框上方那颗开关显不显示、`web_fetch` 与
+ * `screenshot` 要不要直接回绝，都看它。其余字段（装在哪、占多少、是不是正在装）
+ * 只给安装 / 卸载那是几个按钮用。
  */
-export interface BrowserChannelProbe {
-  channel: BrowserChannel
-  label: string
-  /** 探测到的可执行文件路径；null = 没找到 */
+export interface BrowserRuntime {
+  installed: boolean
+  /** 安装目录；`playwright-core` 解析失败时 null */
   path: string | null
-  available: boolean
+  /** 磁盘占用（字节）；没装或统计失败时 null */
+  sizeBytes: number | null
+  /** 与打包进来的 playwright-core 匹配的 headless shell revision */
+  revision: string | null
+  /** 是否有下载正在进行 */
+  downloading: boolean
 }
 
 /** 视口形态：PC / 手机（决定响应式断点、DPR、UA） */
@@ -162,6 +163,13 @@ export type BrowserClientMessage =
   | { type: 'forward' }
   | { type: 'reload' }
   | { type: 'setViewportMode'; mode: BrowserViewportMode }
+  /**
+   * 只把浏览器拉起来，不导航、不动页面。
+   *
+   * 面板「切到这一页 / 连上」时发它，服务端据此 `ensureBrowserSession`（已有会话则原样
+   * 复用）。不复用 `reload`：那会真的刷一次页面（登录态、表单、滚动位置全丢）。
+   */
+  | { type: 'ensure' }
 
 // ---------------------------------------------------------------------------
 // 会话 id

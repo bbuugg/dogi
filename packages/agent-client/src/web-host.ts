@@ -94,10 +94,13 @@ export function openExternal(url: string): Promise<{ ok: boolean; error?: string
 }
 
 /** 浏览器画面：宿主没实现就打服务端的 `/api/browser` */
-export function openBrowserSocket(conversationId: string): WorkbenchSocket {
+export function openBrowserSocket(
+  conversationId: string,
+  opts?: { autostart?: boolean }
+): WorkbenchSocket {
   const host = getAgentHostOrNull()
-  if (host?.openBrowserSocket) return host.openBrowserSocket(conversationId)
-  return browserOpenBrowserSocket(conversationId)
+  if (host?.openBrowserSocket) return host.openBrowserSocket(conversationId, opts)
+  return browserOpenBrowserSocket(conversationId, opts)
 }
 
 /** 接口调试中继：宿主没实现就打服务端的 `/api/api-client/ws/:connId` */
@@ -388,12 +391,18 @@ function browserOpenSshTerminal({ hostId, cols, rows }: SshTerminalOpenOptions):
  * 浏览器画面 WS（web 兜底）：同源打 `/api/browser`，sessionId 由 conversationId 推出来
  * （与后端引擎、Agent 工具是同一个会话）。token 走查询参数（浏览器 WebSocket 拿不到
  * 自定义请求头）。会话不存在时服务端会带原因 close，UI 据此显示「浏览器未启动」。
+ *
+ * `autostart=1` = 连上就把浏览器拉起来（面板正被看着时由调用方带上）。
  */
-function browserOpenBrowserSocket(conversationId: string): WorkbenchSocket {
+function browserOpenBrowserSocket(
+  conversationId: string,
+  opts?: { autostart?: boolean }
+): WorkbenchSocket {
   const connection = requireConnection()
+  const autostart = opts?.autostart ? '&autostart=1' : ''
   const url = wsUrlFor(
     connection,
-    `/api/browser?sessionId=${encodeURIComponent(agentBrowserSessionId(conversationId))}&token=${encodeURIComponent(connection.token)}`
+    `/api/browser?sessionId=${encodeURIComponent(agentBrowserSessionId(conversationId))}&token=${encodeURIComponent(connection.token)}${autostart}`
   )
   return createWorkbenchSocket(url)
 }

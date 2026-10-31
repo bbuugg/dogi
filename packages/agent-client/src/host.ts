@@ -430,8 +430,15 @@ export interface AgentHost {
   /**
    * 打开**浏览器画面**连接（会话 screencast + 状态）；渲染端据此实时显示 Agent 操作的浏览器。
    * 不实现（web）= 浏览器实现打 `/api/browser`。
+   *
+   * `autostart`：连上就让服务端把浏览器拉起来。**只在面板正被看着时置 true** ——
+   * 标签内容一律常挂载，后台标签也挂着面板，无条件自动拉起等于刷新一次页面就给每个
+   * 开过浏览器标签的会话白起一个 Playwright。
    */
-  openBrowserSocket?(conversationId: string): WorkbenchSocket
+  openBrowserSocket?(
+    conversationId: string,
+    opts?: { autostart?: boolean }
+  ): WorkbenchSocket
   /**
    * 打开一条**接口调试中继** WS（WebSocket 调试页用）：双方用 JSON 帧通信
    * （见 `@fizz/contracts/types` 的 `WsRelayClientMessage` / `WsEvent`）。

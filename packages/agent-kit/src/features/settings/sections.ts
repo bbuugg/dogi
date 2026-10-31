@@ -23,6 +23,7 @@ import {
   Box,
   Cpu,
   Gauge,
+  Globe,
   Keyboard,
   Palette,
   Plug,
@@ -138,6 +139,11 @@ function allSettingsGroups(app: AgentApp): SettingsGroup[] {
         { id: 'models', label: t('模型 ({count})', { count: app.models.length }), icon: Cpu },
         { id: 'acp', label: t('ACP agent ({count})', { count: app.acpAgents.length }), icon: Bot },
         { id: 'mcp', label: t('MCP ({count})', { count: app.mcpServers.length }), icon: Plug },
+        // 内置浏览器（Playwright headless shell）的检测 / 安装 / 卸载。跟着 MCP 排：
+        // 两者回答的是同一类问题「这台机器上有什么能替我操作网页」，而且这里是
+        // playwright MCP 那条替代路线的说明所在。
+        // 也不带「装没装」的角标：那会让菜单宽度随安装状态跳（用户报过数字变化导致重排）。
+        { id: 'browser', label: t('浏览器'), icon: Globe },
         { id: 'skills', label: t('技能 ({count})', { count: app.skills?.skills.length ?? 0 }), icon: Sparkles },
         // 叫「插件」而不是「插件」：设置页只管用户级（`~/.fizz/plugins`）那一份，
         // 项目自己的插件在侧栏那个项目的「更多 → 插件」里管。名字里写清楚，省得用户

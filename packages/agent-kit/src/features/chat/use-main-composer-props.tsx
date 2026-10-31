@@ -321,7 +321,12 @@ export function useMainComposerProps(
             会在切换的瞬间往上跳 32px（用户反馈过）。已打开的会话不会再切后端，扒掉不抖。 */}
         {isAcp ? (
           app.activeConversationId ? null : (
-            <ComposerToolbarPlaceholder mcp={app.mcpServers.length > 0} />
+            <ComposerToolbarPlaceholder
+              // 与真工具条的隐藏判据同源：没装浏览器 / 没配 MCP 时那两颗不出现，
+              // 占位也得跟着少画，否则切回内置 agent 的那一下高度对不上
+              browser={app.browserInstalled}
+              mcp={app.mcpServers.length > 0}
+            />
           )
         ) : (
           <ComposerToolbar app={app}>

@@ -280,7 +280,7 @@ async function processFire(triggerId: string): Promise<TriggerFireResult> {
       ? { mcpServerIds: trigger.template.mcpServerIds }
       : {}),
     // 浏览器工具（跑在**服务端**，不依赖用户面前的窗口）：模板里选了就落到会话上，
-    // 之后 chat-turn 与手动会话走完全同一条装配路径。没选 = 会话上不写，按全局默认走。
+    // 之后 chat-turn 与手动会话走完全同一条装配路径。没选 = 会话上不写，按常量默认（关）走。
     ...(trigger.template.browserSettings
       ? { browserSettings: trigger.template.browserSettings }
       : {})

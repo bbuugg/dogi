@@ -472,8 +472,16 @@ function DefaultEmptyState() {
  *
  * `resume` = 断点续跑：这一次不是从头重来，而是接着失败的那一步。文案要区分开 ——
  * 否则用户看着已经写好的正文还在、提示却说「重试」，会以为哪里重复了。
+ *
+ * `message` = 这次失败的原文（服务端 `retry.message` 透传）。有它就把原因跟在次数后面，
+ * 用户能立刻分清是上游限流（改并发 / 等配额）还是网络断了（等着就行）。
  */
-type RetryNoticeView = { attempt: number; maxRetries: number | null; resume?: boolean }
+type RetryNoticeView = {
+  attempt: number
+  maxRetries: number | null
+  resume?: boolean
+  message?: string
+}
 
 /**
  * 「第 N 次重试」提示条（单条自替换）。
@@ -481,6 +489,11 @@ type RetryNoticeView = { attempt: number; maxRetries: number | null; resume?: bo
  * 调用方用 `key={attempt}` —— 次数变化时整条重建，从而**重放一遍入场动画**
  * （只在同一节点上改文本不会重新触发 CSS 动画）。因为 `retryNotice` 只有一份
  * （每次重试覆盖上一条），屏幕上任何时刻只有这一条。
+ *
+ * ⚠️ 失败原文**必须单行截断**（`truncate` + `title` 看全文）：这一行住在固定高度的
+ * 状态槽里（见 `MessageList` 里那段 `min-h-5` 的说明），一条上游报文换行就会让内容高度
+ * 在流式途中抖动。原文本身通常是英文一行（如 `AI_APICallError: concurrency reached,
+ * current: 11, limit: 10`），截断后仍能看开头几个词判断性质。
  */
 function RetryRow({ notice }: { notice: RetryNoticeView }) {
   const tr = useT()
@@ -488,14 +501,29 @@ function RetryRow({ notice }: { notice: RetryNoticeView }) {
     <div
       role="status"
       aria-live="polite"
-      className="flex items-center gap-2 text-sm text-muted-foreground animate-in fade-in slide-in-from-bottom-1 duration-300"
+      className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground animate-in fade-in slide-in-from-bottom-1 duration-300"
     >
       <RotateCw className="size-3.5 shrink-0 animate-spin" />
-      <span>
+      <span className="shrink-0">
         {notice.resume
           ? tr('第 {attempt} 次重试（接着上次的进度）', { attempt: notice.attempt })
           : tr('第 {attempt} 次重试', { attempt: notice.attempt })}
       </span>
+      {notice.message && (
+        <>
+          <span aria-hidden className="shrink-0">
+            ·
+          </span>
+          {/*
+            失败原文用 `text-destructive`：这行整体的 `text-muted-foreground` 是给
+            「第 N 次重试」这句状态用的，而后面跟的是**为什么失败**（上游限流 / 网络断）。
+            同一档灰里读不出「这轮出错了」，用户会当成一句普通的进度说明扫过去。
+          */}
+          <span className="min-w-0 truncate font-mono text-xs text-destructive" title={notice.message}>
+            {notice.message}
+          </span>
+        </>
+      )}
     </div>
   )
 }

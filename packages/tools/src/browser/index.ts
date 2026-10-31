@@ -18,5 +18,5 @@ export {
   type BrowserSessionManager
 } from './engine'
 export { buildBrowserToolSet, BROWSER_PROMPT_SECTION, type BrowserToolOptions } from './tools'
-export { detectBrowsers, launchAttempts } from './resolver'
+export { launchAttempts } from './resolver'
 export { buttonBit, nextButtonsMask, toCdpCommand, type CdpCommand } from './input'

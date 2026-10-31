@@ -5,6 +5,7 @@
  * 一眼能看出层级），存成平铺的人点面板头部那个树/列表图标即可切回去。
  */
 import { useSyncExternalStore } from 'react'
+import { writePref } from '@fizz/agent-kit/shared/lib/prefs-sync'
 
 /** 树状视图：存了 `'0'` 才用平铺，其余（没存过 / 存坏了）都当树状 */
 const TREE_VIEW_KEY = 'fizz.web.gitTreeView'
@@ -20,14 +21,9 @@ export function getGitTreeView(): boolean {
   }
 }
 
-/** 设置视图偏好 */
+/** 设置视图偏好（写盘即广播 + 同步到服务端，见 prefs-sync） */
 export function setGitTreeView(enabled: boolean): void {
-  try {
-    if (enabled) localStorage.setItem(TREE_VIEW_KEY, '1')
-    else localStorage.setItem(TREE_VIEW_KEY, '0')
-  } catch {
-    // 存不进去也不致命：本次会话内仍然生效
-  }
+  writePref(TREE_VIEW_KEY, enabled ? '1' : '0')
   for (const listener of listeners) listener()
 }
 

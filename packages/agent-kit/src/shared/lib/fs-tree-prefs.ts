@@ -17,6 +17,7 @@
  * 与 `lib/editor-view-prefs.ts` 同一套 `useSyncExternalStore` 写法。
  */
 import { useSyncExternalStore } from 'react'
+import { writePref } from '@fizz/agent-kit/shared/lib/prefs-sync'
 
 const SHOW_IGNORED_KEY = 'fizz.web.fsShowIgnored'
 
@@ -36,11 +37,8 @@ export function getShowIgnored(): boolean {
 }
 
 export function setShowIgnored(value: boolean): void {
-  try {
-    localStorage.setItem(SHOW_IGNORED_KEY, value ? '1' : '0')
-  } catch {
-    // 存不进去也不致命：本次会话内仍然生效
-  }
+  // 写盘即广播 + 同步到服务端（见 prefs-sync）
+  writePref(SHOW_IGNORED_KEY, value ? '1' : '0')
   notify()
 }
 

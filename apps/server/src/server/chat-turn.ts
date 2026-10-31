@@ -26,8 +26,15 @@ import {
   resolveContextWindow,
   resolveModelSettings
 } from '@fizz/contracts/types'
+import { DEFAULT_BROWSER_SETTINGS } from '@fizz/contracts'
 import { buildMcpToolset } from '@fizz/mcp'
-import { buildAskFollowupTool, buildBrowserToolSet, resolveBrowserChannel, spawnBackgroundShell } from '@fizz/tools'
+import {
+  browserRuntimeInfo,
+  buildAskFollowupTool,
+  buildBrowserToolSet,
+  resolveBrowserChannel,
+  spawnBackgroundShell
+} from '@fizz/tools'
 import { runAcpAgent } from '@fizz/acp'
 import { discoverServerPlugins, withRuntimeConfig } from './plugin-roots'
 import { refreshPluginModels } from './plugin-models'
@@ -43,7 +50,8 @@ import type {
 } from '@fizz/contracts/types'
 import type { AcpAgentConfig } from '@fizz/acp'
 import { domain, emitServerEvent, markDirty } from './state'
-import { createConfirmGate, DEFAULT_CONFIRM_TIMEOUT_MS, releaseConfirmsFor } from './confirm-gate'
+import { createConfirmGate, releaseConfirmsFor } from './confirm-gate'
+import { agentPrefs } from './prefs'
 import { createFollowupGate, releaseFollowupsFor } from './followup-gate'
 import { startContainerTurn } from './container-projects/turn'
 import { buildClientToolset, createClientToolGate } from './client-tool-gate'
@@ -382,28 +390,34 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
   const skills = workspace.path ? await serverSkillsForAgent(workspace.path) : []
   const projectDoc = workspace.path ? await readProjectDoc(workspace.path) : null
 
-  const permissionMode = (input.permissionMode ?? 'confirm') as AiPermissionMode
+  /**
+   * 服务端权威的一份偏好（`CoreData.prefs`）：请求体给了就用请求体（会话级覆盖 / 旧客户端），
+   * 没给就落到这里。关键是**定时任务**也走同一条 `startTurn`，而它没有任何渲染端可问 ——
+   * 以前这些值只能吃 `runAgent` 的缺省，设置页填的数字对无人值守的任务完全不生效。
+   */
+  const prefs = agentPrefs()
+  const permissionMode = (input.permissionMode ?? prefs.permissionMode) as AiPermissionMode
   const confirmTimeoutMs =
     typeof input.confirmTimeoutMs === 'number' && Number.isFinite(input.confirmTimeoutMs) && input.confirmTimeoutMs >= 0
       ? input.confirmTimeoutMs
-      : DEFAULT_CONFIRM_TIMEOUT_MS
-  // 模型请求自动重试次数（0 = 不限制）；非法值 = 不传，交给 runAgent 用缺省
+      : prefs.confirmTimeoutMs
+  // 模型请求自动重试次数（0 = 不限制）；非法值回落服务端偏好
   const maxRetries =
     typeof input.maxRetries === 'number' && Number.isFinite(input.maxRetries) && input.maxRetries >= 0
       ? Math.round(input.maxRetries)
-      : undefined
-  // 同一批 tool-call 的并发上限（设置页里的偏好）；非法值交给 runAgent 用缺省
+      : prefs.maxRetries
+  // 同一批 tool-call 的并发上限（设置页里的偏好）；非法值回落服务端偏好
   const toolCallConcurrency =
     typeof input.toolCallConcurrency === 'number' && Number.isFinite(input.toolCallConcurrency)
       ? resolveToolCallConcurrency(input.toolCallConcurrency)
-      : undefined
-  // 一轮最多跑多少步（设置页里的偏好）；非法值交给 runAgent 用缺省（`DEFAULT_MAX_STEPS`）
+      : prefs.toolCallConcurrency
+  // 一轮最多跑多少步（设置页里的偏好）；非法值回落服务端偏好
   const maxSteps =
     typeof input.maxSteps === 'number' && Number.isFinite(input.maxSteps)
       ? resolveMaxSteps(input.maxSteps)
-      : undefined
-  // 工具卡「意图」开关（设置页里的偏好）；非布尔值交给 runAgent 用缺省（开启）
-  const toolIntent = typeof input.toolIntent === 'boolean' ? input.toolIntent : undefined
+      : prefs.maxSteps
+  // 工具卡「意图」开关（设置页里的偏好）；非布尔值回落服务端偏好
+  const toolIntent = typeof input.toolIntent === 'boolean' ? input.toolIntent : prefs.toolIntent
 
   const run = createRun({
     conversationId: conversation.id,
@@ -590,22 +604,31 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
      * 与外部 playwright-mcp 的同名冲突由下面的「让位」逻辑自动处理（MCP 有同名工具时
      * 内置对应的 browser_* 直接不挂），不需要用户手动二选一。
      */
-    const browserSettings = conversation.browserSettings ?? domain.getBrowserSettings()
+    // 会话没单独设过 → 用常量默认（关 + bundled）。已经没有「全局默认」那一层了：
+    // 浏览器是「用到才开」的能力，没有「新会话默认开」这个东西。
+    const browserSettings = conversation.browserSettings ?? DEFAULT_BROWSER_SETTINGS
     /**
      * 内置浏览器工具集：先建（关掉时为空对象）。构建本身是廉价的
      * （`ensureSession` 在 execute 里才拉起浏览器）。
+     *
+     * ⚠️ 运行时**没装**（headless shell 没下载）时也在这里就不挂：开关点开了也白点 ——
+     * 引擎的 `ensureChromiumReady` 会在 execute 里静默触发 150MB 下载，而界面上没有任何
+     * 进度，看起来就是「一轮对话卡住不动」。升级上来的老会话里 `enabled: true` 是常态，
+     * 因此这条判断不是多余的。装 / 卸在「设置 → 浏览器」，装好后下一轮自然挂上
+     * （这里每次装配都现读状态，不用重启）。
      *
      * 下面接 MCP 时要用它做「让位」判定：外部 playwright-mcp 的浏览器工具与内置**同名**，
      * 而工具注册表对「同名并列最高 priority」直接抛错 —— 所以 MCP 有同名工具时，就从这里
      * **剔掉**同名的键（内置让位），不让两者同时进注册表。
      */
-    const browserTools: Record<string, unknown> = browserSettings.enabled
-      ? buildBrowserToolSet({
-          channel: resolveBrowserChannel,
-          conversationId: conversation.id,
-          workspacePath: workspace.path
-        })
-      : {}
+    const browserTools: Record<string, unknown> =
+      browserSettings.enabled && browserRuntimeInfo().installed
+        ? buildBrowserToolSet({
+            channel: resolveBrowserChannel,
+            conversationId: conversation.id,
+            workspacePath: workspace.path
+          })
+        : {}
 
     // 只接**这个会话选中**的 MCP server（未选 = 一个都不接，MCP 工具缺席是预期行为，不是故障）。
     // 选了但已被删掉的 id 在 setConversationTarget 时就剔过了，这里再按现存配置过一遍，

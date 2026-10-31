@@ -16,7 +16,33 @@ import { WebSocketServer, type WebSocket } from 'ws'
 import type { BrowserClientMessage, BrowserEvent } from '@fizz/contracts'
 import { rejectSocket } from './lib/ws'
 import { verifyWsToken } from './auth'
-import { browserSessions, subscribeBrowser, ensureBrowserSession } from '@fizz/tools'
+import {
+  browserRuntimeInfo,
+  browserSessions,
+  subscribeBrowser,
+  ensureBrowserSession
+} from '@fizz/tools'
+
+/**
+ * 内置浏览器没装时，**不要让面板把它拉起来**。
+ *
+ * `ensureBrowserSession` 在找不到 headless shell 时会走 `ensureChromiumReady()` —— 也就
+ * 在面板背后静默开始一次 150MB 下载，界面上只有「正在启动浏览器…」的转圈，直到 20s 兜底
+ * 超时才变成一句「浏览器未启动」。装 / 卸是设置页里显式的事，这里直接回一条带原因的
+ * `closed`，面板就能马上显示「去设置里装」。
+ *
+ * 只拦**面板**这一条路：Agent 的 `browser_*` 由 `chat-turn` 在装配时挡掉（没装就不挂），
+ * `web_fetch` 的 browser 引擎仍保留「首次用时自愈下载」的老行为。
+ */
+function blockedByMissingRuntime(ws: WebSocket, sessionId: string): boolean {
+  if (browserRuntimeInfo().installed) return false
+  sendJson(ws, {
+    type: 'closed',
+    sessionId,
+    reason: '内置浏览器未安装：请到「设置 → 浏览器」安装后再打开'
+  })
+  return true
+}
 
 function sendJson(ws: WebSocket, message: BrowserEvent): void {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(message))
@@ -28,6 +54,15 @@ function handleConnection(ws: WebSocket, url: URL): void {
     ws.close(1011, '缺少 sessionId')
     return
   }
+  /**
+   * `autostart=1`：面板一挂上就把浏览器拉起来。
+   *
+   * 用户点开浏览器标签就是要看 / 要用它 —— 不该再等 Agent 先调一次 `browser_navigate`，
+   * 也不该让人先手输一个网址。**只有正被看着的面板**会带这个参数（后台标签不带），
+   * 否则刷新一次页面就会给每个开过浏览器标签的会话白起一个 Playwright
+   * （见 `ensureBrowserSession` 的注释）。
+   */
+  const autostart = url.searchParams.get('autostart') === '1'
 
   // 先订阅（按 sessionId 路由，与引擎共用一个 hub）。会话可能还没被 Agent 拉起 ——
   // 此时先挂着，等 Agent 一调 browser_navigate 建出会话、开始推帧，画面就自动流过来，
@@ -50,6 +85,17 @@ function handleConnection(ws: WebSocket, url: URL): void {
     existing.replayLastState()
   }
 
+  /*
+   * 自动拉起：launch 一个 Chromium 要一两秒，这里不 await（连接先挂着），起来之后
+   * 引擎通过同一个 hub 把 state / frame 推给这条连接。起不来（没装浏览器、缺系统库）
+   * 就把原因发一条 `closed` 过去 —— 面板据此显示失败原因，而不是一直转圈。
+   */
+  if (autostart && !existing?.isAlive() && !blockedByMissingRuntime(ws, sessionId)) {
+    void ensureBrowserSession(sessionId).catch(() => {
+      sendJson(ws, { type: 'closed', sessionId, reason: '浏览器启动失败' })
+    })
+  }
+
   ws.on('message', async (raw: unknown, isBinary: boolean) => {
     if (isBinary) return
     let message: BrowserClientMessage
@@ -60,6 +106,8 @@ function handleConnection(ws: WebSocket, url: URL): void {
     }
     // 会话还没拉起时，第一条控制消息（输网址 / 点按钮 / 发键盘鼠标）按需把它建起来：
     // 这样用户不依赖 Agent 也能手动浏览。建不起来（没装浏览器等）通知前端显示失败。
+    // 没装运行时同样先拦（否则这条 `navigate` 会触发一次静默下载）。
+    if (blockedByMissingRuntime(ws, sessionId)) return
     let session: Awaited<ReturnType<typeof ensureBrowserSession>> | undefined
     try {
       session = await ensureBrowserSession(sessionId)
@@ -68,6 +116,9 @@ function handleConnection(ws: WebSocket, url: URL): void {
       return
     }
     switch (message.type) {
+      // 面板只是「要求拉起」：上面的 ensure 已经做完了，这里什么都不用做
+      case 'ensure':
+        break
       case 'input':
         void session.dispatchInput(message.event)
         break

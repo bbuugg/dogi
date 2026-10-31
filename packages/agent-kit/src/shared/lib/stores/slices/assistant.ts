@@ -526,7 +526,13 @@ export const createAssistantSlice: StateCreator<AgentStore, [], [], AssistantSli
             // 客户端工具(终端操作):只有 terminal 作用域会有值
             ...(clientTools ? { clientTools } : {}),
             // 工具权限档:服务端据此给客户端工具(以及项目工具的 readonly)套闸
-            ...(permissionMode ? { permissionMode } : {})
+            ...(permissionMode ? { permissionMode } : {}),
+            /**
+             * 模型请求重试次数:这是**客户端偏好**(设置页),与主会话同一份。
+             * 少传这一个字段,助手就会退回服务端缺省的 2 次 —— 表现为「开头重试两次,
+             * 中途再失败直接报错」,与设置页填的数字无关。
+             */
+            maxRetries: get().maxRetries
           },
           (frame) => handleFrame(sessionId, assistantId, frame),
           controller.signal

@@ -13,6 +13,10 @@
  * `storage` 事件 + 订阅正好把「同窗口」与「跨窗口」两条路都覆盖掉。
  */
 import { useSyncExternalStore } from 'react'
+import {
+  removePref,
+  writePref
+} from '@fizz/agent-kit/shared/lib/prefs-sync'
 
 const STORAGE_KEY = 'fizz.agent.terminalShell'
 
@@ -27,14 +31,11 @@ export function getTerminalShell(): string | null {
   }
 }
 
-/** 设置默认终端（null = 跟随平台默认） */
+/** 设置默认终端（null = 跟随平台默认；写盘即广播 + 同步到服务端，见 prefs-sync） */
 export function setTerminalShell(id: string | null): void {
-  try {
-    if (id) localStorage.setItem(STORAGE_KEY, id)
-    else localStorage.removeItem(STORAGE_KEY)
-  } catch {
-    // 存不进去也不致命：本次会话内仍然生效
-  }
+  // 空 = 自动探测：`removePref` 对同步 key 提交的是默认值（空串），不是删掉服务端那份
+  if (id) writePref(STORAGE_KEY, id)
+  else removePref(STORAGE_KEY)
   for (const listener of listeners) listener()
 }
 

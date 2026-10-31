@@ -55,7 +55,7 @@ export interface ScopedSettings {
   chatTarget: ChatTarget | null;
   reasoningEffort: AiReasoningEffort | null;
   mcpServerIds: string[];
-  /** 会话没设过时是 `null`（界面按 `defaultBrowserSettings` 显示），与字段本身语义一致 */
+  /** 会话没设过时是 `null`（界面按常量默认 `DEFAULT_BROWSER_SETTINGS` 显示：关），与字段本身语义一致 */
   browserSettings: BrowserSettings | null;
 }
 
@@ -175,6 +175,13 @@ export interface ConvSlice {
     maxRetries: number | null;
     /** `true` = 断点续跑（已渲染的内容没被清空，只回滚了失败那一步） */
     resume?: boolean;
+    /**
+     * 这次尝试失败的**原因原文**（服务端 `retry.message`）。有它就一并显示在次数后面 ——
+     * 「第 2 次重试 · AI_APICallError: concurrency reached…」比光一个次数信息量大得多：
+     * 用户能立刻判断是被上游限流（该降并发）还是断网（等着就行）。
+     * 缺省 = 服务端没给原因，提示里只显示次数。
+     */
+    message?: string;
   } | null;
   /**
    * 连接断了但服务端那轮还在跑：正在自动重接（第几次）。null = 连接正常 / 没在重接。

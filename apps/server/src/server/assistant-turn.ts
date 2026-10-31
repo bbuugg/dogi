@@ -29,7 +29,8 @@ import { buildModelTools, buildProjectTools } from '@fizz/tools'
 import { domain, markDirty } from './state'
 import { probeModelsFromUpstream } from './model-probe'
 import { refreshPluginModels } from './plugin-models'
-import { createConfirmGate, DEFAULT_CONFIRM_TIMEOUT_MS } from './confirm-gate'
+import { createConfirmGate } from './confirm-gate'
+import { agentPrefs } from './prefs'
 import { buildClientToolset, createClientToolGate } from './client-tool-gate'
 import { errorPart, foldEventIntoParts } from './agent-parts'
 import { createProject, createWorktree, getDefaultProjectsRoot, isInsideProjectsRoot, listDirs, removeProject } from './projects'
@@ -179,12 +180,18 @@ export async function startAssistantTurn(input: AssistantSendInput): Promise<Sta
   const run = createRun({ conversationId: input.sessionId, workspaceId: '', backend: 'builtin' })
   markDirty(['activeRuns'])
 
+  /**
+   * 服务端权威的一份偏好（`CoreData.prefs`）：请求体给了就用请求体（见下面的
+   * `permissionMode` / `maxRetries`），没给就落到这里 —— 与 `chat-turn.ts` 同一口径。
+   */
+  const prefs = agentPrefs()
+
   // 审批:与聊天同一套四 kind 选项与超时;不发 conversation:* 广播(助手没有跨页场景)
   const gate = createConfirmGate({
     run,
     ownerKey: input.sessionId,
     title: '项目助手',
-    confirmTimeoutMs: DEFAULT_CONFIRM_TIMEOUT_MS
+    confirmTimeoutMs: prefs.confirmTimeoutMs
   })
 
   /**
@@ -210,7 +217,18 @@ export async function startAssistantTurn(input: AssistantSendInput): Promise<Sta
    *   弹审批 —— 项目工具的作用域在单个工作区之外,且「一次授权、长期自动执行」,见
    *   `guardMutation` 的说明。别拿这里的档位去放松它。
    */
-  const permissionMode = (input.permissionMode ?? 'confirm') as AiPermissionMode
+  const permissionMode = (input.permissionMode ?? prefs.permissionMode) as AiPermissionMode
+  /**
+   * 模型请求自动重试次数（0 = 不限制）；非法值 = 不传，交给 runAgent 用缺省。
+   *
+   * **必须从请求里取**。这条链路早先漏了这个字段，于是助手恒按 `DEFAULT_MAX_RETRIES`（2）
+   * 重试 —— 用户在设置页填 20 也没用：开头两次用完，会话中途再失败就直接报错。与主会话
+   * `chat-turn.ts` 的口径保持一致（那里同样做了一遍非负整数校验）。
+   */
+  const maxRetries =
+    typeof input.maxRetries === 'number' && Number.isFinite(input.maxRetries) && input.maxRetries >= 0
+      ? Math.round(input.maxRetries)
+      : prefs.maxRetries
   // 起始活权限档写回 run：上面 createRun 缺省是 confirm，这里用请求里的档位对齐，
   // 之后 POST /api/chat/permission 改的也是它（见 buildClientToolset / buildProjectTools 的 getter）
   run.permissionMode = permissionMode
@@ -337,6 +355,8 @@ export async function startAssistantTurn(input: AssistantSendInput): Promise<Sta
       modelConfig.model,
       defaultContextWindowFromEnv()
     ),
+    // 客户端偏好（设置页的「模型请求重试」）；不传 = 缺省 2 次
+    ...(maxRetries !== undefined ? { maxRetries } : {}),
     signal: run.controller.signal,
     onEvent
   })

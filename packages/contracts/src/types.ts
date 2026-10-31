@@ -1814,8 +1814,8 @@ export interface AgentConversation {
    */
   mcpServerIds?: string[]
   /**
-   * 这个会话的浏览器偏好（总开关 + 来源）：**按会话独立**，缺省 = 用全局默认
-   * （`CoreData.browserSettings`，即新会话的默认值）。
+   * 这个会话的浏览器偏好（总开关）：**按会话独立**，缺省 = 关
+   * （`DEFAULT_BROWSER_SETTINGS`，没有「全局默认」那一层了）。
    *
    * 开关关掉 = 这一轮不挂内置 `browser_*` 工具、也不追加提示词里的浏览器说明；
    * 会话挂了 `playwright-mcp` 这类**同名**工具时，内置那一侧的 `browser_*` 会自动让位
@@ -2233,6 +2233,15 @@ export type AgentStreamEvent =
       attempt: number
       maxRetries: number | null
       /**
+       * 这一次尝试失败的**原因原文**（`describeError(err)`，如
+       * `AI_APICallError: concurrency reached, current: 11, limit: 10`）。
+       *
+       * 有了它，前端那条「第 N 次重试」才能把「为什么在重试」一并说清 —— 否则用户只看到
+       * 次数在涨、不知道是被限流还是断网，也就无从判断该等还是该改配置。
+       * 缺省（undefined）= 拿不到原因（老服务端 / 合成错误），前端只显示次数。
+       */
+      message?: string
+      /**
        * `true` = **断点续跑**：上一次尝试已经跑完若干步（工具调用与原样结果都在），
        * 这次不是从头再来，而是接着失败的那一步重新发请求。
        *
@@ -2638,11 +2647,10 @@ export interface TaskTriggerTemplate {
    */
   mcpServerIds?: string[]
   /**
-   * 触发会话的浏览器工具偏好（开关 + 来源），**缺省 = 跟随全局默认**
-   * （`CoreData.browserSettings`）。
+   * 触发会话的浏览器工具偏好（开关），**缺省 = 关**（`DEFAULT_BROWSER_SETTINGS`）。
    *
    * 为什么定时任务也需要它：`browser_*` 工具跑在**服务端**（用服务端那台机器的
-   * Chromium / Edge / Chrome），不依赖用户面前的窗口 —— 无人值守的任务照样能开网页、
+   * 内置 headless shell），不依赖用户面前的窗口 —— 无人值守的任务照样能开网页、
    * 抓数据。触发时原样落到会话的 `AgentConversation.browserSettings` 上，
    * 之后走的是与手动会话完全相同的那条装配路径（`chat-turn.ts`）。
    */

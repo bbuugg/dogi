@@ -21,6 +21,7 @@ export type SettingsTabId =
   | 'models'
   | 'acp'
   | 'mcp'
+  | 'browser'
   | 'skills'
   | 'plugins'
   | 'usage'

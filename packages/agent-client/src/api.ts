@@ -10,7 +10,7 @@
  * - 对话是 SSE：`event: <start|event|end>` + `data: <ChatStreamFrame>`。
  */
 import { API_ROUTES, FILES_API } from "@fizz/contracts/agent-api";
-import type { AppLanguage } from "@fizz/contracts";
+import type { AppLanguage, PrefsPatch, PrefsResult } from "@fizz/contracts";
 import type {
   AppLogFrame,
   AppLogResult,
@@ -159,7 +159,7 @@ import type { ShellDetectResult } from "@fizz/shells";
 import type { McpServerConfig, McpServerInput, McpToolInfo } from "@fizz/mcp";
 import type { SkillListResult } from "@fizz/skills";
 import type {
-  BrowserSettingsResult,
+  BrowserRuntimeResult,
   PluginSurfaceActionResult,
   PluginSurfaceContent,
   PluginSurfacesResult,
@@ -506,6 +506,24 @@ export function createApi(
   return {
     /** 连通性 + 配置概览；用于连接校验与顶栏状态 */
     health: () => request<HealthInfo>(API_ROUTES.health),
+
+    // ---------- 客户端偏好（服务端权威的一份） ----------
+
+    /**
+     * 读全量偏好（归一化后的）。功能上等价于 `state-ws` 的 `prefs` 快照域 ——
+     * 留着是为了「还没连上 WS / 快照丢了」时也能对账，以及给 CLI 之类的非 WS 客户端用。
+     */
+    getPrefs: () => request<PrefsResult>(API_ROUTES.prefs),
+
+    /**
+     * 提交改动项：**传几个 key 就改几个**，缺的保留（服务端 `normalizePrefsPatch` 做白名单 +
+     * 归一化）。落盘后服务端经 `state-ws` 推给所有端，所以调用方不需要自己广播。
+     */
+    savePrefs: (patch: PrefsPatch) =>
+      request<PrefsResult>(API_ROUTES.prefs, {
+        method: "POST",
+        body: JSON.stringify({ prefs: patch }),
+      }),
 
     // ---------- 附件上传 ----------
 
@@ -1177,7 +1195,7 @@ export function createApi(
     getSystemMonitorSettings: () =>
       request<SystemMonitorSettings>(API_ROUTES.systemSettings),
     /**
-     * 保存系统监控偏好。**缺字段 = 保留**（与 saveBrowserSettings 同款语义）。
+     * 保存系统监控偏好。**缺字段 = 保留**（与其它偏好保存接口同款语义）。
      * 服务端落盘后会立刻同步采样器（关 = 停采，开 = 重新起采）。
      */
     saveSystemMonitorSettings: (patch: Partial<SystemMonitorSettings>) =>
@@ -1937,18 +1955,32 @@ export function createApi(
         body: JSON.stringify(patch),
       }),
 
-    // ---------- 浏览器（全局默认 + 本机探测） ----------
+    // ---------- 浏览器（本机运行时） ----------
     /**
-     * 读浏览器**全局默认偏好**（新会话的默认值）+ **本机**探测到的可用来源。
+     * 自带浏览器的安装状态（装在哪、占多少、是否正在装）+ 最近一次安装任务。
      *
-     * 会话自己的偏好随会话落库（走 `setConversationTarget`）；这个接口回答的是
-     * 「新会话默认怎么配」与「本机装了哪些浏览器」。
-     *
-     * 探测结果只用来在工具条的来源菜单里标注「哪几个装没装」（`bundled` 在多数机器上是灰的），
-     * 不参与任何判定 —— 服务端不拿它拦路（没探测到也可能是探测规则不覆盖的安装方式）。
+     * `runtime.installed` 是「装没装」的唯一判据（`refresh()` 也读它来填
+     * `browserInstalled`，决定工具条那颗开关显不显示）。
      */
-    getBrowserSettings: () =>
-      request<BrowserSettingsResult>(API_ROUTES.browserSettings),
+    getBrowserRuntime: () =>
+      request<BrowserRuntimeResult>(API_ROUTES.browserRuntime),
+
+    /**
+     * 开始安装自带浏览器（幂等，**立刻返回**）。
+     *
+     * 下载约 150MB，挂在后台任务上跑：返回的 `task` 立刻是 `running`，
+     * 之后轮询 `getBrowserRuntime` 或直接看状态栏那张任务列表。
+     */
+    installBrowserRuntime: () =>
+      request<BrowserRuntimeResult>(API_ROUTES.browserRuntimeInstall, {
+        method: "POST",
+      }),
+
+    /** 卸载自带浏览器（先关掉所有浏览器会话，再删目录） */
+    uninstallBrowserRuntime: () =>
+      request<BrowserRuntimeResult>(API_ROUTES.browserRuntime, {
+        method: "DELETE",
+      }),
 
     // ---------- 插件（磁盘上的 .ts / .js，服务端发现；不加载模块） ----------
     //

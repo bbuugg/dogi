@@ -492,6 +492,8 @@ export function createConversationRunLoop(ctx: ConvCore) {
         retryNotice: {
           attempt: event.attempt,
           maxRetries: event.maxRetries,
+          // 失败原文（限流 / 断网 / 空响应）：提示里跟在次数后面，用户才知道在等什么
+          ...(event.message ? { message: event.message } : {}),
           ...(event.resume ? { resume: true } : {}),
         },
         messages: s.messages.map((m) =>

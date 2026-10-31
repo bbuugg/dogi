@@ -50,7 +50,7 @@ import type {
 import type { McpToolInfo } from "@fizz/mcp";
 import type { SkillListResult } from "@fizz/skills";
 // 浏览器偏好是「前后端共用 + 浏览器安全」的契约，真源在 ./browser（渲染端面板也在用它）
-import type { BrowserChannelProbe, BrowserSettings } from "./browser";
+import type { BrowserRuntime, BrowserSettings } from "./browser";
 
 /** 所有接口都挂在这个前缀下（反代好配） */
 export const API_PREFIX = "/api";
@@ -256,6 +256,21 @@ export const API_ROUTES = {
    */
   systemLanguage: "/api/system/language",
   /**
+   * **客户端偏好的统一入口**（全局一份）：GET / POST `/api/prefs`。
+   *
+   * GET  → `PrefsResult`（服务端归一化后的**全量**一份，见 `./prefs` 的 `PREF_KEYS`）；
+   * POST → body `{ prefs: PrefsPatch }`，**只提交改动的 key**（提交 1 个改 1 个、提交 10 个
+   * 改 10 个，不为每个偏好单开接口）。缺的 key = 保留原值，非法值直接丢弃。
+   *
+   * 落盘后由 `state-ws` 的 `prefs` 域推给**所有**端，所以不只是「保存成功」，而是
+   * 「任何地方打开都是同一份」。为什么不做成 WS 上行：写操作在本仓一律走 HTTP（鉴权、
+   * 错误码、并发都现成），WS 只做下行推送，两条通道各管一半最省事。
+   *
+   * ⚠️ 设备形态相关的偏好（字号 / 快捷键 / 通知 / 亮屏 / 面板宽度）**不在**这里，
+   * 理由见 `./prefs` 文件头。
+   */
+  prefs: "/api/prefs",
+  /**
    * 容器型项目的公网访问域名：GET / POST `/api/system/container-public`。
    *
    * GET 应答 `{ domains, wildcards, target, enabled }`（`domains` = 设置页里填的清单，
@@ -429,16 +444,26 @@ export const API_ROUTES = {
    */
   subagents: "/api/subagents",
   /**
-   * 浏览器**全局默认**（新会话的默认偏好）+ 本机探测到的可用来源：
-   * GET /api/browser/settings → `BrowserSettingsResult`。
+   * 自带浏览器（Playwright headless shell）的安装状态：
+   * - `GET` → `BrowserRuntimeResult`（状态 + 最近一次安装任务）
+   * - `DELETE` → 卸载（先关掉所有浏览器会话再删目录）
    *
-   * ⚠️ 每个会话自己的浏览器偏好（开关 / 来源）不在这个接口里，走 `conversationTarget`
-   * （PATCH）落库；这里只回答「新会话默认怎么配」与「本机装了哪些浏览器」。
+   * 这是「这台机器上到底有没有那套浏览器」的唯一数据源：`runtime.installed` 同时决定
+   * 输入框上方显不显示那颗开关、`web_fetch` / `screenshot` 要不要直接回绝。
    *
-   * ⚠️ 与 `/api/browser`（screencast 的 **WS** 端点）不是一个东西：那条是画面通道，
+   * 「Agent 用不用浏览器」是**会话级**偏好（`AgentConversation.browserSettings`，走
+   * `conversationTarget`），默认关 —— 没有全局那份。
+   *
+   * ⚠️ 与 `/api/browser`（screencast 的 **WS** 端点）不是同一个东西：那条是画面通道，
    * 升级请求在走到 HTTP 路由之前就被拦下了，这里只是普通 JSON 接口。
    */
-  browserSettings: "/api/browser/settings",
+  browserRuntime: "/api/browser/runtime",
+  /**
+   * 安装自带浏览器：`POST` → 立刻返回 `BrowserRuntimeResult`（`task` 是刚登记的后台任务）。
+   *
+   * 下载约 150MB，必须登记成后台任务：关掉设置页不会中断，进度与日志从任务详情里取。
+   */
+  browserRuntimeInstall: "/api/browser/runtime/install",
   /**
    * 这台机器上可用的终端（shell）清单：GET /api/terminal/shells → `ShellDetectResult`
    *
@@ -1908,6 +1933,15 @@ export interface AssistantSendInput {
    *   `packages/tools/src/project-tools.ts` 的 `guardMutation`，别按这里的档位去放松它。
    */
   permissionMode?: AiPermissionMode;
+  /**
+   * 模型请求失败后的自动重试次数。**0 = 不限制**（一直重试）；缺省 = `DEFAULT_MAX_RETRIES`。
+   *
+   * 与 `ChatRequest.maxRetries` **同一套语义、同一个客户端偏好**：助手面板也是「一轮对话」，
+   * 用户把设置页调到 20 就该按 20 跑。这条字段曾经缺席，于是助手链路恒按缺省的 2 次重试
+   * ——现象是「开头重试两次后，会话中途再失败就直接报错、不再重试」。
+   * 只对可重试的请求错误生效（网络中断 / 上游空响应），判据全在 `@fizz/agent` 的外层循环里。
+   */
+  maxRetries?: number;
 }
 
 export interface ChatStartInfo {
@@ -2360,18 +2394,15 @@ export interface SubagentSettingsResult {
 // ---------- 浏览器 ----------
 
 /**
- * 浏览器设置接口返回：**全局默认偏好**（新会话的默认值）+ **这台机器上探测到的可用来源**。
+ * 浏览器运行时接口返回：安装状态 + 最近一次安装任务。
  *
- * 会话级的偏好随会话落库（见 `AgentConversation.browserSettings`），这个接口只回答
- * 「新会话默认怎么配」与「本机装了哪些浏览器」。
- *
- * 探测结果只用于在工具条的来源菜单里标注「哪几个装没装」——`bundled` 在多数机器上都是灰的
- * （Playwright 只下过 headless shell，而面板走的是完整 Chromium），提前标出来，
- * 免得用户选了之后才在界面上看到「没有可用的浏览器」。
+ * `task` 为 null = 从没装过也没卸过（或者服务端重启过，后台任务清单不落盘）。
+ * 判断「正在安装」看 `runtime.downloading`，不要看 `task`（agent 工具的首次使用
+ * 也会触发同一次下载，那条路径没有任务）。
  */
-export interface BrowserSettingsResult {
-  browser: BrowserSettings;
-  detected: BrowserChannelProbe[];
+export interface BrowserRuntimeResult {
+  runtime: BrowserRuntime;
+  task: BackgroundTaskView | null;
 }
 
 // ---------- 应用日志 ----------

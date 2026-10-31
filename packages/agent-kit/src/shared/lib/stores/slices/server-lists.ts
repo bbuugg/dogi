@@ -67,8 +67,6 @@ import type {
 } from '@fizz/contracts/types'
 import type {
   AppLanguage,
-  BrowserChannelProbe,
-  BrowserSettings,
   ContainerProjectCreateInput,
   ContainerProjectUpdateInput,
   SystemMonitorSettings
@@ -162,14 +160,16 @@ export interface ServerListsSlice {
   /** 子任务（subagent）偏好；默认全关，见 GeneralTab 的「子任务」开关 */
   subagentSettings: SubagentSettings | null
   /**
-   * 浏览器**全局默认**偏好（新会话的默认值 + 本机探测）；null = 还没拉过。
+   * 内置浏览器（Playwright headless shell）装好了没有 —— 读 `/api/browser/runtime` 的
+   * `runtime.installed`，与真正 launch 时的判据同源。
    *
-   * 每个会话自己的偏好在会话对象上（`AgentConversation.browserSettings`），工具条读的是
-   * 「会话偏好 ?? 这份默认」（见 useAgentApp 的 agentAppFrom）。这里也供新建会话取初值。
+   * 唯一的用途：没装就**不渲染**输入框上方那颗浏览器开关（点了必报
+   * `Executable doesn't exist` 的开关不如不显示）。装 / 卸完成后要 `refresh()` 一次，
+   * 否则这颗按钮要等下次全量刷新才出现。
+   *
+   * 每个会话自己的浏览器偏好在会话对象上（`AgentConversation.browserSettings`，默认关）。
    */
-  defaultBrowserSettings: BrowserSettings | null
-  /** 本机探测到的可用浏览器来源；只做工具条来源菜单的「未检测到」标注，不参与任何判定 */
-  browserDetected: BrowserChannelProbe[]
+  browserInstalled: boolean
   /**
    * 系统监控偏好（总开关）；`null` = 还没拉过。
    * 设置页「系统监控」小节的开关、以及状态栏是否渲染监控条都读它（见 `app-shell.tsx`）。
@@ -608,8 +608,7 @@ export const createServerListsSlice: StateCreator<AgentStore, [], [], ServerList
     conversationsLoaded: false,
     skills: null,
     subagentSettings: null,
-    defaultBrowserSettings: null,
-    browserDetected: [],
+    browserInstalled: false,
     systemMonitorSettings: null,
     language: getLanguage(),
     notesRoots: [],
@@ -636,7 +635,7 @@ export const createServerListsSlice: StateCreator<AgentStore, [], [], ServerList
           nextConversations,
           nextSkills,
           nextSubagents,
-          nextBrowser,
+          nextBrowserRuntime,
           nextSystemMonitor,
           nextLanguage,
           nextNotesRoots
@@ -659,9 +658,9 @@ export const createServerListsSlice: StateCreator<AgentStore, [], [], ServerList
           // ⚠️ 少了这一条，子任务开关保存成功也会显示未选中（用户报的 bug）：
           // `withRefresh` 的所有动作都靠**这一趟全量刷新**写回 store，漏刷新哪一项，
           // 那一项的 UI 就一直停在初始值（这里 subagentSettings 恒为 null → enabled 恒 []）。
-          // 浏览器全局默认 + 本机探测：新建会话取默认初值、工具条给来源菜单标注「未检测到」
           api.listSubagents(),
-          api.getBrowserSettings(),
+          // 内置浏览器装没装：决定工具条那颗开关显不显示（`runtime.installed`）
+          api.getBrowserRuntime(),
           // 系统监控偏好同理：`saveSystemMonitorSettings` 也走 withRefresh，
           // 漏了这一条，关掉监控后状态栏的监控条不会消失（开关也会弹回去）。
           api.getSystemMonitorSettings(),
@@ -689,8 +688,7 @@ export const createServerListsSlice: StateCreator<AgentStore, [], [], ServerList
           conversationsLoaded: true,
           skills: nextSkills,
           subagentSettings: nextSubagents.subagents,
-          defaultBrowserSettings: nextBrowser.browser,
-          browserDetected: nextBrowser.detected,
+          browserInstalled: nextBrowserRuntime.runtime.installed,
           systemMonitorSettings: nextSystemMonitor,
           language: nextLanguage.language,
           notesRoots: nextNotesRoots,

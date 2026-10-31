@@ -438,7 +438,12 @@ export function ConversationTab({
         label: tr('浏览器'),
         title: tr('浏览器画面'),
         icon: <Globe className="size-4" />,
-        content: <BrowserPane conversationId={key} />,
+        /*
+         * `active`：只让**正看着浏览器画面**的面板「连上就自动拉起浏览器」。
+         * 两个条件缺一不可 —— 会话标签可能在后台（`active=false`），也可能前台但面板
+         * 停在文件 / 终端上（浏览器标签只是挂着没在看）：那两种都会白起一个 Chromium。
+         */
+        content: <BrowserPane conversationId={key} active={active && sideTab === 'browser'} />,
         onClose: () => closeSideTabOf(key, tabKey)
       }
     }
@@ -630,6 +635,35 @@ export function ConversationTab({
                 </DropdownMenu>
               </div>
             )}
+            {/*
+              浏览器画面：Agent 调 `browser_*` 时会自动挂出来（见 `app-shell` 的
+              `browser-active`），这颗按钮是「收起来之后想再看一眼」的**手动入口** ——
+              与 Agent 共用同一个浏览器，面板里能自己点、自己输地址（见 `BrowserPane`）。
+
+              ⚠️ 只在真实会话里给：草稿标签的 key 是 `draft:<工作区>`，面板会连到一个
+              不存在的 `agent-browser:` 会话（只显示「浏览器未启动」）。发第一条消息后
+              标签被复用成真实会话，按钮自然出现。
+            */}
+            {conversationId && (
+              <div className="hidden sm:flex">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      className={cn('h-7! w-8! p-0!', sideTab === 'browser' && 'text-primary')}
+                      aria-label={tr('浏览器')}
+                      disabled={!workspaceId}
+                      onClick={() => toggleSideTabOf(key, 'browser')}
+                    >
+                      <Globe className="size-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">
+                    {sideTab === 'browser' ? tr('收起面板') : tr('浏览器画面')}
+                  </TooltipContent>
+                </Tooltip>
+              </div>
+            )}
             {/* 容器型项目才有「预览」：在会话面板里直接看容器跑起来的页面。
                 桌面端是 `<webview>`（不受 X-Frame-Options 限制），web / 手机端退回 iframe。 */}
             {containerPreview && (
@@ -746,9 +780,11 @@ export function ConversationTab({
                    菜单里的这一项也得跟着判，否则手机上会出现一颗点开没反应的开关。 */
                 canExpandPanel={tabKeys.length > 0}
                 showPreview={containerPreview}
+                showBrowser={!!conversationId}
                 onToggleFiles={() => toggleSideTabOf(key, 'files')}
                 onToggleGit={() => toggleSideTabOf(key, 'git')}
                 onTogglePreview={() => toggleSideTabOf(key, 'preview')}
+                onToggleBrowser={() => toggleSideTabOf(key, 'browser')}
                 onTogglePanel={() => toggleSidePanelOf(key)}
               />
             )}

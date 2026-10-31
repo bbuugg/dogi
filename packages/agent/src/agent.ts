@@ -707,7 +707,18 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
     typeof opts.model.temperature === 'number' && Number.isFinite(opts.model.temperature)
       ? opts.model.temperature
       : undefined
-  /** 已经重试过几次（发 retry 事件时先 +1，作为「第几次重试」） */
+  /**
+   * **连续**失败了几次（发 retry 事件时先 +1，作为「第几次重试」）。
+   *
+   * ⚠️ 不是「整轮累计」：如果失败的这次尝试**产出过内容、且那份内容留得住**（能续跑，
+   * 前端不清空），这里就清零（catch 里 `if (canResume && attemptProduced) retries = 0`）。
+   * 语义上它衡量的是「上游连续抽了几次」，而不是「这一轮一共重试了几次」。
+   *
+   * 为什么必须这样（用户报的）：一轮里上游会发多次请求（多步续写，每步一次）。开头
+   * 网络抖动用掉几次重试、随后某步正常产出，再往后撞上限流 —— 若按整轮累计，`retries`
+   * 早已顶到 `maxRetries`，最后一次机会都没有，只能直接报错。而那段「正常产出」恰好
+   * 证明上游是好的，后面的失败是新的一段故障，理应重新给足次数。
+   */
   let retries = 0
   /**
    * 这一轮是否**已经真实执行过工具**（发出过 tool-call）。
@@ -961,6 +972,16 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
      * 见流循环里的 error 分支与收尾处的失败判定。
      */
     let attemptError: string | null = null
+    /**
+     * 这一次尝试**是否已经产出了实质内容**（正文 / 思考有字，或已发出工具调用）。
+     *
+     * 命中就把 `retries` 清零 —— 上游已经正常工作了，之后若再失败属于**新的一段**故障，
+     * 不该继续吃开头几次抖动消耗掉的额度（见 `retries` 的注释）。
+     *
+     * ⚠️ 判据只认「带内容的事件」：`finish` / `usage` 这类收尾事件**不算**。空响应尝试
+     * 也会收到 `finish`，拿它当产出就等于给「上游永远回空」开了无限重试（次数永远不涨）。
+     */
+    let attemptProduced = false
     /**
      * 这条错误是不是**已经下发给前端**了。有产出时不攒着、当场下发，收尾处就不能再说一遍
      * （重试用尽时的终态分支用它去重）。
@@ -1362,6 +1383,21 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
           }
           errorSent = true
         }
+        /**
+         * 记下「这次尝试产出了实质内容」（只判一次）。真正拿它清零重试计数的是 catch 里的
+         * 重试分支 —— 那里才知道这份产出**留不留得住**（能不能续跑）。
+         *
+         * 正文 / 思考判空串：上游常常先发一个 `delta: ''` 的占位，那不是「回复了内容」，
+         * 认它会让「空响应 + 空增量」的故障无限重试。
+         */
+        if (
+          !attemptProduced &&
+          (event.type === 'tool-call' ||
+            ((event.type === 'text-delta' || event.type === 'reasoning-delta') &&
+              event.delta.trim() !== ''))
+        ) {
+          attemptProduced = true
+        }
         if (event.type === 'tool-call') {
           toolExecuted = true
           // 派活工具：从这一刻开始盯它，直到对应的 tool-result 回来
@@ -1507,7 +1543,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         resumeMessages = null
         resumeSteps = 0
         carriedUsage = rawUsage
-        emitEvent({ type: 'retry', attempt: retries + 1, maxRetries: null })
+        emitEvent({ type: 'retry', attempt: retries + 1, maxRetries: null, message })
         continue
       }
       /**
@@ -1521,6 +1557,22 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
        * 两种都发同一条 `retry` 事件，靠 `resume` 区分前端要不要清空已渲染的内容。
        */
       const canResume = resumeMessages !== null
+      /**
+       * 这一段失败之前**已经产出过内容、且这份内容留得住**（能续跑，前端不清空）→ 重试
+       * 计数清零，重新计。
+       *
+       * 语义从「整轮累计」改成「连续失败次数」（用户要求）：上游既然正常吐过内容，之后
+       * 撞上限流就是新的一段故障，理应重新给足 `maxRetries`。否则开头几次抖动把额度吃光，
+       * 走到中途再失败时一次机会都不剩 —— 也就是「开头重试两次，后面直接报错」。
+       *
+       * ⚠️ 两个限定缺一不可：
+       * - `canResume`：**整轮重来**会把这次尝试的输出整个清掉（前端清空、模型也当没发生），
+       *   那不算「回复了内容」；拿它清零就成了「吐半截就断」的无限重试（`agent.test.ts`
+       *   里那条「半截正文 + 失败 → 重跑整轮」的用例正是在钉这个上限）。
+       * - `attemptProduced`：只判能续跑还不够 —— 续跑起点是上一次留下的断点，这一次请求
+       *   一个字节都没吐就撞限流（并发上限一直没降下来时就是这样）若也清零，同样会无限重试。
+       */
+      if (canResume && attemptProduced) retries = 0
       if (
         isRetryableAttemptError(err) &&
         !steered &&
@@ -1534,6 +1586,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
           attempt: retries,
           // Infinity 无法 JSON 序列化：不限制时用 null 表示
           maxRetries: Number.isFinite(maxRetries) ? maxRetries : null,
+          // 失败原文一并带上：前端那条提示据此说明「为什么在重试」（限流 / 断网 / 空响应）
+          message,
           ...(canResume ? { resume: true } : {})
         })
         const waited = await sleepWithSignal(retryDelayMs(retries), runSignal)

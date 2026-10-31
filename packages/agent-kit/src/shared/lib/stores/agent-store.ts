@@ -20,8 +20,15 @@
  */
 import { create } from 'zustand'
 import type { StateCreator } from 'zustand'
+import { setLanguage } from '@fizz/i18n'
 import { loadConnection } from '@fizz/agent-client/web-host'
 import { getAgentHostOrNull } from '@fizz/agent-client/host'
+import { createApi } from '@fizz/agent-client/api'
+import { watchConversationPrefs } from '@fizz/agent-kit/shared/lib/stores/slices/conversation/storage'
+import { watchPermissionMode } from '@fizz/agent-kit/shared/lib/permission'
+import { watchStoredLanguage } from '@fizz/agent-kit/shared/lib/language'
+import { applyServerPrefs, configurePrefsSync } from '@fizz/agent-kit/shared/lib/prefs-sync'
+import { getSnapshot, subscribe } from '@fizz/agent-kit/shared/lib/state-ws'
 import { createConnectionSlice, type ConnectionSlice } from '@fizz/agent-kit/shared/lib/stores/slices/connection'
 import { createServerListsSlice, type ServerListsSlice } from '@fizz/agent-kit/shared/lib/stores/slices/server-lists'
 import { createConversationSlice, type ConversationSlice } from '@fizz/agent-kit/shared/lib/stores/slices/conversation'
@@ -106,6 +113,50 @@ export const useAgentStore = create<AgentStore>()((set, get, storeApi) => ({
   ...createAssistantSlice(set, get, storeApi),
   ...createTransferSlice(set, get, storeApi)
 }))
+
+/**
+ * 跨窗口偏好 → store 的**唯一接线处**。
+ *
+ * 桌面端的设置页是独立窗口（独立渲染进程 = 另一份 store 单例），那边改完只写了
+ * localStorage；本窗口不重读就一直按旧值跑 —— 现象是「改完设置必须重启 app」。
+ * 总线机制见 `prefs-sync`：写盘自动广播，这里只负责「收到就重读并 set」。
+ *
+ * ⚠️ **新增本地偏好就往这里加一行**（配套 `writePref` 写盘），别在 slice / 组件里
+ * 各自 `window.addEventListener('storage', ...)` —— 那正是这次漏掉重试次数的原因。
+ * 服务端权威配置不用加：`state-ws` 快照域会推给所有端（见 `bindStateWs`）。
+ */
+function bindCrossWindowPrefs(): void {
+  watchConversationPrefs((prefs) => useAgentStore.setState(prefs))
+  watchPermissionMode((permissionMode) => useAgentStore.setState({ permissionMode }))
+  watchStoredLanguage((language) => {
+    // 界面文案是 i18n 单例（进程级），store 里那份是给设置页回显用的，两边一起换
+    setLanguage(language)
+    useAgentStore.setState({ language })
+  })
+
+  /*
+   * ---- 需要跨端一致的那批（`PREF_KEYS`）：上行一个合并 patch，下行靠 `prefs` 快照域 ----
+   *
+   * 上行：`writePref` 已经把本地写好了（首帧 / 离线可用），这里只负责把「改过的 key」合并
+   * 成一次 `POST /api/prefs`（连续改 10 项 = 一次请求，不按 key 开接口）。
+   * 连接要**现取**：desktop 的连接是宿主注入的，模块求值时可能还没有。
+   */
+  configurePrefsSync((patch) => {
+    const connection = loadConnection()
+    if (!connection) return Promise.reject(new Error('no connection'))
+    return createApi(connection).savePrefs(patch)
+  })
+
+  /*
+   * 下行：服务端落盘后 `state-ws` 推全量快照 → 写本地缓存 → 唤醒所有监听者。
+   * 这样桌面主窗口 / 设置窗口 / 手机 / 另一个标签看到的都是同一份，且**不需要重启**。
+   */
+  subscribe('prefs', () => applyServerPrefs(getSnapshot<unknown>('prefs')))
+  const snapshot = getSnapshot<unknown>('prefs')
+  if (snapshot) applyServerPrefs(snapshot)
+}
+
+bindCrossWindowPrefs()
 
 /**
  * 补读一次连接。

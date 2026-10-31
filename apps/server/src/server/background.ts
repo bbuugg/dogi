@@ -12,8 +12,8 @@
  */
 
 import { join } from 'node:path'
+import { DEFAULT_BROWSER_SETTINGS } from '@fizz/contracts'
 import { resolveDataDir } from '@fizz/workspace'
-import { domain } from './state'
 
 /**
  * 拉起全部「服务开着就该跑」的后台维护（等价于旧 Next 版的 `instrumentation.register`）。
@@ -84,17 +84,16 @@ export function startBackgroundServices(): void {
   run('container-sweep', () => {
     void import('./container-projects/purge').then((m) => m.sweepOrphanContainers())
   })
-  // 浏览器引擎配置：把持久化 profile 落到数据目录下（登录态活得过会话重启），
-  // 并把「用哪个浏览器」接到设置里的偏好上。
+  // 浏览器引擎配置：把持久化 profile 落到数据目录下（登录态活得过会话重启）。
   // desktop / web 共享同一份后端代码，这里一处配置两者都生效。
   //
-  // ⚠️ channel 传的是**函数**不是值：引擎在每次 start() 时现取（见 `resolveBrowserChannel`），
-  // 所以用户在设置里改完来源，下次打开浏览器面板就生效，不用重启服务。
+  // 来源（channel）已经没有选项了（`normalizeBrowserSettings` 恒为 `bundled`），这里直接给
+  // 常量；传函数是引擎的契约（每次 start() 现取），保留形态，别改成静态值。
   run('browser', () => {
     void import('@fizz/tools').then((m) =>
       m.configureBrowser({
         profilesRoot: join(resolveDataDir(), 'browser-profiles'),
-        channel: () => domain.getBrowserSettings().channel
+        channel: () => DEFAULT_BROWSER_SETTINGS.channel
       })
     )
   })

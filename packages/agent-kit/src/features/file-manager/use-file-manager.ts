@@ -18,6 +18,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { fileToBase64 } from '@fizz/agent-client/api'
+import {
+  subscribePrefs,
+  writePref
+} from '@fizz/agent-kit/shared/lib/prefs-sync'
 import type {
   FmEntry,
   FmListResult,
@@ -122,21 +126,28 @@ export function useFileManager() {
 
   const setView = useCallback((next: FileManagerView) => {
     setViewState(next)
-    try {
-      localStorage.setItem(VIEW_KEY, next)
-    } catch {
-      /* 隐私模式下写不了，不影响本次会话 */
-    }
+    // 写盘即广播 + 同步到服务端（见 prefs-sync）
+    writePref(VIEW_KEY, next)
   }, [])
 
   const setShowHidden = useCallback((next: boolean) => {
     setShowHiddenState(next)
-    try {
-      localStorage.setItem(HIDDEN_KEY, next ? '1' : '0')
-    } catch {
-      /* 同上 */
-    }
+    writePref(HIDDEN_KEY, next ? '1' : '0')
   }, [])
+
+  /*
+   * 服务端下行 / 别的窗口改了视图偏好：本组件用的是 useState，不会自己重读。
+   * 同窗口写盘不触发 `storage` 事件，所以订阅总线兜住（首次挂载也会立刻收到一次无意义的通知，
+   * 值没变时 setState 是同一份值，不会多渲染）。
+   */
+  useEffect(
+    () =>
+      subscribePrefs([VIEW_KEY, HIDDEN_KEY], () => {
+        setViewState(readStoredView())
+        setShowHiddenState(readStoredHidden())
+      }),
+    []
+  )
 
   // ---------------- 读 ----------------
 

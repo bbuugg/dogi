@@ -7,6 +7,11 @@
  *
  * 会话 id 由 conversationId 推出（`agent-browser:<conversationId>`），与 Agent 工具
  * 是**同一份浏览器** —— 模型导航 / 点击后，这里立刻能看到画面。
+ *
+ * **面板被打开 / 切到前台就自动把浏览器拉起来**（不必等 Agent 先调 `browser_navigate`，
+ * 也不用先手输一个网址）：连接带 `autostart=1`，切到前台时再补一条 `ensure`。
+ * 只在**正看着这一页**时才做 —— 后台挂着的面板不启动，否则刷新一次页面就会给每个
+ * 开过浏览器标签的会话白起一个 Chromium。
  */
 'use client'
 
@@ -15,6 +20,7 @@ import {
   ArrowLeft,
   ArrowRight,
   Globe,
+  Loader2,
   Monitor,
   RotateCw,
   Smartphone
@@ -57,32 +63,63 @@ function modifiersOf(e: KeyboardEvent | MouseEvent): number {
 interface BrowserPaneProps {
   conversationId: string
   workspaceId?: string
+  /**
+   * 面板是不是**正被看着**（它所在的会话标签就是当前标签）。
+   *
+   * 只在**首次挂载**那一刻决定要不要「连上就自动拉起浏览器」：标签内容一律常挂载，
+   * 后台标签的面板也活着，无条件自动拉起等于刷新一次页面就给每个开过浏览器标签的
+   * 会话白起一个 Playwright（见 `ensureBrowserSession` 的注释）。
+   */
+  active?: boolean
 }
 
 /**
  * 注意：`workspaceId` 当前未使用（浏览器进程跟会话走，不跟工作区目录走），但保留入口
  * 以便将来「浏览器落盘路径按工作区区分」时不用改调用方。
  */
-export function BrowserPane({ conversationId }: BrowserPaneProps) {
+export function BrowserPane({ conversationId, active = true }: BrowserPaneProps) {
   const imgRef = useRef<HTMLImageElement>(null)
   const socketRef = useRef<ReturnType<typeof openBrowserSocket> | null>(null)
   const buttonsMaskRef = useRef(0)
+  /**
+   * 「连上就拉起浏览器」的初值：只取**首次挂载**那一刻的 `active`。
+   *
+   * 事后 `active` 变了不跟着重连 —— 这个参数只在连接建立的那一刻有用，而重连要断开
+   * 重订 WS（画面重放、滚动回顶），为它付这个代价不值得。
+   */
+  const autostartRef = useRef(active)
 
   const [frame, setFrame] = useState<BrowserFrame | null>(null)
   const [state, setState] = useState<BrowserSessionState | null>(null)
   const [closed, setClosed] = useState(false)
+  /** 服务端给的关闭原因（启动失败 / 被 Agent 关掉）：有就显示，别只报「未启动」让人猜 */
+  const [closeReason, setCloseReason] = useState<string | null>(null)
   const [noSession, setNoSession] = useState(true)
+  /**
+   * 正在拉起浏览器：launch 一个 Chromium 要一两秒（冷启动更久），这期间既没有帧也
+   * 没有 state，不区分就会一直顶着「浏览器未启动」，看着像点了没反应。
+   */
+  const [starting, setStarting] = useState(false)
   const [address, setAddress] = useState('')
 
   useEffect(() => {
+    const autostart = autostartRef.current
     setFrame(null)
     setState(null)
     setClosed(false)
+    setCloseReason(null)
     setNoSession(true)
+    setStarting(autostart)
     buttonsMaskRef.current = 0
 
-    const socket = openBrowserSocket(conversationId)
+    const socket = openBrowserSocket(conversationId, { autostart })
     socketRef.current = socket
+
+    /*
+     * 兜底：万一服务端没按 `autostart` 把浏览器拉起来（旧版服务端），别让人对着
+     * 「正在启动浏览器…」无限等 —— 到点退回「未启动」空态，重新打开标签还能再来一次。
+     */
+    const startTimeout = autostart ? setTimeout(() => setStarting(false), 20_000) : undefined
 
     const offMessage = socket.onMessage((data) => {
       if (typeof data !== 'string') return
@@ -95,21 +132,28 @@ export function BrowserPane({ conversationId }: BrowserPaneProps) {
       if (event.type === 'frame') {
         setFrame(event as BrowserFrame)
         setNoSession(false)
+        setStarting(false)
       } else if (event.type === 'state') {
         const s = event as BrowserSessionState
         setState(s)
         setAddress(s.url)
         setNoSession(false)
+        setStarting(false)
       } else if (event.type === 'closed') {
         setClosed(true)
+        setStarting(false)
+        setCloseReason(event.reason || null)
       }
     })
-    const offClose = socket.onClose(() => {
+    const offClose = socket.onClose((reason) => {
       // 连接被服务端带原因关掉（如会话不存在）：当成「浏览器未启动」显示
       setClosed(true)
+      setStarting(false)
+      if (reason) setCloseReason(reason)
     })
 
     return () => {
+      if (startTimeout) clearTimeout(startTimeout)
       offMessage()
       offClose()
       socket.close()
@@ -121,6 +165,24 @@ export function BrowserPane({ conversationId }: BrowserPaneProps) {
   const send = useCallback((msg: BrowserClientMessage) => {
     socketRef.current?.send(JSON.stringify(msg))
   }, [])
+
+  /**
+   * 「切到浏览器画面就拉起浏览器」的补丁通道。
+   *
+   * 连接参数里的 `autostart` 只在**建立连接那一刻**有用，而连接是长命的：面板可能先是
+   * 挂在后台（`active=false`，当初没拉起），后来才被切到前台。这时连接已 OPEN，
+   * 补发一条 `ensure` 让服务端拉起即可 —— 不用重连（重连会丢画面、滚动回顶）。
+   *
+   * 已经有画面（`noSession=false`）或已关闭（`closed`）时不发：前者不需要，后者是
+   * 「AI 把它关了 / 启动失败」，再发只会反复拉起。
+   */
+  useEffect(() => {
+    if (!active || closed || !noSession) return
+    setStarting(true)
+    send({ type: 'ensure' })
+    const timer = setTimeout(() => setStarting(false), 20_000)
+    return () => clearTimeout(timer)
+  }, [active, closed, noSession, send])
 
   /**
    * 发一条**输入**事件（鼠标 / 滚轮 / 键盘）。
@@ -215,20 +277,32 @@ export function BrowserPane({ conversationId }: BrowserPaneProps) {
 
   if (closed) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
+      <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-sm text-muted-foreground">
         <Globe className="size-8 opacity-40" />
         <div>浏览器未启动</div>
-        <div className="text-xs">让 AI 调用 browser_navigate 打开一个网址即可在此查看画面</div>
+        <div className="text-xs">
+          {closeReason ?? '让 AI 调用 browser_navigate 打开一个网址即可在此查看画面'}
+        </div>
       </div>
     )
   }
 
   if (noSession) {
+    /* 自动启动进行中：给个转圈 + 一句「在启动」，否则启动那两秒像点了没反应 */
+    if (starting) {
+      return (
+        <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-sm text-muted-foreground">
+          <Loader2 className="size-6 animate-spin opacity-40" />
+          <div>正在启动浏览器…</div>
+          <div className="text-xs">首次启动要一两秒，装的是外部浏览器时更久</div>
+        </div>
+      )
+    }
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
+      <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-sm text-muted-foreground">
         <Globe className="size-8 opacity-40" />
         <div>浏览器未启动</div>
-        <div className="text-xs">在上方地址栏输入网址回车打开，或让 AI 调用 browser_navigate</div>
+        <div className="text-xs">让 AI 调用 browser_navigate 打开一个网址即可在此查看画面</div>
       </div>
     )
   }

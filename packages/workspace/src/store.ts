@@ -45,16 +45,16 @@ import { normalizeModelEntries } from './domain'
 // 「列出来的」子路径写了 alias（前缀匹配下未列出的子路径会被拼成 index.ts/browser），
 // 而根入口四处都登记过。browser.ts 本身就是浏览器安全的，从根入口引不会带进 Node 代码。
 import {
-  normalizeBrowserSettings,
-  DEFAULT_BROWSER_SETTINGS,
-  type BrowserSettings,
   normalizeSystemMonitorSettings,
   DEFAULT_SYSTEM_MONITOR_SETTINGS,
   type SystemMonitorSettings,
   normalizeLanguage,
   type AppLanguage,
   normalizeContainerPublicSettings,
-  type ContainerPublicSettings
+  type ContainerPublicSettings,
+  normalizePrefs,
+  DEFAULT_PREFS,
+  type PrefsSnapshot
 } from '@fizz/contracts'
 import {
   fallbackConversationRoot,
@@ -177,17 +177,6 @@ export interface CoreData {
   /** 子任务（subagent）偏好；默认全关，见 contracts 的 SubagentSettings */
   subagentSettings: SubagentSettings
   /**
-   * 浏览器**全局默认**偏好（新会话的默认开关 + 来源）；默认**关** + auto
-   * —— 浏览器工具是「用到才开」的能力，不再默认挂进每一轮。
-   *
-   * 每个会话的实际偏好存在会话自己身上（`AgentConversation.browserSettings`），新建会话
-   * 时以它为初值。
-   *
-   * ⚠️ 这里的 `enabled` **没有 UI 入口能改**（只有会话级那颗开关），落盘值靠代码里的默认值 +
-   * `DATA_VERSION` 迁移维护 —— 改默认值请同时 +1 版本号（见 `DATA_VERSION` 的注释）。
-   */
-  browserSettings: BrowserSettings
-  /**
    * 服务器性能监控偏好（总开关）：默认开，与「状态栏监控一直采着」的老行为一致。
    *
    * 全局一份而不是按项目：它决定的是**server 所在机器**的采样开销（采集器
@@ -199,6 +188,18 @@ export interface CoreData {
    * 默认中文；老数据文件没有这个字段 → `normalizeLanguage` 补 `zh`。
    */
   language: AppLanguage
+  /**
+   * **客户端偏好的服务端权威副本**（全局一份）：`PREF_KEYS` 里那些要跨端一致的 key。
+   *
+   * 为什么放在服务端：其中 `maxRetries` / `maxSteps` / `toolCallConcurrency` / `toolIntent`
+   * 是 **agent 循环真正读取的值**，而定时任务（`scheduler.ts`）不经过任何渲染端 ——
+   * 存在浏览器里的话，无人值守的任务永远只能拿到 `runAgent` 的缺省值。
+   *
+   * 形状与 localStorage 完全同形（`Record<key, string>`），前端 `writePref` 原样上行、
+   * 下行原样写回，不引入第二套序列化。归一化在 `normalizePrefs` 里做一次。
+   * 老数据文件没有这个字段 → 补成默认值（与加这个字段之前的前端行为一致）。
+   */
+  prefs: PrefsSnapshot
   /**
    * 容器型项目的**公网访问域名清单**（`<slug>.<domain>`，可多个）。
    *
@@ -279,9 +280,9 @@ function emptyData(): CoreData {
     conversations: [],
     skillSettings: { disabled: [], extraDirs: [] },
     subagentSettings: { enabled: [] },
-    browserSettings: { ...DEFAULT_BROWSER_SETTINGS },
     systemMonitorSettings: { ...DEFAULT_SYSTEM_MONITOR_SETTINGS },
     language: normalizeLanguage(undefined),
+    prefs: { ...DEFAULT_PREFS },
     containerPublicSettings: normalizeContainerPublicSettings(undefined),
     pluginSettings: {},
     globalPluginSettings: { disabled: [] },
@@ -305,27 +306,6 @@ function emptyData(): CoreData {
  */
 function arrayOr<T>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : []
-}
-
-/**
- * 浏览器**全局默认**（= 新会话的默认开关）的一次性迁移：v1 → v2。
- *
- * v1 的默认是「开」（浏览器工具一直挂着）；v2 起改成「关」（用到才开）。问题是老数据文件里
- * 已经**写着** `{ enabled: true }` —— `normalizeBrowserSettings` 只补缺失字段，不会改已写着的
- * 值，所以光改常量对已有安装完全不生效。
- *
- * 这里可以放心地直接压掉，因为那个全局 `enabled` **没有任何 UI 入口能改**：设置页「通用 →
- * 浏览器」那一节早就移除了，`domain.saveBrowserSettings` 也没有调用方 —— 落盘的 `true`
- * 只是老默认值的残留，不是用户的选择。（会话级的 `AgentConversation.browserSettings` 才是
- * 用户真正点过的，那份**不动**。）
- *
- * `version >= DATA_VERSION` 时原样返回，迁移只跑一次；此后手改数据文件里的这个字段是算数的。
- */
-function migrateBrowserSettings(value: unknown, version: number): BrowserSettings {
-  const settings = normalizeBrowserSettings(value)
-  return version >= DATA_VERSION
-    ? settings
-    : { ...settings, enabled: DEFAULT_BROWSER_SETTINGS.enabled }
 }
 
 /**
@@ -528,14 +508,14 @@ export class JsonStore {
         workspaces: Array.isArray(raw.workspaces) ? raw.workspaces : [],
         // 子任务偏好：老数据没有这个字段 / 手改坏了都归一化成「全关」
         subagentSettings: normalizeSubagentSettings(raw.subagentSettings),
-        // 浏览器偏好：缺字段 / 手改坏了归一化成默认值（关 + auto）；
-        // v1 数据文件里残留的旧默认值「开」由迁移压回默认值（见 migrateBrowserSettings）
-        browserSettings: migrateBrowserSettings(raw.browserSettings, fileVersion),
         // 系统监控偏好：老数据没有这个字段 → 归一化成默认值（开），
         // 也就是「和加这个开关之前的行为完全一致」，升级后监控照常。
         systemMonitorSettings: normalizeSystemMonitorSettings(raw.systemMonitorSettings),
         // 界面语言：新字段，旧数据文件没有 —— 默认中文
         language: normalizeLanguage(raw.language),
+        // 客户端偏好：新字段，旧数据文件没有 —— 按 `DEFAULT_PREFS` 补齐（与升级前的前端
+        // 行为一致）；已写着的值只有非法时才回落默认，合法值原样保留
+        prefs: normalizePrefs(raw.prefs),
         // 插件偏好：按项目归集（见 CoreData.pluginSettings）。老数据是**全局一份**
         // `{ disabled: [] }`，无从知道该落到哪个项目 —— 直接丢弃，相当于每个项目都
         // 回到「全启用」默认值（用户按需重新勾一遍即可）。

@@ -9,6 +9,7 @@ import type { SettingsCommonProps, SettingsExtraGroup } from '@fizz/agent-kit/fe
 import { AcpTab } from '@fizz/agent-kit/features/settings/AcpTab'
 import { AiPreferencesTab } from '@fizz/agent-kit/features/settings/AiPreferencesTab'
 import { AppearanceTab } from '@fizz/agent-kit/features/settings/AppearanceTab'
+import { BrowserTab } from '@fizz/agent-kit/features/settings/BrowserTab'
 import { ContainerTab } from '@fizz/agent-kit/features/settings/ContainerTab'
 import { GeneralTab } from '@fizz/agent-kit/features/settings/GeneralTab'
 import { HistoryTab } from '@fizz/agent-kit/features/settings/HistoryTab'
@@ -51,6 +52,7 @@ export function SettingsContent({
       {tab === 'skills' && <SkillsTab app={app} />}
       {tab === 'plugins' && <PluginsTab app={app} />}
       {tab === 'mcp' && <McpTab app={app} />}
+      {tab === 'browser' && <BrowserTab app={app} />}
       {tab === 'usage' && <UsageTab app={app} />}
       {tab === 'shortcuts' && (
         <ShortcutsTab

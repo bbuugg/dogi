@@ -7,6 +7,12 @@
  */
 import type { QueuedMessage } from "@fizz/contracts/types";
 import {
+  readPref,
+  removePref,
+  subscribePrefs,
+  writePref,
+} from "@fizz/agent-kit/shared/lib/prefs-sync";
+import {
   DEFAULT_MAX_RETRIES,
   DEFAULT_MAX_STEPS,
   DEFAULT_TOOL_CALL_CONCURRENCY,
@@ -24,15 +30,17 @@ const ACTIVE_CONVERSATION_KEY = "fizz.web.activeConversationId";
 /** confirm 审批超时（分钟）：默认 10，0 = 不超时 */
 const CONFIRM_TIMEOUT_KEY = "fizz.web.confirmTimeout";
 
-/** SSR 上没有 localStorage：各 loader 返回兜底值（客户端行为不变） */ function lsGet(
-  key: string,
-): string | null {
-  if (typeof window === "undefined") return null;
-  return window.localStorage.getItem(key);
+/**
+ * SSR 上没有 localStorage：各 loader 返回兜底值（客户端行为不变）。
+ *
+ * 读写统一走 `prefs-sync`：写盘即广播（浏览器给**别的窗口**发 `storage` 事件），
+ * 读侧只订阅一次就能覆盖所有偏好，不用每个 key 自己 `addEventListener`。
+ */
+function lsGet(key: string): string | null {
+  return readPref(key);
 }
 export function lsSet(key: string, value: string): void {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(key, value);
+  writePref(key, value);
 }
 
 export function loadActiveWorkspaceId(): string | null {
@@ -55,8 +63,7 @@ export function saveActiveConversationId(id: string | null): void {
  * 兜底到最新一条会话），所以这里不能只写空串。
  */
 export function clearActiveConversationId(): void {
-  if (typeof window === "undefined") return;
-  window.localStorage.removeItem(ACTIVE_CONVERSATION_KEY);
+  removePref(ACTIVE_CONVERSATION_KEY);
 }
 /**
  * 「用户明确要空态」是否**已落盘**（键在、但为空串）。
@@ -134,6 +141,55 @@ export function loadToolIntent(): boolean {
 }
 export function saveToolIntent(value: boolean): void {
   lsSet(TOOL_INTENT_KEY, value ? "1" : "0");
+}
+
+/**
+ * 「设置 → AI → 通用」里那批**每轮请求都会带**的偏好（重试次数 / 并发 / 步数 / 意图 /
+ * 审批超时），一次读齐 —— 专给跨窗口同步用（见 `watchConversationPrefs`）。
+ */
+export interface ConversationPrefs {
+  /** confirm 审批超时（分钟；0 = 不超时） */
+  confirmTimeoutMin: number;
+  /** 模型请求重试次数（0 = 不限制） */
+  maxRetries: number;
+  /** 一轮最多跑多少步（工具轮） */
+  maxSteps: number;
+  /** 同一批工具调用的并发上限 */
+  toolCallConcurrency: number;
+  /** 工具卡是否带「意图」 */
+  toolIntent: boolean;
+}
+
+export function loadConversationPrefs(): ConversationPrefs {
+  return {
+    confirmTimeoutMin: loadConfirmTimeout(),
+    maxRetries: loadMaxRetries(),
+    maxSteps: loadMaxSteps(),
+    toolCallConcurrency: loadToolCallConcurrency(),
+    toolIntent: loadToolIntent(),
+  };
+}
+
+const PREF_KEYS = new Set([
+  CONFIRM_TIMEOUT_KEY,
+  MAX_RETRIES_KEY,
+  MAX_STEPS_KEY,
+  TOOL_CONCURRENCY_KEY,
+  TOOL_INTENT_KEY,
+]);
+
+/**
+ * 订阅「**别的窗口**改了这批偏好」—— desktop 的设置页是独立窗口（另一个渲染进程 =
+ * 另一份 `useAgentStore` 单例），在那边改完只写了 localStorage，本窗口不重读就一直是
+ * 旧值（「改完设置必须重启 app」）。总线与跨窗口机制见 `prefs-sync`。
+ *
+ * 只覆盖跨窗口那一半：同窗口写盘不会触发 `storage` 事件，那半由 `setMaxRetries` 等
+ * 动作自己 `set({...})`（见 actions/settings.ts）。两半合起来才完整。
+ */
+export function watchConversationPrefs(
+  onChange: (prefs: ConversationPrefs) => void,
+): () => void {
+  return subscribePrefs([...PREF_KEYS], () => onChange(loadConversationPrefs()));
 }
 
 /**

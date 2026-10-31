@@ -35,19 +35,41 @@
  * 抛出并给出可读提示。
  *
  * 下载只在缺失时发生；模块级 Promise 去重，并发调用共享同一次下载，失败后可重试。
- * 下载不接 abortSignal（一次性成本，中止回合后下次调用直接复用同一份 Promise）。
+ * 下载接 abortSignal（用户点「停止」立刻 kill 子进程并 reject），进度经 `sinks` 转给
+ * 设置页的安装任务日志。
+ *
+ * ⚠️ **谁会触发下载**：设置页「浏览器」的『安装』是唯一显式入口。只剩内置浏览器引擎的
+ * launch 兜底（`browser/engine.ts` 的 `ensureChromiumReady()`）还会在缺失时自愈 —— 那是
+ * 「装配闸放过了、但运行时事后没了」的最后一道，正常路径走不到。
+ * `web_fetch` 的 `engine="browser"`（`BrowserRuntimeMissingError`）与 `screenshot` 都
+ * **不再**触发，没装就直接回一句去设置里装；`browser_*` 工具与浏览器面板也各自在
+ * 装配 / 连接处先挡（`chat-turn.ts`、`browser-ws.ts`）。
  */
 
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, readdirSync, statSync, type Dirent } from 'node:fs'
+import { rm } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
 
 /** 单次下载的总超时：网络再差 10 分钟也该有结论了，挂死比失败更难排查 */
 const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000
 
-/** 进行中的下载（模块级去重）；失败时清空，下次调用重新尝试 */
-let pendingDownload: Promise<void> | undefined
+/** 下载进度行的订阅者（设置页的安装任务把下载器输出转成后台任务日志） */
+type LineSink = (line: string) => void
+
+/**
+ * 进行中的下载（模块级去重）；失败时清空，下次调用重新尝试。
+ *
+ * `sinks` 与 promise 一起挂着：设置页的「安装」走 `startBackgroundTask`，而 Agent 工具
+ * 首次使用也会触发同一次下载 —— 后到的调用者只能拿到这个 Promise，拿不到子进程的
+ * stdout。把订阅者集合放在这里，两条路径才都能看到进度（否则安装任务的日志一片空白，
+ * 用户看着 150MB 下载毫无动静）。
+ */
+let pendingDownload: { promise: Promise<void>; sinks: Set<LineSink> } | undefined
+
+/** 目录占用的缓存：设置页轮询时不必每次重扫几千个文件（安装/卸载时清空） */
+const sizeCache = new Map<string, number>()
 
 /**
  * 工具在动态 import playwright 之前调用：确保 headless shell 可用（必要时先下载）。
@@ -57,7 +79,10 @@ let pendingDownload: Promise<void> | undefined
  * 对话点停止毫无反应，界面看着像卡死。现在 abort 立刻 kill 下载子进程并 reject，
  * 这一轮工具调用随即按「已中止」收场。
  */
-export function ensureChromiumReady(abortSignal?: AbortSignal): Promise<void> {
+export function ensureChromiumReady(
+  abortSignal?: AbortSignal,
+  onLine?: LineSink
+): Promise<void> {
   if (abortSignal?.aborted) {
     return Promise.reject(new Error('chromium 下载前已被中止（用户点了停止）。'))
   }
@@ -65,11 +90,26 @@ export function ensureChromiumReady(abortSignal?: AbortSignal): Promise<void> {
   if (dir !== undefined && existsSync(dir)) return Promise.resolve()
   // 模块级去重：并发调用共享同一次下载。**但传入的 signal 只对本次等待生效** ——
   // abort 时会 kill 掉共享的那个子进程，pendingDownload 清空，下次调用重新下载。
-  pendingDownload ??= downloadChromiumHeadlessShell(abortSignal).catch((err) => {
-    pendingDownload = undefined
-    throw err
-  })
-  return pendingDownload
+  if (!pendingDownload) {
+    const sinks = new Set<LineSink>()
+    const promise = downloadChromiumHeadlessShell(abortSignal, sinks).finally(() => {
+      // 收了就摘掉：`browserRuntimeInfo().downloading` 靠它判断「是否正在装」，
+      // 留着一条已完成的 Promise 会让设置页永远停在「安装中…」。
+      pendingDownload = undefined
+    })
+    pendingDownload = { promise, sinks }
+  }
+  const download = pendingDownload
+  if (onLine) {
+    download.sinks.add(onLine)
+    // 收场后摘掉订阅者：日志闭包会钉住设置页的 React 状态，不摘等于泄漏一份
+    void download.promise
+      .finally(() => download.sinks.delete(onLine))
+      .catch(() => {
+        /* 失败已由主 Promise 的调用方处理，这里只是清理订阅 */
+      })
+  }
+  return download.promise
 }
 
 /**
@@ -98,25 +138,16 @@ function headlessShellDir(): string | undefined {
   }
 }
 
-/**
- * 自带 headless shell 的目录；**没下载过返回 null**。
- *
- * 内置浏览器面板 / `browser_*` 工具与 web_fetch / screenshot 现在**共用同一份**
- * headless shell（见 `browser/resolver.ts` 的说明），所以这就是「Playwright 自带的
- * 浏览器能不能用」的判据 —— 供来源解析的 `detectBrowsers()` / `launchAttempts()` 用。
- */
-export function bundledBrowserDir(): string | null {
-  const dir = headlessShellDir()
-  return dir !== undefined && existsSync(dir) ? dir : null
-}
-
 /** playwright-core 的安装 CLI（asar 内的路径也可直接执行，见文件头说明） */
 function cliJsPath(): string {
   // exports 不暴露 ./cli.js：从包根拼（resolve('playwright-core') → index.js）
   return join(dirname(playwrightCoreRequire().resolve('playwright-core')), 'cli.js')
 }
 
-function downloadChromiumHeadlessShell(abortSignal?: AbortSignal): Promise<void> {
+function downloadChromiumHeadlessShell(
+  abortSignal: AbortSignal | undefined,
+  sinks: Set<LineSink>
+): Promise<void> {
   let cli: string
   try {
     cli = cliJsPath()
@@ -142,8 +173,20 @@ function downloadChromiumHeadlessShell(abortSignal?: AbortSignal): Promise<void>
     })
     let outTail = ''
     const tail = (acc: string, chunk: Buffer) => (acc + chunk.toString()).slice(-2000)
-    child.stdout.on('data', (c: Buffer) => (outTail = tail(outTail, c)))
-    child.stderr.on('data', (c: Buffer) => (outTail = tail(outTail, c)))
+    // 下载器的进度条用 `\r` 刷同一行，所以按行切要连 `\r` 一起当分隔符
+    const emit = (line: string) => {
+      for (const sink of sinks) sink(line)
+    }
+    const splitOut = lineSplitter(emit)
+    const splitErr = lineSplitter(emit)
+    child.stdout.on('data', (c: Buffer) => {
+      outTail = tail(outTail, c)
+      splitOut(c)
+    })
+    child.stderr.on('data', (c: Buffer) => {
+      outTail = tail(outTail, c)
+      splitErr(c)
+    })
 
     let settled = false
     const onAbort = () => {
@@ -199,4 +242,110 @@ function downloadChromiumHeadlessShell(abortSignal?: AbortSignal): Promise<void>
       )
     })
   })
+}
+
+/** 把子进程的字节流切成行（`\r` 与 `\n` 都算行尾），空行丢弃 */
+function lineSplitter(emit: LineSink): (chunk: Buffer) => void {
+  let buffer = ''
+  return (chunk) => {
+    buffer += chunk.toString()
+    const parts = buffer.split(/\r\n|\r|\n/)
+    buffer = parts.pop() ?? ''
+    for (const part of parts) {
+      const line = part.trim()
+      if (line) emit(line)
+    }
+    // 极端情况下（半截超长行）别让 buffer 无限长
+    if (buffer.length > 4000) {
+      emit(buffer.slice(-4000).trim())
+      buffer = ''
+    }
+  }
+}
+
+/** 浏览器运行时的安装状态（设置页「浏览器」一节的数据源） */
+export interface BrowserRuntimeInfo {
+  /** headless shell 是否已就绪 */
+  installed: boolean
+  /** 安装目录；连目录都反查不出（playwright-core 没装）时 null */
+  path: string | null
+  /** 磁盘占用（字节）；没装或统计失败 = null */
+  sizeBytes: number | null
+  /** 与 package.json 里 playwright-core 匹配的 revision；反查不出 null */
+  revision: string | null
+  /** 有没有下载正在进行（设置页据此禁用「安装」按钮） */
+  downloading: boolean
+}
+
+/**
+ * 运行时状态。**同步**读：目录遍历只有几千个文件、几十毫秒，放在 GET 里可接受；
+ * 扫描结果按目录缓存，安装 / 卸载时清掉（`sizeCache`），轮询不会反复扫盘。
+ */
+export function browserRuntimeInfo(): BrowserRuntimeInfo {
+  const dir = headlessShellDir() ?? null
+  const installed = dir !== null && existsSync(dir)
+  let sizeBytes: number | null = null
+  if (installed && dir) {
+    const cached = sizeCache.get(dir)
+    if (cached !== undefined) {
+      sizeBytes = cached
+    } else {
+      const size = directorySize(dir)
+      sizeCache.set(dir, size)
+      sizeBytes = size
+    }
+  }
+  return {
+    installed,
+    path: dir,
+    sizeBytes,
+    revision: dir ? (/chromium_headless_shell-(\d+)$/.exec(dir)?.[1] ?? null) : null,
+    downloading: pendingDownload !== undefined
+  }
+}
+
+/**
+ * 卸载自带浏览器（删掉 headless shell 目录）。
+ *
+ * ⚠️ 调用方必须**先关掉所有浏览器会话**：Windows 上正在运行的可执行文件删不掉
+ * （EBUSY / EPERM），会留下半个目录，比不装更糟（`existsSync` 仍为 true，
+ * 于是被当成「已安装」而 launch 失败）。
+ */
+export async function uninstallChromium(): Promise<void> {
+  const dir = headlessShellDir()
+  if (!dir) {
+    throw new Error(
+      '无法定位自带浏览器的安装目录（playwright-core 未安装或版本解析失败）。可直接删除 ms-playwright 目录下的 chromium_headless_shell-* 。'
+    )
+  }
+  await rm(dir, { recursive: true, force: true })
+  sizeCache.clear()
+}
+
+/** 递归统计目录占用（不跟随符号链接；读不了的文件跳过，不让统计失败拖垮接口） */
+function directorySize(dir: string): number {
+  let total = 0
+  const stack = [dir]
+  while (stack.length > 0) {
+    const current = stack.pop()!
+    let entries: Dirent[]
+    try {
+      entries = readdirSync(current, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      const full = join(current, String(entry.name))
+      if (entry.isDirectory()) {
+        stack.push(full)
+      } else if (entry.isFile()) {
+        try {
+          total += statSync(full).size
+        } catch {
+          /* 统计不到就少算，不影响「占了多少」的量级 */
+        }
+      }
+    }
+  }
+  return total
 }

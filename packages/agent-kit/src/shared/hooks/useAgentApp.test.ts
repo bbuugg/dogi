@@ -48,7 +48,7 @@ function makeStore() {
     acpAgents: [],
     mcpServers: [],
     runningConversations: {},
-    defaultBrowserSettings: null,
+    browserInstalled: false,
     getApi: () => ({}),
     scopedSettingsOf: () => SCOPED
   }

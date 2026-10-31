@@ -45,9 +45,7 @@ export function createTargetsActions(
   const browserBase = (conversationId: string | null): BrowserSettings =>
     (conversationId
       ? scopedSettingsOf(conversationId).browserSettings
-      : get().draftSettings.browserSettings) ??
-    get().defaultBrowserSettings ??
-    DEFAULT_BROWSER_SETTINGS;
+      : get().draftSettings.browserSettings) ?? DEFAULT_BROWSER_SETTINGS;
 
   return {
     setReasoningEffort: (effort, scope) => {

@@ -82,7 +82,15 @@ const GLOBAL_KEYS = [
    * 构建进度走 `onContainerImageBuildProgress` 回调标脏，起停走 docker 事件流，
    * 再加一条低频兜底比对 —— 见文件末尾 `tickDocker`。
    */
-  'containerProjects'
+  'containerProjects',
+  /**
+   * 客户端偏好（`CoreData.prefs`）。
+   *
+   * 为什么进全局域：`POST /api/prefs` 改完要**所有端**（桌面主窗口 / 设置窗口 / 手机 /
+   * 另一个标签）立刻看到同一份，而不是各自读自己的 localStorage。快照不大（十几个字符串），
+   * 但只在实际改动时推（`markDirty` 去重）。
+   */
+  'prefs'
 ] as const
 
 type GlobalKey = (typeof GLOBAL_KEYS)[number]
@@ -132,7 +140,12 @@ const GLOBAL_PROVIDERS: Record<GlobalKey, () => Promise<unknown>> = {
    * 轮次开始 / 结束时对话路由会 `markDirty(['activeRuns'])`。
    */
   activeRuns: async () => listActiveRuns(),
-  containerProjects: () => containerProjectsSnapshot()
+  containerProjects: () => containerProjectsSnapshot(),
+  /**
+   * 客户端偏好：直接读 store 里那份（`domain.getPrefs()` 已经归一化过）。
+   * 写入口只有 `POST /api/prefs`，落盘后由 `STORE_KEYS` 自动标脏。
+   */
+  prefs: async () => domain.getPrefs()
 }
 
 /** 概览：与 `app.ts` 的 `/api/health` 响应**逐字段一致** */
@@ -150,7 +163,7 @@ async function buildHealth(): Promise<{
   const skills = await listServerSkills(workspaces[0]?.path)
   return {
     name: 'fizz-server',
-    version: '0.0.13',
+    version: '0.0.14',
     hasModels: models.length > 0,
     workspaceCount: workspaces.length,
     conversationCount: conversations.length,

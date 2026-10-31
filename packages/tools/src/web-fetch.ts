@@ -19,15 +19,21 @@
  *
  * 单次抓取永远有结论：`timeoutMs` 默认 30000、钳在 [1000, 60000]，两种引擎都吃它
  * （fetch 用 AbortController 定时 abort，browser 传给 `page.goto`）。
- * 用户点「停止」时 abortSignal 一路传到最底层：fetch 直接 abort 请求、browser 关页面、
- * **连首次使用时的 chromium 下载也会被 kill**（见 playwright-browsers.ts）——
- * 早先下载那段不接中止，国内访问 playwright CDN 慢时能挂 10 分钟，点停止毫无反应。
+ * 用户点「停止」时 abortSignal 一路传到最底层：fetch 直接 abort 请求、browser 关页面。
  * 超时与主动中止返回**不同的文案**：模型据此知道是该换镜像 / 调大 timeoutMs，还是别重试。
+ *
+ * ## 不替用户下载浏览器
+ *
+ * `engine=browser` 需要 Playwright 的 headless shell（约 150MB）。这里**不再**调
+ * `ensureChromiumReady()` 自愈下载：一次抓取背后悄悄挂上十分钟的下载，界面上没有任何
+ * 进度，用户只知道「卡住了」；而且它会和「设置 → 浏览器」的安装任务抢同一次下载。
+ * 运行时由设置页显式安装，没装就立刻返回一句能执行的话（改用 fetch 引擎 / 让用户去装），
+ * 见 `BrowserRuntimeMissingError`。
  */
 import { tool, type ToolSet } from 'ai'
 import { z } from 'zod'
 import { summarizeLongOutput } from './output-log'
-import { ensureChromiumReady } from './playwright-browsers'
+import { browserRuntimeInfo } from './playwright-browsers'
 import { abortableSleep, launchHeadlessChromium, pageErrorMessage } from './headless'
 
 /**
@@ -200,16 +206,27 @@ async function formatPage(
   })
 }
 
+/**
+ * 缺运行时：**不是抓取失败**，所以走单独的类型，让 `execute` 回一段能执行的话
+ * （改用 `engine="fetch"` / 让用户去设置里装），而不是「web_fetch 抓取 … 失败：Executable
+ * doesn't exist」这种模型看了也不知道该干什么的报错。
+ */
+class BrowserRuntimeMissingError extends Error {
+  constructor() {
+    super('内置浏览器（Playwright headless shell）未安装')
+    this.name = 'BrowserRuntimeMissingError'
+  }
+}
+
 /** engine=browser：Playwright 无头浏览器跑 JS 后抓取 */
 async function fetchByBrowser(
   target: URL,
   timeout: number,
   abortSignal?: AbortSignal
 ): Promise<FetchedPage> {
-  // 首次使用会在线下载 chromium headless shell（约 150MB）。
-  // ⚠️ 下载**必须接 abortSignal**：国内访问 playwright CDN 常只有几 KB/s，一次拖几分钟，
-  // 不接的话用户点「停止」完全没反应（整轮卡到 10 分钟下载超时）。见 playwright-browsers.ts。
-  await ensureChromiumReady(abortSignal)
+  // 没装就直接回话，**不下载**（见文件头「不替用户下载浏览器」）。判据与工具条那颗
+  // 开关、`chat-turn` 的装配闸同源：都是 `browserRuntimeInfo().installed`。
+  if (!browserRuntimeInfo().installed) throw new BrowserRuntimeMissingError()
   // launch 超时 + playwright 未安装的可读报错都收在 headless.ts
   const browser = await launchHeadlessChromium(timeout)
   try {
@@ -309,7 +326,7 @@ export function buildWebFetchTool(root: string, stopHooks: WebFetchStopHooks = {
   return {
     web_fetch: tool({
       description:
-        '抓取网页并整理成结构化 Markdown 返回给模型。默认用 Node 原生 fetch 取静态 HTML（更快更轻量）；设置 engine="browser" 则改用 Playwright 无头浏览器跑 JS 渲染（适合 SPA / 动态内容、搜索结果页）。适合：联网查资料、读文档 / 博客 / 文章、从网页提取链接继续深挖。页面过长时会只回开头结尾，并把全文落盘到工作区文件（结果里给出相对路径与行号）；其余部分用 read_file 的 offset/limit 接着读，也可以用 search_files 检索。只读、不写任何文件。browser 引擎依赖 playwright + chromium（`npm i playwright && npx playwright install chromium`）。',
+        '抓取网页并整理成结构化 Markdown 返回给模型。默认用 Node 原生 fetch 取静态 HTML（更快更轻量）；设置 engine="browser" 则改用 Playwright 无头浏览器跑 JS 渲染（适合 SPA / 动态内容、搜索结果页）。适合：联网查资料、读文档 / 博客 / 文章、从网页提取链接继续深挖。页面过长时会只回开头结尾，并把全文落盘到工作区文件（结果里给出相对路径与行号）；其余部分用 read_file 的 offset/limit 接着读，也可以用 search_files 检索。只读、不写任何文件。browser 引擎需要内置浏览器运行时（headless shell），由用户在「设置 → 浏览器」里安装 —— 没装时这个引擎会直接告诉你改用 fetch，不会自行下载。',
       inputSchema: z.object({
         url: z.string().describe('要抓取的网页 URL，必须是 http(s)，如 https://example.com'),
         engine: z
@@ -374,6 +391,15 @@ export function buildWebFetchTool(root: string, stopHooks: WebFetchStopHooks = {
               : await fetchByHttp(target, timeout, signal)
           return await formatPage(page, target.toString(), clampedMax, root)
         } catch (err) {
+          // 缺运行时：给能执行的下一步，别让模型以为「换个 URL 再试 browser」就行
+          if (err instanceof BrowserRuntimeMissingError) {
+            return (
+              `web_fetch 的 browser 引擎需要内置浏览器（Playwright headless shell，约 150MB），` +
+              `这台机器上还没装，web_fetch 不会替你下载。两条路：` +
+              `① 用 engine="fetch" 重抓（文档站 / 博客这类静态 HTML 够用；别原样重试 browser 引擎）；` +
+              `② 告诉用户去「设置 → 浏览器」点「安装」，装好后重试。`
+            )
+          }
           // 先剥掉 playwright 附带的终端样式（Call log 是灰字），再做超时判定：
           // 判据看的是错误码与 timeout 字样，样式字节对正则没影响，但多余的 ESC 会让
           // 模型看到 `[2m` 这种残渣（与 execute_command 同一个问题，见 ansi.ts）
@@ -390,6 +416,14 @@ export function buildWebFetchTool(root: string, stopHooks: WebFetchStopHooks = {
               `web_fetch 抓取 ${url} 超时（${timeout}ms 内没拿到响应）。` +
               `常见原因是该站点在本机网络不可达（如境外站点被墙）或响应极慢；` +
               `不要原样重试，可改抓可达的镜像 / 文档站，或把 timeoutMs 调大（上限 60000）再试一次。`
+            )
+          }
+          // 目录在、可执行文件缺（卸载被打断 / 杀软清掉了）：同样不是「换个 URL」能解决的，
+          // 让用户去设置里点一次「安装」把它补回来
+          if (/Executable doesn't exist|executable doesn't exist|Failed to launch/i.test(msg)) {
+            return (
+              `web_fetch 的 browser 引擎启动失败：内置浏览器的可执行文件缺失或不完整（${msg}）。` +
+              `请让用户到「设置 → 浏览器」点「安装」修好运行时后再试；这期间可先用 engine="fetch"。`
             )
           }
           return `web_fetch 抓取 ${url} 失败：${msg}`

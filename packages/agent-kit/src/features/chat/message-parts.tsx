@@ -9,7 +9,7 @@
  * **只依赖 `@fizz/contracts` 的消息类型**，任何有消息流的宿主都能直接用。
  */
 import { memo, useState, type ReactNode } from 'react'
-import { Check, Copy, ArrowRightLeft, GitBranch, Pencil, Trash2 } from 'lucide-react'
+import { Check, Copy, ArrowRightLeft, GitBranch, Pencil, RotateCw, Trash2 } from 'lucide-react'
 import { ShimmerLabel } from '@fizz/agent-kit/shared/ai-elements/shimmer-label'
 import { Button } from '@fizz/ui/button'
 import { PartView } from '@fizz/agent-kit/features/chat/PartView'
@@ -522,6 +522,7 @@ export function MessageActionRow({
   message,
   deleteCount,
   onEdit,
+  onRetry,
   onDelete,
   onFork,
   onConvertFromHere,
@@ -532,6 +533,19 @@ export function MessageActionRow({
   deleteCount: number
   /** 不传 = 不渲染「编辑并重发」（容器侧改不了历史消息） */
   onEdit?: () => void
+  /**
+   * 不传 = 不渲染「重试」（同样只在能改历史的宿主里给）。
+   *
+   * 语义就是「编辑 → 一个字不改 → 发送」：以这条为起点删掉本条及其后的消息，再按原样
+   * 发一轮。调用方负责把原文与附件原样递回去（这里不碰消息内容）。
+   *
+   * 摆在「编辑」**左边**：两者是同一件事的两个入口，重试是「不改就发」的那一个，
+   * 更常用，也就在更靠外侧、更容易点到。
+   *
+   * ⚠️ 会**不可逆地删掉后续历史**（与编辑重发同一条路），所以只在会话没在跑、没在删
+   * 的时候由调用方给这个回调 —— 别在这里判，这里不需要知道会话状态。
+   */
+  onRetry?: () => void
   /** 不传 = 不渲染「删除」（容器侧改不了历史消息） */
   onDelete?: (mode: DeleteMessageMode) => void
   /** 不传 = 不渲染「从此签出」（会话分叉：以这条消息为终点开一个分支会话） */
@@ -649,6 +663,19 @@ export function MessageActionRow({
           className={actionButton}
         >
           <ArrowRightLeft className="size-4" />
+        </button>
+      )}
+
+      {/* 重试在编辑**左边**：两者同一件事，「不改就发」更常用（见 onRetry 的注释） */}
+      {message.role === 'user' && onRetry && (
+        <button
+          type="button"
+          title={tr('重试这条：不修改内容，直接以它为起点重新发送（会删掉它之后的消息）')}
+          aria-label={tr('重试这条消息')}
+          onClick={onRetry}
+          className={actionButton}
+        >
+          <RotateCw className="size-4" />
         </button>
       )}
 

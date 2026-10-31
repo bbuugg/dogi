@@ -37,6 +37,7 @@ import { MessageActionRow } from "@fizz/agent-kit/features/chat/message-parts";
 import { MessageQuoteLayer } from "@fizz/agent-kit/features/chat/quotes";
 import { requestOpenWorkspaceFile } from "@fizz/agent-kit/features/files/open-file";
 import { ArtifactChips } from "@fizz/agent-kit/shared/ai-elements/artifact-chips";
+import { useConfirm } from "@fizz/agent-kit/shared/components/ConfirmProvider";
 import {
   PromptInputProvider,
   usePromptInputController,
@@ -125,6 +126,8 @@ function ChatPanelInner({
   panelKey: string;
 }) {
   const t = useT();
+  /** 命令式二次确认（重试消息会不可逆地删历史，见 `onRetry`） */
+  const confirm = useConfirm();
   const { messages, streaming, activeWorkspace } = app;
   const { textInput } = usePromptInputController();
   /**
@@ -710,6 +713,64 @@ function ChatPanelInner({
                 message={message}
                 deleteCount={total - index}
                 usageSlot={usageSlot}
+                onRetry={
+                  /*
+                   * 「不改就重发」：与编辑重发同一条路（先删本条及其后的历史，再按原样发一轮），
+                   * 只是不用把文本灌进输入框、也不用用户再按一次回车。
+                   *
+                   * 会话在跑 / 正在删历史时不给按钮：那两种状态下 `resendMessage` 会静默返回
+                   * false（`deleteMessagesFrom` 有守卫），点了等于没反应 —— 不如先不摆出来。
+                   * 其余失败（没选模型 / 目标被删）仍可能发生，用 toast 给个响：这条路径没有
+                   * 编辑条那种「把状态还回去」的可见载体。
+                   *
+                   * 点了先**二次确认**再动手：这条路径会不可逆地删掉本条及其后的全部历史，
+                   * 而按钮就挤在 hover 操作行里、紧挨着只读的复制 —— 误点一下就是整段对话没了，
+                   * 还会连带重新跑一轮（费 token）。与队列删除同一形态：`useConfirm` 弹 AlertDialog，
+                   * 描述里带上原文摘要，让人看清删的是哪条。
+                   */
+                  streaming || app.messagesDeleting
+                    ? undefined
+                    : () => {
+                        const text = textOf(message);
+                        const files = fileRefsOfParts(message.parts);
+                        // 空文本且无附件：没有什么可重试的（与 onEdit 的判据同一套）
+                        if (!text && files.length === 0) return;
+                        void (async () => {
+                          const ok = await confirm({
+                            title: t("重试这条消息？"),
+                            description: (
+                              <span className="block space-y-1">
+                                <span className="block whitespace-pre-wrap break-words line-clamp-6">
+                                  {text || t("（仅附件）")}
+                                </span>
+                                <span className="block">
+                                  {t(
+                                    "将删除这条及其后的全部消息，再按原文重新发送（不可撤销）。",
+                                  )}
+                                </span>
+                              </span>
+                            ),
+                            confirmLabel: t("重试"),
+                            destructive: true,
+                          });
+                          if (!ok) return;
+                          void app
+                            .resendMessage(
+                              message.id,
+                              text,
+                              files.length ? files : undefined,
+                            )
+                            .then((sent) => {
+                              if (!sent) {
+                                toast.error(
+                                  t("没能重试：检查模型与会话状态后再试"),
+                                );
+                              }
+                            })
+                            .catch(() => {});
+                        })();
+                      }
+                }
                 onEdit={() => {
                   const t = textOf(message);
                   const fileParts = message.parts.filter(

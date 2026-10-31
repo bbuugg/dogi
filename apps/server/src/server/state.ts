@@ -149,7 +149,9 @@ async function getState(): Promise<FizzState> {
     'taskTriggers',
     // 容器型项目的「有哪些项目 / 各自的配置」也在这份 store 里（`AgentWorkspace.container`）：
     // 新建 / 改名 / 换镜像 / 删项目都会动它，所以一并标脏，前端不必等下一次轮询
-    'containerProjects'
+    'containerProjects',
+    // 客户端偏好（`CoreData.prefs`）：`POST /api/prefs` 改一个 key 就要让所有端看到
+    'prefs'
   ] as const
 
   /**
@@ -306,7 +308,9 @@ export const STORE_KEYS = [
   'skills',
   'taskTriggers',
   'notesRoots',
-  'containerProjects'
+  'containerProjects',
+  // 客户端偏好：任何 `savePrefs` 都要推给所有端（见 `POST /api/prefs`）
+  'prefs'
 ] as const
 
 export const store = _state.store

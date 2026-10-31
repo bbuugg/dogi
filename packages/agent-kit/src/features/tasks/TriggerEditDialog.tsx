@@ -40,7 +40,7 @@ import { useState } from 'react'
 import { CalendarClock, Loader2, TriangleAlert } from 'lucide-react'
 import { toast } from 'sonner'
 import type { AiPermissionMode, TaskTrigger } from '@fizz/contracts/types'
-import type { BrowserChannelProbe, BrowserSettings } from '@fizz/contracts'
+import { DEFAULT_BROWSER_SETTINGS, type BrowserSettings } from '@fizz/contracts'
 import type { AgentWorkspace, AcpAgentView, ModelView } from '@fizz/contracts/agent-api'
 import type { McpServerConfig } from '@fizz/mcp/types'
 import { Button } from '@fizz/ui/button'
@@ -95,8 +95,7 @@ export function TriggerEditDialog({
   acpAgents,
   mcpServers,
   defaultPermissionMode,
-  defaultBrowserSettings,
-  browserDetected,
+  browserInstalled,
   defaultContextWindow,
   onOpenSettings,
   trigger,
@@ -114,10 +113,13 @@ export function TriggerEditDialog({
   mcpServers: McpServerConfig[]
   /** 新建时权限档的预填值 = 当前全局权限档（与聊天输入框那颗 pill 同源） */
   defaultPermissionMode: AiPermissionMode
-  /** 新建时浏览器偏好的预填值 = 全局默认（与「开始新对话」页那颗地球 pill 同源） */
-  defaultBrowserSettings: BrowserSettings
-  /** 服务端探测到的各浏览器来源（下拉里标「未检测到」用） */
-  browserDetected: BrowserChannelProbe[]
+  /**
+   * 内置浏览器（Playwright headless shell）装好了没有（`app.browserInstalled`）。
+   *
+   * 没装时这颗开关**不渲染** —— 与聊天工具条同一条判据。
+   * 一个点了会在任务跑起来时拿到 `Executable doesn't exist` 的开关，不如不显示。
+   */
+  browserInstalled: boolean
   /**
    * 模型没单独配窗口时的兜底值（`app.defaultContextWindow`）：只用于模型下拉里那个
    * 参考数字，与「会话详情」那颗同源 —— 不传就按 `DEFAULT_CONTEXT_WINDOW`。
@@ -155,8 +157,7 @@ export function TriggerEditDialog({
             acpAgents={acpAgents}
             mcpServers={mcpServers}
             defaultPermissionMode={defaultPermissionMode}
-            defaultBrowserSettings={defaultBrowserSettings}
-            browserDetected={browserDetected}
+            browserInstalled={browserInstalled}
             defaultContextWindow={defaultContextWindow}
             onOpenSettings={onOpenSettings}
             editing={trigger}
@@ -191,8 +192,7 @@ function TriggerForm({
   acpAgents,
   mcpServers,
   defaultPermissionMode,
-  defaultBrowserSettings,
-  browserDetected,
+  browserInstalled,
   defaultContextWindow,
   onOpenSettings,
   editing,
@@ -204,8 +204,7 @@ function TriggerForm({
   acpAgents: AcpAgentView[]
   mcpServers: McpServerConfig[]
   defaultPermissionMode: AiPermissionMode
-  defaultBrowserSettings: BrowserSettings
-  browserDetected: BrowserChannelProbe[]
+  browserInstalled: boolean
   defaultContextWindow?: number
   onOpenSettings?: (tab: 'models' | 'acp') => void
   /** null = 新建 */
@@ -285,14 +284,15 @@ function TriggerForm({
     editing?.template.mcpServerIds ?? []
   )
   /**
-   * 浏览器工具偏好（开关 + 来源）。
+   * 浏览器工具偏好（开关）。
    *
-   * 定时任务也能用：`browser_*` 工具跑在**服务端**，靠的是服务端那台机器上的 Chromium /
-   * Edge / Chrome，与用户面前有没有开窗口无关 —— 无人值守反而更需要它（抓页面、核数据）。
-   * 新建预填全局默认，与「开始新对话」页那颗地球 pill 同一份语义。
+   * 定时任务也能用：`browser_*` 工具跑在**服务端**，靠的是服务端那台机器上的浏览器运行时，
+   * 与用户面前有没有开窗口无关 —— 无人值守反而更需要它（抓页面、核数据）。
+   * 新建预填**常量默认**（关）：没有「全局默认」那一层了，别拿当前会话的偏好去预填 ——
+   * 用户在某个开着浏览器的会话里点进来，不该让新建的定时任务默认也开着。
    */
   const [browserSettings, setBrowserSettings] = useState<BrowserSettings>(
-    editing?.template.browserSettings ?? defaultBrowserSettings
+    editing?.template.browserSettings ?? DEFAULT_BROWSER_SETTINGS
   )
 
   /**
@@ -383,23 +383,28 @@ function TriggerForm({
       <div className="space-y-1.5">
         <Label htmlFor="trigger-prompt">需求</Label>
         <div>
-          <div className="mb-2 flex flex-wrap items-center gap-1.5">
-            {/* 浏览器工具跑在**服务端**，无人值守的任务一样能用（见 template.browserSettings） */}
-            <BrowserPicker
-              value={browserSettings}
-              detected={browserDetected}
-              onChange={(patch) =>
-                setBrowserSettings((prev) => ({ ...prev, ...patch }))
-              }
-            />
-            {mcpServers.length > 0 && (
-              <McpPicker
-                servers={mcpServers}
-                value={mcpServerIds}
-                onChange={setMcpServerIds}
-              />
-            )}
-          </div>
+          {/* 与聊天工具条同一条判据：浏览器没装 → 那颗不出现；连 MCP 也没配 →
+              整行不渲染（空行会把需求框往下推，看着像多了一段空白） */}
+          {(browserInstalled || mcpServers.length > 0) && (
+            <div className="mb-2 flex flex-wrap items-center gap-1.5">
+              {/* 浏览器工具跑在**服务端**，无人值守的任务一样能用（见 template.browserSettings） */}
+              {browserInstalled && (
+                <BrowserPicker
+                  value={browserSettings}
+                  onChange={(patch) =>
+                    setBrowserSettings((prev) => ({ ...prev, ...patch }))
+                  }
+                />
+              )}
+              {mcpServers.length > 0 && (
+                <McpPicker
+                  servers={mcpServers}
+                  value={mcpServerIds}
+                  onChange={setMcpServerIds}
+                />
+              )}
+            </div>
+          )}
           <div className="rounded-xl border border-border bg-card/70 transition-colors">
             <textarea
               id="trigger-prompt"

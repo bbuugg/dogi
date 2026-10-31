@@ -16,16 +16,13 @@ import {
   t,
   type AppLanguage
 } from '@fizz/i18n'
+import { readPref, subscribePrefs, writePref } from '@fizz/agent-kit/shared/lib/prefs-sync'
 
 const STORAGE_KEY = 'fizz.language'
 
 export function readStoredLanguage(): AppLanguage | null {
-  try {
-    const value = localStorage.getItem(STORAGE_KEY)
-    return value === 'en' || value === 'zh' ? value : null
-  } catch {
-    return null
-  }
+  const value = readPref(STORAGE_KEY)
+  return value === 'en' || value === 'zh' ? value : null
 }
 
 /** 首帧前调用：把 localStorage 里的语言灌进 i18n 单例 */
@@ -36,11 +33,22 @@ export function bootstrapLanguage(): void {
 
 /** 记住选择（服务端保存成功后调用；失败也先让本机界面切过去） */
 export function persistLanguage(language: AppLanguage): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, language)
-  } catch {
-    // 隐私模式 / 配额满：只影响下次启动的初值，不影响本次切换
-  }
+  // 写盘即广播：别的窗口（desktop 的设置窗口）会收到 storage 事件，见 prefs-sync
+  writePref(STORAGE_KEY, language)
+}
+
+/**
+ * 订阅「**别的窗口**改了界面语言」。
+ *
+ * 与其余本地偏好同一套：desktop 的设置页是独立窗口，在那边切完语言只写了 localStorage，
+ * 不订阅的话主窗口界面仍是旧语言（同上一个「必须重启」家族，见 `prefs-sync`）。
+ * 服务端那份是权威值，`refresh()` 仍会对账覆盖。
+ */
+export function watchStoredLanguage(onChange: (language: AppLanguage) => void): () => void {
+  return subscribePrefs(STORAGE_KEY, () => {
+    const stored = readStoredLanguage()
+    if (stored) onChange(stored)
+  })
 }
 
 /** 当前语言（订阅变化） */

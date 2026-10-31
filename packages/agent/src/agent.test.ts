@@ -120,8 +120,11 @@ describe('runAgent 的失败提示', () => {
     const result = await runAgent(baseOptions((event) => events.push(event)))
 
     // 半截正文 + 失败 → 重跑整轮（`retry` 事件让前端把半截内容清掉，避免正文重复）
+    //
+    // 这条同时钉住「重试计数什么时候**不**清零」：整轮重来会把产出清掉，那不算「回复了
+    // 内容」，次数照常累计 —— 否则每次吐半截就断会成为无限重试（见下面那条续跑用例）。
     expect(streamText).toHaveBeenCalledTimes(2)
-    expect(events.some((e) => e.type === 'retry')).toBe(true)
+    expect(events.filter((e) => e.type === 'retry')).toHaveLength(1)
     expect(result.finishReason).toBe('error')
     expect(result.error).toBe(MID_STREAM_ERROR)
 
@@ -225,4 +228,89 @@ describe('runAgent 的失败提示', () => {
       .join('')
     expect(streamed).toContain('继续写')
   })
+
+  /**
+   * 防的回归：重试次数曾是「整轮累计」，于是「开头抖动两次 + 中途再撞限流」时一次机会
+   * 都不剩（用户报的「设置 20 却只重试两次，后面直接报错」）。
+   *
+   * 现在语义是「**连续**失败次数」：某次尝试产出过内容、且那份内容留得住（能续跑）时清零。
+   * 这条用例里 `maxRetries = 1`，只要清零没生效，第 2 次失败就会直接收场（只调用 2 次）。
+   */
+  it('续跑中产出过内容后再失败：次数清零重计，而不是直接耗尽', async () => {
+    const withToolResult = [
+      { role: 'user', content: '读一下文件' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool-call', toolCallId: 't1', toolName: 'echo', input: { path: 'a.ts' } }
+        ]
+      },
+      {
+        role: 'tool',
+        content: [
+          {
+            type: 'tool-result',
+            toolCallId: 't1',
+            toolName: 'echo',
+            output: { type: 'text', value: 'ok' }
+          }
+        ]
+      }
+    ]
+    const hasToolMessage = (messages: readonly { role: string }[]): boolean =>
+      messages.some((m) => m.role === 'tool')
+
+    let call = 0
+    streamText.mockImplementation(
+      (opts: {
+        messages: readonly { role: string }[]
+        prepareStep?: (args: { messages: unknown[]; stepNumber: number }) => Promise<unknown>
+      }) => {
+        call += 1
+        // 第 3 次 = 续跑：起点已是断点（带 tool 消息），这次正常跑完
+        if (hasToolMessage(opts.messages)) {
+          return fakeStream([
+            { type: 'text-delta', text: '写完了' },
+            {
+              type: 'finish',
+              finishReason: 'stop',
+              totalUsage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }
+            }
+          ])
+        }
+        // 第 1 次：没断点也没工具，吐了半截就断 → 整轮重来（这次**不**清零，见下个用例）
+        if (call === 1) {
+          return fakeStream([
+            { type: 'text-delta', text: '开头' },
+            { type: 'error', error: new Error(MID_STREAM_ERROR) }
+          ])
+        }
+        // 第 2 次：跑到步边界（断点建立）之后才断 → 续跑，且这一段清零后重新计
+        return {
+          fullStream: (async function* () {
+            yield { type: 'tool-call', toolCallId: 't1', toolName: 'echo', input: { path: 'a.ts' } }
+            yield { type: 'tool-result', toolCallId: 't1', toolName: 'echo', output: 'ok' }
+            await opts.prepareStep?.({ messages: withToolResult, stepNumber: 1 })
+            yield { type: 'text-delta', text: '这一步也吐了字' }
+            yield { type: 'error', error: new Error(MID_STREAM_ERROR) }
+          })()
+        }
+      }
+    )
+
+    const events: AgentStreamEvent[] = []
+    const result = await runAgent(baseOptions((event) => events.push(event)))
+
+    // 第 2 次失败时若不重置，`retries(1) < maxRetries(1)` 已不成立 → 只有 2 次调用
+    expect(streamText).toHaveBeenCalledTimes(3)
+    const retries = events.filter(
+      (e): e is Extract<AgentStreamEvent, { type: 'retry' }> => e.type === 'retry'
+    )
+    expect(retries).toHaveLength(2)
+    // 第一次是整轮重来；第二次是续跑，且次数**从 1 重新数**（不是 2）
+    expect(retries[0]).toMatchObject({ attempt: 1 })
+    expect(retries[1]).toMatchObject({ attempt: 1, resume: true })
+    expect(result.finishReason).toBe('done')
+  })
+
 })
