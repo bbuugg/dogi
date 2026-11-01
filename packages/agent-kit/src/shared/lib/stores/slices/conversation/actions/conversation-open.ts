@@ -16,7 +16,7 @@ export function createConversationOpenActions(
   const { set, get, api, readSlice, writeSlice, pruneSlices, preferredTarget, fetchQueue, attachRun, loadConversation, loadMessages, peekActiveRun, pump } = ctx;
 
   return {
-    openConversation: (conversationId) => {
+    openConversation: (conversationId, opts) => {
       /**
        * 已是当前会话**且本地现场还在**：什么都不做（重复打开只会白白重拉，界面闪一下）。
        *
@@ -101,15 +101,20 @@ export function createConversationOpenActions(
         /**
          * 现场还在内存里：**直接切过去**。切走期间这轮的 SSE 帧一直落在它自己的
          * slice 上，这里看到的就是最新直播 —— 不清空、不重拉、不需要 attach。
-         * （resetKey 里带会话 id，切换本身就会让消息区复位落底。）
          *
          * 后台再静默刷一遍历史兜底（别的端可能改过这个会话）：在跑 / 装载中都不刷
          * —— 在跑时流式帧才是真源，装载中时原装载链路自己会写。
+         *
+         * ⚠️ `scrollResetSeq` 是「消息区**复位落底**」的信号，**不是**「切过去了」的信号：
+         * - 从侧栏 / 通知 / 深链打开一条会话 → 用户要看最新的 → bump（落底）；
+         * - **切标签**（`keepScroll`）→ 那个面板从来没卸载过，用户可能正翻在上面读 →
+         *   绝不能 bump。以前这里无条件 bump，表现就是「翻上去 → 点另一个标签 → 点回来，
+         *   列表自己跳到底部」（用户报的）。
          */
         writeSlice(conversationId, (s) => ({
           ...s,
           touchedAt: Date.now(),
-          scrollResetSeq: s.scrollResetSeq + 1,
+          scrollResetSeq: opts?.keepScroll ? s.scrollResetSeq : s.scrollResetSeq + 1,
         }));
         // 后台再静默刷一遍历史兜底（别的端可能改过这个会话）。
         // ⚠️ acp 例外：服务端历史恒为空，拉了会把内存里那份 transcript 回放**擦成空会话**

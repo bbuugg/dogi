@@ -49,7 +49,13 @@ export function useGroupActions(): GroupActions {
         return
       }
       if (key === app.activeConversationId) return
-      openConversation(key)
+      /*
+       * `keepScroll`：**切标签不是「打开会话」**。这条会话的面板一直在内存里（后台标签
+       * 只是 `hidden`，滚动盒与 scrollTop 都还在），用户翻在上面读的时候点到别的标签再
+       * 点回来，不该被复位落底（用户报的「切回来列表自己跳到底部」）。
+       * 从侧栏 / 通知 / 深链打开走的是别的入口，那边照旧落底。
+       */
+      openConversation(key, undefined, { keepScroll: true })
     },
     [app, openConversation]
   )

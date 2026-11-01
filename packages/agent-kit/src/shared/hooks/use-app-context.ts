@@ -45,8 +45,18 @@ export interface AppContextValue {
   toggleTheme: () => void
   /** 定时任务的数据层 */
   triggers: ReturnType<typeof useTriggers>
-  /** 打开一个会话（侧栏点行 / 弹窗建成功后调用）：选中 + 把标签落到位 */
-  openConversation: (conversationId: string, workspaceId?: string) => void
+  /**
+   * 打开一个会话（侧栏点行 / 弹窗建成功后调用）：选中 + 把标签落到位。
+   *
+   * `opts.keepScroll`：别复位消息区的滚动位置 —— **只给「切标签」用**（那条会话的面板
+   * 一直在内存里，用户翻到哪儿该留在哪儿）。从侧栏 / 通知 / 深链打开不要传，那时
+   * 「跳到最新」才是用户要的。
+   */
+  openConversation: (
+    conversationId: string,
+    workspaceId?: string,
+    opts?: { keepScroll?: boolean },
+  ) => void
   /**
    * 删除会话（当前会话被删时由 store 把落点落到同工作区最近一条 / 空态）。
    * 返回**是否真删掉了**：失败时弹窗不该关，留给用户重试。

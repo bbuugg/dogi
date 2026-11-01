@@ -1,7 +1,7 @@
 /**
- * 回归：`openConversation` 的「已是当前会话」早退必须带上「本地现场还在」。
+ * 回归：`openConversation` 的两条「什么时候该动消息区」的规矩。
  *
- * ## 防的是什么
+ * ## 1. 「已是当前会话」早退必须带上「本地现场还在」
  *
  * 「多智能体协作」建完会话后消息区**永远停在骨架屏**（用户报「打开后消息列表始终
  * 显示 loading」）：
@@ -16,6 +16,12 @@
  * 而 `slices` 是空的。
  *
  * 这里钉住两件事：**现场没建时必须装载**；**现场在时仍然早退**（切回来不该白闪重拉）。
+ *
+ * ## 2. `scrollResetSeq` 只在「真的要看最新」时 bump
+ *
+ * 它是**复位落底**的信号（`ChatPanel` 把它拼进 `resetKey`），不是「切过去了」的信号。
+ * 无条件 bump 的表现是「翻上去读历史 → 点另一个标签 → 点回来，列表自己跳到底部」
+ * （用户报的）。切标签走 `keepScroll`，不 bump；侧栏 / 通知 / 深链打开照旧 bump。
  */
 import { describe, expect, it, vi } from 'vitest'
 import { createConversationSlice } from '../index'
@@ -98,8 +104,14 @@ function makeStore(api: Record<string, unknown>) {
   return { state, slice, sliceOf }
 }
 
-function open(slice: Record<string, unknown>, id: string): void {
-  ;(slice.openConversation as (conversationId: string) => void)(id)
+function open(
+  slice: Record<string, unknown>,
+  id: string,
+  opts?: { keepScroll?: boolean }
+): void {
+  ;(
+    slice.openConversation as (conversationId: string, o?: { keepScroll?: boolean }) => void
+  )(id, opts)
 }
 
 describe('openConversation：已是当前会话时的早退', () => {
@@ -135,5 +147,40 @@ describe('openConversation：已是当前会话时的早退', () => {
 
     // 切走再切回来时消息已在内存里：重拉只会让界面白闪一次
     expect(api.getConversation).not.toHaveBeenCalled()
+  })
+})
+
+describe('openConversation：什么时候复位消息区的滚动位置', () => {
+  /** 先把会话装载出来，再「切走」（把 active 清掉），模拟「它现在挂在后台标签里」 */
+  async function loadedThenAway(
+    api: ReturnType<typeof makeApi>
+  ): Promise<{ state: Record<string, unknown>; slice: Record<string, unknown>; sliceOf: (id: string) => ConvSlice | undefined }> {
+    const store = makeStore(api)
+    open(store.slice, CONVERSATION_ID)
+    await vi.waitFor(() => {
+      expect(store.sliceOf(CONVERSATION_ID)?.loading).toBe(false)
+    })
+    store.state.activeConversationId = null
+    return store
+  }
+
+  it('切标签（keepScroll）：不 bump，否则翻上去读的历史会被拽回底部', async () => {
+    const { state, slice, sliceOf } = await loadedThenAway(makeApi())
+    const before = sliceOf(CONVERSATION_ID)?.scrollResetSeq ?? 0
+
+    open(slice, CONVERSATION_ID, { keepScroll: true })
+
+    expect(state.activeConversationId).toBe(CONVERSATION_ID)
+    expect(sliceOf(CONVERSATION_ID)?.scrollResetSeq).toBe(before)
+  })
+
+  it('从侧栏 / 通知打开（不传）：照旧 bump 一次，落底看最新', async () => {
+    const { state, slice, sliceOf } = await loadedThenAway(makeApi())
+    const before = sliceOf(CONVERSATION_ID)?.scrollResetSeq ?? 0
+
+    open(slice, CONVERSATION_ID)
+
+    expect(state.activeConversationId).toBe(CONVERSATION_ID)
+    expect(sliceOf(CONVERSATION_ID)?.scrollResetSeq).toBe(before + 1)
   })
 })

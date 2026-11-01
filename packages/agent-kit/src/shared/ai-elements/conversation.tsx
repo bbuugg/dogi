@@ -339,10 +339,31 @@ export const Conversation = ({
       const ro = new ResizeObserver(([entry]) => {
         const height = entry.contentRect.height;
         const first = prevHeight === null;
-        const heightChanged = !first && prevHeight !== height;
+        const prev = prevHeight;
+        const heightChanged = !first && prev !== height;
         prevHeight = height;
         // 首帧只记录：挂载时不该被当成「刚刚变过尺寸」
         if (!heightChanged) return;
+        /*
+         * **从「没有布局盒」恢复出来**（`display:none` → 有尺寸）：面板标签切回来时就是
+         * 这一下（后台标签只是 `hidden`，不卸载）。
+         *
+         * 浏览器会把 `scrollTop` 原样还回来，可**隐藏期间内容可能已经长高**（后台跑完的
+         * 那一轮）—— 于是「刚才贴底」的那条会停在旧偏移上、最新消息在折叠线以下。所以
+         * 分两种：
+         * - 用户没有主动上滚（`userPausedRef` false，一直在跟随）→ 瞬时回到底部；
+         * - 用户翻在上面读 → **一点都别动**，留在浏览器还回来的那个位置。
+         *
+         * ⚠️ 这一支必须**排在下面那段 relock 之前**并 return：relock 的判据是「离底 ≤ 阈值」，
+         * 而这里离底必然很大（内容长高了），落进去会被当成「用户翻到历史里」而完全不管。
+         */
+        if (prev === 0 && height > 0) {
+          if (!userPausedRef.current) {
+            el.scrollTop = el.scrollHeight;
+            scrollToBottom({ animation: "instant" });
+          }
+          return;
+        }
         // 直接量 DOM 而不是读 React state：这个判断必须与本次布局同步，
         // 走 state 会晚一帧（而这一帧正是库要贴底的那一帧）。
         const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;

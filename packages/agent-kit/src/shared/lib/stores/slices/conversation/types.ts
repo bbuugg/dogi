@@ -477,7 +477,17 @@ export interface ConversationSlice {
    */
   reconcileDroppedRun: (conversationId: string) => Promise<boolean>;
   loadConversation: (conversationId: string) => Promise<void>;
-  openConversation: (conversationId: string | null) => void;
+  /**
+   * 把「当前会话」切到这条（顺带补装载 / 后台刷历史 / 泵队列）。
+   *
+   * `opts.keepScroll`：**不要**复位消息区的滚动位置。给「切标签」用 —— 那条会话的面板
+   * 从来没卸载过（后台标签只是 `hidden`），用户翻到哪儿就该留在哪儿；而「从侧栏 / 通知 /
+   * 深链打开一条会话」是明确的「我要看最新的」，照旧复位落底。
+   */
+  openConversation: (
+    conversationId: string | null,
+    opts?: { keepScroll?: boolean },
+  ) => void;
   retryLoadMessages: () => void;
   /**
    * 重新加载一条 ACP 会话：**当场**再走一次 `session/load`，用 agent 侧回放**整体重建**

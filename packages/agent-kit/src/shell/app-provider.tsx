@@ -91,7 +91,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
    * 会连同标签一起丢。
    */
   const openConversation = useCallback(
-    (conversationId: string, workspaceId?: string): void => {
+    (
+      conversationId: string,
+      workspaceId?: string,
+      /**
+       * `keepScroll`：别复位消息区的滚动位置。**只有「切标签」传它** —— 那条会话的面板
+       * 一直在内存里（后台标签只是 `hidden`），用户翻到哪儿就该留在哪儿；从侧栏 / 通知 /
+       * 深链打开时「跳到最新」才是用户要的，不传。
+       */
+      opts?: { keepScroll?: boolean }
+    ): void => {
       /*
        * 打开会话时把**当前工作区**也切到它所属的工作区。
        *
@@ -122,7 +131,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       ) {
         app.selectWorkspace(targetWorkspaceId, false)
       }
-      void app.openConversation(conversationId)
+      void app.openConversation(conversationId, opts)
       const open = allTabKeys()
       if (!(open.length === 1 && open[0] === NEW_TAB_KEY)) openTab(conversationId)
     },
