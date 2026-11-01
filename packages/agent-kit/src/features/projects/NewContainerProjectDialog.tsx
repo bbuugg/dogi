@@ -21,18 +21,14 @@ import {
 } from '@fizz/ui/dialog'
 import { Button } from '@fizz/ui/button'
 import { Input } from '@fizz/ui/input'
+import { NumberField } from '@fizz/ui/number-field'
 import { Label } from '@fizz/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@fizz/ui/select'
-import {
-  CONTAINER_CPUS_MAX,
-  CONTAINER_ENV_IMAGES,
-  CONTAINER_MEMORY_LIMIT_MAX_MB,
-  CONTAINER_MEMORY_LIMIT_MIN_MB
-} from '@fizz/contracts/types'
+import { CONTAINER_ENV_IMAGES } from '@fizz/contracts/types'
 import type { ContainerEnvId } from '@fizz/contracts/types'
 import type { AgentWorkspace } from '@fizz/contracts/agent-api'
 import type { AgentApp } from '@fizz/agent-kit/shared/hooks/useAgentApp'
-import { limitOf, limitsError } from '@fizz/agent-kit/features/projects/container-limits'
+import { limitsError } from '@fizz/agent-kit/features/projects/container-limits'
 
 export function NewContainerProjectDialog({
   app,
@@ -50,8 +46,8 @@ export function NewContainerProjectDialog({
   const [image, setImage] = useState<ContainerEnvId>(CONTAINER_ENV_IMAGES[0].id)
   const [gitUrl, setGitUrl] = useState('')
   /** 资源限额（可选，空 = 不限制）：与「容器设置」同一套边界，见 container-limits.ts */
-  const [memory, setMemory] = useState('')
-  const [cpus, setCpus] = useState('')
+  const [memory, setMemory] = useState<number | null>(null)
+  const [cpus, setCpus] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
 
   // 每次打开都重置：别残留上次的输入（低频操作，重来一遍不心疼，与 GitCloneDialog 一致）
@@ -60,14 +56,15 @@ export function NewContainerProjectDialog({
     setName('')
     setImage(CONTAINER_ENV_IMAGES[0].id)
     setGitUrl('')
-    setMemory('')
-    setCpus('')
+    setMemory(null)
+    setCpus(null)
     setBusy(false)
   }, [open])
 
   const selected = CONTAINER_ENV_IMAGES.find((img) => img.id === image)
-  const memoryValue = limitOf(memory)
-  const cpusValue = limitOf(cpus)
+  /** 空 = 0 = 不限制（显式发 0，JSON 会把 undefined 丢掉） */
+  const memoryValue = memory ?? 0
+  const cpusValue = cpus ?? 0
   const invalid = limitsError(memoryValue, cpusValue)
   const canSubmit = !busy && !invalid
 
@@ -151,32 +148,26 @@ export function NewContainerProjectDialog({
           <div className="grid grid-cols-2 gap-3">
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="container-project-memory">内存上限（MB，可选）</Label>
-              <Input
+              {/* 不传 min/max：0 也算合法（= 不限制），边界由 `limitsError` 说人话 */}
+              <NumberField
                 id="container-project-memory"
-                type="number"
-                inputMode="numeric"
-                min={CONTAINER_MEMORY_LIMIT_MIN_MB}
-                max={CONTAINER_MEMORY_LIMIT_MAX_MB}
                 step={64}
                 value={memory}
-                onChange={(e) => setMemory(e.target.value)}
                 placeholder="不限制"
                 disabled={busy}
+                onValueChange={setMemory}
               />
             </div>
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="container-project-cpus">CPU 上限（核，可选）</Label>
-              <Input
+              <NumberField
                 id="container-project-cpus"
-                type="number"
-                inputMode="decimal"
-                min={0}
-                max={CONTAINER_CPUS_MAX}
+                integer={false}
                 step={0.1}
                 value={cpus}
-                onChange={(e) => setCpus(e.target.value)}
                 placeholder="不限制"
                 disabled={busy}
+                onValueChange={setCpus}
               />
             </div>
           </div>

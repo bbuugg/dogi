@@ -235,7 +235,9 @@ export async function startRemoteAccess(opts: {
 export function stopRemoteAccess(): void {
   server?.close()
   server = null
-  if (info) info = { ...info, running: false, urls: [], url: null }
+  // `error` 一并清掉：它是「上一次 listen 失败」的残留，关掉之后还留着会让设置页
+  // 一直挂一条红字（用户已经关掉了，那条错误不再描述任何现状）
+  if (info) info = { ...info, running: false, urls: [], url: null, error: undefined }
   clearPasswordPersister?.()
   clearPasswordPersister = null
   // 鉴权随关闭一并撤掉：进程内路径本就不走它，留着只会让下一次启用前状态含糊

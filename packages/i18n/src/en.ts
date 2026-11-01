@@ -339,6 +339,11 @@ export const EN: Record<string, string> = {
   '已复制{label}': 'Copied {label}',
   '复制失败，请手动选中': 'Copy failed; please select manually',
   '远程访问设置失败': 'Failed to update remote access settings',
+  '远程访问没能开启': 'Remote access could not be enabled',
+  '端口 {port} 已被占用：换一个端口，或先关掉占用它的程序':
+    'Port {port} is already in use: pick another port, or stop the program using it',
+  '没有权限监听端口 {port}（1024 以下是特权端口）':
+    'No permission to listen on port {port} (ports below 1024 are privileged)',
 
   '新建自定义主题': 'New custom theme',
   '「{name}」的背景': 'Background for “{name}”',
@@ -564,6 +569,17 @@ export const EN: Record<string, string> = {
   '请求失败后的自动重试次数。已跑完工具步骤的轮次会从断点继续，不会重跑已完成的工具。0 = 不限，默认 2。': 'Automatic retries after a failed request. Turns that already finished tool steps resume from the breakpoint instead of re-running those tools. 0 = unlimited, default 2.',
   '次': '',
   '（不限制）': ' (unlimited)',
+  '需为 1–10 的整数，离开输入框会夹到最近的边界':
+    'Must be an integer from 1 to 10; leaving the field clamps it to the nearest bound',
+  '需为 {min}–{max} 的整数，离开输入框会夹到最近的边界':
+    'Must be an integer from {min} to {max}; leaving the field clamps it to the nearest bound',
+  '需为不小于 0 的整数（0 = 一直等待）': 'Must be an integer ≥ 0 (0 = wait forever)',
+  '需为不小于 0 的整数（0 = 不限）': 'Must be an integer ≥ 0 (0 = unlimited)',
+  '需为 0–3600 的整数秒，离开输入框会夹到最近的边界':
+    'Must be an integer number of seconds from 0 to 3600; leaving the field clamps it to the nearest bound',
+  '端口需为 1–65535 的整数，离开输入框会夹到最近的边界':
+    'Must be an integer from 1 to 65535; leaving the field clamps it to the nearest bound',
+  '留空 = 默认（{value}）': 'Leave empty for the default ({value})',
 
   '存不下：本地存储已满，换张小一点的图。': 'Could not save: local storage is full. Try a smaller image.',
   '这张图读不了，换一张试试。': 'This image cannot be read. Try another one.',

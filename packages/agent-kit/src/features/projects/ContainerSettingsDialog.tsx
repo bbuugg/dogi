@@ -24,22 +24,17 @@ import {
 } from '@fizz/ui/dialog'
 import { Button } from '@fizz/ui/button'
 import { Input } from '@fizz/ui/input'
+import { NumberField } from '@fizz/ui/number-field'
 import { Label } from '@fizz/ui/label'
 import type { AgentWorkspace } from '@fizz/contracts/agent-api'
-import {
-  CONTAINER_CPUS_MAX,
-  CONTAINER_MEMORY_LIMIT_MAX_MB,
-  CONTAINER_MEMORY_LIMIT_MIN_MB
-} from '@fizz/contracts/types'
+import { CONTAINER_MEMORY_LIMIT_MIN_MB } from '@fizz/contracts/types'
 import type { ContainerProjectsSnapshot } from '@fizz/contracts/types'
 import type { AgentApp } from '@fizz/agent-kit/shared/hooks/useAgentApp'
 import { useStateValue } from '@fizz/agent-kit/shared/lib/state-ws'
-import { limitOf, limitsError } from '@fizz/agent-kit/features/projects/container-limits'
+import { limitsError } from '@fizz/agent-kit/features/projects/container-limits'
 
-/** 边界常量与服务端共用（`@fizz/contracts/types`），这里只为输入框属性与提示文案 */
+/** 边界常量与服务端共用（`@fizz/contracts/types`），这里只为提示文案 */
 const MEMORY_MIN_MB = CONTAINER_MEMORY_LIMIT_MIN_MB
-const MEMORY_MAX_MB = CONTAINER_MEMORY_LIMIT_MAX_MB
-const CPUS_MAX = CONTAINER_CPUS_MAX
 
 /**
  * 前端生成一个新预览 key（12 字节随机 → base64url，16 字符）。
@@ -67,8 +62,9 @@ export function ContainerSettingsDialog({
   workspace: AgentWorkspace | null
   onOpenChange: (open: boolean) => void
 }) {
-  const [memory, setMemory] = useState('')
-  const [cpus, setCpus] = useState('')
+  /** 限额草稿：`null` = 空 = 不限制（落盘时转成 0，见 container-limits.ts） */
+  const [memory, setMemory] = useState<number | null>(null)
+  const [cpus, setCpus] = useState<number | null>(null)
   /** `'save' | 'restart'` = 正在提交（顶住连点，也顶住关弹窗） */
   const [busy, setBusy] = useState<'save' | 'restart' | null>(null)
   /** 预览 key 走本地状态：重新生成后立刻反映，不必等父组件拿到新引用 */
@@ -105,19 +101,20 @@ export function ContainerSettingsDialog({
     if (!workspace?.container) return
     setMemory(
       workspace.container.memoryLimitMb && workspace.container.memoryLimitMb > 0
-        ? String(workspace.container.memoryLimitMb)
-        : ''
+        ? workspace.container.memoryLimitMb
+        : null
     )
     setCpus(
-      workspace.container.cpus && workspace.container.cpus > 0 ? String(workspace.container.cpus) : ''
+      workspace.container.cpus && workspace.container.cpus > 0 ? workspace.container.cpus : null
     )
     setPreviewKey(workspace.container.previewKey ?? '')
     setBusy(null)
     setRegenerating(false)
   }, [workspace?.id, workspace?.container])
 
-  const memoryValue = limitOf(memory)
-  const cpusValue = limitOf(cpus)
+  /** 空 = 0 = 不限制（服务端再归一化；显式发 0 是因为 JSON 会把 undefined 丢掉） */
+  const memoryValue = memory ?? 0
+  const cpusValue = cpus ?? 0
   const invalid = limitsError(memoryValue, cpusValue)
 
   const save = (restart: boolean): void => {
@@ -207,33 +204,30 @@ export function ContainerSettingsDialog({
           <div className="grid grid-cols-2 gap-3">
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="container-memory-limit">内存上限（MB）</Label>
-              <Input
+              {/*
+                不传 min/max：这里 0 也算合法（= 不限制），边界由 `limitsError` 说人话。
+                传 min 会把 0 标红，跟底下的提示自相矛盾。
+              */}
+              <NumberField
                 id="container-memory-limit"
-                type="number"
-                inputMode="numeric"
-                min={MEMORY_MIN_MB}
-                max={MEMORY_MAX_MB}
                 step={64}
                 value={memory}
-                onChange={(e) => setMemory(e.target.value)}
                 placeholder="不限制"
                 disabled={busy !== null}
                 autoFocus
+                onValueChange={setMemory}
               />
             </div>
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="container-cpu-limit">CPU 上限（核）</Label>
-              <Input
+              <NumberField
                 id="container-cpu-limit"
-                type="number"
-                inputMode="decimal"
-                min={0}
-                max={CPUS_MAX}
+                integer={false}
                 step={0.1}
                 value={cpus}
-                onChange={(e) => setCpus(e.target.value)}
                 placeholder="不限制"
                 disabled={busy !== null}
+                onValueChange={setCpus}
               />
             </div>
           </div>

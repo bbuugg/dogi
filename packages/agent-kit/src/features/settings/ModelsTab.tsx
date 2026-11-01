@@ -29,6 +29,7 @@ import { useRef, useState } from 'react'
 import { Check, Download, Loader2, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { Button } from '@fizz/ui/button'
 import { Input } from '@fizz/ui/input'
+import { NumberField } from '@fizz/ui/number-field'
 import { Switch } from '@fizz/ui/switch'
 import {
   Dialog,
@@ -98,19 +99,6 @@ const OUTPUT_PRESETS: Array<{ value: number; label: string }> = [
   { value: 64_000, label: '64k' }
 ]
 
-/** 数字输入框草稿 → token 数；空串 = 未配置，非法值也当未配置（保存前由校验拦住） */
-function tokenInputValue(raw: string): number | undefined {
-  const text = raw.trim()
-  if (!text) return undefined
-  const value = Number(text)
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined
-}
-
-/** 数字输入框草稿是否「填了但不是正整数」（用来拦保存并提示，而不是静默丢掉） */
-function isTokenInputInvalid(raw: string): boolean {
-  return raw.trim() !== '' && tokenInputValue(raw) === undefined
-}
-
 /** 输入框下方的预置值按钮：点一下填进输入框；当前值命中的那颗高亮 */
 function TokenPresetButtons({
   presets,
@@ -119,11 +107,12 @@ function TokenPresetButtons({
   onPick
 }: {
   presets: ReadonlyArray<{ value: number; label: string }>
-  value: string
+  /** 当前值；`null` = 空（走默认 / 不限制） */
+  value: number | null
   clearLabel: string
-  onPick: (next: string) => void
+  onPick: (next: number | null) => void
 }) {
-  const current = tokenInputValue(value)
+  const current = value !== null && value > 0 ? Math.floor(value) : null
   /**
    * 选中态只换颜色、**不换边框**：`secondary` 没有 border、`outline` 有，
    * 来回切会让按钮宽高各差 1px（点一下字号像跳了一下）。所以统一用 outline，
@@ -140,8 +129,8 @@ function TokenPresetButtons({
         type="button"
         size="sm"
         variant="outline"
-        className={chipClass(current === undefined)}
-        onClick={() => onPick('')}
+        className={chipClass(current === null)}
+        onClick={() => onPick(null)}
       >
         {clearLabel}
       </Button>
@@ -152,7 +141,7 @@ function TokenPresetButtons({
           size="sm"
           variant="outline"
           className={chipClass(current === preset.value)}
-          onClick={() => onPick(String(preset.value))}
+          onClick={() => onPick(preset.value)}
         >
           {preset.label}
         </Button>
@@ -203,10 +192,10 @@ export function ModelsTab({ app }: { app: AgentApp }) {
    */
   const [modelEditing, setModelEditing] = useState<{ configId: string; modelId?: string } | null>(null)
   const [modelId, setModelId] = useState('')
-  /** 上下文窗口草稿（空串 = 不单独配，走兜底；数字输入框直接编辑） */
-  const [modelWindowTokens, setModelWindowTokens] = useState('')
-  /** 最大输出 token 草稿（空串 = 不单独配，走上游默认） */
-  const [modelMaxOutput, setModelMaxOutput] = useState('')
+  /** 上下文窗口（`null` = 不单独配，走兜底；输入框是草稿态，见 @fizz/ui/number-field） */
+  const [modelWindowTokens, setModelWindowTokens] = useState<number | null>(null)
+  /** 最大输出 token（`null` = 不单独配，走上游默认） */
+  const [modelMaxOutput, setModelMaxOutput] = useState<number | null>(null)
   /** 能力开关草稿：只有显式关掉才落盘（缺省 = 开） */
   const [modelToolCall, setModelToolCall] = useState(true)
   const [modelImageInput, setModelImageInput] = useState(true)
@@ -325,10 +314,10 @@ export function ModelsTab({ app }: { app: AgentApp }) {
     setModelId(targetId ?? '')
     const entry = findModelEntry(config.models, targetId)
     const tokens = entry?.contextWindow
-    setModelWindowTokens(tokens !== undefined ? String(tokens) : '')
+    setModelWindowTokens(tokens !== undefined && tokens > 0 ? tokens : null)
     // 进阶设置：缺省 = 工具 / 图片 / 思考都开、输出不限、协议跟随配置
     const extra = entry?.settings
-    setModelMaxOutput(extra?.maxOutputTokens ? String(extra.maxOutputTokens) : '')
+    setModelMaxOutput(extra?.maxOutputTokens && extra.maxOutputTokens > 0 ? extra.maxOutputTokens : null)
     setModelToolCall(extra?.toolCall !== false)
     setModelImageInput(extra?.imageInput !== false)
     setModelReasoning(extra?.reasoning !== false)
@@ -339,8 +328,8 @@ export function ModelsTab({ app }: { app: AgentApp }) {
   const closeModelDialog = (): void => {
     setModelEditing(null)
     setModelId('')
-    setModelWindowTokens('')
-    setModelMaxOutput('')
+    setModelWindowTokens(null)
+    setModelMaxOutput(null)
     setModelToolCall(true)
     setModelImageInput(true)
     setModelReasoning(true)
@@ -348,8 +337,12 @@ export function ModelsTab({ app }: { app: AgentApp }) {
     setModelError('')
   }
 
-  const windowInvalid = isTokenInputInvalid(modelWindowTokens)
-  const outputInvalid = isTokenInputInvalid(modelMaxOutput)
+  /**
+   * 「填了但不合法」只剩一种：填了 0 或负数（乱码 / 半截输入进不了 state —— 草稿态输入框
+   * 只提交完整的数字）。留空仍然合法 = 走默认 / 不限制。
+   */
+  const windowInvalid = modelWindowTokens !== null && modelWindowTokens <= 0
+  const outputInvalid = modelMaxOutput !== null && modelMaxOutput <= 0
 
   const saveModelEntry = async (): Promise<void> => {
     const config = modelConfig
@@ -373,7 +366,7 @@ export function ModelsTab({ app }: { app: AgentApp }) {
       setModelError(tr('最大输出 token 要填正整数（留空 = 不限制）'))
       return
     }
-    const outputTokens = tokenInputValue(modelMaxOutput)
+    const outputTokens = modelMaxOutput ?? undefined
 
     setModelBusy(true)
     try {
@@ -385,10 +378,10 @@ export function ModelsTab({ app }: { app: AgentApp }) {
         ...(modelReasoning ? {} : { reasoning: false }),
         ...(modelApiStyle !== 'inherit' ? { apiStyle: modelApiStyle } : {})
       }
-      const tokens = tokenInputValue(modelWindowTokens)
+      const tokens = modelWindowTokens ?? undefined
       const entry: AiModelEntry = {
         id: trimmed,
-        ...(tokens !== undefined ? { contextWindow: tokens } : {}),
+        ...(tokens !== undefined ? { contextWindow: Math.floor(tokens) } : {}),
         ...(Object.keys(settings).length ? { settings } : {})
       }
       const models = oldId
@@ -740,15 +733,18 @@ export function ModelsTab({ app }: { app: AgentApp }) {
                 <span className="text-xs text-muted-foreground">
                   {tr('上下文窗口（输入 + 输出共用的总上限，决定圆环分母与自动压缩阈值）')}
                 </span>
-                <Input
-                  type="number"
-                  inputMode="numeric"
-                  // 不用原生 step/min 做题，避免 1000000 被判无效
+                <NumberField
+                  // 只标红不夹边界：token 数被悄悄改掉比报错更难发现（保存前还会再拦一次）
+                  min={1}
+                  clamp={false}
                   step="any"
-                  placeholder={`留空 = 默认（${DEFAULT_CONTEXT_WINDOW.toLocaleString()}）`}
+                  placeholder={tr('留空 = 默认（{value}）', {
+                    value: DEFAULT_CONTEXT_WINDOW.toLocaleString()
+                  })}
                   value={modelWindowTokens}
-                  onChange={(e) => {
-                    setModelWindowTokens(e.target.value)
+                  invalidHint={tr('要填正整数（token），留空 = 默认')}
+                  onValueChange={(next) => {
+                    setModelWindowTokens(next)
                     setModelError('')
                   }}
                 />
@@ -775,14 +771,15 @@ export function ModelsTab({ app }: { app: AgentApp }) {
               {/* 最大输出 token：OpenAI 的 max_output_tokens / max_completion_tokens（含思考 token） */}
               <div className="space-y-1.5">
                 <span className="text-xs text-muted-foreground">{tr('最大输出 token（单次回复上限）')}</span>
-                <Input
-                  type="number"
-                  inputMode="numeric"
+                <NumberField
+                  min={1}
+                  clamp={false}
                   step="any"
                   placeholder={tr('留空 = 不限制（如 4000、64000）')}
                   value={modelMaxOutput}
-                  onChange={(e) => {
-                    setModelMaxOutput(e.target.value)
+                  invalidHint={tr('要填正整数（留空 = 不限制）')}
+                  onValueChange={(next) => {
+                    setModelMaxOutput(next)
                     setModelError('')
                   }}
                 />

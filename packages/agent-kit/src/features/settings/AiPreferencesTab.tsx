@@ -19,7 +19,7 @@
  */
 import { toast } from 'sonner'
 import { Check, ShieldCheck } from 'lucide-react'
-import { Input } from '@fizz/ui/input'
+import { NumberField } from '@fizz/ui/number-field'
 import { Switch } from '@fizz/ui/switch'
 import {
   Select,
@@ -42,9 +42,7 @@ import {
   DEFAULT_MAX_STEPS,
   DEFAULT_TOOL_CALL_CONCURRENCY,
   MAX_MAX_STEPS,
-  MIN_MAX_STEPS,
-  resolveMaxSteps,
-  resolveToolCallConcurrency
+  MIN_MAX_STEPS
 } from '@fizz/contracts'
 import { useAgentStore } from '@fizz/agent-kit/shared/lib/stores/agent-store'
 import { ChoiceChips } from '@fizz/agent-kit/features/settings/ChoiceChips'
@@ -100,14 +98,13 @@ export function AiPreferencesTab({ app }: { app: AgentApp }) {
    *
    * 越界**不静默夹到边界**：夹了之后界面上看不出「我填的 200 变成了 64」，
    * 用户只会觉得「设了没用，它还是中途停」。所以直接拒绝并说清范围。
+   * 输入框那边配的是 `clamp={false}` —— 组件不替这里做决定。
    */
   const saveSubagentMaxSteps = async (
     id: SubagentId,
     name: string,
-    raw: string
+    steps: number | null
   ): Promise<void> => {
-    const trimmed = raw.trim()
-    const steps = trimmed === '' ? null : Number(trimmed)
     if (
       steps !== null &&
       (!Number.isInteger(steps) || steps < SUBAGENT_MIN_STEPS || steps > SUBAGENT_MAX_STEPS)
@@ -155,21 +152,14 @@ export function AiPreferencesTab({ app }: { app: AgentApp }) {
           {DEFAULT_TOOL_CALL_CONCURRENCY}{tr('，上限 10。')}
         </p>
         <div className="flex items-center gap-2">
-          <Input
-            type="number"
+          {/* 草稿态输入：删空不会回填，失焦才夹到 1–10（见 @fizz/ui/number-field） */}
+          <NumberField
+            value={app.toolCallConcurrency}
             min={1}
             max={10}
-            step={1}
-            value={app.toolCallConcurrency}
-            onChange={(e) => {
-              const raw = e.target.value === '' ? DEFAULT_TOOL_CALL_CONCURRENCY : Number(e.target.value)
-              if (!Number.isNaN(raw)) app.setToolCallConcurrency(raw)
-            }}
-            onBlur={(e) => {
-              // 失焦时把胡乱输入（越界 / 小数 / 空）夹回合法区间
-              const raw = e.target.value === '' ? DEFAULT_TOOL_CALL_CONCURRENCY : Number(e.target.value)
-              app.setToolCallConcurrency(resolveToolCallConcurrency(raw))
-            }}
+            onValueChange={(next) => app.setToolCallConcurrency(next ?? DEFAULT_TOOL_CALL_CONCURRENCY)}
+            invalidHint={tr('需为 1–10 的整数，离开输入框会夹到最近的边界')}
+            aria-label={tr('工具调用并发')}
             className="w-28 font-mono"
           />
           <span className="text-xs text-muted-foreground">{tr('个')}</span>
@@ -184,21 +174,16 @@ export function AiPreferencesTab({ app }: { app: AgentApp }) {
           {tr('；调大能跑更长的任务，代价是每步都要重发全量上下文，成本随步数累加。')}
         </p>
         <div className="flex items-center gap-2">
-          <Input
-            type="number"
+          <NumberField
+            value={app.maxSteps}
             min={MIN_MAX_STEPS}
             max={MAX_MAX_STEPS}
-            step={1}
-            value={app.maxSteps}
-            onChange={(e) => {
-              const raw = e.target.value === '' ? DEFAULT_MAX_STEPS : Number(e.target.value)
-              if (!Number.isNaN(raw)) app.setMaxSteps(raw)
-            }}
-            onBlur={(e) => {
-              // 失焦时把胡乱输入（越界 / 小数 / 空）夹回合法区间
-              const raw = e.target.value === '' ? DEFAULT_MAX_STEPS : Number(e.target.value)
-              app.setMaxSteps(resolveMaxSteps(Number.isNaN(raw) ? DEFAULT_MAX_STEPS : raw))
-            }}
+            onValueChange={(next) => app.setMaxSteps(next ?? DEFAULT_MAX_STEPS)}
+            invalidHint={tr('需为 {min}–{max} 的整数，离开输入框会夹到最近的边界', {
+              min: MIN_MAX_STEPS,
+              max: MAX_MAX_STEPS
+            })}
+            aria-label={tr('工具调用最大步数')}
             className="w-28 font-mono"
           />
           <span className="text-xs text-muted-foreground">{tr('步')}</span>
@@ -280,17 +265,20 @@ export function AiPreferencesTab({ app }: { app: AgentApp }) {
                   <div className="text-xs leading-4 text-muted-foreground">{tr(meta.hint)}</div>
                   <div className="mt-1.5 flex items-center gap-1.5">
                     <span className="text-[0.625rem] text-muted-foreground">{tr('步数上限')}</span>
-                    {/* 非受控 + key 跟着落库值走：只在外部值变了才重挂，打字过程不发请求 */}
-                    <Input
-                      key={`steps-${id}-${savedSteps ?? 'default'}`}
-                      type="number"
+                    {/* 留空 = 用默认值；只在失焦时提交，越界交给 saveSubagentMaxSteps 拒绝 */}
+                    <NumberField
+                      value={savedSteps}
                       min={SUBAGENT_MIN_STEPS}
                       max={SUBAGENT_MAX_STEPS}
-                      step={1}
-                      defaultValue={savedSteps ?? ''}
+                      clamp={false}
+                      commitWhileTyping={false}
                       placeholder={tr('默认 {n}', { n: meta.defaultMaxSteps })}
                       aria-label={tr('「{name}」步数上限', { name: meta.name })}
-                      onBlur={(event) => void saveSubagentMaxSteps(id, meta.name, event.target.value)}
+                      invalidHint={tr('步数需为 {min}–{max} 的整数', {
+                        min: SUBAGENT_MIN_STEPS,
+                        max: SUBAGENT_MAX_STEPS
+                      })}
+                      onValueChange={(next) => void saveSubagentMaxSteps(id, meta.name, next)}
                       className="h-7 w-20 font-mono text-xs"
                     />
                   </div>
@@ -330,20 +318,12 @@ export function AiPreferencesTab({ app }: { app: AgentApp }) {
           {tr('等待审批的最长时间，超时按拒绝处理。0 = 一直等待。')}
         </p>
         <div className="flex items-center gap-2">
-          <Input
-            type="number"
-            min={0}
-            step={1}
+          <NumberField
             value={app.confirmTimeoutMin}
-            onChange={(e) => {
-              const raw = e.target.value === '' ? 0 : Number(e.target.value)
-              if (!Number.isNaN(raw)) app.setConfirmTimeoutMin(raw)
-            }}
-            onBlur={(e) => {
-              // 失焦时把胡乱输入（负数 / 小数 / 空）归一化回合法值
-              const raw = e.target.value === '' ? 0 : Number(e.target.value)
-              app.setConfirmTimeoutMin(Number.isNaN(raw) ? 10 : raw)
-            }}
+            min={0}
+            onValueChange={(next) => app.setConfirmTimeoutMin(next ?? 0)}
+            invalidHint={tr('需为不小于 0 的整数（0 = 一直等待）')}
+            aria-label={tr('命令审批超时')}
             className="w-28 font-mono"
           />
           <span className="text-xs text-muted-foreground">
@@ -358,20 +338,12 @@ export function AiPreferencesTab({ app }: { app: AgentApp }) {
           {tr('请求失败后的自动重试次数。已跑完工具步骤的轮次会从断点继续，不会重跑已完成的工具。0 = 不限，默认 2。')}
         </p>
         <div className="flex items-center gap-2">
-          <Input
-            type="number"
-            min={0}
-            step={1}
+          <NumberField
             value={app.maxRetries}
-            onChange={(e) => {
-              const raw = e.target.value === '' ? 0 : Number(e.target.value)
-              if (!Number.isNaN(raw)) app.setMaxRetries(raw)
-            }}
-            onBlur={(e) => {
-              // 失焦时把胡乱输入（负数 / 小数 / 空）归一化回合法值
-              const raw = e.target.value === '' ? 0 : Number(e.target.value)
-              app.setMaxRetries(Number.isNaN(raw) ? 2 : raw)
-            }}
+            min={0}
+            onValueChange={(next) => app.setMaxRetries(next ?? 0)}
+            invalidHint={tr('需为不小于 0 的整数（0 = 不限）')}
+            aria-label={tr('模型请求重试')}
             className="w-28 font-mono"
           />
           <span className="text-xs text-muted-foreground">

@@ -19,6 +19,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { Activity, Bell, Copy, ExternalLink, Globe, Languages, Mic, Sun } from 'lucide-react'
 import { Button } from '@fizz/ui/button'
 import { Input } from '@fizz/ui/input'
+import { NumberField } from '@fizz/ui/number-field'
 import { Switch } from '@fizz/ui/switch'
 import {
   Dialog,
@@ -50,7 +51,6 @@ import {
 } from '@fizz/agent-kit/shared/lib/notify'
 import { isNativeShell } from '@fizz/agent-kit/shared/lib/native-notify'
 import {
-  normalizeSilenceTimeoutSec,
   setVoiceSilenceTimeout,
   useVoiceSilenceTimeout
 } from '@fizz/agent-kit/shared/lib/voice-prefs'
@@ -226,20 +226,13 @@ export function GeneralTab({ app }: { app: AgentApp }) {
             {tr('连续静音多久后停止语音输入。0 = 不自动停止。')}
           </p>
           <div className="flex items-center gap-2">
-            <Input
-              type="number"
-              min={0}
-              step={1}
+            <NumberField
               value={silenceSec}
-              onChange={(e) => {
-                const raw = e.target.value === '' ? 0 : Number(e.target.value)
-                if (!Number.isNaN(raw)) setVoiceSilenceTimeout(raw)
-              }}
-              onBlur={(e) => {
-                // 失焦时把胡乱输入（负数 / 小数 / 空）归一化回合法值
-                const raw = e.target.value === '' ? 0 : Number(e.target.value)
-                setVoiceSilenceTimeout(normalizeSilenceTimeoutSec(raw))
-              }}
+              min={0}
+              max={3600}
+              onValueChange={(next) => setVoiceSilenceTimeout(next ?? 60)}
+              invalidHint={tr('需为 0–3600 的整数秒，离开输入框会夹到最近的边界')}
+              aria-label={tr('语音输入静音超时')}
               className="w-28 font-mono"
             />
             <span className="text-xs text-muted-foreground">
@@ -374,8 +367,8 @@ function RemoteAccessSection({ app }: { app: AgentApp }) {
   const save = host.saveRemoteAccess?.bind(host) ?? null
   const initial = host.loadRemoteAccess?.() ?? null
   const [state, setState] = useState<RemoteAccessState | null>(initial)
-  /** 端口是**草稿**：改完点应用（或拨开关）才落到主进程 */
-  const [portDraft, setPortDraft] = useState<string>(() => String(initial?.port ?? 7801))
+  /** 端口是**草稿**：改完点应用（或拨开关）才落到主进程。`null` 只会在清空时短暂出现 */
+  const [portDraft, setPortDraft] = useState<number | null>(() => initial?.port ?? 7801)
   const [busy, setBusy] = useState(false)
   /** 修改密码弹窗：旧密码 + 新密码 + 确认；只保存新密码的哈希 */
   const [passwordOpen, setPasswordOpen] = useState(false)
@@ -472,15 +465,41 @@ function RemoteAccessSection({ app }: { app: AgentApp }) {
     }
   }
 
+  /**
+   * 把主进程带回来的原始错误翻成人话。
+   *
+   * `startRemoteAccess` 失败时 `state.error` 里是 Node 的原文（`listen EADDRINUSE:
+   * address already in use 0.0.0.0:7801`），直接甩给用户等于没说 —— 端口占用是这一块
+   * 最常见、也最容易自己解决的失败，单独认出来。
+   */
+  const describeError = (error: string | undefined, port: number): string => {
+    if (!error) return tr('未知原因')
+    if (/EADDRINUSE/i.test(error)) {
+      return tr('端口 {port} 已被占用：换一个端口，或先关掉占用它的程序', { port })
+    }
+    if (/EACCES/i.test(error)) {
+      return tr('没有权限监听端口 {port}（1024 以下是特权端口）', { port })
+    }
+    return error
+  }
+
   /** 落一次改动。主进程会**重启监听**才生效（服务端只在启动时读 `FIZZ_AUTH_*`） */
   const apply = async (enabled: boolean): Promise<void> => {
     setBusy(true)
     try {
-      // 端口以输入框为准（空 / 非法值回落到当前配置）
-      const port = Number(portDraft) > 0 ? Math.trunc(Number(portDraft)) : (state?.port ?? 7801)
+      // 端口以输入框为准（输入框已经保证是 1–65535 的整数；清空时回落到当前配置）
+      const port = portDraft ?? state?.port ?? 7801
       const next = await save({ enabled, port })
       setState(next)
-      setPortDraft(String(next.port))
+      setPortDraft(next.port)
+      /**
+       * ⚠️ 失败**不会抛**：主进程（agent-host 的 `startRemoteAccess`）把 listen 的错误收进
+       * `info.error` 之后照常返回，所以 `await save()` 永远是成功。只看返回值的话，表现就是
+       * 「开关自己弹回去、界面一个字都没有」。这里必须自己判结果并吭一声。
+       */
+      if (enabled && !next.enabled) {
+        toast.error(tr('远程访问没能开启'), { description: describeError(next.error, next.port) })
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : tr('远程访问设置失败'))
     } finally {
@@ -506,12 +525,12 @@ function RemoteAccessSection({ app }: { app: AgentApp }) {
         />
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
           {tr('端口')}
-          <Input
-            type="number"
+          <NumberField
+            value={portDraft}
             min={1}
             max={65535}
-            value={portDraft}
-            onChange={(e) => setPortDraft(e.target.value)}
+            onValueChange={(next) => setPortDraft(next ?? state?.port ?? 7801)}
+            invalidHint={tr('端口需为 1–65535 的整数，离开输入框会夹到最近的边界')}
             className="h-7 w-24 tabular-nums"
             disabled={busy}
             aria-label={tr('监听端口')}
@@ -519,6 +538,14 @@ function RemoteAccessSection({ app }: { app: AgentApp }) {
         </div>
         {busy && <span className="text-xs text-muted-foreground">{tr('应用中…')}</span>}
       </div>
+
+      {/*
+        失败原因**不放在 `state.enabled` 里**：失败时 `running` 恒为 false、这一块整段不渲染，
+        于是「端口被占用」这种最该看到的信息恰好被藏掉了（toast 会消失，这里留一条常驻的）。
+      */}
+      {state?.error && (
+        <div className="text-xs leading-4 text-destructive">{describeError(state.error, state.port)}</div>
+      )}
 
       {state?.enabled && (
         <div className="space-y-2 rounded-md border border-border/60 bg-muted/20 p-2.5 text-xs">
@@ -547,7 +574,6 @@ function RemoteAccessSection({ app }: { app: AgentApp }) {
               {tr('没找到 web 产物')}（<code>apps/web/dist</code>）：{tr('浏览器打开只有接口、没有界面。先在仓库根跑一次')} <code>npm run build:web</code> {tr('再开关一次这里。')}
             </div>
           )}
-          {state.error && <div className="text-destructive">{state.error}</div>}
         </div>
       )}
 
