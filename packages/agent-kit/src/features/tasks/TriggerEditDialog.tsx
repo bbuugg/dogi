@@ -23,6 +23,11 @@
  * 浏览器那颗在定时任务里**不是凑数**：`browser_*` 工具跑在**服务端**（用服务端那台机器的
  * Chromium / Edge / Chrome），不依赖用户面前的窗口 —— 无人值守的任务照样能开网页抓数据。
  *
+ * ⚠️ 但**只在选内置模型时才有意义**：外部 Agent（ACP）自带工具、不读 `browserSettings` /
+ * `mcpServerIds`，所以目标切到外部 Agent 时这一排换成与「开始新对话」页同一颗灰占位
+ * （`ComposerToolbarPlaceholder`）—— 高度占住不抖，但点不动；保存时这两个字段也不写进
+ * 模板（见 `submit`），否则任务详情会显示「浏览器：开启」这种用户从没设过的假事实。
+ *
  * ⚠️ **布局也是抄的**，不是「摆得差不多」：需求这块必须与 `chat-surface.tsx` 的
  * `ChatComposer` 同构 —— 卡片上方工具条（MCP）、卡片内底部左权限右模型、卡片下方那条
  * 工作区窄条。第一版把这四样平铺进卡片的同一行，一眼就能看出不是同一个控件。
@@ -64,6 +69,7 @@ import {
 import { WorkspacePicker } from '@fizz/agent-kit/features/chat/WorkspacePicker'
 import { BrowserPicker } from '@fizz/agent-kit/features/chat/BrowserPicker'
 import { McpPicker } from '@fizz/agent-kit/features/chat/McpPicker'
+import { ComposerToolbarPlaceholder } from '@fizz/agent-kit/features/chat/ComposerToolbar'
 import type { TriggersState } from '@fizz/agent-kit/shared/hooks/useTriggers'
 
 /**
@@ -337,9 +343,15 @@ function TriggerForm({
         // 外部 Agent 的「跟随默认」= 不写这个字段（省了就是 agent 自己的默认）
         ...(modelId ? { modelId } : {}),
         // 开关 + 来源**总是**带上（不能只在开启时写）：全局默认可能是开着的，
-        // 用户在表单里明确关掉时得能把「关」这一状态存下来，否则触发时又按全局默认开回来
-        browserSettings,
-        ...(chosenMcpIds.length ? { mcpServerIds: chosenMcpIds } : {})
+        // 用户在表单里明确关掉时得能把「关」这一状态存下来，否则触发时又按全局默认开回来。
+        // 但**外部 Agent 那两个字段一律不写**：它自带工具、不读它们，写进去只会让任务详情
+        // 显示「浏览器：开启」这种假事实（表单里这两颗对 ACP 是灰占位，用户根本没碰过）。
+        ...(isAcpTarget
+          ? {}
+          : {
+              browserSettings,
+              ...(chosenMcpIds.length ? { mcpServerIds: chosenMcpIds } : {})
+            })
       },
       enabled: editing?.enabled ?? true
     })
@@ -384,8 +396,23 @@ function TriggerForm({
         <Label htmlFor="trigger-prompt">需求</Label>
         <div>
           {/* 与聊天工具条同一条判据：浏览器没装 → 那颗不出现；连 MCP 也没配 →
-              整行不渲染（空行会把需求框往下推，看着像多了一段空白） */}
-          {(browserInstalled || mcpServers.length > 0) && (
+              整行不渲染（空行会把需求框往下推，看着像多了一段空白）。
+
+              选的是**外部 Agent** 时这一排不生效：`browser_*` 工具与提示词里的浏览器说明
+              只在**内置链路**注入，MCP 也是按会话勾给内置 agent 的；ACP 走外部 agent，
+              它自带工具、也不读 template.browserSettings / mcpServerIds（见 scheduler 的
+              建会话那一段）。所以与「开始新对话」页同一套处理 —— 画灰占位把高度占住
+              （在这里当场把目标从内置切到外部 Agent 时需求框不会上下跳），不给能点的开关。 */}
+          {isAcpTarget ? (
+            (browserInstalled || mcpServers.length > 0) && (
+              <div className="mb-2">
+                <ComposerToolbarPlaceholder
+                  browser={browserInstalled}
+                  mcp={mcpServers.length > 0}
+                />
+              </div>
+            )
+          ) : (browserInstalled || mcpServers.length > 0) && (
             <div className="mb-2 flex flex-wrap items-center gap-1.5">
               {/* 浏览器工具跑在**服务端**，无人值守的任务一样能用（见 template.browserSettings） */}
               {browserInstalled && (
@@ -457,9 +484,11 @@ function TriggerForm({
           {workspaceId
             ? '每次触发都在这个工作区里跑一轮会话。'
             : '不绑工作区：每次触发自动新建一个临时工作区（空目录、不进项目列表），从零干一遍。'}
-          权限 / 模型 / 浏览器 / MCP 与新建会话时是同一套选项；必须选一个目标（内置模型，或外部
-          Agent）—— 触发时没人值守，不会替你挑一个。外部 Agent 可以「跟随它自己的默认模型」。
-          浏览器工具跑在服务端，无人值守也能用。
+          {isAcpTarget
+            ? '权限 / 模型与新建会话时是同一套选项；浏览器 / MCP 只对内置模型生效 —— 外部 Agent 自带工具，不读这两个开关。'
+            : '权限 / 模型 / 浏览器 / MCP 与新建会话时是同一套选项；浏览器工具跑在服务端，无人值守也能用。'}
+          必须选一个目标（内置模型，或外部 Agent）—— 触发时没人值守，不会替你挑一个。外部 Agent
+          可以「跟随它自己的默认模型」。
         </p>
       </div>
 

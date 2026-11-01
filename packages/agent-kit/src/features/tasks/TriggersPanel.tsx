@@ -527,26 +527,38 @@ export function TriggersPanel() {
                 <dd className="min-w-0 truncate">
                   {modelTextOf(selected.template, app.models, app.acpAgents)}
                 </dd>
-                <dt className="text-muted-foreground">浏览器</dt>
-                <dd className="min-w-0">
-                  {selected.template.browserSettings
-                    ? selected.template.browserSettings.enabled
-                      ? '开启'
-                      : '关闭'
-                    : // 存量任务没有这个字段 = 触发时按**全局默认**走（不是「关闭」）
-                      '跟随全局默认'}
-                </dd>
-                <dt className="text-muted-foreground">MCP</dt>
-                <dd className="min-w-0">
-                  {selected.template.mcpServerIds?.length
-                    ? selected.template.mcpServerIds
-                        .map(
-                          (id) =>
-                            app.mcpServers.find((server) => server.id === id)?.name ?? id
-                        )
-                        .join('、')
-                    : '不挂'}
-                </dd>
+                {/* 外部 Agent 自带工具、不读这两个字段（表单里那两颗对它就是灰占位，
+                    保存时也不写进模板）：这一档合并成一行「不适用」，否则会显示
+                    「浏览器：关闭 / MCP：不挂」这种用户从没设过的假事实 */}
+                {selected.template.backend === 'acp' ? (
+                  <>
+                    <dt className="text-muted-foreground">浏览器 / MCP</dt>
+                    <dd className="min-w-0">不适用（外部 Agent 自带工具）</dd>
+                  </>
+                ) : (
+                  <>
+                    <dt className="text-muted-foreground">浏览器</dt>
+                    <dd className="min-w-0">
+                      {selected.template.browserSettings
+                        ? selected.template.browserSettings.enabled
+                          ? '开启'
+                          : '关闭'
+                        : // 存量任务没有这个字段 = 触发时按**全局默认**走（不是「关闭」）
+                          '跟随全局默认'}
+                    </dd>
+                    <dt className="text-muted-foreground">MCP</dt>
+                    <dd className="min-w-0">
+                      {selected.template.mcpServerIds?.length
+                        ? selected.template.mcpServerIds
+                            .map(
+                              (id) =>
+                                app.mcpServers.find((server) => server.id === id)?.name ?? id
+                            )
+                            .join('、')
+                        : '不挂'}
+                    </dd>
+                  </>
+                )}
               </dl>
 
               <div className="space-y-1.5">
