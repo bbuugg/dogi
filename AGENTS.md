@@ -44,6 +44,7 @@ Fizz 是自托管的 AI Agent 工作台：**所有能力跑在一个 Node 进程
 - **`.env` 是我们自己读的**（`packages/workspace/src/env.ts`），解析一律用 `dotenv`；真实环境变量优先于文件。contracts 每加一个子路径入口，`apps/server` 的 vite alias 要同步加。
 - 对话走 SSE，**必须有应用层心跳**（15s），否则空闲会被掐断。
 - **API key 绝不进 git**；落盘走 `SecretBox`（AES-256-GCM）。发往浏览器的视图不含明文（`hasApiKey` / `envKeys`），别为了「编辑好回填」把明文加回去。
+- **插件配置只认设置页（系统配置），不读环境变量**：一个凭据两个真源时，排查「为什么发不出去 / 传不上去」永远得先问「你到底配在哪」（`FIZZ_CONTAINER_DOMAIN` 也是同一条理由移除的）。容器 / 无界面部署用的是同一个设置页。
 
 ### 耗时任务
 

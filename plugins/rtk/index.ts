@@ -56,6 +56,17 @@
  * 开关打开、`git status` 照旧直跑）。所以这里用 `spawnSync` 读 `status`，不用
  * `execFileSync`（它对非零退出直接抛，只能靠 catch 把码 3 的 stdout 一起丢掉）。
  *
+ * ## 单条命令不过滤：`rtk bypass`，不是 `RTK_DISABLED=1`
+ *
+ * rtk 自己认命令前缀 `RTK_DISABLED=1 git status`（`rtk rewrite` 返回 exit 1，本插件走到
+ * exit 1 就原样放行，端到端是通的）。但那是 **POSIX 的 `VAR=val cmd` 语法**：Windows 上
+ * `execute_command` 优先 Git Bash 时能用，退回 cmd / PowerShell 就变成「不是内部或外部命令」
+ * —— 看起来像插件的锅，其实是 shell 语法。
+ *
+ * 所以给用户 / 模型的建议一律是 **`rtk bypass <命令>`**：它就是一条普通命令，各 shell 都合法，
+ * 语义也正好是「执行但不过滤」（仍统计用量）。插件看到命令以 `rtk ` 开头会直接放行
+ * （`^\s*rtk\b`），不会套娃。输出过滤完才发现不够看，还有 `rtk recall <hash>` 把省略的部分捞回来。
+ *
  * ## 降级约定
  *
  * 任何异常都回退原命令（与 RTK 自己的 hook 同一条规矩：永不阻塞命令执行）。只有
@@ -233,7 +244,11 @@ export default {
         id: 'enabled',
         title: '启用 RTK 命令重写',
         type: 'boolean',
-        default: false
+        default: false,
+        description:
+          '打开后 git status 这类命令会被改写成 rtk git status（输出在 rtk 进程里过滤，省 token）。' +
+          '想对单条命令不过滤：写成 rtk bypass <命令> —— 各平台各 shell 都合法。' +
+          'Windows 上别用 RTK_DISABLED=1 <命令>：那是 POSIX 语法，没有 Git Bash 时会直接报「不是内部或外部命令」。'
       })
       c.ui.setting({
         id: 'terminal',
@@ -274,8 +289,21 @@ export default {
 
         const command = (current as { command?: unknown }).command
         if (typeof command !== 'string' || !command.trim()) return current
-        // 已经是 rtk 的、或用户对单条命令显式禁用（RTK_DISABLED=1 git status），原样放行
-        if (/^\s*rtk\b/.test(command) || process.env.RTK_DISABLED === '1') return current
+        /**
+         * 已经是 rtk 的：别套娃。
+         *
+         * ⚠️ 这里**刻意不读 `process.env.RTK_DISABLED`**（原来有一句，已删）。两件事别搞混：
+         *
+         * - 「单条命令不过滤」是 **rtk 自己**的机制：命令前缀 `RTK_DISABLED=1 git status`，
+         *   `rtk rewrite` 认它并返回 exit 1（实测 `rtk hook check` 也是 `No rewrite for: …`），
+         *   本插件走到 exit 1 就原样放行 —— 端到端本来就通，不需要这一层再判一次。
+         * - 而**进程环境**里的 `RTK_DISABLED=1` rtk 根本不认（实测：设进环境后 `rewrite`
+         *   照样返回改写结果）。留着那个判断只会变成第二个总开关：设置页显示「已启用」、
+         *   实际一条命令都不改写，且没有任何界面提示 —— 排查时只能靠猜。
+         *
+         * 总开关只有设置项 `enabled` 一个（见文件头「为什么默认关」）。
+         */
+        if (/^\s*rtk\b/.test(command)) return current
 
         const rewritten = rewriteCommand(command, settings.bin, settings.timeoutMs, ctx)
         if (rewritten === command) return current

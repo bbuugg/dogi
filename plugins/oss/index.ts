@@ -38,8 +38,8 @@
  * - `verifyPublicRead`：上传后立刻回读一次公网地址，读不到就当场报错（默认开）。
  *   没有它的话，「桶不是公共读」会表现成「附件发出去、模型读不到」，比报错难查得多。
  *
- * 环境变量兜底（容器 / 无界面部署）：`OSS_ENDPOINT`、`OSS_REGION`、`OSS_BUCKET`、
- * `OSS_ACCESS_KEY_ID`、`OSS_ACCESS_KEY_SECRET`、`OSS_PUBLIC_BASE_URL`。
+ * 配置**只从设置页来**（系统配置），不读环境变量：一个凭据有两个真源，排查「为什么传不
+ * 上去」时永远得先问「你到底配在哪」。容器 / 无界面部署用的是同一个设置页。
  *
  * ## 签名细节（排障时看这里）
  *
@@ -294,10 +294,9 @@ interface OssSettings {
   enableTools: boolean
 }
 
-/** 设置页里填的值优先，环境变量兜底（容器 / 无界面部署） */
-function pick(configured: unknown, envName: string): string {
-  if (typeof configured === 'string' && configured.trim()) return configured.trim()
-  return process.env[envName]?.trim() ?? ''
+/** 取设置页里填的值（去首尾空白；**不读环境变量**，见文件头） */
+function pick(configured: unknown): string {
+  return typeof configured === 'string' ? configured.trim() : ''
 }
 
 function stripSlash(value: string): string {
@@ -306,13 +305,13 @@ function stripSlash(value: string): string {
 
 function readSettings(config?: OssConfig): OssSettings {
   return {
-    endpoint: stripSlash(pick(config?.endpoint, 'OSS_ENDPOINT')),
-    region: pick(config?.region, 'OSS_REGION'),
-    bucket: pick(config?.bucket, 'OSS_BUCKET'),
-    accessKeyId: pick(config?.accessKeyId, 'OSS_ACCESS_KEY_ID'),
-    secretAccessKey: pick(config?.secretAccessKey, 'OSS_ACCESS_KEY_SECRET'),
-    publicBaseUrl: stripSlash(pick(config?.publicBaseUrl, 'OSS_PUBLIC_BASE_URL')),
-    keyPrefix: pick(config?.keyPrefix, 'OSS_KEY_PREFIX') || 'fizz/',
+    endpoint: stripSlash(pick(config?.endpoint)),
+    region: pick(config?.region),
+    bucket: pick(config?.bucket),
+    accessKeyId: pick(config?.accessKeyId),
+    secretAccessKey: pick(config?.secretAccessKey),
+    publicBaseUrl: stripSlash(pick(config?.publicBaseUrl)),
+    keyPrefix: pick(config?.keyPrefix) || 'fizz/',
     // 开关：缺省 = 开（只有显式存成 false 才关）
     verifyPublicRead: config?.verifyPublicRead !== false,
     enableUploadProvider: config?.enableUploadProvider !== false,

@@ -32,8 +32,9 @@
  * 那个 `key=` 等价于群机器人的密码。设置项标 `secret: true`，由宿主走 SecretBox 加密
  * 落盘、明文不回传浏览器（与 `api-upload` 的 apiKey 同一条路）。
  *
- * ⚠️ 但**环境变量是次选、不是首选**：`WECOM_WEBHOOK_URL` 写在 `.env` / compose 里，
- * 同样等于把 key 落到磁盘上。它存在的意义是**容器 / 无界面部署**（那里没人开设置页）。
+ * ⚠️ **只认设置页（系统配置），不读环境变量**：早先还支持 `WECOM_WEBHOOK_URL` 兜底，
+ * 已经移除 —— 同一个凭据有两个真源时，排查「为什么发不出去」永远得先问「你到底配在哪」。
+ * 容器 / 无界面部署用的是**同一个**设置页（同一个 server 托管 web 产物），不需要第二套入口。
  */
 import { z } from 'zod'
 import { tool } from 'ai'
@@ -75,7 +76,7 @@ const TRUNCATE_SUFFIX = '\n…（内容过长已截断）'
 const ICON =
   'data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20width%3D%2224%22%20height%3D%2224%22%3E%3Cpath%20fill%3D%22%2307C160%22%20d%3D%22M12%203C8.1%203%205%206.1%205%2010L5%2015L3.5%2019.5L20.5%2019.5L19%2015L19%2010C19%206.1%2015.9%203%2012%203Z%22%2F%3E%3Cpath%20fill%3D%22%2307C160%22%20d%3D%22M9.8%2020.6C9.8%2023.2%2014.2%2023.2%2014.2%2020.6Z%22%2F%3E%3C%2Fsvg%3E'
 
-/** 插件配置（宿主传进来的；值来自设置页或环境变量兜底） */
+/** 插件配置（宿主传进来的；值来自设置页，**不读环境变量**） */
 interface WecomConfig {
   enabled?: boolean
   webhookUrl?: string
@@ -88,23 +89,20 @@ interface WecomSettings {
   defaultMentions: string[]
 }
 
-/** 取配置值：设置页优先，其次环境变量（容器 / 无界面部署） */
-function pick(...values: (string | undefined)[]): string {
-  for (const v of values) {
-    const t = typeof v === 'string' ? v.trim() : ''
-    if (t) return t
-  }
-  return ''
+/** 取配置值：只去首尾空白，空串当「没配」 */
+function pick(value: string | undefined): string {
+  return typeof value === 'string' ? value.trim() : ''
 }
 
 function readSettings(config?: WecomConfig): WecomSettings {
+  // 默认 @ 谁：逗号分隔的用户 id 或 `@all`；留空 = 不 @
+  const mentions = pick(config?.defaultMentions)
   return {
     // 开关：缺省 = 开（只有显式存成 false 才关），与 oss / api-upload 同一口径
     enabled: config?.enabled !== false,
-    webhookUrl: pick(config?.webhookUrl, process.env.WECOM_WEBHOOK_URL),
-    // 默认 @ 谁：逗号分隔的用户 id 或 `@all`；留空 = 不 @
-    defaultMentions: pick(config?.defaultMentions).length
-      ? pick(config?.defaultMentions)
+    webhookUrl: pick(config?.webhookUrl),
+    defaultMentions: mentions
+      ? mentions
           .split(/[,，\s]+/)
           .map((x) => x.trim())
           .filter(Boolean)
@@ -122,8 +120,7 @@ function readSettings(config?: WecomConfig): WecomSettings {
 function validateWebhook(url: string): URL {
   if (!url) {
     throw new Error(
-      '还没配企业微信 webhook：设置 →「插件」→ 企业微信通知 →「群机器人 Webhook 地址」，' +
-        '或设环境变量 WECOM_WEBHOOK_URL'
+      '还没配企业微信 webhook：设置 →「插件」→ 企业微信通知 →「群机器人 Webhook 地址」'
     )
   }
   let parsed: URL
@@ -287,7 +284,7 @@ export default {
         placeholder: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxxxx',
         description:
           '在企业微信群里「添加群机器人 → 复制 Webhook 地址」。⚠️ 这条地址里的 key 等于机器人的密码，' +
-          '**不要提交进 git**。等价环境变量：WECOM_WEBHOOK_URL（容器 / 无界面部署用）'
+          '**不要提交进 git**。'
       })
       c.ui.setting({
         id: 'defaultMentions',
@@ -295,8 +292,7 @@ export default {
         type: 'string',
         placeholder: '@all 或 zhangsan,lisi',
         description:
-          '逗号分隔的企业微信用户 id（不是姓名），`@all` 表示所有人。每次调用可以再用 mentions 参数补充或覆盖。' +
-          '等价环境变量：WECOM_DEFAULT_MENTIONS'
+          '逗号分隔的企业微信用户 id（不是姓名），`@all` 表示所有人。每次调用可以再用 mentions 参数补充或覆盖。'
       })
     })
 

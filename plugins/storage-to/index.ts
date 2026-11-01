@@ -37,7 +37,7 @@
  *
  * 设置 →「全局插件」里把 storage.to 关掉（用户级插件的开关是全局一份，与项目无关）。
  *
- * ## 凭据：设置页里填（不必碰环境变量）
+ * ## 凭据：只从设置页里填
  *
  * `apply` 里用 `ctx.ui.setting(...)` 声明了两个设置项，**值在 设置 →「全局插件」里填**：
  * - `token`（`secret: true`）：账号 API 令牌。落盘经 SecretBox 加密，**明文不回传浏览器**；
@@ -45,8 +45,9 @@
  * - `visitorToken`：匿名上传用的访客令牌（同一令牌共享 24h 配额）。不填就每次进程启动
  *   随机生成一个 —— 想要配额跨重启可续就填一个固定的。
  *
- * 环境变量仍然是**兜底**（容器 / 无界面部署、或想用密钥管理系统注入时）：
- * `STORAGE_TO_TOKEN`、`STORAGE_TO_VISITOR_TOKEN`。优先级 = 设置页里填的 > 环境变量。
+ * 早先还支持 `STORAGE_TO_TOKEN` / `STORAGE_TO_VISITOR_TOKEN` 环境变量兜底，**已移除**：
+ * 一个凭据两个真源，排查「为什么传不上去」时永远得先问「你到底配在哪」。容器 / 无界面
+ * 部署用的是同一个设置页（同一个 server 托管 web 产物），不需要第二套入口。
  *
  * 令牌里混进 `Bearer ` 前缀或引号会被自动清掉（粘贴最常见的两种形态），所以照样能用。
  *
@@ -156,7 +157,7 @@ const ICON =
   `%3Cpath d=%27M24 30V12%27 stroke=%27%2338bdf8%27 stroke-width=%274%27 stroke-linecap=%27round%27/%3E` +
   `%3Cpath d=%27M16 20l8-8 8 8%27 stroke=%27%2338bdf8%27 stroke-width=%274%27 stroke-linecap=%27round%27 stroke-linejoin=%27round%27 fill=%27none%27/%3E%3C/svg%3E`
 
-/** 进程内固定的随机访客令牌（设置项 / 环境变量都没给时的兜底） */
+/** 进程内固定的随机访客令牌（设置项没填时的兜底） */
 const processVisitorToken = `fizz-${randomUUID()}`
 
 /**
@@ -274,10 +275,9 @@ function putHeaders(extra: unknown, mediaType: string): Record<string, string> {
   return Object.fromEntries([...merged.values()].map(({ name, value }) => [name, value]))
 }
 
-/** 从设置页 / 环境变量里取一个非空字符串（设置页优先） */
-function pick(configured: unknown, envName: string): string {
-  if (typeof configured === 'string' && configured.trim()) return configured.trim()
-  return process.env[envName]?.trim() ?? ''
+/** 取设置页里填的值（去首尾空白；**不读环境变量**，见文件头） */
+function pick(configured: unknown): string {
+  return typeof configured === 'string' ? configured.trim() : ''
 }
 
 /**
@@ -407,10 +407,9 @@ export default {
     },
     config?: { token?: string; visitorToken?: string }
   ) {
-    // 凭据优先级：设置页里填的 > 环境变量（容器 / 无界面部署用 env 兜底）
-    const token = normalizeToken(pick(config?.token, 'STORAGE_TO_TOKEN'))
-    const visitorToken =
-      pick(config?.visitorToken, 'STORAGE_TO_VISITOR_TOKEN') || processVisitorToken
+    // 凭据只认设置页（不读环境变量，见文件头）
+    const token = normalizeToken(pick(config?.token))
+    const visitorToken = pick(config?.visitorToken) || processVisitorToken
 
     /**
      * 设置项与图标：**只在有 ui 的 context 里声明**。
@@ -430,7 +429,7 @@ export default {
         type: 'string',
         secret: true,
         description:
-          '在 storage.to 的「账号 → API 令牌」里创建。填了 = 永久保存 + 无配额限制；留空 = 匿名上传（文件约 3 天后过期）。等价环境变量：STORAGE_TO_TOKEN',
+          '在 storage.to 的「账号 → API 令牌」里创建。填了 = 永久保存 + 无配额限制；留空 = 匿名上传（文件约 3 天后过期）。',
         placeholder: '留空则匿名上传'
       })
       c.ui.setting({
@@ -438,7 +437,7 @@ export default {
         title: '访客令牌（匿名用）',
         type: 'string',
         description:
-          '匿名上传用来归集配额的随机字符串（同一令牌共享 24 小时 100GB 配额）。不填就每次进程启动随机一个 —— 想跨重启续配额就填个固定的。等价环境变量：STORAGE_TO_VISITOR_TOKEN'
+          '匿名上传用来归集配额的随机字符串（同一令牌共享 24 小时 100GB 配额）。不填就每次进程启动随机一个 —— 想跨重启续配额就填个固定的。'
       })
     })
 

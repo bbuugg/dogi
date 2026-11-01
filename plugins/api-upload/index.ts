@@ -31,8 +31,8 @@
  * - `verifyUrl`：上传后立刻 GET 一次返回的地址，取不到就报错（默认开）；
  * - `enableUploadProvider`：关掉就只保留配置、不出现在「传到哪儿」里。
  *
- * 环境变量兜底（容器 / 无界面部署）：`API_UPLOAD_BASE_URL`、`API_UPLOAD_API_KEY`、
- * `API_UPLOAD_DIR`、`API_UPLOAD_PUBLIC_BASE_URL`。
+ * 配置**只从设置页来**（系统配置），不读环境变量：一个凭据有两个真源，排查「为什么传不
+ * 上去」时永远得先问「你到底配在哪」。容器 / 无界面部署用的是同一个设置页。
  *
  * ## 报错口径
  *
@@ -78,10 +78,9 @@ interface ApiUploadSettings {
   enableUploadProvider: boolean
 }
 
-/** 设置页里填的值优先，环境变量兜底（容器 / 无界面部署） */
-function pick(configured: unknown, envName: string): string {
-  if (typeof configured === 'string' && configured.trim()) return configured.trim()
-  return process.env[envName]?.trim() ?? ''
+/** 取设置页里填的值（去首尾空白；**不读环境变量**，见文件头） */
+function pick(configured: unknown): string {
+  return typeof configured === 'string' ? configured.trim() : ''
 }
 
 function stripSlash(value: string): string {
@@ -89,13 +88,13 @@ function stripSlash(value: string): string {
 }
 
 function readSettings(config?: ApiUploadConfig): ApiUploadSettings {
-  const baseUrl = stripSlash(pick(config?.baseUrl, 'API_UPLOAD_BASE_URL'))
+  const baseUrl = stripSlash(pick(config?.baseUrl))
   return {
     baseUrl,
-    apiKey: pick(config?.apiKey, 'API_UPLOAD_API_KEY'),
-    dir: pick(config?.dir, 'API_UPLOAD_DIR'),
+    apiKey: pick(config?.apiKey),
+    dir: pick(config?.dir),
     // 没单独配静态域名时，文件就挂在接口那个域下（文档：assetUrl 未配置 → 回退请求 host）
-    publicBaseUrl: stripSlash(pick(config?.publicBaseUrl, 'API_UPLOAD_PUBLIC_BASE_URL')) || baseUrl,
+    publicBaseUrl: stripSlash(pick(config?.publicBaseUrl)) || baseUrl,
     // 开关：缺省 = 开（只有显式存成 false 才关）
     verifyUrl: config?.verifyUrl !== false,
     enableUploadProvider: config?.enableUploadProvider !== false
@@ -303,7 +302,7 @@ export default {
         secret: true,
         placeholder: 'sk-xxxxxxxx',
         description:
-          '后台「系统监控 → API Key 管理」里创建的 Key。每次成功调用扣 1 次配额；无效 / 禁用 / 过期会返回 401，配额用尽返回 429。等价环境变量：API_UPLOAD_API_KEY'
+          '后台「系统监控 → API Key 管理」里创建的 Key。每次成功调用扣 1 次配额；无效 / 禁用 / 过期会返回 401，配额用尽返回 429。'
       })
       c.ui.setting({
         id: 'publicBaseUrl',
