@@ -700,8 +700,16 @@ export function AcpTab({ app }: { app: AgentApp }) {
           ⚠️ 高度**钉死**（`h-[min(34rem,85dvh)]`，不是 `max-h`）：弹窗一开是「正在问它要
           模型清单」，探测回来后多出搜索行与整片列表 —— 用 `max-h` 的话弹窗会先小后大地跳
           一下（与「管理工作区 / 导入会话」同一条规矩）。定高之后内容怎么变都在这张卡里换。
+
+          ⚠️ **打开时不要自动聚焦**（`onOpenAutoFocus` 里 preventDefault）：Radix 默认把焦点
+          送到第一个可聚焦元素，而这里第一个是**搜索框** —— 弹窗一开焦点就跳进输入框，手机
+          上直接弹起软键盘、桌面端还平白多一个焦点环（用户要求去掉）。焦点留在原处即可，
+          Esc / Tab 由 Radix 的焦点陷阱与 DismissableLayer 照常接管，点击列表也能正常落焦。
         */}
-        <DialogContent className="flex h-[min(34rem,85dvh)] flex-col gap-4 overflow-hidden">
+        <DialogContent
+          className="flex h-[min(34rem,85dvh)] flex-col gap-4 overflow-hidden"
+          onOpenAutoFocus={(event) => event.preventDefault()}
+        >
           <DialogHeader className="shrink-0">
             <DialogTitle>{tr('选择 {name} 的模型', { name: openAgent?.name ?? '' })}</DialogTitle>
             <DialogDescription>

@@ -16,9 +16,15 @@
  *
  * ⚠️ 与 dogi 一样，这里**没有「自动下载」**：`available` 只是「有新版本、等你点」。
  * 三个消费点都只负责展示与转发用户的点击，别在这里自动调 `download()`。
+ *
+ * ## 「提醒」与「状态」是两件事
+ *
+ * 文件末尾那个 `useUpdateNotifyEnabled()` 是**要不要打扰用户**的开关：关掉之后
+ * 徽章与 toast 都不出现，但设置页里的状态与按钮照旧 —— 更新本身没有被关掉。
  */
 import { useSyncExternalStore } from 'react'
 import { getAgentHostOrNull, type AppUpdateStatus } from '@fizz/agent-client/host'
+import { readPref, subscribePrefs, writePref } from './prefs-sync'
 
 /** 最近一次拿到的状态快照；null = 还没拿到（或宿主没这个能力） */
 let current: AppUpdateStatus | null = null
@@ -99,4 +105,70 @@ export async function installAppUpdate(): Promise<boolean> {
   const bridge = getAgentHostOrNull()?.appUpdate
   if (!bridge) return false
   return bridge.install().catch(() => false)
+}
+
+// ---------------------------------------------------------------------------
+// 「有更新时提醒我」开关
+// ---------------------------------------------------------------------------
+
+/**
+ * 关掉之后**只有设置页**还显示更新状态：状态栏那条指示与应用内 toast 都不再出现，
+ * 但下载 / 安装入口一个不少（它们本来就在设置里）。
+ *
+ * 为什么是**本地**偏好、不进 `PREF_KEYS`（服务端同步）：更新是**这台机器上这个安装包**
+ * 的事 —— 每台机器的版本各不相同，web / 手机压根没有这个能力（`appUpdateAvailable()`
+ * 恒 false）。跨窗口（desktop 的设置页是独立渲染进程）由 `prefs-sync` 的本地总线负责，
+ * 不需要服务端那一层。
+ *
+ * 缺省**开**：与加这个开关之前的行为一致（有更新就提醒）；关掉是明确的用户决定，
+ * 所以只存「关掉」的标记 —— 没存过 = 开。
+ */
+const UPDATE_NOTIFY_KEY = 'fizz.web.updateNotify'
+
+function readUpdateNotify(): boolean {
+  return readPref(UPDATE_NOTIFY_KEY) !== '0'
+}
+
+const notifyListeners = new Set<() => void>()
+
+/** 模块级缓存：`useSyncExternalStore` 要求 `getSnapshot` 返回同一个值 */
+let notifyEnabled = readUpdateNotify()
+
+/*
+ * 订阅变更：别的窗口（desktop 的设置页）改完写 localStorage 会触发这里。
+ * 模块级单例，不需要退订。
+ */
+subscribePrefs(UPDATE_NOTIFY_KEY, () => {
+  const next = readUpdateNotify()
+  if (next === notifyEnabled) return
+  notifyEnabled = next
+  for (const listener of notifyListeners) listener()
+})
+
+function getUpdateNotify(): boolean {
+  return notifyEnabled
+}
+
+function subscribeUpdateNotify(listener: () => void): () => void {
+  notifyListeners.add(listener)
+  return () => {
+    notifyListeners.delete(listener)
+  }
+}
+
+/** 要不要用状态栏指示条 / 应用内 toast 提醒「有更新」（设置页永远显示，不受它影响） */
+export function useUpdateNotifyEnabled(): boolean {
+  // SSR 上按默认（开）：与 `useAppUpdateStatus` 的第三参同一口径，避免首帧闪一下
+  return useSyncExternalStore(subscribeUpdateNotify, getUpdateNotify, () => true)
+}
+
+/**
+ * 写开关。同窗口写盘不会触发 `storage`，所以内存态与订阅者得自己更新一次
+ * （与 `notify.ts` 的 `saveNotifyEnabled` 同一套路）。
+ */
+export function saveUpdateNotifyEnabled(next: boolean): void {
+  if (next === notifyEnabled) return
+  notifyEnabled = next
+  writePref(UPDATE_NOTIFY_KEY, next ? '1' : '0')
+  for (const listener of notifyListeners) listener()
 }

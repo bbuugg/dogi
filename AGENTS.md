@@ -79,6 +79,7 @@ Fizz 是自托管的 AI Agent 工作台：**所有能力跑在一个 Node 进程
 - 可拖拽宽度有现成三份实现，**别起第四份**：宽度与开合同作用域用 `panel-width.ts`，全局一份用 `files-pane-width.ts` / `terminal-assistant-width.ts`；一律复用 `ResizeHandle.tsx`。
 - 表单弹窗一律 `sm:max-w-md`，别为摊两列而加宽；手机（<640px）表单行上下排。
 - 开外链只有一条路：`openExternal`（`@fizz/agent-client`），**别裸调 `window.open`**；协议白名单只在 `agent-host/src/external-link.ts` 一份。
+- **`IconTip` 不能直接套自带 `data-state` 的 Radix 原语**（`Switch` / `Checkbox` / `Toggle`）：`TooltipTrigger asChild` 会注 `data-state="closed"`，而这些原语把外部 props 排在自带 `data-state` 之后 → `checked` 被盖掉、`data-checked:` 规则全失效，控件整个透明只剩 tooltip（2026-11-01 定时任务那颗启停开关就是这么「消失」的）。包一层 `<span className="inline-flex">` 再套。
 - 往终端写多行输入，行分隔符必须是裸回车 `\r`（用 `toTerminalInput()`）：PowerShell 的 LF 会把行插到上方，顺序整个反过来。
 - 主题必须在首帧前定好（preload + `index.html` 内联脚本），**回落规则在 6 处，改一处必须六处同步**。
 - 文案**中文为源**，英文缺失自动回落，新增文案两边都补。
