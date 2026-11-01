@@ -18,7 +18,7 @@
  * 两个字段同时写会打架（两个数可能不一致），所以**有 `usage` 时不写 `durationMs`**。
  * 少了这条兜底，中止的轮次刷新后就只剩「思考 ×5 · 工具调用 ×5」的计数摘要。
  */
-import type { AgentChatMessage, TurnUsage } from '@fizz/contracts/types'
+import type { AgentChatMessage, AgentStopReason, TurnUsage } from '@fizz/contracts/types'
 
 /**
  * 落盘前把「还没结束」的子任务记录收敛成 `aborted`。
@@ -64,6 +64,13 @@ export interface BuildAssistantMessageInput {
   id?: string
   /** 没有 `usage` 时的整轮耗时（毫秒） */
   durationMs?: number
+  /**
+   * 被预算截断时给（见 `AgentStopReason`）。**与 `usage` / `durationMs` 不冲突**：
+   * 它回答的是「这一轮为什么停」，不是「花了多少」，所以单独写。
+   */
+  stopReason?: AgentStopReason
+  /** 这一轮实际跑了多少步（只有 `stopReason` 存在时给） */
+  steps?: number
   /** 落盘时间戳，缺省即当下（测试用） */
   now?: number
 }
@@ -80,6 +87,8 @@ export function buildAssistantMessage(input: BuildAssistantMessageInput): AgentC
       ? { usage: input.usage }
       : input.durationMs != null
         ? { durationMs: input.durationMs }
-        : {})
+        : {}),
+    ...(input.stopReason ? { stopReason: input.stopReason } : {}),
+    ...(input.stopReason && input.steps != null ? { steps: input.steps } : {})
   }
 }

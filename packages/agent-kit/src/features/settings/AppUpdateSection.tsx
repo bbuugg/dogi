@@ -16,19 +16,23 @@ import { useState } from 'react'
 import { Download, Loader2, RefreshCw, RotateCw, X } from 'lucide-react'
 import { Button } from '@fizz/ui/button'
 import { Progress } from '@fizz/ui/progress'
+import { Switch } from '@fizz/ui/switch'
 import {
   appUpdateAvailable,
   cancelAppUpdate,
   checkAppUpdate,
   downloadAppUpdate,
   installAppUpdate,
-  useAppUpdateStatus
+  saveUpdateNotifyEnabled,
+  useAppUpdateStatus,
+  useUpdateNotifyEnabled
 } from '@fizz/agent-kit/shared/lib/app-update'
 import { useT } from '@fizz/agent-kit/shared/lib/language'
 
 export function AppUpdateSection() {
   const tr = useT()
   const status = useAppUpdateStatus()
+  const notifyEnabled = useUpdateNotifyEnabled()
   /** 按钮的「正在发指令」态：只覆盖 IPC 往返那一小段，真正的进度看 status.state */
   const [busy, setBusy] = useState(false)
 
@@ -66,6 +70,26 @@ export function AppUpdateSection() {
 
       {status?.supported && (
         <>
+          {/*
+            「有更新时提醒我」：关掉只影响**打扰**（状态栏指示 + 应用内 toast），
+            这一节本身永远显示 —— 用户说的「只在设置中显示」就是它。
+          */}
+          <div className="flex items-center gap-2">
+            <Switch
+              id="update-notify-enabled"
+              checked={notifyEnabled}
+              onCheckedChange={saveUpdateNotifyEnabled}
+            />
+            <label htmlFor="update-notify-enabled" className="text-xs text-muted-foreground">
+              {tr('有更新时提醒我')}
+            </label>
+          </div>
+          <p className="text-xs leading-4 text-muted-foreground">
+            {notifyEnabled
+              ? tr('有新版本时，状态栏会出现一条指示、应用内也会弹一条提示。')
+              : tr('已关闭：状态栏与应用内都不再提醒，有新版本只在这里显示。')}
+          </p>
+
           <div className="flex flex-wrap items-center gap-3">
             <span className="text-xs text-muted-foreground">
               {tr('当前版本')} <code className="text-foreground">v{status.current}</code>

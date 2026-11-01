@@ -429,15 +429,26 @@ export function TriggersPanel() {
                   {/*
                     开关直接写盘（`toggleTrigger`），不做二次确认：这是**可逆**操作，
                     点错了再点回来即可 —— 与删除不同，删除才需要那两步。
+
+                    ⚠️ **必须用一层 `<span>` 当 tooltip 的触发器，不能把 IconTip 直接套在
+                    Switch 上**（这一条是踩过的坑，别「顺手」简化掉）：
+                    `TooltipTrigger asChild` 会往子元素注 `data-state="closed|delayed-open"`，
+                    而 Radix 的 Switch 恰恰靠 `data-state="checked|unchecked"` 决定轨道颜色 ——
+                    并且它内部把 `{...switchProps}` 排在自带的 `data-state` **之后**，所以
+                    传进来的 tooltip 状态会把它覆盖掉。结果：`data-checked` / `data-unchecked`
+                    两个档位都不命中，轨道背景整个丢失、只剩一个和面板同色的圆点，
+                    看起来就是「按钮不见了，只有悬停时才冒出一个 tooltip」。
                   */}
                   <IconTip label={selected.enabled ? '停用' : '启用'}>
-                    <Switch
-                      checked={selected.enabled}
-                      onCheckedChange={(checked) =>
-                        void triggers.toggleTrigger(selected.id, checked)
-                      }
-                      aria-label={selected.enabled ? '停用定时任务' : '启用定时任务'}
-                    />
+                    <span className="inline-flex items-center">
+                      <Switch
+                        checked={selected.enabled}
+                        onCheckedChange={(checked) =>
+                          void triggers.toggleTrigger(selected.id, checked)
+                        }
+                        aria-label={selected.enabled ? '停用定时任务' : '启用定时任务'}
+                      />
+                    </span>
                   </IconTip>
                   <IconTip label="编辑">
                     <Button

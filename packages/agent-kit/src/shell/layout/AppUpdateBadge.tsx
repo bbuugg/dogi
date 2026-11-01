@@ -9,23 +9,32 @@
  * ——而且下载是个会持续几十秒的后台动作，用户该在设置里看清版本号与进度再决定。
  * 想一步到位的入口在应用内提示（`AppUpdateNotifier` 的 toast 上有「下载」）。
  *
+ * ⚠️ 设置里的「有更新时提醒我」关掉时**整块不渲染**（`useUpdateNotifyEnabled`）：
+ * 那是用户明确说的「别在这儿提醒我」。下载不会因此停下，进度去设置里看。
+ *
  * 进度与状态来自 `shared/lib/app-update.ts`（与设置页那一节共用同一份订阅）。
  */
 import { Download, Loader2, RotateCw } from 'lucide-react'
 import { cn } from '@fizz/agent-kit/shared/lib/utils'
 import { STATUS_ITEM_CLASS } from '@fizz/agent-kit/shared/lib/status-bar'
-import { useAppUpdateStatus } from '@fizz/agent-kit/shared/lib/app-update'
+import {
+  useAppUpdateStatus,
+  useUpdateNotifyEnabled
+} from '@fizz/agent-kit/shared/lib/app-update'
 import { useT } from '@fizz/agent-kit/shared/lib/language'
 
 export function AppUpdateBadge({ onOpenSettings }: { onOpenSettings: () => void }) {
   const t = useT()
   const status = useAppUpdateStatus()
+  const notifyEnabled = useUpdateNotifyEnabled()
   const state = status?.state ?? 'idle'
   const percent = status?.percent ?? 0
   const latest = status?.latest
 
   // 非打包态（开发模式 / 当前平台装不了）：整块不渲染，免得给一个点不动的入口
   if (!status?.supported) return null
+  // 用户关了「有更新时提醒我」：状态栏这条也不出现（设置页照旧）
+  if (!notifyEnabled) return null
 
   if (state === 'downloading') {
     return (

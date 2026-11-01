@@ -67,6 +67,90 @@ export function toolIntentHint(): string {
 }
 
 /**
+ * 「这一轮有步数预算」这条约定（系统提示词里的**静态**一段）。
+ *
+ * 为什么值得花这几十个 token：模型不知道有闸，就会把「再查一个文件 / 再跑一次命令」无限
+ * 续下去，直到被 `stepCountIs` 硬停 —— 那时它连一句「做到哪了」都没机会说。提前告诉它
+ * 有预算，它才会先规划、把验证与结论排进前 N 步。
+ *
+ * ⚠️ **只能放常量预算，绝不能放「还剩几步」**：系统提示词是请求最前面的那几 k token，
+ * 一旦它随步数变化，上游前缀缓存就从第一个 token 起全部失效 —— 每一步都按全价重读整段
+ * 历史（第 N 步的成本本来就是第 1 步的 N 倍，再乘一次就是灾难）。动态的剩余步数走
+ * `stepBudgetReminder`（步骤边界注入到消息尾部，只影响尾部那一小段前缀）。
+ *
+ * 由 `buildAgentSetup` 按调用方传入的 `maxSteps` 追加（见那里的说明），
+ * 一轮只出现一次。
+ */
+export function stepBudgetHint(maxSteps: number): string {
+  return getLanguage() === 'en'
+    ? [
+        '',
+        `- This turn has a budget of **${maxSteps} tool steps** (1 step = one model request + one round of tool execution; several parallel tool calls in one batch still count as 1 step). When the budget runs out the turn is stopped immediately and you get no chance to reply — so plan for it:`,
+        '  - do the work that answers the user first, verification second, extra exploration last;',
+        '  - as the budget runs low, stop opening new threads and land the answer: what is done, what is left, what you would do next;',
+        '  - do **not** skip necessary verification just to save steps (that trades a wrong answer for a cheap one).'
+      ].join('\n')
+    : [
+        '',
+        `- 本轮有 **${maxSteps} 步**工具预算（1 步 = 一次模型请求 + 一轮工具执行；一次并行下发多个工具调用也只算 1 步）。预算用完会被立即停下、来不及再说一句话，所以要按预算规划：`,
+        '  - 先做「回答用户问题必需」的事，验证其次，额外的探索最后；',
+        '  - 快用完时停止开新战线，把结论落地：做完了什么、还差什么、下一步打算怎么做；',
+        '  - 但**不要为了省步数跳过必要的验证**（那是拿错误答案换便宜）。'
+      ].join('\n')
+}
+
+/**
+ * 步骤边界注入的「预算提醒」的固定前缀。
+ *
+ * 两个用途：
+ * 1. 模型一眼看出这是**系统提示**而不是用户的新指令（框题必须明确，否则它会把「快收尾」
+ *    当成新任务，把正在做的事丢掉 —— 与插话注入踩过的坑完全一样）；
+ * 2. `agent.ts` 据此在消息数组里**找到上一次那条提醒并原地替换**（幂等）。不能记下标：
+ *    轮中压缩会把数组重排，下标一失效就会堆出好几条互相矛盾的提醒。
+ */
+export const STEP_BUDGET_MARKER = '【系统提示 · 步数预算】'
+
+/** 预算提醒要用到的两个数 */
+export interface StepBudgetState {
+  /** 本轮的总预算（用户设置的那个数） */
+  maxSteps: number
+  /** 已经跑完的步数 */
+  used: number
+}
+
+/** 还剩几步（含即将发出的这一步）：`1` = 这次就是最后一步 */
+export function stepBudgetRemaining(state: StepBudgetState): number {
+  return state.maxSteps - state.used
+}
+
+/**
+ * 提醒从「还剩几步」开始出现。绝对值与比例取小的那个，再夹进 [3, 8]：
+ * - 预算很小（比如 12）时按比例只有 1~2 步，来不及收尾；
+ * - 预算很大（500）时按 8 步收尾又太仓促，所以取 15%。
+ */
+export function stepBudgetWarnSteps(maxSteps: number): number {
+  return Math.max(3, Math.min(8, Math.ceil(maxSteps * 0.15)))
+}
+
+/**
+ * 注入给模型的一条预算提醒（步骤边界、消息尾部）。
+ *
+ * `remaining <= 1` 时是「最后一步」的硬口吻：**明确禁止再调工具**（`agent.ts` 同时会把
+ * 这一步的 `toolChoice` 钉成 `'none'`，两边一起说才不会出现「提示说别调、模型还是调了」）。
+ */
+export function stepBudgetReminder(state: StepBudgetState): string {
+  const remaining = stepBudgetRemaining(state)
+  if (remaining <= 1) {
+    return getLanguage() === 'en'
+      ? `${STEP_BUDGET_MARKER} This is the **last step** of this turn (${state.used} / ${state.maxSteps} used). Do not call any more tools — reply in text now: what you finished, what is still open, and what you would do next.`
+      : `${STEP_BUDGET_MARKER}这是本轮的**最后一步**（已用 ${state.used} / ${state.maxSteps} 步）。**不要再调用任何工具**，现在就用文字收尾：做完了什么、还差什么、下一步打算怎么做。`
+  }
+  return getLanguage() === 'en'
+    ? `${STEP_BUDGET_MARKER} ${state.used} / ${state.maxSteps} steps used, ${remaining} left. Stop opening new threads: finish what is in hand and land the answer (done / left / next). If you cannot finish, say so in one sentence and let the user decide whether to continue. Do not repeat this notice.`
+    : `${STEP_BUDGET_MARKER}已用 ${state.used} / ${state.maxSteps} 步，还剩 ${remaining} 步。不要再开新战线：把手上的事做完并把结论落地（做完了什么 / 还差什么 / 下一步）。真做不完就一句话说清、把是否继续交给用户。不要复述这段提示。`
+}
+
+/**
  * 构建 Agent 系统提示词：说明工作区、工具约定与安全边界。
  *
  * `skills` 非空时追加「可用技能」段落（只有名称 + 描述，正文由 read_skill 按需加载，

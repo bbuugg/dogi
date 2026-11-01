@@ -313,4 +313,49 @@ describe('runAgent 的失败提示', () => {
     expect(result.finishReason).toBe('done')
   })
 
+  it('用满步数预算且最后一步还在调工具 → 报 stopReason: max-steps（不是静默 done）', async () => {
+    // 真实链路：`stopWhen: stepCountIs(2)` 在第 2 步的工具执行完后停下，那一步的
+    // finishReason 是 'tool-calls'，模型再没有机会回话。以前这一轮会被报成纯粹的
+    // `done`，用户看到的是「工具卡都跑完了、然后没有下文」，也查不出原因。
+    streamText.mockImplementation(() =>
+      fakeStream([
+        { type: 'tool-call', toolCallId: 't1', toolName: 'echo', input: {} },
+        { type: 'tool-result', toolCallId: 't1', toolName: 'echo', output: 'ok' },
+        { type: 'finish-step', finishReason: 'tool-calls', usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } },
+        { type: 'tool-call', toolCallId: 't2', toolName: 'echo', input: {} },
+        { type: 'tool-result', toolCallId: 't2', toolName: 'echo', output: 'ok' },
+        { type: 'finish-step', finishReason: 'tool-calls', usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } },
+        { type: 'finish', finishReason: 'tool-calls', totalUsage: { inputTokens: 2, outputTokens: 2, totalTokens: 4 } }
+      ])
+    )
+
+    const events: AgentStreamEvent[] = []
+    const result = await runAgent({ ...baseOptions((event) => events.push(event)), maxSteps: 2 })
+
+    const finish = events.find(
+      (e): e is Extract<AgentStreamEvent, { type: 'finish' }> => e.type === 'finish'
+    )
+    // finishReason 仍是 done（它不是错误、也不是用户停的），只是多了 stopReason
+    expect(finish).toMatchObject({ finishReason: 'done', stopReason: 'max-steps', steps: 2 })
+    expect(result).toMatchObject({ finishReason: 'done', stopReason: 'max-steps', steps: 2 })
+  })
+
+  it('步数没到预算就自然收尾 → 不带 stopReason', async () => {
+    streamText.mockImplementation(() =>
+      fakeStream([
+        { type: 'text-delta', text: '做完了' },
+        { type: 'finish-step', finishReason: 'stop', usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } },
+        { type: 'finish', finishReason: 'stop', totalUsage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } }
+      ])
+    )
+
+    const events: AgentStreamEvent[] = []
+    const result = await runAgent({ ...baseOptions((event) => events.push(event)), maxSteps: 2 })
+
+    const finish = events.find(
+      (e): e is Extract<AgentStreamEvent, { type: 'finish' }> => e.type === 'finish'
+    )
+    expect(finish?.stopReason).toBeUndefined()
+    expect(result.stopReason).toBeUndefined()
+  })
 })

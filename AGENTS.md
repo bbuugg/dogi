@@ -60,6 +60,7 @@ Fizz 是自托管的 AI Agent 工作台：**所有能力跑在一个 Node 进程
 - 后台任务的 `permissionMode` 必须是 `full`：`confirm` 档没有审批通道，会被按「拒绝」处理，任务「什么都没干也没报错」。
 - **改任何字段的默认值都要 `DATA_VERSION` +1 并在 `load()` 补迁移**：老数据文件里写着的是旧默认值，`normalize*` 只补缺失字段。
 - 上下文压缩只有一层（`context.ts` 的 `compactHistory`）；**不要加回 microcompact / 缓存 TTL 判断 / 按窗口比例提前压**——它们会改动请求前缀，上游前缀缓存一断就按全价重读整段历史。
+- **单轮步数预算有三件配套，改一处要想到另外两处**：① 系统提示词里只放**常量**预算（`stepBudgetHint`，剩余步数绝不能进去，否则前缀缓存整段失效）；② 步骤边界往**消息尾部**注入「还剩几步」（`applyStepBudgetReminder`，按 `STEP_BUDGET_MARKER` 原地替换，不能按下标）；③ 最后一步 `toolChoice: 'none'` 钉成纯文本，别让用户只拿到一个「工具跑完没下文」的空回复。撞上限的那一轮 `finishReason` 仍是 `done`，另有 `stopReason: 'max-steps'`（挂在消息上、**不进模型上下文**），界面与通知都靠它。
 
 ### 权限与审批
 
@@ -78,6 +79,7 @@ Fizz 是自托管的 AI Agent 工作台：**所有能力跑在一个 Node 进程
 - 可拖拽宽度有现成三份实现，**别起第四份**：宽度与开合同作用域用 `panel-width.ts`，全局一份用 `files-pane-width.ts` / `terminal-assistant-width.ts`；一律复用 `ResizeHandle.tsx`。
 - 表单弹窗一律 `sm:max-w-md`，别为摊两列而加宽；手机（<640px）表单行上下排。
 - 开外链只有一条路：`openExternal`（`@fizz/agent-client`），**别裸调 `window.open`**；协议白名单只在 `agent-host/src/external-link.ts` 一份。
+- **`IconTip` 不能直接套自带 `data-state` 的 Radix 原语**（`Switch` / `Checkbox` / `Toggle`）：`TooltipTrigger asChild` 会注 `data-state="closed"`，而这些原语把外部 props 排在自带 `data-state` 之后 → `checked` 被盖掉、`data-checked:` 规则全失效，控件整个透明只剩 tooltip（2026-11-01 定时任务那颗启停开关就是这么「消失」的）。包一层 `<span className="inline-flex">` 再套。
 - 往终端写多行输入，行分隔符必须是裸回车 `\r`（用 `toTerminalInput()`）：PowerShell 的 LF 会把行插到上方，顺序整个反过来。
 - 主题必须在首帧前定好（preload + `index.html` 内联脚本），**回落规则在 6 处，改一处必须六处同步**。
 - 文案**中文为源**，英文缺失自动回落，新增文案两边都补。

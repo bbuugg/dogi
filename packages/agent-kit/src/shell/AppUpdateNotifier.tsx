@@ -11,6 +11,9 @@
  *   （而且它没有「用户要拍板的事」，弹了只会变成噪音）；
  * - `checking` / `up-to-date`：无事发生，弹提示 = 打扰。
  *
+ * 整条还受设置里的「有更新时提醒我」管（`useUpdateNotifyEnabled`）：关掉就一条都不弹，
+ * 连已经弹出来的也立刻 dismiss。设置页那一节永远显示，不受这个开关影响。
+ *
  * ⚠️ `id` 固定成同一个：同一个版本的提示反复触发时**更新**那一条而不是堆一串
  * （状态抖动 / 两个窗口都可能触发）。与 `use-error-toast.ts` 同一套路。
  *
@@ -37,17 +40,31 @@ import { toast } from 'sonner'
 import {
   downloadAppUpdate,
   installAppUpdate,
-  useAppUpdateStatus
+  useAppUpdateStatus,
+  useUpdateNotifyEnabled
 } from '@fizz/agent-kit/shared/lib/app-update'
 
 const TOAST_ID = 'app-update'
 
 export function AppUpdateNotifier() {
   const status = useAppUpdateStatus()
+  const notifyEnabled = useUpdateNotifyEnabled()
   const state = status?.state ?? 'idle'
   const latest = status?.latest ?? ''
 
   useEffect(() => {
+    /**
+     * 用户在设置里关掉了「有更新时提醒我」：**连已经弹出来的那条也要收掉** ——
+     * 否则开关一关、右上角那条常驻提示还杵在那儿（`duration: Infinity`，不主动 dismiss
+     * 就不会自己走）。
+     *
+     * 关掉不等于关掉更新：设置页的「软件更新」分区照常显示状态与下载 / 安装按钮。
+     */
+    if (!notifyEnabled) {
+      toast.dismiss(TOAST_ID)
+      return
+    }
+
     if (state === 'available') {
       toast(`发现新版本 v${latest}`, {
         id: TOAST_ID,
@@ -72,7 +89,7 @@ export function AppUpdateNotifier() {
     }
 
     toast.dismiss(TOAST_ID)
-  }, [state, latest])
+  }, [state, latest, notifyEnabled])
 
   return null
 }
