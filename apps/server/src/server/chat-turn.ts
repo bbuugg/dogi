@@ -24,7 +24,8 @@ import { CollabRuntime, defaultContextWindowFromEnv, rawToolsPlugin, readProject
 import {
   normalizeReasoningEffort,
   resolveContextWindow,
-  resolveModelSettings
+  resolveModelSettings,
+  type AgentStopReason
 } from '@fizz/contracts/types'
 import { DEFAULT_BROWSER_SETTINGS } from '@fizz/contracts'
 import { buildMcpToolset } from '@fizz/mcp'
@@ -137,12 +138,17 @@ export function persistAssistantMessage(
    * 少了它整轮就退回「思考 ×5 · 工具调用 ×5」的计数摘要 —— 用户看到的是「这一轮
    * 好像没结束」。
    */
-  durationMs?: number
+  durationMs?: number,
+  /**
+   * 被单轮步数上限截断时给（见 `AgentStopReason`）：落盘后刷新仍在，用户不会过一会儿
+   * 又不知道为什么停的。与 `durationMs` 不互斥（一个说「为什么停」、一个说「花了多久」）。
+   */
+  stop?: { stopReason: AgentStopReason; steps: number }
 ): void {
   try {
     domain.appendMessages(
       conversationId,
-      [buildAssistantMessage({ parts, usage, id, durationMs })],
+      [buildAssistantMessage({ parts, usage, id, durationMs, ...(stop ?? {}) })],
       // 标题：助手回复不改标题（由这一轮的用户消息决定）
       undefined,
       // 会话级用量统计：没有 `usage`（中止的轮次）就不累计
@@ -263,7 +269,6 @@ export async function drainSteerInbox(
 
 /**
  * 启动一轮对话并立刻返回：run 已登记、runner 已在后台跑。
- *
  * 调用方拿 `run` 想接到 SSE 上（聊天路由 → `pipeRun`），还是只想等它跑完
  * （队列 worker → `await run.done`），都行 —— 这正是抽成服务的原因。
  * 失败不抛：返回 `{ ok: false }` 让调用方决定回 400 还是记任务失败。
@@ -527,6 +532,11 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
    */
   let turnDurationMs: number | undefined
   /**
+   * 这一轮**被预算截断**了（撞上 `maxSteps`）。从 finish 帧取，收尾时落进助手消息
+   * （`AgentChatMessage.stopReason`），界面据此在消息底部补一行「已用满 N 步」。
+   */
+  let turnStop: { stopReason: AgentStopReason; steps: number } | undefined
+  /**
    * 运行中插话的注入记录：`index` = user-injected 事件到达时 assistantParts 的长度
    * （= 该条插话之前已产出的部分），`message` = 那条 user 消息（含 id）。
    * 收尾时按这些边界把 assistantParts 切成多段，与插话交错落盘（真实时序）。
@@ -551,6 +561,10 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
       // `durationMs`（ACP 全程如此；内置被中止 / 出错时也常常一个 usage chunk 都没收到）
       if (event.usage) turnUsage = event.usage
       if (event.durationMs != null) turnDurationMs = event.durationMs
+      // 撞步数上限：**不是错误**（finishReason 仍是 done），只是多了这一位
+      if (event.stopReason) {
+        turnStop = { stopReason: event.stopReason, steps: event.steps ?? 0 }
+      }
     }
     // 内容折叠(聊天 / 助手共用,见 `agent-parts.ts`):tool-call-delta 不落盘、retry 按
     // 整轮重来 / 断点续跑分别「全清」与「回滚到最后一次工具结果」,其余按形状归位;
@@ -975,7 +989,14 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
     /** 客户端给的这一轮助手消息 id（缺省自生成 —— 见 persistAssistantMessage） */
     const baseId = input.assistantMessageId
     if (steerBoundaries.length === 0) {
-      persistAssistantMessage(conversation.id, parts, turnUsage, baseId, turnDurationMs)
+      persistAssistantMessage(
+        conversation.id,
+        parts,
+        turnUsage,
+        baseId,
+        turnDurationMs,
+        turnStop
+      )
       return
     }
     /**
@@ -1022,7 +1043,9 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
         parts: tail,
         createdAt: Date.now(),
         // 整轮耗时与 `usage` 同口径：挂在尾段（有 usage 时它自带耗时，这里不重复）
-        ...(turnUsage || turnDurationMs == null ? {} : { durationMs: turnDurationMs })
+        ...(turnUsage || turnDurationMs == null ? {} : { durationMs: turnDurationMs }),
+        // 撞上限的标记同样挂尾段：它描述的是「这一轮怎么结束的」，不是某一段的事
+        ...(turnStop ?? {})
       })
     }
     try {
@@ -1091,6 +1114,8 @@ export async function startTurn(input: ChatRequest, opts?: { origin?: string }):
         title: conversationTitle,
         finishReason,
         ...(runError ? { error: runError } : {}),
+        // 撞步数上限：通知文案据此换成「已用满 N 步」，别让用户以为这一轮是正常答完的
+        ...(turnStop ?? {}),
         ...(excerpt ? { excerpt } : {}),
         finishedAt: Date.now()
       })

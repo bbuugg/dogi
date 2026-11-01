@@ -1054,6 +1054,19 @@ export interface TodoItem {
   status: TodoStatus
 }
 
+/**
+ * 这一轮**为什么停** —— 只回答「是不是被预算截断的」，其余原因仍看 `finishReason`
+ * （`done` / `error` / `aborted`）。
+ *
+ * 为什么单独一个字段、而不是把 `finishReason` 分叉出一个值：`finishReason` 是
+ * 「这一轮怎么结束的」的总开关，前端渲染、系统通知、队列 worker、`conversation:finished`
+ * 全都在按那三档判 —— 改它的取值域会牵连一整片，而这里要补的只是「被截断」这一条附加信息。
+ *
+ * 目前只有 `'max-steps'`（单轮工具步数用满）。以后若有「时间上限 / token 上限」这类，
+ * 往这个联合里加，别动 `finishReason`。
+ */
+export type AgentStopReason = 'max-steps'
+
 /** Agent 聊天消息（与 AiChatMessage 同构，part 形状一致） */
 export interface AgentChatMessage {
   id: string
@@ -1081,6 +1094,19 @@ export interface AgentChatMessage {
    * 进程内快照里 —— 重启后靠 `session/load` 重建的视图没有它，抬头退回计数摘要。
    */
   durationMs?: number
+  /**
+   * 这一轮是**被截断**的（目前只有「撞上 `maxSteps` 工具步数上限」）：有值就说明模型
+   * 是被闸停下的，不是自己说完的。
+   *
+   * 为什么挂在消息上而不是做成一个 part：part 会被 `toModelMessages` 回传进模型上下文，
+   * 等于每轮白付一句「你上次被截断了」；这个字段只给渲染层，**不进模型上下文**
+   * （与 `durationMs` 同一口径），落盘后刷新仍在，用户不会过一会儿又不知道为什么停的。
+   *
+   * 缺省 = 正常结束（老数据也都没有这个字段，渲染完全不变）。
+   */
+  stopReason?: AgentStopReason
+  /** 这一轮实际跑了多少步（只有 `stopReason` 存在时给：撞上限时用户要看「用满了多少」） */
+  steps?: number
   /**
    * 上下文占用快照（见流事件的 `context-usage`）。
    *
@@ -2218,7 +2244,19 @@ export type AgentStreamEvent =
    * 都没收到（`agent.ts` 的 `finishTiming`），耗时仍然要给 —— 否则折叠条抬头只能退回
    * 「思考 ×N · 工具调用 ×N」的计数摘要。
    */
-  | { type: 'finish'; finishReason: string; usage?: TurnUsage; durationMs?: number }
+  | {
+      type: 'finish'
+      finishReason: string
+      usage?: TurnUsage
+      durationMs?: number
+      /**
+       * 被预算截断时给（见 `AgentStopReason`）。**与 `finishReason` 并存**：撞上限的那一轮
+       * `finishReason` 仍是 `'done'`（它不是错误、也不是用户停的），只是多了这一位。
+       */
+      stopReason?: AgentStopReason
+      /** 这一轮实际跑了多少步（只有 `stopReason` 存在时给） */
+      steps?: number
+    }
   | { type: 'error'; message: string }
   | {
       /**
@@ -2405,6 +2443,10 @@ export interface RunAgentResult {
   error?: string
   /** 这一轮的用量统计（模型没上报 usage 时为 undefined） */
   usage?: TurnUsage
+  /** 被单轮步数上限截断时给（见 `AgentStopReason`）；服务端据此落盘并在界面提示 */
+  stopReason?: AgentStopReason
+  /** 这一轮实际跑了多少步（只有 `stopReason` 存在时给） */
+  steps?: number
 }
 
 // ============================================================================
@@ -2453,6 +2495,13 @@ export interface ConversationFinishedEvent extends ConversationEventBase {
   excerpt?: string
   /** finishReason 是 error 时的原因 */
   error?: string
+  /**
+   * 被单轮步数上限截断（见 `AgentStopReason`）。通知文案据此换成「已用满 N 步上限」，
+   * 否则用户只会收到一条像是正常跑完的摘要。
+   */
+  stopReason?: AgentStopReason
+  /** 这一轮实际跑了多少步（只有 `stopReason` 存在时给） */
+  steps?: number
   finishedAt: number
 }
 

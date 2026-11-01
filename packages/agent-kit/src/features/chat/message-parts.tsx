@@ -137,6 +137,43 @@ export interface MessagePartsProps {
   followup?: MessageFollowupBridge
   /** 当前会话的交接文档；只有 `messageId` 匹配的那条消息会把它插进 parts 流。 */
   compaction?: ContextCompactionState | null
+  /**
+   * 「继续」：撞上步数上限的那一轮，正文后面那行提示旁边会有一颗按钮，点它由宿主发一条
+   * 新消息把任务续下去。不传 = 只显示提示、不给按钮（容器工作台没有「发消息」的语义）。
+   */
+  onContinue?: () => void
+}
+
+/**
+ * 「这一轮被步数上限截断」的提示行 +「继续」。
+ *
+ * 为什么必须有它：撞上限的那一轮 `finishReason` 仍是 `done`（它不是错误、也不是用户停的），
+ * 以前界面上完全看不出来 —— 用户只看到「工具卡都跑完了，然后没有下文」。这一行是**唯一
+ * 的解释**，所以它跟正文同一层级，不收进折叠条（收进去等于让人找不到）。
+ *
+ * 只在 `stopReason` 存在时出现：老数据没有这个字段，渲染与从前逐字节一致。
+ */
+function MaxStepsNotice({ steps, onContinue }: { steps?: number; onContinue?: () => void }) {
+  const tr = useT()
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-border/60 px-2.5 py-1.5 text-xs text-muted-foreground">
+      <span>
+        {steps
+          ? tr('本轮已用满 {n} 步工具上限，自动停止', { n: steps })
+          : tr('本轮已用满工具步数上限，自动停止')}
+      </span>
+      {onContinue ? (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-6 px-1.5 text-xs"
+          onClick={onContinue}
+        >
+          {tr('继续')}
+        </Button>
+      ) : null}
+    </div>
+  )
 }
 
 function MessagePartsInner({
@@ -145,7 +182,8 @@ function MessagePartsInner({
   total,
   streaming,
   followup,
-  compaction
+  compaction,
+  onContinue
 }: MessagePartsProps) {
   // 订阅语言：折叠条摘要（思考 ×N / 工具调用 ×N）在渲染期用 `t()` 算，切语言要跟着变
   useT()
@@ -450,6 +488,21 @@ function MessagePartsInner({
   })
   flushRun()
   if (compactionNode && compactionIndex >= message.parts.length) nodes.push(compactionNode)
+  /**
+   * 撞步数上限：正文之后补一行「为什么停」+「继续」。
+   *
+   * 位置在**最后**：这一轮常常连一句正文都没有（工具跑完就被停），提示必须紧跟着过程
+   * 折叠条，否则用户看到的就是一片空白。`turnDone` 兜住「还在跑」的那一小段窗口。
+   */
+  if (turnDone && message.stopReason === 'max-steps') {
+    nodes.push(
+      <MaxStepsNotice
+        key={`${message.id}-max-steps`}
+        steps={message.steps}
+        onContinue={onContinue}
+      />
+    )
+  }
 
   return <>{nodes}</>
 }
@@ -474,6 +527,9 @@ function MessagePartsInner({
  *
  * `onResume`（补答通道）只比**有没有**：它决定「没拿到答案的提问卡能不能补答」，
  * 而它本身同样是个内联箭头函数（闭包读 store 最新值），引用变化不需要重渲。
+ *
+ * `onContinue`（撞步数上限后的「继续」）同理**不参与比较**：它只在那条消息带
+ * `stopReason` 时被用到，而 `message` 本身就是逐引用比的 —— 内容没变就不需要重渲。
  */
 export const MessageParts = memo(
   MessagePartsInner,

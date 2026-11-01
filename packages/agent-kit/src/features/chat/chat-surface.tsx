@@ -169,6 +169,11 @@ export interface MessageListProps {
    * 「编辑消息」条 —— 两处一起才是完整标识：条上写着原文，消息上是它在哪。
    */
   editingMessageId?: string | null
+  /**
+   * 「继续」：撞上步数上限的那条助手消息底部有颗按钮，点它发一条新消息把任务续下去。
+   * 不传 = 只显示提示、不给按钮（容器工作台没有「发消息」的语义）。
+   */
+  onContinueMessage?: (message: AgentChatMessage) => void
 }
 
 /** `MessageList` 里 `renderActions` 的参数 */
@@ -205,7 +210,8 @@ export function MessageList({
   editingMessageId = null,
   retryNotice = null,
   reconnectNotice = null,
-  compaction = null
+  compaction = null,
+  onContinueMessage
 }: MessageListProps) {
   const tr = useT()
   /**
@@ -397,6 +403,9 @@ export function MessageList({
                           streaming={streaming}
                           followup={followup}
                           compaction={messageCompaction}
+                          onContinue={
+                            onContinueMessage ? () => onContinueMessage(message) : undefined
+                          }
                         />
                       )}
                       {/*

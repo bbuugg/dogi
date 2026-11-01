@@ -73,10 +73,19 @@ function questionBody(followup: AskFollowupRequest): string {
   return truncateText(followup.questions?.[0]?.question ?? followup.title, 60)
 }
 
-/** 收尾 → 通知正文：出错给原因、被停给一句话、正常跑完给助手正文摘要 */
+/** 收尾 → 通知正文：出错给原因、被停给一句话、撞步数上限说明白、正常跑完给助手正文摘要 */
 function finishedBody(event: Extract<ConversationNotifyEvent, { type: 'conversation:finished' }>): string {
   if (event.finishReason === 'error') return event.error ? `出错：${event.error}` : '这一轮出错了'
   if (event.finishReason === 'aborted') return '已停止'
+  /**
+   * 撞步数上限：`finishReason` 仍是 `done`（它不是错误），但**绝不能**当成正常跑完报
+   * 摘要 —— 用户最需要知道的就是「它被截断了，不是自己说完的」。
+   */
+  if (event.stopReason === 'max-steps') {
+    return event.steps
+      ? `已用满 ${event.steps} 步工具预算，本轮自动停止`
+      : '已用满工具步数预算，本轮自动停止'
+  }
   return event.excerpt ?? ''
 }
 

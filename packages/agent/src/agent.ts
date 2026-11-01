@@ -36,6 +36,11 @@ import {
 import {
   MAX_STEPS,
   buildAgentSystemPrompt,
+  STEP_BUDGET_MARKER,
+  stepBudgetHint,
+  stepBudgetRemaining,
+  stepBudgetReminder,
+  stepBudgetWarnSteps,
   toModelMessages,
   toolIntentHint
 } from './prompt'
@@ -52,7 +57,11 @@ import { runEngine, withToolIntent } from './engine'
 import { resolveModel } from './resolve-model'
 import { isEmptyStreamOutputError, isRetryableNetworkError, retryDelayMs, sleepWithSignal } from './retry'
 import { resolveMaxRetries, resolveToolCallConcurrency } from '@fizz/contracts/agent-api'
-import { resolveModelSettings, withModelApiStyle } from '@fizz/contracts/types'
+import {
+  resolveModelSettings,
+  withModelApiStyle,
+  type AgentStopReason
+} from '@fizz/contracts/types'
 import { extractNestedDocPaths, readNestedProjectDocs, type ProjectDoc } from './project-doc'
 import type { Context, TurnFinishPayload, TurnStartPayload } from '@fizz/plugin'
 import type {
@@ -309,6 +318,60 @@ function attemptFailure(message: string): Error {
  */
 type EngineMessages = Parameters<typeof runEngine>[0]['messages']
 
+/**
+ * 最后一步是否**钉成纯文本**（`toolChoice: 'none'`）。
+ *
+ * 开着时，剩余步数只剩 1 的那一步不允许再调工具，模型只能把结论写出来 —— 用户至少能
+ * 拿到「做完了什么 / 还差什么」，而不是「工具卡都跑完了，然后没有下文」。
+ *
+ * ⚠️ 这是唯一需要为兼容性关掉的地方：极个别第三方兼容网关不认 `tool_choice: "none"`
+ * 会直接 400。关掉它只是退回老行为（模型可能再调一次工具然后被硬停），提醒照旧生效。
+ */
+const FORCE_FINAL_TEXT_STEP = true
+
+/**
+ * 把「步数预算提醒」放进消息尾部：**有旧的就原地换掉，没有才追加**。
+ *
+ * 为什么必须幂等：`prepareStep` 返回的 messages 会一路带到后面的步骤，所以上一步注入的
+ * 提醒本来就还在数组里。直接 push 会在 8 个边界上堆出 8 条互相矛盾的「还剩 N 步」。
+ *
+ * 为什么按**内容标记**找、不记下标：轮中压缩会把数组重排（`compactModelMessages` 返回
+ * 新数组），下标一失效就再也找不回来。
+ *
+ * 替换发生在**尾部**：前缀缓存命中的是「提醒之前」的那一段，被作废的只有这条提醒本身
+ * （几十个 token），所以每步更新一次是划算的 —— 换来的是模型看到的数字永远准确。
+ */
+export function applyStepBudgetReminder(
+  messages: EngineMessages,
+  text: string | null
+): EngineMessages {
+  if (!text) return messages
+  const isReminder = (message: EngineMessages[number]): boolean => {
+    if (message.role !== 'user') return false
+    const content = message.content
+    if (typeof content === 'string') return content.startsWith(STEP_BUDGET_MARKER)
+    if (!Array.isArray(content)) return false
+    const first = content[0] as { type?: unknown; text?: unknown } | undefined
+    return (
+      first?.type === 'text' &&
+      typeof first.text === 'string' &&
+      first.text.startsWith(STEP_BUDGET_MARKER)
+    )
+  }
+  const reminder = {
+    role: 'user',
+    content: [{ type: 'text', text }]
+  } as EngineMessages[number]
+  const out = [...messages]
+  for (let i = out.length - 1; i >= 0; i -= 1) {
+    if (!isReminder(out[i])) continue
+    out[i] = reminder
+    return out
+  }
+  out.push(reminder)
+  return out
+}
+
 /** 累加两段用量（断点续跑：失败那几段白烧的 token 也要算进 finish 帧） */
 function mergeRawUsage(a: RawUsage | null, b: RawUsage | null): RawUsage | null {
   if (!a) return b
@@ -479,6 +542,18 @@ export function buildAgentSetup(opts: {
    * （否则模型会被告知填一个 schema 里没有的字段，见 `toolIntentHint`）。
    */
   toolIntent?: boolean
+  /**
+   * 本轮的**工具步数预算**（`runAgent` 的 `opts.maxSteps`）。给了就在系统提示词末尾追加
+   * 一段「这轮有 N 步」的约定（见 `stepBudgetHint`）。
+   *
+   * 为什么值得说：模型不知道有闸，就会一直「再查一个文件 / 再跑一次」，直到被
+   * `stepCountIs` 硬停 —— 那时它连一句「做到哪了」都没机会说。提前知道预算，它才会先规划、
+   * 把结论排进前 N 步。
+   *
+   * 只放**常量预算**：剩余步数每步都变，进系统提示词会让上游前缀缓存从第一个 token 起
+   * 全部失效（见 `stepBudgetHint` 的警告）；动态的那部分走步骤边界的 `stepBudgetReminder`。
+   */
+  maxSteps?: number
 }): AgentSetup {
   const ctx = createAppContext('agent-setup')
   ctx.set('tools', new ToolsService(ctx))
@@ -578,7 +653,13 @@ export function buildAgentSetup(opts: {
   // 提示词也走注册表：内置提示词是唯一一段，插件可再追加（priority 更大的排在后面）
   // 「工具意图」的约定：只有真的往 schema 注入 `intent` 时才追加（见 toolIntentHint）
   const intentHint = opts.toolIntent === false ? '' : toolIntentHint()
-  ctx.prompt.section('builtin', base + askHint + intentHint, { priority: 0 })
+  // 「这轮有多少步」的约定：调用方没给预算（比如自造 setup 的项目助手）就不追加 ——
+  // 说了也没有闸，模型只会为一个不存在的上限做无谓的收尾
+  const budgetHint =
+    typeof opts.maxSteps === 'number' && Number.isFinite(opts.maxSteps)
+      ? stepBudgetHint(Math.max(1, Math.trunc(opts.maxSteps)))
+      : ''
+  ctx.prompt.section('builtin', base + askHint + intentHint + budgetHint, { priority: 0 })
   if (opts.extraPrompt?.trim()) {
     ctx.prompt.section('caller', opts.extraPrompt.trim(), { priority: 1 })
   }
@@ -793,7 +874,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
   const finish = async (
     finishReason: RunAgentResult['finishReason'],
     usage?: TurnUsage,
-    error?: string
+    error?: string,
+    /** 被预算截断时补的两个字段（见 `AgentStopReason`）：只有「正常跑完但用满步数」那条路给 */
+    stop?: { stopReason: AgentStopReason; steps: number }
   ): Promise<RunAgentResult> => {
     opts.signal?.removeEventListener('abort', forwardAbort)
     if (stats.hookErrors.length > 0) {
@@ -824,7 +907,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         console.error('[plugin] 本轮 context 卸载失败：', err)
       }
     }
-    return { finishReason, ...(error ? { error } : {}), ...(usage ? { usage } : {}) }
+    return {
+      finishReason,
+      ...(error ? { error } : {}),
+      ...(usage ? { usage } : {}),
+      ...(stop ? { stopReason: stop.stopReason, steps: stop.steps } : {})
+    }
   }
 
 
@@ -905,7 +993,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
       ...(opts.browser ? { browser: true } : {}),
       ...(opts.extraPrompt ? { extraPrompt: opts.extraPrompt } : {}),
       ...(nestedDocs ? { nestedDocs } : {}),
-      ...(opts.toolIntent === false ? { toolIntent: false } : {})
+      ...(opts.toolIntent === false ? { toolIntent: false } : {}),
+      // 预算只报**总量**：续跑时本次尝试的剩余会变，那部分由边界提醒现算（见 onStepBoundary）
+      maxSteps: opts.maxSteps ?? MAX_STEPS
     })
   /**
    * 工具调用开关关掉时**一个工具都不下发**（`AiModelSettings.toolCall`）。
@@ -1118,6 +1208,18 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
       let boundaryCount = messages.length
       /** 进入本次尝试时整轮已完成的步数（续跑时非 0）：checkpoint 的基数，见那里 */
       const stepsAtAttemptStart = resumeSteps
+      /** 本次尝试的步数预算（续跑会扣掉已跑的，见下面的 `maxSteps`） */
+      const attemptBudget = Math.max(1, (opts.maxSteps ?? MAX_STEPS) - resumeSteps)
+      /** 提醒从「还剩几步」开始出现（绝对值与比例取小，见 `stepBudgetWarnSteps`） */
+      const warnAt = stepBudgetWarnSteps(attemptBudget)
+      /**
+       * 有没有工具可「禁」：`tool_choice: 'none'` 在**一个工具都没下发**时是非法请求
+       * （OpenAI 明确报 tool_choice is only allowed when tools are specified）。
+       * 关掉工具调用的模型走不到末步钉住这条路。
+       */
+      const hasTools = Object.keys(engineTools).length > 0
+      /** 末步是否已经被钉成纯文本（撞没撞上限的判据之一，见 `finished.steps` 那一段） */
+      let forcedWrapUp = false
 
       const engine = runEngine({
         model: resolveModel(effectiveModel) as unknown as EngineInput['model'],
@@ -1126,7 +1228,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         tools: engineTools,
         // 续跑会新建一个引擎，步数预算要扣掉已经跑完的：否则每续跑一次都是一份完整的
         // `MAX_STEPS`，一个反复失败的轮次能把步数上限放大很多倍
-        maxSteps: Math.max(1, (opts.maxSteps ?? MAX_STEPS) - resumeSteps),
+        maxSteps: attemptBudget,
         abortSignal: runSignal,
         toolCallConcurrency: resolveToolCallConcurrency(opts.toolCallConcurrency),
         ...(maxOutputTokens !== undefined ||
@@ -1146,7 +1248,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
          * 工具步骤边界（下一次请求之前）。这里是唯一能安全介入的位置：
          * 1. 推一帧 `context-usage`，让圆环在一轮之内也走；
          * 2. 轮中压缩：压完返回新数组，下一步请求立刻变小（不落检查点）；
-         * 3. 消费一条运行中插话，追加成 user 消息。
+         * 3. 步数预算提醒：进了提醒区就往尾部放一条「还剩几步」（原地更新，见
+         *    `applyStepBudgetReminder`）；剩最后一步时顺手把它钉成纯文本；
+         * 4. 消费一条运行中插话，追加成 user 消息。
          *
          * ⚠️ 不再需要 `isFinal` 判断 —— `prepareStep` 只在「还有下一步」时被调用，
          * 天然不会出现「最后一步之后再压一次」。
@@ -1158,17 +1262,32 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
            * 下一次请求万一失败，下次尝试就从这个**完整**的消息数组接着发 —— 已完成的部分
            * 不重跑，也就没有「整轮重来」的重复副作用。
            *
-           * 存的是返回给引擎的 `next`（可能被轮中压缩 / 插话改过），不是入参 `current`：
-           * 续跑要接的是**实际发出去的那份上下文**。
+           * 存的是返回给引擎的 `next`（可能被轮中压缩 / 插话 / 预算提醒改过），不是入参
+           * `current`：续跑要接的是**实际发出去的那份上下文**。
+           *
+           * 顺带决定这一步要不要**钉成纯文本**（`toolChoice: 'none'`）：剩余步数只够这一步
+           * 时，与其让模型再发起一批工具调用、然后被 `stepCountIs` 硬停（用户拿到一个
+           * 「工具跑完但没下文」的空回复），不如强制它把结论写出来。
            */
-          const checkpoint = (value: EngineMessages): EngineMessages | undefined => {
+          const checkpoint = (value: EngineMessages) => {
             // 存一份浅拷贝：引擎会把返回的数组接着用于下一步，直接存引用的话后续步骤可能
             // 就地往里追加，快照就不再是「边界那一刻」的消息了
             resumeMessages = [...value]
             // 续跑会新建引擎，`stepNumber` 是从 0 重新数的：必须加上进入本次尝试时的基数，
             // 否则每续跑一次步数预算就重置一次
             resumeSteps = stepsAtAttemptStart + stepNumber
-            return value === current ? undefined : value
+            const forceFinal =
+              FORCE_FINAL_TEXT_STEP &&
+              hasTools &&
+              stepBudgetRemaining({
+                maxSteps: attemptBudget,
+                used: stepNumber
+              }) <= 1
+            if (forceFinal) forcedWrapUp = true
+            return {
+              messages: value,
+              ...(forceFinal ? { toolChoice: 'none' as const } : {})
+            }
           }
           /**
            * 显示与判据用**同一个数**：`真值 + 本步新增的估算`，没有真值才全量估算。
@@ -1238,6 +1357,25 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
             }
           }
           boundaryCount = next.length
+          /**
+           * 步数预算提醒：进了提醒区就在**消息尾部**放一条（并原地更新上一条）。
+           *
+           * 为什么是 user 消息、且必须带框题：模型天然把「最后一条 user 消息」当当前任务，
+           * 裸着放一句「快收尾」会被当成新指令、把正在做的事丢掉 —— 与插话注入踩过的坑
+           * 完全一样（见下面那段框题说明）。
+           *
+           * 为什么不改 `system`：那是请求最前面的几 k token，一动前缀缓存就整段失效。
+           * 放在尾部只影响尾部的几条消息，成本可忽略。
+           */
+          const remainingNow = stepBudgetRemaining({ maxSteps: attemptBudget, used: stepNumber })
+          if (remainingNow <= warnAt) {
+            next = applyStepBudgetReminder(
+              next,
+              stepBudgetReminder({ maxSteps: attemptBudget, used: stepNumber })
+            )
+            // 提醒也算「这一步之前就有的」：下一步的「新增尾巴」估算从它之后算起
+            boundaryCount = next.length
+          }
 
           const steer = (await opts.pollSteer?.()) ?? null
           if (!steer) return checkpoint(next)
@@ -1509,8 +1647,31 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
       const usage = rawUsage
         ? buildTurnUsage(rawUsage, startedAt, turnFirstOutputAt, contextTokens, stats.subagents)
         : undefined
-      emitEvent({ type: 'finish', finishReason: 'done', ...finishTiming(usage) })
-      return finish('done', usage)
+      /**
+       * 撞没撞步数上限 —— **只看步数不够，也不能只看 `finishReason`**：
+       *
+       * - `forcedWrapUp`：最后一步被我们钉成了纯文本（`toolChoice: 'none'`）。这种情况
+       *   `finishReason` 会是 `'stop'`（模型正常吐完字），但它是被闸停的 —— 模型本来
+       *   还想继续，只是没机会了。
+       * - `finished.steps >= attemptBudget && finishReason === 'tool-calls'`：没钉住
+       *   （关掉了 `FORCE_FINAL_TEXT_STEP`，或网关不认 `tool_choice`）时由
+       *   `stepCountIs` 硬停，特征是最后一步仍然是「工具调用」。
+       *
+       * 步数用**整轮累计**（续跑前那几段也算），用户看到的是「这一轮一共跑了多少步」。
+       */
+      const hitStepLimit =
+        !runSignal.aborted &&
+        (forcedWrapUp || (finished.steps >= attemptBudget && finished.finishReason === 'tool-calls'))
+      const stop = hitStepLimit
+        ? { stopReason: 'max-steps' as const, steps: stepsAtAttemptStart + finished.steps }
+        : undefined
+      emitEvent({
+        type: 'finish',
+        finishReason: 'done',
+        ...finishTiming(usage),
+        ...(stop ?? {})
+      })
+      return finish('done', usage, undefined, stop)
     } catch (err) {
       // 失败尝试的用量先并进来：下面算 usage、以及「续跑时累加白烧的 token」都以它为准
       rawUsage = mergeRawUsage(carriedUsage, rawUsage)

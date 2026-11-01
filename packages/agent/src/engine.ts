@@ -31,6 +31,25 @@ export interface EngineStepBoundary {
   stepNumber: number
 }
 
+/**
+ * 边界回调对下一步的改写。**两个字段都可省**：返回 `void` 与返回空对象等价（什么都不改）。
+ *
+ * `toolChoice` 目前只用来做一件事：**收尾步钉成纯文本**（`'none'`）。步数预算快用完时，
+ * 与其让模型再发起一批工具调用、然后被 `stepCountIs` 硬停（用户拿到一个「工具跑完但没下文」
+ * 的空回复），不如把最后一步钉死成文本，至少能拿到「做完了什么 / 还差什么」。
+ */
+export interface EngineStepOverride {
+  /** 改写下一步真正发出去的消息（与老行为一致：返回它就会一路带下去） */
+  messages?: ModelMessage[]
+  /**
+   * 下一步的工具选择策略。`'none'` = 这一步禁止调工具（只给收尾步用）。
+   *
+   * ⚠️ 个别第三方兼容网关不认 `tool_choice: "none"`（会 400）。真撞上就把
+   * `agent.ts` 里那个 `FORCE_FINAL_TEXT_STEP` 关掉 —— 提醒照旧生效，只是不再硬钉。
+   */
+  toolChoice?: 'none'
+}
+
 export interface AgentEngineOptions {
   model: LanguageModel
   system: string
@@ -52,12 +71,20 @@ export interface AgentEngineOptions {
   toolCallConcurrency?: number
   onStepBoundary?: (
     ctx: EngineStepBoundary
-  ) => Promise<ModelMessage[] | void> | ModelMessage[] | void
+  ) => Promise<EngineStepOverride | void> | EngineStepOverride | void
 }
 
 export interface AgentEngineResult {
   /** 'stop' | 'length' | 'tool-calls' | 'error' | 'other' | 'aborted' …（AI SDK 原值） */
   finishReason: string
+  /**
+   * 本次尝试实际跑完的步数（数 `finish-step`）。
+   *
+   * 调用方据此判断「是不是撞上了步数上限」—— 只看 `finishReason` 不够：被
+   * `stepCountIs` 停下的那一步 `finishReason` 是 `'tool-calls'`，而正常跑完的一轮
+   * 最后一步也可能是 `'tool-calls'`（工具跑完、模型还想继续但循环自然结束）。
+   */
+  steps: number
   /** 整轮累计（多步相加） */
   totalUsage?: unknown
   /** **最后一步**的 usage —— 它才是「当前上下文有多大」 */
@@ -342,11 +369,17 @@ export function runEngine(opts: AgentEngineOptions): AgentEngine {
       : {}),
     prepareStep: async ({ messages, stepNumber }) => {
       const next = await opts.onStepBoundary?.({ messages, stepNumber })
-      return next ? { messages: next } : undefined
+      if (!next) return undefined
+      return {
+        ...(next.messages ? { messages: next.messages } : {}),
+        ...(next.toolChoice ? { toolChoice: next.toolChoice } : {})
+      }
     }
   })
 
   let finishReason = 'other'
+  /** 已跑完的步数：每来一个 `finish-step` 就 +1（撞没撞上限全靠它，见 `AgentEngineResult.steps`） */
+  let steps = 0
   let totalUsage: unknown
   let lastStepUsage: unknown
   let error: unknown
@@ -382,6 +415,7 @@ export function runEngine(opts: AgentEngineOptions): AgentEngine {
           )
         }
         if (p.type === 'finish-step') {
+          steps += 1
           // 单步 usage：最后一次请求的那个才是「当前上下文有多大」
           if (p.usage) lastStepUsage = p.usage
           if (typeof p.finishReason === 'string') finishReason = p.finishReason
@@ -406,7 +440,7 @@ export function runEngine(opts: AgentEngineOptions): AgentEngine {
       throw err
     } finally {
       if (opts.abortSignal?.aborted && finishReason === 'other') finishReason = 'aborted'
-      settle({ finishReason, totalUsage, lastStepUsage, error })
+      settle({ finishReason, steps, totalUsage, lastStepUsage, error })
     }
   }
 

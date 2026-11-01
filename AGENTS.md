@@ -60,6 +60,7 @@ Fizz 是自托管的 AI Agent 工作台：**所有能力跑在一个 Node 进程
 - 后台任务的 `permissionMode` 必须是 `full`：`confirm` 档没有审批通道，会被按「拒绝」处理，任务「什么都没干也没报错」。
 - **改任何字段的默认值都要 `DATA_VERSION` +1 并在 `load()` 补迁移**：老数据文件里写着的是旧默认值，`normalize*` 只补缺失字段。
 - 上下文压缩只有一层（`context.ts` 的 `compactHistory`）；**不要加回 microcompact / 缓存 TTL 判断 / 按窗口比例提前压**——它们会改动请求前缀，上游前缀缓存一断就按全价重读整段历史。
+- **单轮步数预算有三件配套，改一处要想到另外两处**：① 系统提示词里只放**常量**预算（`stepBudgetHint`，剩余步数绝不能进去，否则前缀缓存整段失效）；② 步骤边界往**消息尾部**注入「还剩几步」（`applyStepBudgetReminder`，按 `STEP_BUDGET_MARKER` 原地替换，不能按下标）；③ 最后一步 `toolChoice: 'none'` 钉成纯文本，别让用户只拿到一个「工具跑完没下文」的空回复。撞上限的那一轮 `finishReason` 仍是 `done`，另有 `stopReason: 'max-steps'`（挂在消息上、**不进模型上下文**），界面与通知都靠它。
 
 ### 权限与审批
 

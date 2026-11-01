@@ -169,16 +169,22 @@ export function AcpTab({ app }: { app: AgentApp }) {
     .map((v) => modelByValue.get(v))
     .filter((m): m is AcpModelOption => Boolean(m))
     .filter(match)
-  /** 候选里还没加的（可勾选添加） */
-  const availableList = probeOptions.filter((o) => !selected.includes(o.value)).filter(match)
+  /** 探测清单里的模型 value（判断哪些「已保存 / 手动添加」的要追加到末尾） */
+  const probeValueSet = new Set(probeOptions.map((o) => o.value))
   /**
-   * 单列表：已添加排前、可按搜索过滤；每个模型都带删除/勾选，
-   * 满足「agent 已配的模型也显示在模型列表里、且可删除」（一个配置现在支持多个模型）。
+   * 单列表：顺序**只跟探测清单走** —— 先按 agent 广告的原始顺序，再追加这次没探测到的
+   * （上次保存的、刚手动添加的）。勾选 / 取消只改 `added` 标记，
+   * **不会把某一行挪到列表最上面**（用户明确要求：选中的模型不要往上跑），搜索也只是过滤、不重排。
    */
   const modelRows = [
-    ...addedList.map((m) => ({ model: m, added: true })),
-    ...availableList.map((m) => ({ model: m, added: false }))
-  ]
+    ...probeOptions.map((o) => ({
+      model: modelByValue.get(o.value) ?? o,
+      added: selected.includes(o.value)
+    })),
+    ...[...modelByValue.values()]
+      .filter((m) => !probeValueSet.has(m.value))
+      .map((m) => ({ model: m, added: selected.includes(m.value) }))
+  ].filter(({ model }) => match(model))
   /** 当前白名单里的模型数（= 保存后写入的条数） */
   const chosenCount = selected.length
 
@@ -738,7 +744,8 @@ export function AcpTab({ app }: { app: AgentApp }) {
           )}
 
           {/*
-            列表：已添加（含手动添加的）排前 + 探测到的候选。
+            列表：按探测清单的原始顺序（未探测到的已保存 / 手动模型追加在末尾），
+            **勾选不改变行位置**。行内只靠勾选框 + 底色区分「已添加」。
             不挂在「探测成功」分支下 —— 探测失败 / 进行中时，已保存与手动添加的模型仍要能看见、能取消。
 
             ⚠️ 容器**无条件渲染**并常驻 `flex-auto`：只有探测回来那一刻才出现列表的话，

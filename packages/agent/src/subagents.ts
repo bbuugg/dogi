@@ -27,6 +27,7 @@ import type {
   SubagentTurnUsage
 } from '@fizz/contracts/types'
 import { resolveModel } from './resolve-model'
+import { stepBudgetHint } from './prompt'
 
 /**
  * 只读子任务的工具白名单。
@@ -354,7 +355,14 @@ export function buildDelegationTools(
         try {
           const result = streamText({
             model: model as never,
-            system: spec.instructions + DELEGATION_PROMPT_SUFFIX,
+            /**
+             * 预算也要告诉子 agent：子 run 是**独立的 streamText**，没有主对话那套步骤边界
+             * 提醒（它连 `prepareStep` 都没挂），模型不知道有闸就会一直读文件，直到被
+             * `stepCountIs` 硬停 —— 那时 `result.text` 往往是空串（最后一步还是工具调用），
+             * 父上下文只收到一句「没有产出可用结论」。提示词里先讲清预算，至少能让它把
+             * 结论排进前 N 步。
+             */
+            system: spec.instructions + DELEGATION_PROMPT_SUFFIX + stepBudgetHint(maxSteps),
             // 只给子 agent 这一条任务：父的完整历史既费 token，也容易把敏感内容带出去
             messages: [{ role: 'user', content: task }],
             tools: tools as ToolSet,

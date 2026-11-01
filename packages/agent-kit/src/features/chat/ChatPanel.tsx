@@ -570,6 +570,17 @@ function ChatPanelInner({
           resetKey: `${app.activeConversationId ?? ""}#${app.scrollResetSeq}`,
           // 正在编辑重发的那条消息（描边压暗）——与输入框卡片内的编辑条是一对
           editingMessageId: editing?.id ?? null,
+          /**
+           * 「继续」：撞上步数上限的那条消息底部那颗按钮。
+           *
+           * 发一条**真实的用户消息**而不是内部续跑：用户要能在历史里看见「这里是我让它
+           * 继续的」。文案把「为什么停」写进去 —— 模型看不到界面上那行提示，这句话是它
+           * 唯一的交接说明。
+           */
+          onContinueMessage: () =>
+            void app.send(
+              "继续（上一轮达到工具步数上限被停下，请接着未完成的部分继续，不要重复已完成的工作）"
+            ),
           // 正在删消息：消息区压暗 + 不收点击 + 顶部「正在删除…」（删除完成后要整体
           // 回拉历史，中途再点别的消息只会让两边互相盖）
           deleting: app.messagesDeleting,
